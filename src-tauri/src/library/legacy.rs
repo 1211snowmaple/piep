@@ -20,6 +20,7 @@ mod inventory;
 mod profiles;
 mod relations;
 mod rows;
+mod state;
 mod suggestions;
 
 /// 未解決の記録がある移行先は、完成した棚として切り替えてはならない。
@@ -277,6 +278,13 @@ impl LegacyImporter {
             "source_relations",
             "作者・シリーズの所属の照合",
             self.normalize_source_relations(target),
+            &mut report,
+        )?;
+        self.finish_normalization(
+            target,
+            "work_check_state",
+            "作品の詳細確認日時の移行",
+            self.normalize_work_check_state(target, cancel),
             &mut report,
         )?;
         self.finish_normalization(

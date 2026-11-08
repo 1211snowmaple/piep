@@ -40,6 +40,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let id=LibraryId::parse_str(&args[3])?;
             println!("{}",serde_json::to_string_pretty(&library.acquisition_status(id)?)?);
         },
+        Some("source-state") if args.len()==4=>{
+            let library=Library::open(Path::new(&args[2]))?;
+            let id=LibraryId::parse_str(&args[3])?;
+            println!("{}",serde_json::to_string_pretty(&library.source_entity_state(id)?)?);
+        },
         Some("backup") if args.len()==4=>{
             let library=Library::open(Path::new(&args[2]))?;
             library.backup(Path::new(&args[3]))?;
@@ -61,7 +66,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("未解決のデータがあります。この移行先へ本番の棚を切り替えてはいけません".into());
             }
         },
-        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / backup <新棚> <新規出力先> / export-original <新棚> <ファイルSHA-256> <新規ファイル> / import-legacy <旧棚> <新棚>".into()),
+        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / source-state <新棚> <対象UUID> / backup <新棚> <新規出力先> / export-original <新棚> <ファイルSHA-256> <新規ファイル> / import-legacy <旧棚> <新棚>".into()),
     }
     Ok(())
 }

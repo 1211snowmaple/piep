@@ -63,7 +63,7 @@ impl LegacyImporter {
                         if !equivalent {return Err(Error::Integrity(format!("{kind} {key} の現在の {old} が保存された原本と一致しません")));}
                     }
                 }
-                tx.execute("INSERT INTO source_entity_state VALUES(?1,?2,?3) ON CONFLICT(entity_id) DO UPDATE SET last_checked_at=excluded.last_checked_at,last_fetched_at=excluded.last_fetched_at",params![entity,row.optional_time("last_checked_at")?,row.optional_time("last_fetched_at")?])?;
+                tx.execute("INSERT INTO source_entity_state(entity_id,last_checked_at,last_fetched_at) VALUES(?1,?2,?3) ON CONFLICT(entity_id) DO UPDATE SET last_checked_at=excluded.last_checked_at,last_fetched_at=excluded.last_fetched_at",params![entity,row.optional_time("last_checked_at")?,row.optional_time("last_fetched_at")?])?;
                 let id=LibraryId::from_slice(&entity).map_err(|_|Error::Integrity("プロフィールの識別子が不正です".into()))?;
                 mark_row(&tx,table,&row.integer("id")?.to_string(),id)
             })?;

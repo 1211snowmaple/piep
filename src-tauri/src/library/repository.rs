@@ -1372,6 +1372,7 @@ impl Library {
         self.verify_source_bodies(&conn)?;
         self.verify_reading_positions(&conn)?;
         self.verify_acquisitions(&conn)?;
+        super::source_state::verify_source_state(&conn)?;
         super::integrity::verify_snapshots(&conn)?;
         Ok(count)
     }

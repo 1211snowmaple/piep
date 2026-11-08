@@ -16,6 +16,7 @@ mod reading;
 mod renditions;
 mod repository;
 mod schema;
+mod source_state;
 mod store;
 mod suggestions;
 
@@ -32,6 +33,7 @@ pub use repository::{
     Capture, CaptureResult, CaptureSource, CapturedAttachment, CapturedMedia, EntityKind, Library,
     WorkSummary,
 };
+pub use source_state::SourceEntityState;
 pub use store::{ContentFile, FileChunk, ObjectStore, StorageStats};
 pub use suggestions::{CollectionSuggestion, SuggestedMember, SuggestionDecision, SuggestionJson};
 

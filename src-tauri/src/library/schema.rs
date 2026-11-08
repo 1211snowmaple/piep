@@ -2,12 +2,13 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 3;
+pub(crate) const VERSION: i64 = 4;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
     include_str!("migration_002_suggestions.sql"),
     include_str!("migration_003_acquisitions.sql"),
+    include_str!("migration_004_source_checks.sql"),
 ];
 
 fn migration_checksum(sql: &str) -> Fingerprint {
@@ -133,6 +134,37 @@ mod tests {
             .unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
         conn
+    }
+
+    #[test]
+    fn the_source_check_extension_keeps_profile_dates_and_does_not_invent_a_deep_check() {
+        let id = LibraryId::now_v7();
+        let conn = version_one(id);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(2) {
+            conn.execute_batch(sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        let person = LibraryId::now_v7();
+        conn.execute(
+            "INSERT INTO entities(id,kind,created_at) VALUES(?1,'person',0)",
+            [person.as_bytes().as_slice()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source_entity_state VALUES(?1,1234,5678)",
+            [person.as_bytes().as_slice()],
+        )
+        .unwrap();
+        open(&conn, id).unwrap();
+        let dates=conn.query_row("SELECT last_checked_at,last_fetched_at,last_deep_checked_at FROM source_entity_state",[],|r|Ok((r.get::<_,Option<i64>>(0)?,r.get::<_,Option<i64>>(1)?,r.get::<_,Option<i64>>(2)?))).unwrap();
+        assert_eq!(dates, (Some(1234), Some(5678), None));
+        assert_eq!(
+            conn.query_row("SELECT generation FROM library_meta", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
     }
 
     #[test]
