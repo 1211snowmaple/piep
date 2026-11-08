@@ -110,20 +110,15 @@ impl Library {
         &self,
         entity: LibraryId,
         snapshot: LibraryId,
-        mut destination: impl Write,
+        destination: impl Write,
     ) -> Result<()> {
-        let file = {
-            let conn = self.conn.lock().map_err(|_| Error::Busy)?;
-            let body: Option<Vec<u8>>=conn.query_row("SELECT body_file_id FROM revision_snapshots WHERE entity_id=?1 AND id=?2 AND published=1",params![entity.as_bytes().as_slice(),snapshot.as_bytes().as_slice()],|r|r.get(0))?;
-            body.map(fingerprint)
-                .transpose()?
-                .map(|id| Self::file_from_conn(&conn, id))
-                .transpose()?
-        };
-        if let Some(file) = file {
-            self.objects.export(&file, &mut destination)?;
-        }
-        Ok(())
+        self.read_resource(
+            entity,
+            super::ResourceScope::Snapshot(snapshot),
+            &super::ResourceReference::Body,
+            None,
+            destination,
+        )
     }
 
     /// 画像は要求した作品・保存状態から到達できるものだけを返す。
@@ -133,9 +128,11 @@ impl Library {
         snapshot: LibraryId,
         slot: &str,
     ) -> Result<ContentFile> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
-        let bytes: Vec<u8>=conn.query_row("SELECT r.file_id FROM snapshot_media m JOIN revision_snapshots s ON s.id=m.snapshot_id JOIN media_renditions r ON r.id=m.rendition_id WHERE s.entity_id=?1 AND s.id=?2 AND s.published=1 AND m.slot=?3",params![work.as_bytes().as_slice(),snapshot.as_bytes().as_slice(),slot],|r|r.get(0))?;
-        Self::file_from_conn(&conn, fingerprint(bytes)?)
+        self.resource_file(
+            work,
+            super::ResourceScope::Snapshot(snapshot),
+            &super::ResourceReference::Media { slot: slot.into() },
+        )
     }
 
     pub fn user_state(&self, work: LibraryId, user: LibraryId) -> Result<UserState> {

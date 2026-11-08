@@ -15,6 +15,7 @@ mod operations;
 mod reading;
 mod renditions;
 mod repository;
+mod resources;
 mod schema;
 mod source_state;
 mod store;
@@ -32,6 +33,10 @@ pub use reading::{ReadingAnchor, ReadingLocation, ReadingPosition, ReadingUpdate
 pub use repository::{
     Capture, CaptureResult, CaptureSource, CapturedAttachment, CapturedMedia, EntityKind, Library,
     WorkSummary,
+};
+pub use resources::{
+    ResourceFile, ResourceFormat, ResourceInfo, ResourceManifest, ResourceRange, ResourceReference,
+    ResourceScope,
 };
 pub use source_state::SourceEntityState;
 pub use store::{ContentFile, FileChunk, ObjectStore, StorageStats};
@@ -52,6 +57,10 @@ pub enum Error {
     Integrity(String),
     #[error("新しい取得や保存が先に進んだため、この取得結果は現在版に適用しませんでした")]
     Superseded,
+    #[error("指定された保存状態のファイルを利用できません")]
+    ResourceUnavailable,
+    #[error("読取範囲が元ファイルを超えています")]
+    InvalidRange,
     #[error("対応していないライブラリ形式です: {0}")]
     Unsupported(String),
     #[error("保存先が安全な管理領域ではありません: {}", .0.display())]

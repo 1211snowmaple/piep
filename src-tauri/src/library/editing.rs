@@ -224,14 +224,10 @@ impl Library {
         edit: LibraryId,
         slot: &str,
     ) -> Result<ContentFile> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
-        let file:Vec<u8>=conn.query_row("SELECT m.file_id FROM edit_media m JOIN edit_revisions e ON e.id=m.edit_id WHERE e.work_id=?1 AND e.id=?2 AND e.sealed=1 AND m.slot=?3",params![work.as_bytes().as_slice(),edit.as_bytes().as_slice(),slot],|r|r.get(0))?;
-        Self::file_from_conn(
-            &conn,
-            Fingerprint(
-                file.try_into()
-                    .map_err(|_| Error::Integrity("編集画像のハッシュが不正です".into()))?,
-            ),
+        self.resource_file(
+            work,
+            super::ResourceScope::Edit(edit),
+            &super::ResourceReference::Media { slot: slot.into() },
         )
     }
 
