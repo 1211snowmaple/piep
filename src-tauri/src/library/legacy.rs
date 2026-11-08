@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 mod annotations;
 mod catalogue;
+mod current;
 mod edits;
 mod inventory;
 mod profiles;
@@ -130,9 +131,13 @@ impl LegacyImporter {
         cancel: &AtomicBool,
         mut progress: impl FnMut(&LegacyImportReport),
     ) -> Result<LegacyImportReport> {
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Canceled);
+        }
         if target.root().starts_with(&self.root) || self.root.starts_with(target.root()) {
             return Err(Error::UnsafePath(target.root().into()));
         }
+        self.validate_migration_target(target)?;
         let mut report = LegacyImportReport::default();
         self.preserve_tables(target, &mut report)?;
         let profiles = self
@@ -236,6 +241,13 @@ impl LegacyImporter {
             let _ = (title, author); // 現在値で過去の不明項目を埋めない。
             progress(&report);
         }
+        self.finish_normalization(
+            target,
+            "current_versions",
+            "現在の保存版の照合",
+            self.normalize_current_versions(target, cancel),
+            &mut report,
+        )?;
         self.finish_normalization(
             target,
             "catalogue",
