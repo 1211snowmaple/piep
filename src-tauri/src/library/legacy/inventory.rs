@@ -75,6 +75,7 @@ impl LegacyImporter {
                 UNION ALL SELECT 1 FROM migration_records p JOIN revision_snapshots s ON s.id=p.target_id JOIN snapshot_files f ON f.snapshot_id=s.id WHERE p.source_table='asset_placements' AND p.source_key=?3 AND p.status='imported' AND p.evidence_file_id=?2 AND s.entity_id=?1 AND f.file_id=?2 AND s.published=1
                 UNION ALL SELECT 1 FROM migration_records p JOIN edit_revisions e ON e.id=p.target_id JOIN edit_media m ON m.edit_id=e.id WHERE p.source_table='edit_asset_placements' AND p.source_key=?3 AND p.status='imported' AND p.evidence_file_id=?2 AND e.work_id=?1 AND m.file_id=?2 AND m.slot=('legacy-asset:'||?3) AND e.sealed=1
             )",params![work.as_bytes().as_slice(),file.id.0.as_slice(),old.to_string()],|r|r.get(0))?;
+            if assigned { self.mark_used_file(&tx,&path,&file.id.0)?; }
             tx.execute("INSERT INTO migration_records(source_table,source_key,target_id,evidence_file_id,status) VALUES('assets',?1,?2,?3,?4) ON CONFLICT(source_table,source_key) DO UPDATE SET target_id=excluded.target_id,evidence_file_id=excluded.evidence_file_id,status=excluded.status",params![old.to_string(),work.as_bytes().as_slice(),file.id.0.as_slice(),if assigned {"imported"}else{"unresolved"}])?;
             if !assigned {unresolved+=1;}
             tx.commit()?;

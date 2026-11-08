@@ -205,8 +205,12 @@ impl LegacyImporter {
             )));
         }
         let mut media = Vec::new();
+        let mut image_paths = Vec::new();
         for (slot, url_field) in [("icon", "iconUrl"), ("cover", "coverUrl")] {
             let saved = images.remove(slot);
+            if let Some((_, path)) = &saved {
+                image_paths.push((slot, path.clone()));
+            }
             let url = data
                 .get(url_field)
                 .and_then(Value::as_str)
@@ -271,7 +275,7 @@ impl LegacyImporter {
                 external_key: key.into(),
                 kind,
                 route: "legacy-profile-import".into(),
-                raw: CaptureSource::File(path),
+                raw: CaptureSource::File(path.clone()),
                 metadata,
                 field_states: states,
                 body: None,
@@ -283,6 +287,16 @@ impl LegacyImporter {
         let mut conn = target.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         mark_row(&tx, "entity_versions", &old, result.snapshot_id)?;
+        let raw: Vec<u8> = tx.query_row(
+            "SELECT raw_file_id FROM acquisition_observations WHERE request_id=?1",
+            [request.as_bytes().as_slice()],
+            |r| r.get(0),
+        )?;
+        self.mark_used_file(&tx, &path, &raw)?;
+        for (slot, path) in image_paths {
+            let file:Vec<u8>=tx.query_row("SELECT r.file_id FROM snapshot_media m JOIN media_renditions r ON r.id=m.rendition_id WHERE m.snapshot_id=?1 AND m.slot=?2",params![result.snapshot_id.as_bytes().as_slice(),slot],|r|r.get(0))?;
+            self.mark_used_file(&tx, &path, &file)?;
+        }
         tx.commit()?;
         Ok(())
     }

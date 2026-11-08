@@ -37,8 +37,14 @@ fn deserialize_score<'de, D: serde::Deserializer<'de>>(
 struct PreparedSuggestion {
     row: LegacyRow,
     seeds: Vec<i64>,
-    members: Vec<(Member, Option<(PreparedFile, String)>)>,
+    members: Vec<(Member, Option<PreparedPreview>)>,
     names: Vec<SuggestionJson>,
+}
+
+struct PreparedPreview {
+    file: PreparedFile,
+    name: String,
+    path: std::path::PathBuf,
 }
 
 impl LegacyImporter {
@@ -47,12 +53,6 @@ impl LegacyImporter {
         target: &Library,
         cancel: &AtomicBool,
     ) -> Result<()> {
-        {
-            let conn = target.conn.lock().map_err(|_| Error::Busy)?;
-            if marked(&conn, "collection_suggestions")? {
-                return Ok(());
-            }
-        }
         let mut suggestions = Vec::new();
         self.each_row("collection_suggestions", |row| {
             if cancel.load(Ordering::Acquire) {
@@ -88,7 +88,11 @@ impl LegacyImporter {
                             .ok_or_else(|| Error::UnsafePath(path.clone()))?
                             .to_owned();
                         let file = target.objects.put_path(&path)?;
-                        Ok::<_, Error>((target.prepare_file(&file)?, name))
+                        Ok::<_, Error>(PreparedPreview {
+                            file: target.prepare_file(&file)?,
+                            name,
+                            path,
+                        })
                     })
                     .transpose()?;
                 prepared.push((member, preview));
@@ -105,6 +109,24 @@ impl LegacyImporter {
         let tx = conn.transaction()?;
         // プレビューの圧縮中に他の処理が完了していても、判断を二重適用しない。
         if marked(&tx, "collection_suggestions")? {
+            for suggestion in suggestions {
+                if cancel.load(Ordering::Acquire) {
+                    return Err(Error::Canceled);
+                }
+                let old = suggestion.row.text("id")?;
+                for (member, preview) in suggestion.members {
+                    if let Some(preview) = preview {
+                        let stored:Vec<u8>=tx.query_row("SELECT m.preview_file_id FROM collection_suggestion_members m JOIN migration_records r ON r.target_id=m.suggestion_id JOIN external_identities e ON e.entity_id=m.work_id WHERE r.source_table='collection_suggestions' AND r.source_key=?1 AND r.status='imported' AND e.provider=?2 AND e.kind='work' AND e.external_key=?3",params![old,member.source,member.source_id],|r|r.get(0))?;
+                        if stored != preview.file.file.id.0 {
+                            return Err(Error::Integrity(
+                                "移行先の提案プレビューが元ファイルと一致しません".into(),
+                            ));
+                        }
+                        self.mark_used_file(&tx, &preview.path, &stored)?;
+                    }
+                }
+            }
+            tx.commit()?;
             return Ok(());
         }
         for suggestion in suggestions {
@@ -155,9 +177,10 @@ impl LegacyImporter {
                     row.time("created_at")?,
                 )?;
                 let (file, name) = match preview {
-                    Some((file, name)) => {
-                        Library::register_file(&tx, &file)?;
-                        (Some(file.file.id.0.to_vec()), Some(name))
+                    Some(preview) => {
+                        Library::register_file(&tx, &preview.file)?;
+                        self.mark_used_file(&tx, &preview.path, &preview.file.file.id.0)?;
+                        (Some(preview.file.file.id.0.to_vec()), Some(preview.name))
                     }
                     None => (None, None),
                 };

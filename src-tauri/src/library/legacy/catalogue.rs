@@ -36,10 +36,11 @@ impl LegacyImporter {
                 .optional_text("cover_image_path")?
                 .filter(|s| !s.is_empty())
             {
-                let file = target.objects.put_path(&self.managed_path(path)?)?;
+                let path = self.managed_path(path)?;
+                let file = target.objects.put_path(&path)?;
                 covers.insert(
                     row.text("id")?.to_owned(),
-                    (file.id, target.prepare_file(&file)?),
+                    (file.id, target.prepare_file(&file)?, path),
                 );
             }
             Ok(())
@@ -69,7 +70,7 @@ impl LegacyImporter {
                 let created=row.time("created_at")?;
                 let ordered=match row.text("collection_kind")? {"ordered"=>true,"unordered"=>false,_=>return Err(Error::Integrity("旧コレクションの種類が不正です".into()))};
                 let cover_work=row.optional_integer("cover_download_id")?.map(|old|self.work_from_old(&tx,old)).transpose()?;
-                let cover_file=if let Some((id,file))=covers.get(key) {Library::register_file(&tx,file)?;Some(id.0.to_vec())} else {None};
+                let cover_file=if let Some((id,file,_))=covers.get(key) {Library::register_file(&tx,file)?;Some(id.0.to_vec())} else {None};
                 let appearance=json!({"cover_mode":row.optional_text("cover_mode")?,"name_source":row.optional_text("name_source")?,"track":row.optional_text("track")?});
                 tx.execute("INSERT INTO entities(id,kind,created_at) VALUES(?1,'collection',?2)",params![id.as_bytes().as_slice(),created])?;
                 tx.execute("INSERT INTO collections(id,title,description,appearance_json,cover_work_id,cover_file_id,ordered,generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![id.as_bytes().as_slice(),row.text("name")?,row.optional_text("description")?,appearance.to_string(),cover_work.map(|id|id.as_bytes().to_vec()),cover_file,ordered,row.integer("revision")?])?;
@@ -218,6 +219,15 @@ impl LegacyImporter {
                 Ok(())
             })?;
             mark_table(&tx, "collection_pair_feedback")?;
+        }
+        for (key, (file, _, path)) in covers {
+            let stored:Vec<u8>=tx.query_row("SELECT c.cover_file_id FROM collections c JOIN migration_records r ON r.target_id=c.id WHERE r.source_table='work_collections' AND r.source_key=?1 AND r.status='imported'",[key],|r|r.get(0))?;
+            if stored != file.0 {
+                return Err(Error::Integrity(
+                    "移行先のコレクション表紙が元ファイルと一致しません".into(),
+                ));
+            }
+            self.mark_used_file(&tx, &path, &stored)?;
         }
         tx.commit()?;
         Ok(())

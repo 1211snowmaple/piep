@@ -15,6 +15,7 @@ mod annotations;
 mod catalogue;
 mod current;
 mod edits;
+mod filesystem;
 mod inventory;
 mod profiles;
 mod relations;
@@ -28,6 +29,8 @@ pub struct LegacyImportReport {
     pub snapshots: usize,
     pub profile_snapshots: usize,
     pub files: u64,
+    pub managed_files: u64,
+    pub unresolved_files: u64,
     pub unresolved: Vec<String>,
     pub preserved_tables: BTreeMap<String, usize>,
 }
@@ -109,14 +112,7 @@ impl LegacyImporter {
         if !relative.components().next().is_some_and(|c| {
             matches!(
                 c.as_os_str().to_str(),
-                Some(
-                    "downloads"
-                        | "profiles"
-                        | "series"
-                        | "editor-assets"
-                        | "collection-covers"
-                        | "templates"
-                )
+                Some(name) if filesystem::MANAGED_ROOTS.contains(&name)
             )
         }) {
             return Err(Error::UnsafePath(path));
@@ -290,10 +286,27 @@ impl LegacyImporter {
             self.normalize_suggestions(target, cancel),
             &mut report,
         )?;
+        let inventory = self
+            .normalize_filesystem(target, cancel, |files| {
+                report.managed_files = files;
+                progress(&report);
+            })
+            .map(|inventory| {
+                report.managed_files = inventory.files;
+                report.unresolved_files = inventory.unresolved;
+            });
+        self.finish_normalization(
+            target,
+            "filesystem",
+            "管理領域のファイル全件照合",
+            inventory,
+            &mut report,
+        )?;
+        report.files = target.verify()?;
+        target.conn.lock().map_err(|_|Error::Busy)?.execute("DELETE FROM migration_records WHERE source_table='__normalization__' AND source_key='migration'",[])?;
         report.unresolved.extend(target.activation_problems()?);
         report.unresolved.sort();
         report.unresolved.dedup();
-        report.files = target.verify()?;
         Ok(report)
     }
 
@@ -532,7 +545,7 @@ impl LegacyImporter {
                 external_key: key.into(),
                 kind: EntityKind::Work,
                 route: "legacy-import".into(),
-                raw: CaptureSource::File(path),
+                raw: CaptureSource::File(path.clone()),
                 metadata,
                 field_states: states,
                 body,
@@ -544,6 +557,12 @@ impl LegacyImporter {
         let mut conn = target.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         rows::mark_row(&tx, "download_versions", &migration_key, saved.snapshot_id)?;
+        let raw: Vec<u8> = tx.query_row(
+            "SELECT raw_file_id FROM acquisition_observations WHERE request_id=?1",
+            [request_id.as_bytes().as_slice()],
+            |r| r.get(0),
+        )?;
+        self.mark_used_file(&tx, &path, &raw)?;
         for (asset, slot) in included_assets {
             rows::mark_row(
                 &tx,
@@ -615,6 +634,8 @@ impl LegacyImporter {
                         "旧棚の {table} が前回の移行から変更されています"
                     )));
                 }
+                // 最初の原記録と未完了の印を同時に確定する。正規化開始前に落ちても完成に見せない。
+                tx.execute("INSERT INTO migration_records(source_table,source_key,status) VALUES('__normalization__','migration','unresolved') ON CONFLICT(source_table,source_key) DO UPDATE SET status='unresolved'",[])?;
                 tx.execute("INSERT OR IGNORE INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES(?1,'__all_rows__',?2,?3)",params![table,file.id.0.as_slice(),if count==0 || matches!(table.as_str(),"downloads"|"download_versions") { "imported" } else { "unresolved" }])?;
                 tx.commit()?;
             }
