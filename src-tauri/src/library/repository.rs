@@ -1517,6 +1517,45 @@ mod tests {
     }
 
     #[test]
+    fn equivalent_publication_date_formats_share_a_revision_and_keep_each_raw_response() {
+        let temp = Temp::new();
+        let library = Library::create(&temp.0).unwrap();
+        let milliseconds = 1735754645123_i64;
+        for (n, date) in [
+            json!("2025-01-02T03:04:05.123+09:00"),
+            json!("2025-01-01T18:04:05.123Z"),
+            json!(milliseconds),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let raw = serde_json::to_vec(&json!({"create_date":date})).unwrap();
+            let mut input = capture("title");
+            input.metadata.insert("create_date".into(), date);
+            input.raw = raw.clone().into();
+            let saved = library.capture(input).unwrap();
+            assert_eq!(saved.created_revision, n == 0);
+            assert_eq!(
+                library.works(1).unwrap()[0].published_at,
+                Some(milliseconds)
+            );
+            let mut restored = Vec::new();
+            library
+                .objects
+                .export(&library.file(Fingerprint::of(&raw)).unwrap(), &mut restored)
+                .unwrap();
+            assert_eq!(restored, raw);
+            let snapshots = library.snapshots(saved.entity_id).unwrap();
+            assert_eq!(snapshots.len(), n + 1);
+            assert!(snapshots
+                .iter()
+                .all(|s| s.revision_id == snapshots[0].revision_id
+                    && s.metadata["create_date"] == json!(milliseconds)));
+        }
+        library.verify().unwrap();
+    }
+
+    #[test]
     fn acquisition_time_is_preserved_without_using_the_clock_to_order_or_select_history() {
         let temp = Temp::new();
         let library = Library::create(&temp.0).unwrap();
