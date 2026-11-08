@@ -262,6 +262,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn structured_numbers_roundtrip_without_changing_bytes_or_the_comparison_fingerprint() {
+        for number in [
+            0.07221960411257732,
+            -0.0,
+            1.0000000000000002,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+        ] {
+            let body = SourceBody::FanboxBody(
+                json!({"blocks":[{"type":"p","text":"body"}],"future":{"number":number,"large_integer":u64::MAX}}),
+            );
+            let bytes = body.storage_bytes().unwrap();
+            let restored = SourceBody::decode(body.format(), &bytes).unwrap();
+            assert_eq!(bytes, restored.storage_bytes().unwrap(), "{number:?}");
+            assert_eq!(
+                body.semantic_fingerprint().unwrap(),
+                restored.semantic_fingerprint().unwrap(),
+                "{number:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rich_content_order_and_attributes_are_part_of_the_source_and_preview_paths_are_not() {
         let body = SourceBody::FanboxBody(
             json!({"blocks":[{"type":"p","text":"文章"},{"type":"image","imageId":"image"}],"imageMap":{"image":{"originalUrl":"https://example.test/original.png","thumbnailUrl":"https://example.test/thumb.png","localPath":"old/path.png"}}}),

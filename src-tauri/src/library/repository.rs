@@ -813,7 +813,11 @@ impl Library {
             states.insert(key.clone(), "known".into());
         }
         for (key, state) in &capture.field_states {
-            if !merged.contains_key(key) {
+            if !merged.contains_key(key)
+                && (legacy_kind.is_some()
+                    || state == "known"
+                    || states.get(key).is_none_or(|old| old != "known"))
+            {
                 states.insert(key.clone(), state.clone());
             }
         }
@@ -940,6 +944,11 @@ impl Library {
                 "取得元の変更を確定する前に本文の再取得が必要です".into(),
             ));
         }
+        for file in &prepared {
+            Self::register_file(&tx, file)?;
+        }
+        // 保存状態に差がなければ、取得記録を残して候補の構築だけを巻き戻す。
+        tx.execute_batch("SAVEPOINT snapshot_publication")?;
         let revision = if changed {
             let id = LibraryId::now_v7();
             let ordinal: i64 = tx.query_row(
@@ -965,9 +974,6 @@ impl Library {
         } else {
             uuid(previous.as_ref().unwrap().1.clone())?
         };
-        for file in &prepared {
-            Self::register_file(&tx, file)?;
-        }
         let semantic = Fingerprint::of(b"unpublished");
         // 仮の値は公開前に、継承したものも含む実際の全参照から作り直す。
         let manifest = Fingerprint::of(b"unpublished");
@@ -979,19 +985,13 @@ impl Library {
         )?;
         tx.execute("INSERT INTO revision_snapshots(id,entity_id,revision_id,metadata_json,field_states_json,body_file_id,interpretation_version,semantic_rule,semantic_hash,manifest_hash,created_at,sequence,body_format,body_semantic_hash) VALUES(?1,?2,?3,?4,?5,?6,1,1,?7,?8,?9,?10,?11,?12)",params![snapshot.as_bytes().as_slice(),entity.as_bytes().as_slice(),revision.as_bytes().as_slice(),serde_json::to_string(&merged)?,serde_json::to_string(&states)?,body_id,semantic.0.as_slice(),manifest.0.as_slice(),acquired_at,sequence,body_format,body_semantic])?;
         let observation = LibraryId::now_v7();
-        tx.execute("INSERT INTO acquisition_observations(id,entity_id,request_id,request_hash,acquired_at,recorded_at,route,status,raw_file_id,result_snapshot_id,created_revision,body_file_id,body_format) VALUES(?1,?2,?3,?4,?5,?6,?7,'available',?8,?9,?10,?11,?12)",params![observation.as_bytes().as_slice(),entity.as_bytes().as_slice(),capture.request_id.as_bytes().as_slice(),request_hash.0.as_slice(),acquired_at,now,capture.route,raw.id.0.as_slice(),snapshot.as_bytes().as_slice(),changed,input_body.as_ref().map(|b|b.file.id.0.to_vec()),input_body.as_ref().map(|b|b.format.name())])?;
-        tx.execute(
-            "INSERT INTO snapshot_observations VALUES(?1,?2,?3)",
-            params![
-                entity.as_bytes().as_slice(),
-                snapshot.as_bytes().as_slice(),
-                observation.as_bytes().as_slice()
-            ],
-        )?;
+        let insert_observation = |result_snapshot: LibraryId| -> Result<()> {
+            tx.execute("INSERT INTO acquisition_observations(id,entity_id,request_id,request_hash,acquired_at,recorded_at,route,status,raw_file_id,result_snapshot_id,created_revision,body_file_id,body_format) VALUES(?1,?2,?3,?4,?5,?6,?7,'available',?8,?9,?10,?11,?12)",params![observation.as_bytes().as_slice(),entity.as_bytes().as_slice(),capture.request_id.as_bytes().as_slice(),request_hash.0.as_slice(),acquired_at,now,capture.route,raw.id.0.as_slice(),result_snapshot.as_bytes().as_slice(),changed,input_body.as_ref().map(|b|b.file.id.0.to_vec()),input_body.as_ref().map(|b|b.format.name())])?;
+            Ok(())
+        };
         if let Some(previous) = &previous {
             let old = &previous.0;
             tx.execute("INSERT INTO snapshot_media SELECT ?1,slot,role,media_id,rendition_id,original_name FROM snapshot_media WHERE snapshot_id=?2",params![snapshot.as_bytes().as_slice(),old])?;
-            tx.execute("INSERT OR IGNORE INTO snapshot_observations SELECT entity_id,?1,observation_id FROM snapshot_observations WHERE snapshot_id=?2",params![snapshot.as_bytes().as_slice(),old])?;
             let mut statement=tx.prepare("SELECT slot,file_id,original_name,mime_type,role FROM snapshot_files WHERE snapshot_id=?1 ORDER BY slot")?;
             let rows = statement
                 .query_map([old], |r| {
@@ -1063,6 +1063,12 @@ impl Library {
             }
         }
         for next in &media {
+            if legacy_kind.is_none() && next.source_key.is_none() && next.file.is_none() {
+                let saved:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshot_media WHERE snapshot_id=?1 AND slot=?2 AND role=?3 AND rendition_id IS NOT NULL)",params![snapshot.as_bytes().as_slice(),next.slot,next.role],|r|r.get(0))?;
+                if saved {
+                    continue;
+                }
+            }
             let known = match next.source_key {
                 Some(key)=>tx.query_row("SELECT id FROM source_media WHERE provider=?1 AND kind=?2 AND source_key=?3 AND identity_rule=1",params![capture.provider,next.role,key],|r|r.get::<_,Vec<u8>>(0)).optional()?,
                 None=>None,
@@ -1120,6 +1126,48 @@ impl Library {
             };
             tx.execute("INSERT INTO snapshot_media VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(snapshot_id,slot) DO UPDATE SET role=excluded.role,media_id=excluded.media_id,rendition_id=excluded.rendition_id,original_name=excluded.original_name",params![snapshot.as_bytes().as_slice(),next.slot,next.role,media_id.as_bytes().as_slice(),rendition,name])?;
         }
+        if context.is_some() && !changed {
+            if let Some(previous) = &previous {
+                let old = uuid(previous.0.clone())?;
+                if super::saved_state::fingerprint(&tx, snapshot)?
+                    == super::saved_state::fingerprint(&tx, old)?
+                {
+                    tx.execute_batch(
+                        "ROLLBACK TO snapshot_publication; RELEASE snapshot_publication;",
+                    )?;
+                    insert_observation(old)?;
+                    let result = CaptureResult {
+                        entity_id: entity,
+                        snapshot_id: old,
+                        created_revision: false,
+                    };
+                    Self::finish_capture(
+                        &tx,
+                        &result,
+                        capture.request_id,
+                        observation,
+                        request_hash,
+                        now,
+                        context.as_ref(),
+                    )?;
+                    tx.commit()?;
+                    return Ok(result);
+                }
+            }
+        }
+        tx.execute_batch("RELEASE snapshot_publication")?;
+        insert_observation(snapshot)?;
+        tx.execute(
+            "INSERT INTO snapshot_observations VALUES(?1,?2,?3)",
+            params![
+                entity.as_bytes().as_slice(),
+                snapshot.as_bytes().as_slice(),
+                observation.as_bytes().as_slice()
+            ],
+        )?;
+        if let Some(previous) = &previous {
+            tx.execute("INSERT OR IGNORE INTO snapshot_observations SELECT entity_id,?1,observation_id FROM snapshot_observations WHERE snapshot_id=?2",params![snapshot.as_bytes().as_slice(),previous.0])?;
+        }
         let (semantic, manifest) = super::integrity::snapshot_fingerprints(&tx, snapshot)?;
         tx.execute(
             "UPDATE revision_snapshots SET semantic_hash=?2,manifest_hash=?3,published=1 WHERE id=?1",
@@ -1149,7 +1197,7 @@ impl Library {
                 SELECT body_file_id AS file_id FROM revision_snapshots WHERE id=?1
                 UNION SELECT file_id FROM snapshot_files WHERE snapshot_id=?1
                 UNION SELECT r.file_id FROM snapshot_media m JOIN media_renditions r ON r.id=m.rendition_id WHERE m.snapshot_id=?1
-                UNION SELECT raw_file_id FROM acquisition_observations WHERE result_snapshot_id=?1
+                UNION SELECT o.raw_file_id FROM snapshot_observations so JOIN acquisition_observations o ON o.id=so.observation_id WHERE so.snapshot_id=?1 AND o.result_snapshot_id=?1
                 ) selected ON selected.file_id=f.id",[snapshot.as_bytes().as_slice()],|r|r.get(0))?;
             let previous_length: Option<i64> = tx
                 .query_row(
@@ -1167,25 +1215,47 @@ impl Library {
             );
             tx.execute("INSERT INTO work_current_projection(work_id,snapshot_id,title,author_name,text_length,logical_size,published_at,recipe) VALUES(?1,?2,?3,?4,?5,?6,?7,1) ON CONFLICT(work_id) DO UPDATE SET snapshot_id=excluded.snapshot_id,title=excluded.title,author_name=excluded.author_name,text_length=excluded.text_length,logical_size=excluded.logical_size,published_at=excluded.published_at,recipe=excluded.recipe",params![entity.as_bytes().as_slice(),snapshot.as_bytes().as_slice(),title,author,sql_size(text_length)?,logical_size,merged.get("create_date").and_then(Value::as_i64)])?;
         }
+        let result = CaptureResult {
+            entity_id: entity,
+            snapshot_id: snapshot,
+            created_revision: changed,
+        };
+        Self::finish_capture(
+            &tx,
+            &result,
+            capture.request_id,
+            observation,
+            request_hash,
+            now,
+            context.as_ref(),
+        )?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    fn finish_capture(
+        tx: &Transaction<'_>,
+        result: &CaptureResult,
+        request: LibraryId,
+        observation: LibraryId,
+        request_hash: Fingerprint,
+        now: i64,
+        context: Option<&super::acquisitions::CompletionContext>,
+    ) -> Result<()> {
         tx.execute(
             "UPDATE library_meta SET generation=generation+1 WHERE singleton=1",
             [],
         )?;
-        if let Some(context) = &context {
-            if entity != context.ticket.entity {
+        if let Some(context) = context {
+            if result.entity_id != context.ticket.entity {
                 return Err(Error::Integrity(
                     "取得開始の対象と保存対象が一致しません".into(),
                 ));
             }
-            tx.execute("UPDATE acquisition_attempts SET state='complete',input_manifest_file_id=?2,observation_id=?3,result_snapshot_id=?4,finished_at=?5 WHERE id=?1",params![context.ticket.id.as_bytes().as_slice(),request_hash.0.as_slice(),observation.as_bytes().as_slice(),snapshot.as_bytes().as_slice(),now])?;
+            tx.execute("UPDATE acquisition_attempts SET state='complete',input_manifest_file_id=?2,observation_id=?3,result_snapshot_id=?4,finished_at=?5 WHERE id=?1",params![context.ticket.id.as_bytes().as_slice(),request_hash.0.as_slice(),observation.as_bytes().as_slice(),result.snapshot_id.as_bytes().as_slice(),now])?;
         }
-        tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'capture',?3,?4)",params![capture.request_id.as_bytes().as_slice(),entity.as_bytes().as_slice(),serde_json::to_string(&CaptureResult { entity_id:entity,snapshot_id:snapshot,created_revision:changed })?,now])?;
-        tx.commit()?;
-        Ok(CaptureResult {
-            entity_id: entity,
-            snapshot_id: snapshot,
-            created_revision: changed,
-        })
+        tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'capture',?3,?4)",params![request.as_bytes().as_slice(),result.entity_id.as_bytes().as_slice(),serde_json::to_string(result)?,now])?;
+        Ok(())
     }
 
     pub(crate) fn relation_entity(

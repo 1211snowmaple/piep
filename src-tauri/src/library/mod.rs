@@ -16,6 +16,7 @@ mod reading;
 mod renditions;
 mod repository;
 mod resources;
+mod saved_state;
 mod schema;
 mod source_state;
 mod store;
