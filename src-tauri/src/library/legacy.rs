@@ -18,6 +18,7 @@ mod edits;
 mod filesystem;
 mod inventory;
 mod profiles;
+mod reader;
 mod relations;
 mod rows;
 mod searches;
@@ -269,6 +270,13 @@ impl LegacyImporter {
         )?;
         self.finish_normalization(
             target,
+            "reader_bindings",
+            "本文と画像・添付の対応の移行",
+            self.normalize_reader(target, cancel),
+            &mut report,
+        )?;
+        self.finish_normalization(
+            target,
             "tags",
             "タグの出どころと所属の照合",
             self.normalize_tags(target),
@@ -501,14 +509,10 @@ impl LegacyImporter {
                 )));
             }
             if role == "cover" || role == "illustration" {
-                let slot = if role == "cover" {
-                    "cover".into()
-                } else {
-                    Path::new(&name)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .ok_or_else(|| Error::Integrity("画像名が不正です".into()))?
-                        .to_owned()
+                let crate::library::ResourceReference::Media { slot } =
+                    reader::asset_reference(&role, &name)?
+                else {
+                    unreachable!()
                 };
                 let media_key = if role == "cover" {
                     url.as_deref()
@@ -543,7 +547,11 @@ impl LegacyImporter {
                     bytes: Some(CaptureSource::File(asset_path)),
                 });
             } else {
-                let slot = format!("file:{name}");
+                let crate::library::ResourceReference::File { slot } =
+                    reader::asset_reference(&role, &name)?
+                else {
+                    unreachable!()
+                };
                 included_assets.push((asset_id, slot.clone()));
                 attachments.push(CapturedAttachment {
                     slot,

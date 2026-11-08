@@ -12,6 +12,8 @@ mod identity;
 mod integrity;
 mod legacy;
 mod operations;
+mod reader;
+mod reader_references;
 mod reading;
 mod renditions;
 mod repository;
@@ -31,6 +33,10 @@ pub use editing::{EditBlock, EditContent, EditInfo, EditMedia, EditState};
 pub use identity::{cover_identity, image_identity, Fingerprint, LibraryId};
 pub use legacy::{LegacyImportReport, LegacyImporter};
 pub use operations::{EditRequest, SnapshotInfo, UserState};
+pub use reader::{
+    ReaderBinding, ReaderBindingSet, ReaderBody, ReaderDocument, ResolvedReaderBinding,
+};
+pub use reader_references::BodyAssetReference;
 pub use reading::{ReadingAnchor, ReadingLocation, ReadingPosition, ReadingUpdate};
 pub use repository::{
     Capture, CaptureResult, CaptureSource, CapturedAttachment, CapturedMedia, EntityKind, Library,

@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 5;
+pub(crate) const VERSION: i64 = 6;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -10,6 +10,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_003_acquisitions.sql"),
     include_str!("migration_004_source_checks.sql"),
     include_str!("migration_005_saved_searches.sql"),
+    include_str!("migration_006_reader_bindings.sql"),
 ];
 
 fn migration_checksum(sql: &str) -> Fingerprint {
@@ -263,6 +264,50 @@ mod tests {
                 .unwrap();
             assert_eq!(kept, (definition.into(), version));
         }
+    }
+
+    #[test]
+    fn reader_binding_migration_rolls_back_on_failure_and_requires_backfill_for_imported_history() {
+        let id = LibraryId::now_v7();
+        let conn = version_one(id);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(4) {
+            conn.execute_batch(sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 5).unwrap();
+        conn.execute("INSERT INTO migration_records(source_table,source_key,target_id,status) VALUES('download_versions','old',?1,'imported')",[id.as_bytes().as_slice()]).unwrap();
+        conn.execute_batch("CREATE TABLE reader_bindings(blocked TEXT)")
+            .unwrap();
+        assert!(open(&conn, id).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='reader_binding_sets'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        conn.execute_batch("DROP TABLE reader_bindings").unwrap();
+        open(&conn, id).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+        assert_eq!(conn.query_row("SELECT status FROM migration_records WHERE source_table='__normalization__' AND source_key='reader_bindings'",[],|r|r.get::<_,String>(0)).unwrap(),"unresolved");
+        assert_eq!(conn.query_row("SELECT target_id FROM migration_records WHERE source_table='download_versions' AND source_key='old'",[],|r|r.get::<_,Vec<u8>>(0)).unwrap(),id.as_bytes());
+        assert_eq!(
+            conn.query_row("SELECT generation FROM library_meta", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
     }
 
     #[test]
