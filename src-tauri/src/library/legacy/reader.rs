@@ -13,7 +13,7 @@ use std::{
 struct Asset {
     reference: ResourceReference,
     name: String,
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     url: Option<String>,
 }
 pub(super) fn asset_reference(role: &str, name: &str) -> Result<ResourceReference> {
@@ -46,7 +46,7 @@ fn ordinary(path: &Path) -> PathBuf {
     }
     path.to_path_buf()
 }
-fn absolute(root: &Path, base: &Path, stored: &str) -> Result<PathBuf> {
+fn spelling(base: &Path, stored: &str) -> Result<PathBuf> {
     let stored = Path::new(stored);
     if stored
         .components()
@@ -54,7 +54,6 @@ fn absolute(root: &Path, base: &Path, stored: &str) -> Result<PathBuf> {
     {
         return Err(Error::UnsafePath(stored.into()));
     }
-    let root = ordinary(root);
     let path = ordinary(&if stored.is_absolute() {
         stored.to_path_buf()
     } else {
@@ -64,9 +63,6 @@ fn absolute(root: &Path, base: &Path, stored: &str) -> Result<PathBuf> {
         .components()
         .filter(|c| !matches!(c, Component::CurDir))
         .collect();
-    if !path.starts_with(&root) {
-        return Err(Error::UnsafePath(path));
-    }
     // 本文内のパス自体は開かず、所属を照合済みの資産記録とだけ比較する。
     Ok(path)
 }
@@ -111,14 +107,20 @@ fn choose(
         .and_then(|v| v.get("localPath"))
         .and_then(Value::as_str)
         .map(|p| {
-            absolute(
-                root,
+            spelling(
                 json.parent()
                     .ok_or_else(|| Error::UnsafePath(json.into()))?,
                 p,
             )
         })
         .transpose()?;
+    if let Some(local) = &local {
+        // 元記録の表記も、実在する同一資産として検査したものだけを許可する。
+        // Windows の大小文字・短い名前・verbatim 表記を一律に潰して別ファイルを混ぜない。
+        if !local.starts_with(ordinary(root)) && !assets.iter().any(|a| a.paths.contains(local)) {
+            return Err(Error::UnsafePath(local.clone()));
+        }
+    }
     let mut stems = Vec::new();
     match reference {
         BodyAssetReference::PixivUploaded { image_id } => stems.extend([
@@ -156,7 +158,9 @@ fn choose(
             continue;
         }
         let exact_url = url.is_some_and(|url| asset.url.as_deref() == Some(url));
-        let exact_path = local.as_ref().is_some_and(|local| local == &asset.path);
+        let exact_path = local
+            .as_ref()
+            .is_some_and(|local| asset.paths.contains(local));
         let stem = Path::new(&asset.name)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -241,7 +245,10 @@ impl LegacyImporter {
                 assets.push(Asset {
                     reference,
                     name,
-                    path: absolute(&self.root, &self.root, row.text("local_path")?)?,
+                    paths: vec![
+                        ordinary(&self.managed_path(row.text("local_path")?)?),
+                        spelling(&self.root, row.text("local_path")?)?,
+                    ],
                     url: row.optional_text("original_url")?.map(str::to_owned),
                 });
                 Ok(())

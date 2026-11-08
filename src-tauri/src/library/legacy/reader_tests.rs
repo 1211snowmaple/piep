@@ -104,6 +104,66 @@ fn imported_pixiv_notation_keeps_each_version_and_declares_unsaved_images_withou
 }
 
 #[test]
+#[cfg(windows)]
+fn windows_path_spelling_does_not_change_the_owned_reader_assets() {
+    for article in [false, true] {
+        let fixture = Fixture::new(false);
+        {
+            let db = Connection::open(fixture.0.join("old/piep.db")).unwrap();
+            db.execute_batch("UPDATE download_versions SET json_path=lower(json_path),original_json_path=lower(original_json_path); UPDATE assets SET local_path=lower(local_path);").unwrap();
+            if article {
+                db.execute("UPDATE downloads SET source='fanbox'", [])
+                    .unwrap();
+                for version in 1..=2 {
+                    let dir = fixture
+                        .0
+                        .join(format!("old/downloads/pixiv/one/v{version}"));
+                    let absolute = dir
+                        .join("data_assets/illustrations/inline_123.png")
+                        .to_str()
+                        .unwrap()
+                        .to_ascii_lowercase();
+                    std::fs::write(dir.join("original.json"),json!({"detail":{"title":format!("version {version}")},"body":{"images":[{"localPath":absolute},{"localPath":"./data_assets/illustrations/456_p1.png"}]}}).to_string()).unwrap();
+                }
+            }
+        }
+        let source = LegacyImporter::open(&fixture.0.join("old")).unwrap();
+        let library = Library::create(&fixture.0.join("new")).unwrap();
+        let report = source
+            .import(&library, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        assert!(report.unresolved.is_empty(), "{:?}", report.unresolved);
+        let work = library.works(1).unwrap().remove(0);
+        let document = library
+            .reader_document(work.id, ResourceScope::Snapshot(work.snapshot_id))
+            .unwrap();
+        assert_eq!(
+            document
+                .bindings
+                .iter()
+                .filter(|b| b.resource.is_some())
+                .count(),
+            2
+        );
+        if article {
+            assert_eq!(
+                document.bindings[0].resource.as_ref().unwrap().reference,
+                ResourceReference::Media {
+                    slot: "inline_123".into()
+                }
+            );
+            assert_eq!(
+                document.bindings[1].resource.as_ref().unwrap().reference,
+                ResourceReference::Media {
+                    slot: "456_p1".into()
+                }
+            );
+        }
+        library.verify().unwrap();
+    }
+}
+
+#[test]
 fn ambiguous_old_image_names_remain_unresolved_without_publishing_a_guess() {
     let fixture = Fixture::new(true);
     let source = LegacyImporter::open(&fixture.0.join("old")).unwrap();
@@ -171,12 +231,11 @@ fn explicit_article_urls_and_paths_are_checked_and_different_known_sources_are_n
             slot: "opaque".into(),
         },
         name: "image.png".into(),
-        path: absolute(
-            &root,
+        paths: vec![spelling(
             &root,
             "downloads/pixiv/one/v1/data_assets/illustrations/inline_123.png",
         )
-        .unwrap(),
+        .unwrap()],
         url: Some("https://example.test/original".into()),
     }];
     let body = SourceBody::FanboxBody(
