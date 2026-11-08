@@ -4845,12 +4845,14 @@ dependencies = [
  "tower-http",
  "unicode-normalization",
  "url",
+ "uuid",
  "wana_kana",
  "webp",
  "webview2-com",
  "windows",
  "zenjpeg",
  "zip",
+ "zstd 0.13.4",
 ]
 
 [[package]]
