@@ -208,7 +208,7 @@ fn decode(row: StoredResource) -> Result<ResourceInfo> {
     })
 }
 
-fn resources(
+pub(super) fn resources(
     conn: &Connection,
     scope: ResourceScope,
     filter: Option<&ResourceReference>,

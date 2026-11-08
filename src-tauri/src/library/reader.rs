@@ -89,15 +89,26 @@ fn header(conn: &Connection, entity: LibraryId, snapshot: LibraryId) -> Result<H
     })
 }
 fn validate(body: &SourceBody, bindings: &mut [ReaderBinding]) -> Result<()> {
+    normalize_input_bindings(bindings)?;
+    let required = reader_references::required(body)?;
+    let provided: BTreeSet<_> = bindings.iter().map(|b| b.reference.clone()).collect();
+    if provided != required {
+        return Err(Error::Integrity(
+            "本文の画像・添付指定と読書用の対応表が一致しません".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn normalize_input_bindings(bindings: &mut [ReaderBinding]) -> Result<()> {
     if bindings.len() > reader_references::MAX_BODY_ASSETS {
         return Err(Error::Unsupported(
             "読書用の対応表が読み込み上限を超えています".into(),
         ));
     }
     bindings.sort_by(|a, b| a.reference.cmp(&b.reference));
-    let required = reader_references::required(body)?;
     let provided: BTreeSet<_> = bindings.iter().map(|b| b.reference.clone()).collect();
-    if provided.len() != bindings.len() || provided != required {
+    if provided.len() != bindings.len() {
         return Err(Error::Integrity(
             "本文の画像・添付指定と読書用の対応表が一致しません".into(),
         ));
@@ -198,14 +209,35 @@ impl Library {
         &self,
         entity: LibraryId,
         snapshot: LibraryId,
+        bindings: Vec<ReaderBinding>,
+    ) -> Result<ReaderBindingSet> {
+        let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let tx = conn.transaction()?;
+        let plan = self.publish_reader_bindings_in_tx(&tx, entity, snapshot, bindings)?;
+        tx.commit()?;
+        Ok(plan)
+    }
+
+    pub(super) fn publish_reader_bindings_in_tx(
+        &self,
+        conn: &Connection,
+        entity: LibraryId,
+        snapshot: LibraryId,
         mut bindings: Vec<ReaderBinding>,
     ) -> Result<ReaderBindingSet> {
-        let body = self
-            .source_body(entity, snapshot)?
-            .ok_or(Error::ResourceUnavailable)?;
+        let header = header(conn, entity, snapshot)?;
+        let file = Self::file_from_conn(conn, header.body)?;
+        if file.length > super::body::MAX_BODY_BYTES {
+            return Err(Error::Unsupported(
+                "本文が読み込み上限を超えています".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        self.objects.export(&file, &mut bytes)?;
+        let body = SourceBody::decode(header.format, &bytes)?;
         validate(&body, &mut bindings)?;
-        let resources = self.resource_manifest(entity, ResourceScope::Snapshot(snapshot))?;
-        let references: BTreeSet<_> = resources.resources.iter().map(|r| &r.reference).collect();
+        let resources = super::resources::resources(conn, ResourceScope::Snapshot(snapshot), None)?;
+        let references: BTreeSet<_> = resources.iter().map(|r| &r.reference).collect();
         for binding in &bindings {
             if let Some(resource) = &binding.resource {
                 if !references.contains(resource) {
@@ -213,10 +245,7 @@ impl Library {
                 }
             }
         }
-        let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
-        let tx = conn.transaction()?;
-        let header = header(&tx, entity, snapshot)?;
-        if let Some(old) = load(&tx, entity, snapshot, &header)? {
+        if let Some(old) = load(conn, entity, snapshot, &header)? {
             if old.bindings != bindings {
                 return Err(Error::Integrity(
                     "確定済みの読書用の対応表は変更できません".into(),
@@ -225,14 +254,14 @@ impl Library {
             return Ok(old);
         }
         let digest = hash(entity, snapshot, &header, &bindings)?;
-        tx.execute("INSERT INTO reader_binding_sets(entity_id,snapshot_id,recipe,source_manifest,body_file_id,bindings_hash) VALUES(?1,?2,1,?3,?4,?5)",params![entity.as_bytes().as_slice(),snapshot.as_bytes().as_slice(),header.manifest.0.as_slice(),header.body.0.as_slice(),digest.0.as_slice()])?;
+        conn.execute("INSERT INTO reader_binding_sets(entity_id,snapshot_id,recipe,source_manifest,body_file_id,bindings_hash) VALUES(?1,?2,1,?3,?4,?5)",params![entity.as_bytes().as_slice(),snapshot.as_bytes().as_slice(),header.manifest.0.as_slice(),header.body.0.as_slice(),digest.0.as_slice()])?;
         for binding in &bindings {
             let (media, file) = match &binding.resource {
                 Some(ResourceReference::Media { slot }) => (Some(slot), None),
                 Some(ResourceReference::File { slot }) => (None, Some(slot)),
                 _ => (None, None),
             };
-            tx.execute(
+            conn.execute(
                 "INSERT INTO reader_bindings VALUES(?1,1,?2,?3,?4,?5)",
                 params![
                     snapshot.as_bytes().as_slice(),
@@ -243,11 +272,10 @@ impl Library {
                 ],
             )?;
         }
-        tx.execute(
+        conn.execute(
             "UPDATE reader_binding_sets SET sealed=1 WHERE snapshot_id=?1 AND recipe=1",
             [snapshot.as_bytes().as_slice()],
         )?;
-        tx.commit()?;
         Ok(ReaderBindingSet {
             entity,
             snapshot,
@@ -264,8 +292,15 @@ impl Library {
         snapshot: LibraryId,
     ) -> Result<ReaderBindingSet> {
         let conn = self.conn.lock().map_err(|_| Error::Busy)?;
-        let header = header(&conn, entity, snapshot)?;
-        load(&conn, entity, snapshot, &header)?.ok_or(Error::ResourceUnavailable)
+        Self::reader_bindings_from_conn(&conn, entity, snapshot)
+    }
+    pub(super) fn reader_bindings_from_conn(
+        conn: &Connection,
+        entity: LibraryId,
+        snapshot: LibraryId,
+    ) -> Result<ReaderBindingSet> {
+        let header = header(conn, entity, snapshot)?;
+        load(conn, entity, snapshot, &header)?.ok_or(Error::ResourceUnavailable)
     }
     pub fn reader_document(
         &self,

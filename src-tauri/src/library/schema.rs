@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 6;
+pub(crate) const VERSION: i64 = 7;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -11,6 +11,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_004_source_checks.sql"),
     include_str!("migration_005_saved_searches.sql"),
     include_str!("migration_006_reader_bindings.sql"),
+    include_str!("migration_007_acquisition_readers.sql"),
 ];
 
 fn migration_checksum(sql: &str) -> Fingerprint {
@@ -298,7 +299,7 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            6
+            VERSION
         );
         assert_eq!(conn.query_row("SELECT status FROM migration_records WHERE source_table='__normalization__' AND source_key='reader_bindings'",[],|r|r.get::<_,String>(0)).unwrap(),"unresolved");
         assert_eq!(conn.query_row("SELECT target_id FROM migration_records WHERE source_table='download_versions' AND source_key='old'",[],|r|r.get::<_,Vec<u8>>(0)).unwrap(),id.as_bytes());
@@ -307,6 +308,60 @@ mod tests {
                 .get::<_, i64>(0))
                 .unwrap(),
             42
+        );
+    }
+
+    #[test]
+    fn atomic_reader_completion_migration_keeps_v6_state_and_rolls_back_partial_ddl() {
+        let id = LibraryId::now_v7();
+        let conn = version_one(id);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(5) {
+            conn.execute_batch(sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 6).unwrap();
+        let old_checksums = conn
+            .prepare("SELECT checksum FROM schema_migrations ORDER BY version")
+            .unwrap()
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        conn.execute_batch("CREATE TRIGGER acquisition_reader_completion BEFORE UPDATE ON acquisition_attempts BEGIN SELECT 1; END;").unwrap();
+        assert!(open(&conn, id).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            6
+        );
+        assert_eq!(conn.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('acquisition_reader_outputs','acquisition_reader_scope')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        conn.execute_batch("DROP TRIGGER acquisition_reader_completion;")
+            .unwrap();
+        open(&conn, id).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            VERSION
+        );
+        let kept = conn
+            .prepare("SELECT checksum FROM schema_migrations WHERE version<=6 ORDER BY version")
+            .unwrap()
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(kept, old_checksums);
+        assert_eq!(
+            conn.query_row("SELECT generation FROM library_meta", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM acquisition_reader_outputs", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
         );
     }
 

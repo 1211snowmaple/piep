@@ -25,7 +25,10 @@ mod source_state;
 mod store;
 mod suggestions;
 
-pub use acquisitions::{AcquisitionInfo, AcquisitionPayload, AcquisitionState, AcquisitionTicket};
+pub use acquisitions::{
+    AcquisitionInfo, AcquisitionPayload, AcquisitionReaderOutput, AcquisitionState,
+    AcquisitionTicket,
+};
 pub use annotations::{TagProvenance, TagUpdate, UserTag, UserTags};
 pub use body::{BodyFormat, SourceBody};
 pub use catalogue::{CollectionInfo, CollectionMember, CollectionSave};

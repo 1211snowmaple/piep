@@ -1,6 +1,6 @@
 use super::{
     Capture, CaptureResult, CaptureSource, EntityKind, Error, Fingerprint, Library, LibraryId,
-    Result,
+    ReaderBinding, Result,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,16 @@ pub struct AcquisitionInfo {
     pub result: Option<CaptureResult>,
     /// 再起動後も解釈前の応答へ戻れるよう、受信済みの原本を列挙する。
     pub payloads: Vec<AcquisitionPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader: Option<AcquisitionReaderOutput>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AcquisitionReaderOutput {
+    pub entity: LibraryId,
+    pub snapshot: LibraryId,
+    pub recipe: i64,
+    pub bindings_hash: Fingerprint,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,6 +63,7 @@ pub(super) type RawPart = AcquisitionPayload;
 pub(super) struct CompletionContext {
     pub ticket: AcquisitionTicket,
     pub parts: Vec<RawPart>,
+    pub reader_bindings: Option<Vec<ReaderBinding>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -61,6 +72,8 @@ pub(super) struct AcquisitionManifest {
     pub ticket: AcquisitionTicket,
     pub parts: Vec<RawPart>,
     pub capture: Box<serde_json::value::RawValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_bindings: Option<Vec<ReaderBinding>>,
 }
 
 fn sql_id(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<LibraryId> {
@@ -86,6 +99,11 @@ fn fingerprint(bytes: Vec<u8>) -> Result<Fingerprint> {
     Ok(Fingerprint(bytes.try_into().map_err(|_| {
         Error::Integrity("受信記録のファイル識別子が不正です".into())
     })?))
+}
+
+fn reader_output(conn: &Connection, id: LibraryId) -> Result<Option<AcquisitionReaderOutput>> {
+    conn.query_row("SELECT entity_id,snapshot_id,recipe,bindings_hash FROM acquisition_reader_outputs WHERE attempt_id=?1",[id.as_bytes().as_slice()],|r|Ok((sql_id(r,0)?,sql_id(r,1)?,r.get::<_,i64>(2)?,r.get::<_,Vec<u8>>(3)?))).optional()?
+        .map(|(entity,snapshot,recipe,hash)|Ok(AcquisitionReaderOutput {entity,snapshot,recipe,bindings_hash:fingerprint(hash)?})).transpose()
 }
 
 pub(super) fn load_info(conn: &Connection, id: LibraryId) -> Result<AcquisitionInfo> {
@@ -138,6 +156,7 @@ pub(super) fn load_info(conn: &Connection, id: LibraryId) -> Result<AcquisitionI
             })
             .transpose()?,
         payloads: raw_parts(conn, id)?,
+        reader: reader_output(conn, id)?,
     })
 }
 
@@ -295,6 +314,31 @@ impl Library {
     }
 
     pub fn complete_acquisition(&self, id: LibraryId, capture: Capture) -> Result<CaptureResult> {
+        self.complete_with_reader(id, capture, None)
+    }
+
+    /// 保存版・現在版・読書用の対応・取得の完了をまとめて確定する。
+    pub fn complete_acquisition_with_reader(
+        &self,
+        id: LibraryId,
+        capture: Capture,
+        mut bindings: Vec<ReaderBinding>,
+    ) -> Result<CaptureResult> {
+        if capture.kind != EntityKind::Work {
+            return Err(Error::Integrity(
+                "読書用の保存は作品に対してだけ行えます".into(),
+            ));
+        }
+        super::reader::normalize_input_bindings(&mut bindings)?;
+        self.complete_with_reader(id, capture, Some(bindings))
+    }
+
+    fn complete_with_reader(
+        &self,
+        id: LibraryId,
+        capture: Capture,
+        reader_bindings: Option<Vec<ReaderBinding>>,
+    ) -> Result<CaptureResult> {
         let context = {
             let conn = self.conn.lock().map_err(|_| Error::Busy)?;
             let info = load_info(&conn, id)?;
@@ -314,6 +358,7 @@ impl Library {
             CompletionContext {
                 ticket: info.ticket,
                 parts: info.payloads,
+                reader_bindings,
             }
         };
         self.capture_prepared(capture, None, Some(context))
@@ -349,10 +394,16 @@ pub(super) fn encode_manifest(context: &CompletionContext, request: Vec<u8>) -> 
             .map_err(|_| Error::Integrity("取得入力が UTF-8 ではありません".into()))?,
     )?;
     let bytes = serde_json::to_vec(&AcquisitionManifest {
-        format: "capture-request-v2".into(),
+        format: if context.reader_bindings.is_some() {
+            "capture-request-v3"
+        } else {
+            "capture-request-v2"
+        }
+        .into(),
         ticket: context.ticket.clone(),
         parts: context.parts.clone(),
         capture,
+        reader_bindings: context.reader_bindings.clone(),
     })?;
     if bytes.len() as u64 > MAX_ACQUISITION_MANIFEST_BYTES {
         return Err(Error::Unsupported(
@@ -423,7 +474,16 @@ fn manifest_files(
         .filter(|v| v.len() == 13)
         .ok_or_else(invalid_manifest)?;
     let ticket = &manifest.ticket;
-    if manifest.format != "capture-request-v2"
+    let reader_format = match (manifest.format.as_str(), &manifest.reader_bindings) {
+        ("capture-request-v2", None) => true,
+        ("capture-request-v3", Some(bindings)) if ticket.kind == EntityKind::Work => {
+            let mut normalized = bindings.clone();
+            super::reader::normalize_input_bindings(&mut normalized)?;
+            &normalized == bindings
+        }
+        _ => false,
+    };
+    if !reader_format
         || fields[0] != "capture-request-v1"
         || fields[1] != ticket.provider
         || fields[2] != ticket.external_key
@@ -493,6 +553,7 @@ impl Library {
             let id = id?;
             let info = load_info(conn, id)?;
             let stored = inputs(conn, id)?;
+            let mut reader_bindings = None;
             match info.state {
                 AcquisitionState::Pending | AcquisitionState::Cancelled => {
                     if stored.keys().any(|(role, _)| role != "raw_part") {
@@ -508,7 +569,26 @@ impl Library {
                     {
                         return Err(invalid_manifest());
                     }
+                    reader_bindings = manifest.reader_bindings;
                 }
+            }
+            match (&reader_bindings, &info.reader, info.state) {
+                (Some(bindings), Some(reader), AcquisitionState::Complete) => {
+                    if reader.entity != info.ticket.entity
+                        || Some(reader.snapshot) != info.result.as_ref().map(|r| r.snapshot_id)
+                        || reader.recipe != 1
+                    {
+                        return Err(invalid_manifest());
+                    }
+                    let plan =
+                        Self::reader_bindings_from_conn(conn, reader.entity, reader.snapshot)?;
+                    if plan.bindings_hash != reader.bindings_hash || &plan.bindings != bindings {
+                        return Err(invalid_manifest());
+                    }
+                }
+                (_, None, state)
+                    if state != AcquisitionState::Complete || reader_bindings.is_none() => {}
+                _ => return Err(invalid_manifest()),
             }
             // 完了以外は、観測や現在版を作らない。完了は同じ要求・原本を指す。
             let observation=conn.query_row("SELECT entity_id,request_hash,result_snapshot_id,route,raw_file_id,body_file_id FROM acquisition_observations WHERE request_id=?1",[id.as_bytes().as_slice()],|r|Ok(ObservationLink {entity:r.get(0)?,request:r.get(1)?,snapshot:r.get(2)?,route:r.get(3)?,raw:r.get(4)?,body:r.get(5)?})).optional()?;
@@ -542,3 +622,7 @@ impl Library {
 #[cfg(test)]
 #[path = "acquisitions_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "acquisition_readers_tests.rs"]
+mod reader_tests;

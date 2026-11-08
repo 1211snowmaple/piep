@@ -681,6 +681,28 @@ impl Library {
                 {
                     return Err(Error::Integrity("取得結果と完了記録が一致しません".into()));
                 }
+                match (&context.reader_bindings, &info.reader) {
+                    (Some(bindings), Some(reader))
+                        if reader.entity.as_bytes() == entity.as_slice()
+                            && reader.snapshot.as_bytes() == snapshot.as_slice()
+                            && reader.recipe == 1 =>
+                    {
+                        let plan =
+                            Self::reader_bindings_from_conn(&tx, reader.entity, reader.snapshot)?;
+                        if plan.bindings_hash != reader.bindings_hash || &plan.bindings != bindings
+                        {
+                            return Err(Error::Integrity(
+                                "取得結果と読書用の完了記録が一致しません".into(),
+                            ));
+                        }
+                    }
+                    (None, None) => {}
+                    _ => {
+                        return Err(Error::Integrity(
+                            "取得結果と読書用の完了記録が一致しません".into(),
+                        ))
+                    }
+                }
             }
             return Ok(CaptureResult {
                 entity_id: uuid(entity)?,
@@ -1141,6 +1163,7 @@ impl Library {
                         snapshot_id: old,
                         created_revision: false,
                     };
+                    self.prepare_capture_reader(&tx, &result, context.as_ref())?;
                     Self::finish_capture(
                         &tx,
                         &result,
@@ -1220,6 +1243,7 @@ impl Library {
             snapshot_id: snapshot,
             created_revision: changed,
         };
+        self.prepare_capture_reader(&tx, &result, context.as_ref())?;
         Self::finish_capture(
             &tx,
             &result,
@@ -1231,6 +1255,28 @@ impl Library {
         )?;
         tx.commit()?;
         Ok(result)
+    }
+
+    fn prepare_capture_reader(
+        &self,
+        tx: &Transaction<'_>,
+        result: &CaptureResult,
+        context: Option<&super::acquisitions::CompletionContext>,
+    ) -> Result<()> {
+        let Some(context) = context else {
+            return Ok(());
+        };
+        let Some(bindings) = &context.reader_bindings else {
+            return Ok(());
+        };
+        let plan = self.publish_reader_bindings_in_tx(
+            tx,
+            result.entity_id,
+            result.snapshot_id,
+            bindings.clone(),
+        )?;
+        tx.execute("INSERT INTO acquisition_reader_outputs(attempt_id,entity_id,snapshot_id,recipe,bindings_hash) VALUES(?1,?2,?3,1,?4)",params![context.ticket.id.as_bytes().as_slice(),result.entity_id.as_bytes().as_slice(),result.snapshot_id.as_bytes().as_slice(),plan.bindings_hash.0.as_slice()])?;
+        Ok(())
     }
 
     fn finish_capture(
