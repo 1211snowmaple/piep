@@ -61,6 +61,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let user=LibraryId::parse_str(&args[3])?;
             println!("{}",serde_json::to_string_pretty(&library.saved_searches(user)?)?);
         },
+        Some("job-history") if args.len()==3 || args.len()==4=>{
+            let library=Library::open(Path::new(&args[2]))?;
+            let before=args.get(3).map(|s|LibraryId::parse_str(s)).transpose()?;
+            println!("{}",serde_json::to_string_pretty(&library.job_history_page(before,100)?)?);
+        },
+        Some("job-history-items"|"job-history-logs") if args.len()==4 || args.len()==5=>{
+            let library=Library::open(Path::new(&args[2]))?;
+            let job=LibraryId::parse_str(&args[3])?;
+            let after=args.get(4).map(|s|s.parse::<i64>()).transpose()?;
+            if args[1]=="job-history-items" {
+                println!("{}",serde_json::to_string_pretty(&library.job_history_items(job,after,100)?)?);
+            } else {
+                println!("{}",serde_json::to_string_pretty(&library.job_history_logs(job,after,100)?)?);
+            }
+        },
+        Some("job-history-payload") if args.len()==5=>{
+            let library=Library::open(Path::new(&args[2]))?;
+            let job=LibraryId::parse_str(&args[3])?;
+            let item=LibraryId::parse_str(&args[4])?;
+            println!("{}",serde_json::to_string(&library.job_history_payload(job,item)?)?);
+        },
         Some("resources") if args.len()==6=>{
             let library=Library::open(Path::new(&args[2]))?;
             let entity=LibraryId::parse_str(&args[3])?;
@@ -108,7 +129,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("未解決のデータがあります。この移行先へ本番の棚を切り替えてはいけません".into());
             }
         },
-        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / source-state <新棚> <対象UUID> / saved-searches <新棚> <利用者UUID> / resources|reader <新棚> <対象UUID> snapshot|edit <保存状態UUID> / export-resource <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] <新規出力先> / backup <新棚> <新規出力先> / export-original <新棚> <ファイルSHA-256> <新規ファイル> / import-legacy <旧棚> <新棚>".into()),
+        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / source-state <新棚> <対象UUID> / saved-searches <新棚> <利用者UUID> / job-history <新棚> [前のページ末尾のジョブUUID] / job-history-items|job-history-logs <新棚> <ジョブUUID> [前のページ末尾のsequence] / job-history-payload <新棚> <ジョブUUID> <項目UUID> / resources|reader <新棚> <対象UUID> snapshot|edit <保存状態UUID> / export-resource <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] <新規出力先> / backup <新棚> <新規出力先> / export-original <新棚> <ファイルSHA-256> <新規ファイル> / import-legacy <旧棚> <新棚>".into()),
     }
     Ok(())
 }

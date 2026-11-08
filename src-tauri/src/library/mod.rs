@@ -10,6 +10,7 @@ mod catalogue;
 mod editing;
 mod identity;
 mod integrity;
+mod job_history;
 mod legacy;
 mod operations;
 mod reader;
@@ -34,6 +35,7 @@ pub use body::{BodyFormat, SourceBody};
 pub use catalogue::{CollectionInfo, CollectionMember, CollectionSave};
 pub use editing::{EditBlock, EditContent, EditInfo, EditMedia, EditState};
 pub use identity::{cover_identity, image_identity, Fingerprint, LibraryId};
+pub use job_history::{JobHistory, JobHistoryItem, JobHistoryLog};
 pub use legacy::{LegacyImportReport, LegacyImporter};
 pub use operations::{EditRequest, SnapshotInfo, UserState};
 pub use reader::{

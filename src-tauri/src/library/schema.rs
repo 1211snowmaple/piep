@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 7;
+pub(crate) const VERSION: i64 = 8;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -12,6 +12,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_005_saved_searches.sql"),
     include_str!("migration_006_reader_bindings.sql"),
     include_str!("migration_007_acquisition_readers.sql"),
+    include_str!("migration_008_job_history.sql"),
 ];
 
 fn migration_checksum(sql: &str) -> Fingerprint {
@@ -363,6 +364,58 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn job_history_forward_migration_preserves_v7_state_and_rolls_back_all_new_tables_on_failure() {
+        let id = LibraryId::now_v7();
+        let conn = version_one(id);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(6) {
+            conn.execute_batch(sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        conn.execute_batch("CREATE TABLE job_history_logs(blocked TEXT)")
+            .unwrap();
+        assert!(open(&conn, id).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        assert_eq!(conn.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('job_history','job_history_items','job_history_item_scope')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM schema_migrations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            7
+        );
+        conn.execute_batch("DROP TABLE job_history_logs").unwrap();
+        open(&conn, id).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            VERSION
+        );
+        assert_eq!(
+            conn.query_row("SELECT generation FROM library_meta", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM schema_migrations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM acquisition_reader_outputs", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        open(&conn, id).unwrap();
     }
 
     #[test]

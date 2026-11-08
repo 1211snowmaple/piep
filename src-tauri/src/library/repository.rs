@@ -1491,6 +1491,7 @@ impl Library {
         super::source_state::verify_source_state(&conn)?;
         super::searches::verify_searches(&conn)?;
         self.verify_reader_bindings(&conn)?;
+        self.verify_job_history(&conn)?;
         super::integrity::verify_snapshots(&conn)?;
         Ok(count)
     }

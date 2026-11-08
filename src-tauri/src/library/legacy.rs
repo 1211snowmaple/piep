@@ -17,6 +17,7 @@ mod current;
 mod edits;
 mod filesystem;
 mod inventory;
+mod jobs;
 mod profiles;
 mod reader;
 mod relations;
@@ -301,6 +302,13 @@ impl LegacyImporter {
             "saved_searches",
             "保存した検索の正規化",
             self.normalize_searches(target, cancel),
+            &mut report,
+        )?;
+        self.finish_normalization(
+            target,
+            "job_history",
+            "更新ジョブの履歴と項目・操作記録の移行",
+            self.normalize_job_history(target, cancel),
             &mut report,
         )?;
         self.finish_normalization(
