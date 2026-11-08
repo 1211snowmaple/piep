@@ -1443,6 +1443,7 @@ impl Library {
         self.verify_reading_positions(&conn)?;
         self.verify_acquisitions(&conn)?;
         super::source_state::verify_source_state(&conn)?;
+        super::searches::verify_searches(&conn)?;
         super::integrity::verify_snapshots(&conn)?;
         Ok(count)
     }

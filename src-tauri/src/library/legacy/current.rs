@@ -12,10 +12,12 @@ impl LegacyImporter {
             let advanced:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM acquisition_observations WHERE route NOT IN ('legacy-import','legacy-profile-import')) OR EXISTS(SELECT 1 FROM acquisition_attempts)",[],|r|r.get(0))?;
             if advanced {
                 return Err(Error::Integrity(
-                    "移行後に別の取得が行われています。移行先は新しい空のライブラリにしてください"
+                    "移行後に取得や利用者の変更が保存されています。移行先は新しい空のライブラリにしてください"
                         .into(),
                 ));
             }
+            // 移行器自身が作った初回のお気に入りは許可するが、通常の利用者操作後には再適用しない。
+            self.validate_imported_user_operations(target, &conn)?;
             return Ok(());
         }
         let generation: i64 = conn.query_row(
@@ -44,6 +46,51 @@ impl LegacyImporter {
                     "移行先は新しい空のライブラリか、同じ移行を再開するライブラリにしてください"
                         .into(),
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_imported_user_operations(
+        &self,
+        target: &Library,
+        conn: &rusqlite::Connection,
+    ) -> Result<()> {
+        let reject = || {
+            Error::Integrity("移行後に利用者の変更が保存されています。移行先は新しい空のライブラリにしてください".into())
+        };
+        let mut stmt = conn.prepare(
+            "SELECT entity_id,operation,payload_json FROM outbox WHERE operation<>'capture'",
+        )?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let operation: String = row.get(1)?;
+            if operation != "favorite" {
+                return Err(reject());
+            }
+            let work: Vec<u8> = row.get(0)?;
+            let work_id = LibraryId::from_slice(&work).map_err(|_| reject())?;
+            let payload: String = row.get(2)?;
+            let payload: serde_json::Value = serde_json::from_str(&payload)?;
+            let expected = serde_json::json!({"request":{"work":work_id,"user":target.id,"expected":0,"favorite":true},"result":{"favorite":true,"generation":1}});
+            if payload != expected {
+                return Err(reject());
+            }
+            let state:Option<(bool,i64)>=conn.query_row("SELECT favorite,generation FROM work_user_state WHERE work_id=?1 AND user_id=?2",params![work.as_slice(),target.id.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            if state != Some((true, 1)) {
+                return Err(reject());
+            }
+            let (provider,key):(String,String)=conn.query_row("SELECT provider,external_key FROM external_identities WHERE entity_id=?1 AND kind='work'",[work.as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            let favorite: Option<bool> = self
+                .conn
+                .query_row(
+                    "SELECT favorite FROM downloads WHERE source=?1 AND source_id=?2",
+                    params![provider, key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if favorite != Some(true) {
+                return Err(reject());
             }
         }
         Ok(())
@@ -243,6 +290,49 @@ CREATE TABLE assets(id INTEGER,download_id INTEGER,asset_type TEXT,filename TEXT
         );
         assert_eq!(target.snapshots(before.id).unwrap().len(), 2);
         target.verify().unwrap();
+    }
+
+    #[test]
+    fn user_favorite_changes_block_resume_while_imported_initial_favorites_allow_retry() {
+        for initially_favorite in [false, true] {
+            let fixture = Fixture::new(2);
+            {
+                let old = rusqlite::Connection::open(fixture.0.join("old/piep.db")).unwrap();
+                old.execute("UPDATE downloads SET favorite=?1", [initially_favorite])
+                    .unwrap();
+            }
+            let source = LegacyImporter::open(&fixture.0.join("old")).unwrap();
+            let target = Library::create(&fixture.0.join("new")).unwrap();
+            assert!(source
+                .import(&target, &AtomicBool::new(false), |_| {})
+                .unwrap()
+                .unresolved
+                .is_empty());
+            assert!(source
+                .import(&target, &AtomicBool::new(false), |_| {})
+                .unwrap()
+                .unresolved
+                .is_empty());
+            let work = target.works(1).unwrap().remove(0);
+            let state = target.user_state(work.id, target.id).unwrap();
+            let changed = target
+                .set_favorite(
+                    LibraryId::now_v7(),
+                    work.id,
+                    target.id,
+                    state.generation,
+                    !initially_favorite,
+                )
+                .unwrap();
+            assert!(matches!(
+                source.import(&target, &AtomicBool::new(false), |_| {}),
+                Err(Error::Integrity(_))
+            ));
+            assert_eq!(target.user_state(work.id, target.id).unwrap(), changed);
+            assert_eq!(target.current_snapshot(work.id).unwrap(), work.snapshot_id);
+            assert_eq!(target.snapshots(work.id).unwrap().len(), 2);
+            assert!(target.activation_problems().unwrap().is_empty());
+        }
     }
 
     #[test]

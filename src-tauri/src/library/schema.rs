@@ -2,13 +2,14 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 4;
+pub(crate) const VERSION: i64 = 5;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
     include_str!("migration_002_suggestions.sql"),
     include_str!("migration_003_acquisitions.sql"),
     include_str!("migration_004_source_checks.sql"),
+    include_str!("migration_005_saved_searches.sql"),
 ];
 
 fn migration_checksum(sql: &str) -> Fingerprint {
@@ -165,6 +166,103 @@ mod tests {
                 .unwrap(),
             42
         );
+    }
+
+    #[test]
+    fn saved_search_migration_keeps_outbox_rows_and_its_deleted_sequence_high_water_mark() {
+        let id = LibraryId::now_v7();
+        let conn = version_one(id);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(3) {
+            conn.execute_batch(sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.execute(
+            "INSERT INTO entities(id,kind,created_at) VALUES(?1,'work',0)",
+            [id.as_bytes().as_slice()],
+        )
+        .unwrap();
+        for sequence in [2, 7, 200] {
+            conn.execute("INSERT INTO outbox(sequence,request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,?3,'favorite','{ \"old\": true }',123)",rusqlite::params![sequence,LibraryId::now_v7().as_bytes().as_slice(),id.as_bytes().as_slice()]).unwrap();
+        }
+        conn.execute("DELETE FROM outbox WHERE sequence=200", [])
+            .unwrap();
+        let original = || {
+            conn.prepare("SELECT sequence,request_id,entity_id,operation,payload_json,created_at FROM outbox ORDER BY sequence").unwrap().query_map([],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,Vec<u8>>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,i64>(5)?))).unwrap().collect::<std::result::Result<Vec<_>,_>>().unwrap()
+        };
+        let before = original();
+        let search = LibraryId::now_v7();
+        conn.execute("INSERT INTO saved_searches VALUES(?1,'keep',NULL,'{ \"future\":9007199254740993 }',1,12,34)",[search.as_bytes().as_slice()]).unwrap();
+        // 途中の DDL まで巻き戻り、outbox を失わない。
+        conn.execute_batch("CREATE TABLE outbox_next(blocked TEXT)")
+            .unwrap();
+        assert!(open(&conn, id).is_err());
+        assert_eq!(original(), before);
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM pragma_table_info('saved_searches') WHERE name='user_id'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        conn.execute_batch("DROP TABLE outbox_next").unwrap();
+        open(&conn, id).unwrap();
+        assert_eq!(original(), before);
+        let kept:(Vec<u8>,String,i64,i64,i64)=conn.query_row("SELECT user_id,params_json,created_at,updated_at,generation FROM saved_searches WHERE id=?1",[search.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap();
+        assert_eq!(
+            kept,
+            (
+                id.as_bytes().to_vec(),
+                "{ \"future\":9007199254740993 }".into(),
+                12,
+                34,
+                1
+            )
+        );
+        conn.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'favorite','{}',0)",rusqlite::params![LibraryId::now_v7().as_bytes().as_slice(),id.as_bytes().as_slice()]).unwrap();
+        assert_eq!(conn.last_insert_rowid(), 201);
+        open(&conn, id).unwrap();
+        assert_eq!(conn.last_insert_rowid(), 201);
+    }
+
+    #[test]
+    fn unsupported_saved_search_definitions_keep_the_old_table_and_schema_on_failure() {
+        for (definition, version) in [("{}", 2), ("[]", 1)] {
+            let id = LibraryId::now_v7();
+            let conn = version_one(id);
+            for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(3) {
+                conn.execute_batch(sql).unwrap();
+                record_migration(&conn, index as i64 + 1, sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 4).unwrap();
+            let search = LibraryId::now_v7();
+            conn.execute(
+                "INSERT INTO saved_searches VALUES(?1,'keep',NULL,?2,?3,12,34)",
+                rusqlite::params![search.as_bytes().as_slice(), definition, version],
+            )
+            .unwrap();
+            assert!(open(&conn, id).is_err());
+            assert_eq!(
+                conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                4
+            );
+            let kept: (String, i64) = conn
+                .query_row(
+                    "SELECT filters_json,filter_version FROM saved_searches WHERE id=?1",
+                    [search.as_bytes().as_slice()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(kept, (definition.into(), version));
+        }
     }
 
     #[test]

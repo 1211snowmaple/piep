@@ -18,6 +18,7 @@ mod repository;
 mod resources;
 mod saved_state;
 mod schema;
+mod searches;
 mod source_state;
 mod store;
 mod suggestions;
@@ -39,6 +40,7 @@ pub use resources::{
     ResourceFile, ResourceFormat, ResourceInfo, ResourceManifest, ResourceRange, ResourceReference,
     ResourceScope,
 };
+pub use searches::{SavedSearch, SavedSearchDefinition, SavedSearchUpdate};
 pub use source_state::SourceEntityState;
 pub use store::{ContentFile, FileChunk, ObjectStore, StorageStats};
 pub use suggestions::{CollectionSuggestion, SuggestedMember, SuggestionDecision, SuggestionJson};

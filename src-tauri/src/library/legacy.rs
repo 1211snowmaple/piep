@@ -20,6 +20,7 @@ mod inventory;
 mod profiles;
 mod relations;
 mod rows;
+mod searches;
 mod state;
 mod suggestions;
 
@@ -285,6 +286,13 @@ impl LegacyImporter {
             "work_check_state",
             "作品の詳細確認日時の移行",
             self.normalize_work_check_state(target, cancel),
+            &mut report,
+        )?;
+        self.finish_normalization(
+            target,
+            "saved_searches",
+            "保存した検索の正規化",
+            self.normalize_searches(target, cancel),
             &mut report,
         )?;
         self.finish_normalization(
