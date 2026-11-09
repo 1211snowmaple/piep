@@ -33,7 +33,7 @@ file は利用者向けの attachment / document に限る。管理用原本の�
 `apiVersion: 2` があっても新ライブラリ対応とは解釈しない。
 `readerBundle` と `mutations` は false。資産転送の成功を一作品の保存完了としない。
 
-認証後の応答には `x-piep-library-id` と `x-piep-sync-epoch` が付く。
+認証後の応答には `x-piep-library-id`、`x-piep-subject-id` と `x-piep-sync-epoch` が付く。
 並列読取は4件までで、超過は429。無制限の待機列を作らない。
 ハッシュだけを指定する入口は設けず、manifest / chunk の両方で所属を再確認する。
 

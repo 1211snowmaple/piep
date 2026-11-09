@@ -132,6 +132,10 @@ async fn read_capacity_is_bounded_and_scope_headers_identify_the_epoch() {
     let response = server.get(&path).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
+        response.headers()["x-piep-subject-id"].to_str().unwrap(),
+        server.authority.subject.get().to_string()
+    );
+    assert_eq!(
         response.headers()["x-piep-library-id"].to_str().unwrap(),
         server.library.id.to_string()
     );

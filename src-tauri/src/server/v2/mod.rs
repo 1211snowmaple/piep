@@ -114,6 +114,10 @@ async fn authorize(
     request.extensions_mut().insert(Principal { subject });
     let mut response = next.run(request).await;
     response.headers_mut().insert(
+        "x-piep-subject-id",
+        subject.get().to_string().parse().map_err(|_| internal())?,
+    );
+    response.headers_mut().insert(
         "x-piep-library-id",
         ctx.library_id
             .get()
