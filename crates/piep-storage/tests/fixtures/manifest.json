@@ -1,0 +1,22 @@
+{
+  "producer_commit": "dbb18b1436f923678c1c881ff96e83fc15fe0acb",
+  "format": "PIEPOB01",
+  "vectors": [
+    {
+      "name": "raw-control",
+      "file_sha256": "9b473a080bf51f56a18eed80e35c92a63565f374706d2eba47d8203b10b49d08",
+      "original_length": 15,
+      "encoded_sha256": "a934aa4e6b70dbc94cdb0dcf0a4f3ef1b608245d86d0e05ab5c80e2c2a41acf4",
+      "codec": 0,
+      "encoded_length": 72
+    },
+    {
+      "name": "zstd-repeat",
+      "file_sha256": "8a6d5f7b1061fefacb7509d5bf23a3227c8a3a6ecfe51dc9f666772c99b75b98",
+      "original_length": 30000,
+      "encoded_sha256": "1b2a0b4944651a4b6596757e274ae7c4a7a122fe4b547e744c711e48a916bbba",
+      "codec": 1,
+      "encoded_length": 80
+    }
+  ]
+}

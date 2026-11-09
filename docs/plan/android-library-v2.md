@@ -1,6 +1,6 @@
 # 新ライブラリと Android の設計境界
 
-策定日: 2026-11-09。状態: 設計を改訂。新しい端末保存・同期・配信への接続は未完了。
+策定日: 2026-11-09。状態: 共通の保管処理を抽出。新しい端末保存・同期・配信への接続は未完了。
 
 Android 側の詳細は [Android の新ライブラリ基盤設計](https://github.com/1211snowmaple/piep-android/blob/codex/android-library-v2-design/LIBRARY-V2.md) を正本とする。
 現行の Android は Tauri・React・Rust のアプリで、既存 API を使ったオンライン読書と
@@ -28,6 +28,8 @@ Android 側の詳細は [Android の新ライブラリ基盤設計](https://gith
   未完成の転送は旧保存版を置き換えず、再開では検証済みの chunk を再利用する。
 - 現形式では小さい単一実体が最大 8 MiB、大きな file の分割は 4 MiB である。
   端末の chunk 受信・復元上限を 4 MiB と誤認しない。
+  v1 の保存 payload の受け入れ上限は 16 MiB とヘッダー 57 byte。
+  展開後と圧縮ウィンドウの上限は各 8 MiB として別々に検査する。
 - 位置とお気に入りは期待する更新世代・要求 UUID・receipt で同期する。
   端末時刻で勝者を決めず、古い応答が新しい未送信操作を消さないようにする。
   操作の基準には syncEpoch も含め、サーバー復元前の未完了要求を新規操作として適用しない。
@@ -38,6 +40,11 @@ Android 側の詳細は [Android の新ライブラリ基盤設計](https://gith
   新しい UUID へ結ぶ。対応不明・取得不能な作品を初期化や再取得で置き換えない。
 
 ## 変更に伴う実装単位
+
+`crates/piep-storage` は UI・SQLite・認証に依存しない Rust crate として分離した。
+デスクトップもこの実装を使い、既存の形式・元ハッシュ・manifest の表現を維持する。
+chunk の受信・送信は同じ検査を使い、破損・中断・上限超過を公開しない。
+認可・wire DTO・bundle の完成・端末の DB 更新はこの crate の責務に含めない。
 
 1. 共有する実体形式と wire DTO の抽出、試験ベクトル、Android 向けコンパイル。
 2. 認証・対応版・所属検査を持つ API v2 と、保存状態に固定した読書 bundle の配信。

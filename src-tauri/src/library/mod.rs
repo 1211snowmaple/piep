@@ -88,3 +88,13 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<piep_storage::Error> for Error {
+    fn from(error: piep_storage::Error) -> Self {
+        match error {
+            piep_storage::Error::Io(error) => Self::Io(error),
+            piep_storage::Error::Integrity(message) => Self::Integrity(message),
+            piep_storage::Error::UnsafePath(path) => Self::UnsafePath(path),
+        }
+    }
+}

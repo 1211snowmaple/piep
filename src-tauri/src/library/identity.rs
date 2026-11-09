@@ -1,40 +1,7 @@
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::fmt;
+pub use piep_storage::Fingerprint;
 
 /// 棚のコピーや端末間の送受信でも変わらない識別子。
 pub type LibraryId = uuid::Uuid;
-
-/// 常に圧縮前の元バイト列を識別する。パスや圧縮方式からは作らない。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Fingerprint(pub [u8; 32]);
-
-impl Fingerprint {
-    pub fn of(bytes: &[u8]) -> Self {
-        Self(Sha256::digest(bytes).into())
-    }
-
-    pub fn parse(value: &str) -> super::Result<Self> {
-        if value.len() != 64 || !value.bytes().all(|v| v.is_ascii_hexdigit()) {
-            return Err(super::Error::Integrity("不正なファイル識別子".into()));
-        }
-        let mut bytes = [0; 32];
-        for (index, byte) in bytes.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-                .map_err(|_| super::Error::Integrity("不正なファイル識別子".into()))?;
-        }
-        Ok(Self(bytes))
-    }
-}
-
-impl fmt::Display for Fingerprint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for b in self.0 {
-            write!(f, "{b:02x}")?;
-        }
-        Ok(())
-    }
-}
 
 /// pixiv の既知の表紙・挿絵形式だけ、品質によらない識別子を作る。
 /// 未知の URL は厳密比較へ戻し、他の画像を同じものと推測しない。

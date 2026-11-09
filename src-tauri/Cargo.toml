@@ -29,7 +29,7 @@ tokio = { version = "1.53.1", features = ["full"] }
 tauri-plugin-store = "2.4.4"
 sha2 = "0.11.0"
 uuid = { version = "1", features = ["v7", "serde"] }
-zstd = "0.13"
+piep-storage = { path = "../crates/piep-storage", version = "0.1.0" }
 base64 = "0.23.1"
 url = "2.5.8"
 rand = "0.10.2"

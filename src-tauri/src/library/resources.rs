@@ -305,7 +305,7 @@ impl Library {
     ) -> Result<()> {
         let file = self.resource_file(entity, scope, reference)?;
         match range {
-            None => self.objects.export(&file, destination),
+            None => self.objects.export(&file, destination).map_err(Into::into),
             Some(range) => {
                 if range
                     .offset
@@ -316,6 +316,7 @@ impl Library {
                 }
                 self.objects
                     .read_range(&file, range.offset, range.length, destination)
+                    .map_err(Into::into)
             }
         }
     }
@@ -329,7 +330,9 @@ impl Library {
         destination: &Path,
     ) -> Result<()> {
         let file = self.resource_file(entity, scope, reference)?;
-        self.objects.export_new(&file, destination)
+        self.objects
+            .export_new(&file, destination)
+            .map_err(Into::into)
     }
 }
 

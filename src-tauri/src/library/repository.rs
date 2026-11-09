@@ -60,8 +60,8 @@ impl From<Vec<u8>> for CaptureSource {
 impl CaptureSource {
     pub(super) fn store(&self, objects: &ObjectStore) -> Result<ContentFile> {
         match self {
-            Self::Bytes(bytes) => objects.put(Cursor::new(bytes)),
-            Self::File(path) => objects.put_path(path),
+            Self::Bytes(bytes) => objects.put(Cursor::new(bytes)).map_err(Into::into),
+            Self::File(path) => objects.put_path(path).map_err(Into::into),
         }
     }
 }
@@ -314,7 +314,7 @@ impl Library {
             Err(error) => return Err(error.into()),
         }
         regular_directory(&parent)?;
-        ObjectStore::open(&parent.join("v1"))
+        ObjectStore::open(&parent.join("v1")).map_err(Into::into)
     }
 
     fn lock(root: &Path) -> Result<File> {
@@ -357,7 +357,7 @@ impl Library {
             .chunks
             .iter()
             .map(|chunk| self.objects.chunk_info(chunk))
-            .collect::<Result<_>>()?;
+            .collect::<piep_storage::Result<_>>()?;
         Ok(PreparedFile {
             file: file.clone(),
             encodings,
