@@ -50,6 +50,7 @@ chunk の受信・送信は同じ検査を使い、破損・中断・上限超�
 UUID・hex・u64 の十進文字列とサイズ・部分数・分割位置を検査する。
 デスクトップの供給処理は毎回、資産の所属・file ID・部分の順番を照合する。
 これは HTTP の認証や読書 bundle の配信を有効にしたという意味ではない。
+認証付きの資産転送 router と接続情報の契約は [API v2](library-api-v2.md) に記載する。
 全体の構成は [図解](library-architecture-guide.md) を参照。
 
 1. 共有する実体形式と wire DTO の抽出、試験ベクトル、Android 向けコンパイル。

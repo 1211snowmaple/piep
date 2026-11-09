@@ -89,6 +89,7 @@ tauri-plugin-process = "2"
 
 # サーバーモード。読み手の API と管理の API を、内蔵サーバーと piep-server で共有する。
 axum = "0.8.9"
+headers = "0.4.2"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 # 接続の頭が届くまでの時間を切るのに、hyper のタイマーが要る。依存木にはすでに入っている。
 hyper-util = { version = "0.1", features = ["tokio"] }
