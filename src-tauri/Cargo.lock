@@ -4814,6 +4814,7 @@ dependencies = [
  "oxipng",
  "parking_lot",
  "pdfium-render",
+ "piep-library-protocol",
  "piep-storage",
  "r2d2",
  "r2d2_sqlite",
@@ -4853,6 +4854,16 @@ dependencies = [
  "windows",
  "zenjpeg",
  "zip",
+]
+
+[[package]]
+name = "piep-library-protocol"
+version = "0.1.0"
+dependencies = [
+ "piep-storage",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

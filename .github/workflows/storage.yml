@@ -18,10 +18,15 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: crates/piep-storage
+          workspaces: |
+            crates/piep-storage
+            crates/piep-library-protocol
       - run: cargo +1.98.1 test --manifest-path crates/piep-storage/Cargo.toml --locked
       - run: cargo +1.98.1 clippy --manifest-path crates/piep-storage/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo +1.98.1 fmt --manifest-path crates/piep-storage/Cargo.toml -- --check
+      - run: cargo +1.98.1 test --manifest-path crates/piep-library-protocol/Cargo.toml --locked
+      - run: cargo +1.98.1 clippy --manifest-path crates/piep-library-protocol/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo +1.98.1 fmt --manifest-path crates/piep-library-protocol/Cargo.toml -- --check
 
   storage-android:
     runs-on: ubuntu-latest
@@ -42,6 +47,10 @@ jobs:
           echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$ndk/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: crates/piep-storage
+          workspaces: |
+            crates/piep-storage
+            crates/piep-library-protocol
       - run: cargo +1.98.1 test --manifest-path crates/piep-storage/Cargo.toml --locked --target aarch64-linux-android --no-run
       - run: cargo +1.98.1 test --manifest-path crates/piep-storage/Cargo.toml --locked --target x86_64-linux-android --no-run
+      - run: cargo +1.98.1 test --manifest-path crates/piep-library-protocol/Cargo.toml --locked --target aarch64-linux-android --no-run
+      - run: cargo +1.98.1 test --manifest-path crates/piep-library-protocol/Cargo.toml --locked --target x86_64-linux-android --no-run

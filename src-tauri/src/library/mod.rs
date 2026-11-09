@@ -26,6 +26,9 @@ mod searches;
 mod source_state;
 mod store;
 mod suggestions;
+mod transfer;
+
+pub use piep_library_protocol as protocol;
 
 pub use acquisitions::{
     AcquisitionInfo, AcquisitionPayload, AcquisitionReaderOutput, AcquisitionState,

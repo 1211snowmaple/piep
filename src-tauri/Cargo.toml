@@ -30,6 +30,7 @@ tauri-plugin-store = "2.4.4"
 sha2 = "0.11.0"
 uuid = { version = "1", features = ["v7", "serde"] }
 piep-storage = { path = "../crates/piep-storage", version = "0.1.0" }
+piep-library-protocol = { path = "../crates/piep-library-protocol", version = "0.1.0" }
 base64 = "0.23.1"
 url = "2.5.8"
 rand = "0.10.2"

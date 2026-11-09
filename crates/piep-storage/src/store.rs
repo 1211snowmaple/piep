@@ -30,6 +30,13 @@ pub struct ContentFile {
     pub chunks: Vec<FileChunk>,
 }
 
+impl ContentFile {
+    /// v1 の長さ・個数・分割位置を検査する。実体の存在やバイト列の検証とは別。
+    pub fn validate_layout(&self) -> Result<()> {
+        ObjectStore::validate_manifest(self)
+    }
+}
+
 #[derive(Clone, Copy, Default, Debug, Serialize)]
 pub struct StorageStats {
     pub chunks: u64,

@@ -46,6 +46,12 @@ Android 側の詳細は [Android の新ライブラリ基盤設計](https://gith
 chunk の受信・送信は同じ検査を使い、破損・中断・上限超過を公開しない。
 認可・wire DTO・bundle の完成・端末の DB 更新はこの crate の責務に含めない。
 
+`piep-library-protocol` に、一ファイルを保存状態と資産に固定する転送 DTO を追加した。
+UUID・hex・u64 の十進文字列とサイズ・部分数・分割位置を検査する。
+デスクトップの供給処理は毎回、資産の所属・file ID・部分の順番を照合する。
+これは HTTP の認証や読書 bundle の配信を有効にしたという意味ではない。
+全体の構成は [図解](library-architecture-guide.md) を参照。
+
 1. 共有する実体形式と wire DTO の抽出、試験ベクトル、Android 向けコンパイル。
 2. 認証・対応版・所属検査を持つ API v2 と、保存状態に固定した読書 bundle の配信。
 3. Android の新端末 DB、選択保存・cache の区別、移行器、失敗時の復旧。
