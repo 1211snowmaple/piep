@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 8;
+pub(crate) const VERSION: i64 = 9;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -13,6 +13,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_006_reader_bindings.sql"),
     include_str!("migration_007_acquisition_readers.sql"),
     include_str!("migration_008_job_history.sql"),
+    include_str!("migration_009_maintenance_markers.sql"),
 ];
 
 fn migration_checksum(sql: &str) -> Fingerprint {
@@ -407,7 +408,7 @@ mod tests {
             conn.query_row("SELECT count(*) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            8
+            VERSION
         );
         assert_eq!(
             conn.query_row("SELECT count(*) FROM acquisition_reader_outputs", [], |r| r
@@ -416,6 +417,54 @@ mod tests {
             0
         );
         open(&conn, id).unwrap();
+    }
+
+    #[test]
+    fn maintenance_forward_migration_keeps_v8_state_and_rolls_back_partial_ddl() {
+        let id = LibraryId::now_v7();
+        let conn = version_one(id);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(7) {
+            conn.execute_batch(sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 8).unwrap();
+        conn.execute_batch("CREATE TABLE asset_audit_markers(blocked TEXT)")
+            .unwrap();
+        assert!(open(&conn, id).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='repair_attempt_markers'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM schema_migrations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            8
+        );
+        conn.execute_batch("DROP TABLE asset_audit_markers")
+            .unwrap();
+        open(&conn, id).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            VERSION
+        );
+        assert_eq!(
+            conn.query_row("SELECT generation FROM library_meta", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            42
+        );
     }
 
     #[test]

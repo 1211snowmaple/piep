@@ -18,6 +18,7 @@ mod edits;
 mod filesystem;
 mod inventory;
 mod jobs;
+mod maintenance;
 mod profiles;
 mod reader;
 mod relations;
@@ -309,6 +310,13 @@ impl LegacyImporter {
             "job_history",
             "更新ジョブの履歴と項目・操作記録の移行",
             self.normalize_job_history(target, cancel),
+            &mut report,
+        )?;
+        self.finish_normalization(
+            target,
+            "maintenance",
+            "修復試行と旧保存検査の記録の移行",
+            self.normalize_maintenance(target, cancel),
             &mut report,
         )?;
         self.finish_normalization(

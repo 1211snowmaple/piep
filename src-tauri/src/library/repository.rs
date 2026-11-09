@@ -1492,6 +1492,7 @@ impl Library {
         super::searches::verify_searches(&conn)?;
         self.verify_reader_bindings(&conn)?;
         self.verify_job_history(&conn)?;
+        Self::verify_maintenance_markers(&conn)?;
         super::integrity::verify_snapshots(&conn)?;
         Ok(count)
     }

@@ -12,6 +12,7 @@ mod identity;
 mod integrity;
 mod job_history;
 mod legacy;
+mod maintenance;
 mod operations;
 mod reader;
 mod reader_references;
@@ -37,6 +38,7 @@ pub use editing::{EditBlock, EditContent, EditInfo, EditMedia, EditState};
 pub use identity::{cover_identity, image_identity, Fingerprint, LibraryId};
 pub use job_history::{JobHistory, JobHistoryItem, JobHistoryLog};
 pub use legacy::{LegacyImportReport, LegacyImporter};
+pub use maintenance::{AssetAuditMarker, MaintenanceHistory, RepairAttemptMarker};
 pub use operations::{EditRequest, SnapshotInfo, UserState};
 pub use reader::{
     ReaderBinding, ReaderBindingSet, ReaderBody, ReaderDocument, ResolvedReaderBinding,

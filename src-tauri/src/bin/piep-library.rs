@@ -56,6 +56,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let id=LibraryId::parse_str(&args[3])?;
             println!("{}",serde_json::to_string_pretty(&library.source_entity_state(id)?)?);
         },
+        Some("maintenance") if args.len()==5=>{
+            let library=Library::open(Path::new(&args[2]))?;
+            let entity=LibraryId::parse_str(&args[3])?;
+            let snapshot=LibraryId::parse_str(&args[4])?;
+            println!("{}",serde_json::to_string_pretty(&library.maintenance_history(entity,snapshot)?)?);
+        },
         Some("saved-searches") if args.len()==4=>{
             let library=Library::open(Path::new(&args[2]))?;
             let user=LibraryId::parse_str(&args[3])?;
@@ -129,7 +135,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("未解決のデータがあります。この移行先へ本番の棚を切り替えてはいけません".into());
             }
         },
-        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / source-state <新棚> <対象UUID> / saved-searches <新棚> <利用者UUID> / job-history <新棚> [前のページ末尾のジョブUUID] / job-history-items|job-history-logs <新棚> <ジョブUUID> [前のページ末尾のsequence] / job-history-payload <新棚> <ジョブUUID> <項目UUID> / resources|reader <新棚> <対象UUID> snapshot|edit <保存状態UUID> / export-resource <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] <新規出力先> / backup <新棚> <新規出力先> / export-original <新棚> <ファイルSHA-256> <新規ファイル> / import-legacy <旧棚> <新棚>".into()),
+        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / source-state <新棚> <対象UUID> / maintenance <新棚> <作品UUID> <保存状態UUID> / saved-searches <新棚> <利用者UUID> / job-history <新棚> [前のページ末尾のジョブUUID] / job-history-items|job-history-logs <新棚> <ジョブUUID> [前のページ末尾のsequence] / job-history-payload <新棚> <ジョブUUID> <項目UUID> / resources|reader <新棚> <対象UUID> snapshot|edit <保存状態UUID> / export-resource <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] <新規出力先> / backup <新棚> <新規出力先> / export-original <新棚> <ファイルSHA-256> <新規ファイル> / import-legacy <旧棚> <新棚>".into()),
     }
     Ok(())
 }
