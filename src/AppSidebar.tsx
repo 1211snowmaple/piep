@@ -10,13 +10,13 @@ import type { SavedCondition } from "./librarySort";
 import { useReadingShelf } from "./recentReading";
 
 export type Section = "pc" | "offline" | "settings";
-export type Shelf = "all" | "favorite" | "reading" | "revised";
+export type Shelf = "all" | "favorite" | "reading" | "finished" | "revised";
 
-const shelfCriteria: Record<Exclude<Shelf, "reading">, Partial<PcSearchCriteria>> = { all: {}, favorite: { favorite: true }, revised: { revision: "revised" } };
+const shelfCriteria: Record<Exclude<Shelf, "reading" | "finished">, Partial<PcSearchCriteria>> = { all: {}, favorite: { favorite: true }, revised: { revision: "revised" } };
 
 function currentShelf(page: AppPage): Shelf | null {
   if (page.name !== "library" || page.tab !== "works") return null;
-  if (page.shelf === "reading") return "reading";
+  if (page.shelf) return page.shelf;
   for (const shelf of ["all", "favorite", "revised"] as const) {
     const wanted: PcSearchCriteria = { ...defaultPcSearch, ...shelfCriteria[shelf] };
     if ((Object.keys(wanted) as (keyof PcSearchCriteria)[]).every((key) => ["sort", "tagMode", "dateField"].includes(key) || page.criteria[key] === wanted[key])) return shelf;
@@ -27,7 +27,7 @@ function currentShelf(page: AppPage): Shelf | null {
 /** サイドバーが引き出しになる幅。App.desktop.css と同じ条件。 */
 const drawerLayout = "(max-width: 599px), (max-width: 900px) and (orientation: portrait)";
 
-function useShelfCount(shelf: Exclude<Shelf, "reading">, enabled: boolean): number | null {
+function useShelfCount(shelf: Exclude<Shelf, "reading" | "finished">, enabled: boolean): number | null {
   return useQuery({
     queryKey: ["shelf-count", shelf],
     // 欲しいのは件数だけ。一覧の中身を運ばない。
@@ -84,6 +84,7 @@ export function AppSidebar({ open, section, page, status, savedConditions, first
   const version = useAppVersion();
   const active = currentShelf(page);
   const reading = useReadingShelf();
+  const finished = useReadingShelf(true);
   // 閉じている引き出しの数字のために、起動時の通信を増やさない。
   const visible = open || !window.matchMedia(drawerLayout).matches;
   const all = useShelfCount("all", reachable && visible);
@@ -100,6 +101,7 @@ export function AppSidebar({ open, section, page, status, savedConditions, first
         <ShelfItem buttonRef={firstControlRef} icon={<Rows3 aria-hidden="true" />} label="すべて" count={all} active={active === "all"} onClick={() => onShelf("all")} />
         <ShelfItem icon={<Heart aria-hidden="true" />} label="お気に入り" count={favorite} active={active === "favorite"} onClick={() => onShelf("favorite")} />
         <ShelfItem icon={<BookMarked aria-hidden="true" />} label="読みかけ" count={reading.length || null} active={active === "reading"} onClick={() => onShelf("reading")} />
+        <ShelfItem icon={<BookOpen aria-hidden="true" />} label="読了" count={finished.length || null} active={active === "finished"} onClick={() => onShelf("finished")} />
         <ShelfItem icon={<History aria-hidden="true" />} label="改稿あり" count={revised} active={active === "revised"} onClick={() => onShelf("revised")} />
       </div>
       <div className="saved-search">

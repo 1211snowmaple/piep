@@ -26,7 +26,7 @@ vi.mock("@tauri-apps/api/core", () => ({
       }
       case "reading_local_shelf":
         return [...db.rows.values()]
-          .filter((row) => row.serverUrl === args.serverUrl && row.shelved && !row.finished)
+          .filter((row) => row.serverUrl === args.serverUrl && row.shelved && row.finished === Boolean(args.finished))
           .sort((a, b) => (b.readAt as number) - (a.readAt as number));
       default: throw new Error(command);
     }
@@ -54,6 +54,22 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("端末の読書の記録", () => {
+  it("読了は読みかけから読了棚へ移り、開き直しても残る", async () => {
+    let store = await fresh();
+    store.setReadingServer("https://pc.example/");
+    await store.loadLocalReading(work);
+    store.rememberReading(work, null, 0.5, false);
+    expect(await store.loadShelf()).toHaveLength(1);
+    store.rememberReading(work, null, 1, true);
+    expect(await store.loadShelf()).toHaveLength(0);
+    expect(await store.loadShelf(true)).toMatchObject([{ work, finished: true }]);
+    store = await fresh();
+    store.setReadingServer("https://pc.example/");
+    expect(await store.loadShelf(true)).toHaveLength(1);
+    store.setReadingServer("https://different.example/");
+    expect(await store.loadShelf(true)).toHaveLength(0);
+  });
+
   it("書いた位置は SQLite に残り、開き直しても同じ位置を返す", async () => {
     let store = await fresh();
     await store.loadLocalReading(work);

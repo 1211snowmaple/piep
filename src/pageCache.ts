@@ -12,15 +12,15 @@ const entries = new Map<string, Entry>();
  * 通信を待たない。作品を端末へ残す「保存」とは別の、メモリ上だけの短い控えである。
  * 版の違いは本文に添えられた版で呼び出し側が確かめる。
  */
-export function fetchPage(workId: number, page: number): Promise<PcPage> {
-  const key = `${workId}:${page}`;
+export function fetchPage(workId: number, page: number, version: number | null = null): Promise<PcPage> {
+  const key = `${workId}:${version ?? "latest"}:${page}`;
   const found = entries.get(key);
   if (found && Date.now() - found.at < maxAgeMs) {
     entries.delete(key);
     entries.set(key, found);
     return found.page;
   }
-  const entry: Entry = { workId, at: Date.now(), page: getPcPage(workId, page) };
+  const entry: Entry = { workId, at: Date.now(), page: getPcPage(workId, page, version) };
   entries.delete(key);
   entries.set(key, entry);
   // 失敗を覚えない。次に開いたときに取り直す。
@@ -29,8 +29,8 @@ export function fetchPage(workId: number, page: number): Promise<PcPage> {
   return entry.page;
 }
 
-export function prefetchPage(workId: number, page: number): void {
-  fetchPage(workId, page).catch(() => { /* 読みに来たときにもう一度試す */ });
+export function prefetchPage(workId: number, page: number, version: number | null = null): void {
+  fetchPage(workId, page, version).catch(() => { /* 読みに来たときにもう一度試す */ });
 }
 
 export function forgetWorkPages(workId: number): void {

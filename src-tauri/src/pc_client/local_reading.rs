@@ -152,20 +152,30 @@ fn put(tx: &rusqlite::Transaction<'_>, reading: &LocalReading) -> Result<(), Cli
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn shelf(
     tx: &rusqlite::Transaction<'_>,
     server_url: &str,
     limit: i64,
 ) -> Result<Vec<LocalReading>, ClientError> {
+    shelf_by_status(tx, server_url, limit, false)
+}
+
+fn shelf_by_status(
+    tx: &rusqlite::Transaction<'_>,
+    server_url: &str,
+    limit: i64,
+    finished: bool,
+) -> Result<Vec<LocalReading>, ClientError> {
     let mut query = tx
         .prepare(
-            "SELECT * FROM readings WHERE server_url = ?1 AND shelved = 1 AND finished = 0
+            "SELECT * FROM readings WHERE server_url = ?1 AND shelved = 1 AND finished = ?3
              ORDER BY read_at DESC LIMIT ?2",
         )
         .map_err(records_error)?;
     let rows = query
         .query_map(
-            rusqlite::params![server_url, limit.clamp(1, MAX_SHELF)],
+            rusqlite::params![server_url, limit.clamp(1, MAX_SHELF), finished],
             row_to_reading,
         )
         .map_err(records_error)?;
@@ -201,8 +211,9 @@ pub async fn reading_local_shelf(
     db: State<'_, Arc<DeviceDb>>,
     server_url: String,
     limit: i64,
+    finished: Option<bool>,
 ) -> Result<Vec<LocalReading>, ClientError> {
-    db.transaction(|tx| shelf(tx, &server_url, limit))
+    db.transaction(|tx| shelf_by_status(tx, &server_url, limit, finished.unwrap_or(false)))
 }
 
 /// localStorage に残っていた記録を移す。すでにある記録より古いものは捨てる。
@@ -296,6 +307,11 @@ mod tests {
             .unwrap();
         let ids: Vec<_> = shelf.iter().map(|item| item.source_id.as_str()).collect();
         assert_eq!(ids, ["5", "1"]);
+        let finished = db
+            .transaction(|tx| shelf_by_status(tx, "https://pc.example/", 10, true))
+            .unwrap();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].source_id, "3");
     }
 
     #[test]

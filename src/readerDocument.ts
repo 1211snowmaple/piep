@@ -1,8 +1,10 @@
 import DOMPurify from "dompurify";
+import { normalizeContentLinkUrl } from "./contentLinks";
 
 function safeHtml(source: string): string {
   return DOMPurify.sanitize(source, {
     ALLOWED_TAGS: ["p", "br", "h1", "h2", "h3", "ruby", "rt", "rp", "span", "strong", "em", "b", "i", "u", "s", "blockquote", "figure", "figcaption", "img", "hr", "a", "div", "ul", "ol", "li", "code", "pre"],
+    ALLOWED_URI_REGEXP: /^(?:https?:\/\/|pixiv:\/\/(?:novels?|users?)\/\d+\/?$)/i,
     ALLOWED_ATTR: ["class", "alt", "data-asset-id", "data-page", "href", "width", "height"],
     FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "form", "svg", "math", "template"],
   });
@@ -17,7 +19,8 @@ export function safePageHtml(source: string): string {
       anchor.setAttribute("href", "#");
       continue;
     }
-    const href = anchor.getAttribute("href");
+    const href = normalizeContentLinkUrl(anchor.getAttribute("href") ?? "");
+    if (/^https?:\/\//i.test(href)) anchor.setAttribute("href", href);
     if (!href || !/^https?:\/\//i.test(href)) anchor.removeAttribute("href");
     anchor.removeAttribute("data-page");
   }

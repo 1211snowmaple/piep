@@ -468,7 +468,7 @@ function App() {
   };
 
   const showShelf = (shelf: Shelf) => {
-    if (shelf === "reading") { showLibrary({ ...homePage, shelf: "reading" }); return; }
+    if (shelf === "reading" || shelf === "finished") { showLibrary({ ...homePage, shelf }); return; }
     showLibrary({ ...homePage, criteria: { ...defaultPcSearch, favorite: shelf === "favorite", revision: shelf === "revised" ? "revised" : "" } });
   };
 
@@ -559,7 +559,7 @@ function App() {
   const activeReader = !recordsReady ? null : offlineWork
     ? <OnlineReader key={`saved:${offlineWork.work.id}`} work={offlineWork.work} offline offlineCollections={offlineWork.collections ?? []} offlineEditHash={offlineWork.savedEditHash} offlineAuthorCover={Boolean(offlineWork.hasAuthorCover)} snapshotGeneration={offlineWork.savedAtMs} startPage={offlineStartPage} {...readerProps} />
     : onlineWork
-      ? <OnlineReader key={`pc:${onlineWork.id}`} work={onlineWork} onSaved={savedWorkChanged} {...readerProps} />
+      ? <OnlineReader key={`pc:${onlineWork.id}:${entry.reader?.kind === "online" ? entry.reader.version ?? "latest" : "latest"}`} selectedVersion={entry.reader?.kind === "online" ? entry.reader.version : undefined} work={onlineWork} onSaved={savedWorkChanged} {...readerProps} />
       : reading ? (
       <div className={`reader-screen reader-theme--${readerTheme} reader-bars--pinned`}>
         <header className="reader-toolbar">

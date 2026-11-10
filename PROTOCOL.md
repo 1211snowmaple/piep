@@ -171,3 +171,14 @@ Tailscale Funnel の実経路と実機は未確認。
 - 署名の違う APK は、OS が「package conflicts with an existing package」で拒否し、版は変わらなかった。
 - release ビルドで、知らせ、設定の欄、読み取り画面、「やめる」、戻るキーが動いた。R8 で ML Kit が落ちる問題は `proguard-rules.pro` で直した。
 - QR の読み取りは、カメラの映像と止め方までを確かめた。実際のカメラでの読み取りは未確認。
+
+## 読書・検索の読取 API 追加（2026-11-07）
+
+既存の版2登録と `/api/v1` を維持し、認証済み読み手向けに次を追加した。
+
+- `search-suggest`: `GET /api/v1/search/suggest?text=...&limit=8`。デスクトップの候補生成を使い、検索語は200文字・応答は最大12候補。Android はこの機能が通知されたときだけ検索欄に候補を出す。
+- `work-lookup`: `GET /api/v1/works/lookup?source=...&key=...`。取得元と作品IDから、公開用作品情報または `null` を返す。本文リンクからライブラリ内の読書画面を開くために使う。内部パスは返さない。
+- ページ・目次の `?version=N` を Android から選べるようにした。ページの `revision` は明示した原文の版・ハッシュを示し、現在の編集版のハッシュは付けない。
+- 作者の `cover` はプロフィールアイコンだけを返す。背景は `variant=banner`。`hasCover` と `hasBanner` も独立に判定する。
+
+検索候補と本文リンクの作品照合、作者画像の修正には対応するサーバーへの更新が必要。旧サーバーでの通常検索と既存の読書は継続できる。

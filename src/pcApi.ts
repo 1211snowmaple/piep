@@ -280,7 +280,17 @@ export const getPcMetadata = (workId: number) => {
   });
 };
 export const getPcPage = (workId: number, page: number, version: number | null = null) => invoke<PcPage>("pc_get_page", { workId, page, version });
-export const getPcOutline = (workId: number) => invoke<PcOutlineEntry[]>("pc_get_outline", { workId });
+export const getPcOutline = (workId: number, version: number | null = null) => invoke<PcOutlineEntry[]>("pc_get_outline", { workId, version });
+export interface SearchSuggestion {
+  kind: string;
+  label: string;
+  value: string;
+  count: number | null;
+  source?: string;
+  sourceKey?: string;
+}
+export const searchPcSuggestions = (text: string) => invoke<{ items: SearchSuggestion[] }>("pc_search_suggest", { text }).then((result) => result.items);
+export const lookupPcWork = (source: string, key: string) => invoke<PcWork | null>("pc_lookup_work", { source, key });
 export const listOfflineWorks = () => invoke<OfflineWork[]>("offline_list_works");
 export const saveOfflineWork = (workId: number) => invoke<OfflineWork>("offline_save_work", { workId });
 export const getOfflinePage = (workId: number, page: number) => invoke<OfflinePage>("offline_get_page", { workId, page });

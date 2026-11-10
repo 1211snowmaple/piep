@@ -1532,6 +1532,43 @@ pub async fn pc_get_collection(
         .await
 }
 
+#[tauri::command]
+pub async fn pc_search_suggest(
+    state: State<'_, PcClientState>,
+    text: String,
+) -> Result<serde_json::Value, ClientError> {
+    if text.chars().count() > 200 {
+        return Err(ClientError::remote());
+    }
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("text", text.trim())
+        .append_pair("limit", "8")
+        .finish();
+    authenticated_get(&state, &format!("/api/v1/search/suggest?{query}"))
+        .await?
+        .bounded_json()
+        .await
+}
+
+#[tauri::command]
+pub async fn pc_lookup_work(
+    state: State<'_, PcClientState>,
+    source: String,
+    key: String,
+) -> Result<Option<MobileWork>, ClientError> {
+    if !valid_entity_identity(&source, &key) {
+        return Err(ClientError::remote());
+    }
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("source", &source)
+        .append_pair("key", &key)
+        .finish();
+    authenticated_get(&state, &format!("/api/v1/works/lookup?{query}"))
+        .await?
+        .bounded_json()
+        .await
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileMetadata {
@@ -1621,11 +1658,15 @@ pub struct MobileOutlineEntry {
 pub async fn pc_get_outline(
     state: State<'_, PcClientState>,
     work_id: i64,
+    version: Option<i64>,
 ) -> Result<Vec<MobileOutlineEntry>, ClientError> {
     if work_id <= 0 {
         return Err(ClientError::remote());
     }
-    authenticated_get(&state, &format!("/api/v1/works/{work_id}/outline"))
+    let query = version
+        .map(|value| format!("?version={value}"))
+        .unwrap_or_default();
+    authenticated_get(&state, &format!("/api/v1/works/{work_id}/outline{query}"))
         .await?
         .bounded_json()
         .await

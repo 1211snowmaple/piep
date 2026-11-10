@@ -10,7 +10,7 @@ import { useReadingShelf } from "./recentReading";
 import { CollectionBrowser, CollectionMembers, EntityBrowser } from "./LibraryGroups";
 import { ChoiceMenu, SortMenu, relevanceLabel } from "./SortMenu";
 import { effectiveSort, entitySortGroups, entitySortLabel, loadEntitySort, saveEntitySort, sortLabels, type EntitySort, type FixedSort } from "./librarySort";
-import { defaultPcSearch, pcConnectionIssue, type PcConnectionStatus, type PcSearchCriteria, type PcSort, type PcWork } from "./pcApi";
+import { defaultPcSearch, lookupPcWork, pcConnectionIssue, type PcConnectionStatus, type PcSearchCriteria, type PcSort, type PcWork } from "./pcApi";
 import { useAppNavigation, type LibraryPage, type LibraryTab } from "./appHistory";
 import { useSavedStates, useWorkList, WorkListSkeleton, WorkResults } from "./workList";
 import { readingPercent, scrollMainToTop } from "./workText";
@@ -23,14 +23,14 @@ const tabs: [LibraryTab, string, ReactNode][] = [
 ];
 
 /** 読みかけの棚。サーバーへは問い合わせず、この端末で読んだ記録から並べる。 */
-function ReadingShelf({ savedRevision, onOpenWork, onOpenDetail, onSaved }: { savedRevision: number; onOpenWork: (work: PcWork) => void; onOpenDetail: (work: PcWork) => void; onSaved: () => void }) {
-  const items = useReadingShelf();
+function ReadingShelf({ finished = false, savedRevision, onOpenWork, onOpenDetail, onSaved }: { finished?: boolean; savedRevision: number; onOpenWork: (work: PcWork) => void; onOpenDetail: (work: PcWork) => void; onSaved: () => void }) {
+  const items = useReadingShelf(finished);
   const works = useMemo(() => items.map((item) => item.work), [items]);
   const savedState = useSavedStates(works, savedRevision, true);
   return <>
-    <div className="results-bar"><h2>読みかけ</h2><span>この端末で読んだ {items.length} 作品</span></div>
-    {items.length ? <VirtualWorkList listKey="reading-shelf" items={items} itemKey={(item) => item.work.id} renderItem={(item) => <WorkCard work={item.work} prefix={`${readingPercent(item.progress)}%`} savedState={savedState(item.work)} onSaved={onSaved} onRead={() => onOpenWork(item.work)} onDetail={() => onOpenDetail(item.work)} />} />
-      : <section className="empty-card"><h2>読みかけの作品はありません</h2><p>この端末で読み始めた作品がここに並びます。読み終えると棚から外れます。</p></section>}
+    <div className="results-bar"><h2>{finished ? "読了" : "読みかけ"}</h2><span>この端末で読んだ {items.length} 作品</span></div>
+    {items.length ? <VirtualWorkList listKey={finished ? "finished-shelf" : "reading-shelf"} items={items} itemKey={(item) => item.work.id} renderItem={(item) => <WorkCard work={item.work} prefix={finished ? "読了" : `${readingPercent(item.progress)}%`} savedState={savedState(item.work)} onSaved={onSaved} onRead={() => onOpenWork(item.work)} onDetail={() => onOpenDetail(item.work)} />} />
+      : <section className="empty-card"><h2>{finished ? "読了した作品はありません" : "読みかけの作品はありません"}</h2><p>{finished ? "この端末で最後まで読んだ作品がここに並びます。" : "この端末で読み始めた作品がここに並びます。読み終えると「読了」へ移ります。"}</p></section>}
   </>;
 }
 
@@ -63,7 +63,7 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
 
   const sentSort = effectiveSort(criteria, rememberedSort);
   const search = useMemo(() => ({ ...criteria, sort: sentSort }), [criteria, sentSort]);
-  const list = useWorkList({ search, scope: null, pagingMode, page: listPage, enabled: reachable && tab === "works" && shelf !== "reading" });
+  const list = useWorkList({ search, scope: null, pagingMode, page: listPage, enabled: reachable && tab === "works" && shelf === null });
 
   const move = (patch: Partial<LibraryPage>) => navigation.push({ page: { ...page, ...patch } });
   const changeCriteria = (next: PcSearchCriteria) => move({ criteria: next, listPage: 1 });
@@ -100,10 +100,11 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
   const conditionSortLabel = criteria.sort !== "remembered" && criteria.sort !== "standard" ? sortLabels[criteria.sort] : null;
   const target = tab === "works" ? "作品" : tab === "people" ? "作者・クリエイター" : tab === "series" ? "シリーズ" : inCollection ? "コレクション内の作品" : "コレクション";
 
+  if (shelf) return <ReadingShelf finished={shelf === "finished"} savedRevision={savedRevision} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onSaved={onSaved} />;
   if (statusLoading) return <WorkListSkeleton />;
   if (!reachable) return <section className="empty-card pc-connection-empty"><h2>{status?.paired ? "サーバーの本棚を開けません" : "サーバーの本棚をつなぐ"}</h2><p>{status?.issue ? pcConnectionIssue(status) : "設定でサーバーとの接続を登録すると、作品がここに並びます。"}</p><button className="primary-button" onClick={onGoToSettings}>{status?.issue === "protocol_mismatch" ? "設定で更新を確かめる" : "設定で接続を確認"}</button></section>;
 
-  if (shelf === "reading") return <ReadingShelf savedRevision={savedRevision} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onSaved={onSaved} />;
+
 
   const resultsTitle = criteria.text ? `「${criteria.text}」の検索結果` : filterCount === 1 && criteria.favorite ? "お気に入り" : filterCount === 1 && criteria.revision === "revised" ? "改稿あり" : null;
   const plainShelf = tab === "works" && !criteria.text && filterCount === 0 && listPage === 1;
@@ -126,7 +127,13 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
   }
 
   return <>
-    <SearchField value={input} label={`${target}を検索`} placeholder={tab === "works" ? "作品・作者・本文を検索" : `${target}を検索`} onChange={setInput} onSubmit={submitSearch}>
+    <SearchField value={input} label={`${target}を検索`} placeholder={tab === "works" ? "作品・作者・本文を検索" : `${target}を検索`} onChange={setInput} onSubmit={submitSearch} onSuggestion={tab === "works" && status?.capabilities.includes("search-suggest") ? (item) => {
+      if (item.kind === "tag") navigation.openTag(item.value);
+      else if ((item.kind === "author" || item.kind === "series") && item.source && item.sourceKey) navigation.openEntity(item.kind === "author" ? "person" : "series", item.source, item.sourceKey, item.label);
+      else if (item.kind === "author") changeCriteria({ ...criteria, text: "", author: item.label });
+      else if (item.kind === "title" && item.source) void lookupPcWork(item.source, item.value).then((work) => work ? onOpenWork(work) : submitSearch(item.label)).catch(() => submitSearch(item.label));
+      else submitSearch(item.label);
+    } : undefined}>
       {tab === "works" && <button type="button" className="filter-button" data-active={filterCount > 0 || undefined} aria-haspopup="dialog" aria-label={filterCount ? `絞り込み（${filterCount} 個の条件）` : "絞り込み"} onClick={() => setFilterOpen(true)}><Funnel aria-hidden="true" />{filterCount > 0 && <small aria-hidden="true">{filterCount}</small>}</button>}
       {tab === "works" && <SortMenu current={sentSort} relevance={Boolean(criteria.text.trim())} onSelect={selectSort} conditionLabel={conditionSortLabel} />}
       {(tab === "people" || tab === "series") && <ChoiceMenu current={entitySorts[tab]} label={entitySortLabel(entitySorts[tab])} groups={entitySortGroups} onSelect={(sort) => selectEntitySort(tab, sort)} />}
