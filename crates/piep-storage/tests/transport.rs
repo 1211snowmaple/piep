@@ -1,6 +1,6 @@
 use piep_storage::{
-    decode_chunk, ContentFile, FileChunk, Fingerprint, ObjectStore, MAX_CHUNK_ORIGINAL_BYTES,
-    MAX_CHUNK_STORED_BYTES, OBJECT_HEADER_BYTES,
+    decode_chunk, ChunkState, ContentFile, FileChunk, Fingerprint, ObjectStore,
+    MAX_CHUNK_ORIGINAL_BYTES, MAX_CHUNK_STORED_BYTES, OBJECT_HEADER_BYTES,
 };
 use std::{
     fs,
@@ -178,7 +178,7 @@ fn malformed_inputs_never_publish_and_cannot_replace_a_verified_cached_object() 
 }
 
 #[test]
-fn corrupt_existing_objects_are_reported_instead_of_reused_or_overwritten() {
+fn corrupt_existing_objects_are_reported_and_replaced_only_by_verified_input() {
     let temp = Temp::new();
     let target = temp.store("objects");
     let good = include_bytes!("fixtures/raw-control.obj");
@@ -192,11 +192,27 @@ fn corrupt_existing_objects_are_reported_instead_of_reused_or_overwritten() {
         .join(format!("{hash}.obj"));
     fs::write(&path, b"corruption").unwrap();
     assert!(target.has_verified_chunk(&chunk).is_err());
-    assert!(target.import_chunk(&chunk, Cursor::new(good)).is_err());
+    assert_eq!(target.chunk_state(&chunk).unwrap(), ChunkState::Damaged);
     let mut out = Vec::new();
     assert!(target.export_chunk(&chunk, &mut out).is_err());
     assert!(out.is_empty());
-    assert_eq!(fs::read(path).unwrap(), b"corruption");
+    // 壊れた受信内容では置き換えない。
+    let mut bad = good.to_vec();
+    *bad.last_mut().unwrap() ^= 1;
+    assert!(target.import_chunk(&chunk, Cursor::new(&bad)).is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"corruption");
+    // 検証できた受信内容で置き換え、壊れたほうは消さずに退ける。
+    target.import_chunk(&chunk, Cursor::new(good)).unwrap();
+    assert_eq!(target.chunk_state(&chunk).unwrap(), ChunkState::Verified);
+    target.export_chunk(&chunk, &mut out).unwrap();
+    assert_eq!(out, good);
+    let kept: Vec<_> = fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|kept| kept.extension().is_some_and(|ext| ext == "damaged"))
+        .collect();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(fs::read(&kept[0]).unwrap(), b"corruption");
     temp.assert_no_parts();
 }
 

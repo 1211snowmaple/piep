@@ -6,8 +6,8 @@ mod store;
 
 pub use fingerprint::Fingerprint;
 pub use store::{
-    decode_chunk, regular_directory, regular_file, sync_directory, ContentFile, FileChunk,
-    ObjectStore, StorageStats, MAX_CHUNK_ORIGINAL_BYTES, MAX_CHUNK_STORED_BYTES,
+    decode_chunk, regular_directory, regular_file, sync_directory, ChunkState, ContentFile,
+    FileChunk, ObjectStore, StorageStats, MAX_CHUNK_ORIGINAL_BYTES, MAX_CHUNK_STORED_BYTES,
     MAX_ENCODED_CHUNK_BYTES, OBJECT_HEADER_BYTES,
 };
 

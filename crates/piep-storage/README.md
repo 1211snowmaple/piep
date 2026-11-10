@@ -12,9 +12,14 @@
   上書きせず公開する。途中失敗時は `.part` を片付け、検証済みの他の実体は残す。
   入力は一つの HTTP response body 等、その実体で終わるストリームを渡す。
   Android ではハードリンクを使わず、`renameat2(RENAME_NOREPLACE)` で公開する。
+  Windows は置き換えない `MoveFileExW` で公開し、exFAT・FAT32 の外付けドライブでも使える。
   非対応の OS・保存先では失敗を返し、上書きや公開途中のコピーへ切り替えない。
+- 既存の実体が壊れていた場合、`put` と `import_chunk` は検証済みの同じ中身で置き換える。
+  壊れたファイルは `<hash>.<UUID>.damaged` として同じ場所に残し、この crate では消さない。
+  壊れた入力では置き換えない。
 - `export_chunk` は検証した保存バイト列を送り、転送のための再圧縮を行わない。
-  `has_verified_chunk` は未受信と破損を区別する。
+  `has_verified_chunk` は未受信と破損を区別する。受信し直す部分を決めるときは、
+  検証済み・未受信・破損を返す `chunk_state` を使う。
 - 一つの chunk の受信成功はファイル全体や読書 bundle の完成を意味しない。
   `verify` で全 chunk と元ファイル全体のハッシュを検査した後、呼び手の DB で
   bundle・利用者・世代を照合して公開する。

@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 const MAGIC: &[u8; 8] = b"PIEPOB01";
 pub const OBJECT_HEADER_BYTES: u64 = 57;
@@ -35,6 +36,35 @@ impl ContentFile {
     pub fn validate_layout(&self) -> Result<()> {
         ObjectStore::validate_manifest(self)
     }
+}
+
+/// 保存済みの部分実体の状態。未受信と破損を区別する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChunkState {
+    /// ヘッダー・長さ・展開結果・元ハッシュがすべて一致した。
+    Verified,
+    /// まだ保存していない。
+    Missing,
+    /// 保存したものが読めないか、中身が一致しない。正しい中身を受け取れば置き換えられる。
+    Damaged,
+}
+
+/// 壊れた実体とみなす失敗。権限や安全でないパスは修復の対象にしない。
+fn damaged(error: &Error) -> bool {
+    match error {
+        Error::Integrity(_) => true,
+        Error::Io(e) => matches!(
+            e.kind(),
+            std::io::ErrorKind::InvalidData
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::Other
+        ),
+        Error::UnsafePath(_) => false,
+    }
+}
+
+fn missing(error: &Error) -> bool {
+    matches!(error, Error::Io(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 #[derive(Clone, Copy, Default, Debug, Serialize)]
@@ -137,7 +167,47 @@ fn publish_new(source: &Path, destination: &Path) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(target_os = "android"))]
+// Windows は置き換えない名前変更で公開する。hard link は exFAT・FAT32 の外付けドライブや
+// 一部のネットワーク共有で使えず、棚をそこへ置くと保存がすべて失敗していた。
+// MOVEFILE_REPLACE_EXISTING を付けないので、既存の実体があれば ERROR_ALREADY_EXISTS になる。
+// https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-movefileexw
+#[cfg(windows)]
+fn publish_new(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let wide = |path: &Path| -> std::io::Result<Vec<u16>> {
+        let mut units: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if units.contains(&0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "パスに NUL が含まれています",
+            ));
+        }
+        units.push(0);
+        Ok(units)
+    };
+    let source = wide(source)?;
+    let destination = wide(destination)?;
+    // SAFETY: 両方とも呼出し中有効な NUL 終端の UTF-16 パス。
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "android", windows)))]
 fn publish_new(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::hard_link(source, destination)
 }
@@ -281,8 +351,8 @@ impl ObjectStore {
             length: original.len() as u64,
         };
         let dest = self.chunk_path(id, true)?;
-        if dest.try_exists()? {
-            self.read_chunk(&result)?;
+        // 壊れた既存の実体は再利用しない。下で検証した中身と置き換える。
+        if self.chunk_state(&result)? == ChunkState::Verified {
             return Ok(result);
         }
         let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3)?;
@@ -318,16 +388,49 @@ impl ObjectStore {
         if self.decode(&temporary, &result)? != original {
             return Err(Error::Integrity("保存直後の復元結果が一致しません".into()));
         }
-        match publish_new(&temporary, &dest) {
+        self.publish_verified(&temporary, &dest, &result)?;
+        drop(guard);
+        Ok(result)
+    }
+
+    /// 検証済みの一時ファイルを公開する。同じ実体がすでにあれば、それを検証して使う。
+    /// 既存の実体が壊れていたときだけ、それを消さずに隔離してから置き換える。
+    fn publish_verified(&self, temporary: &Path, dest: &Path, expected: &FileChunk) -> Result<()> {
+        match publish_new(temporary, dest) {
             Ok(()) => (),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.read_chunk(&result)?;
+                match self.read_chunk(expected) {
+                    Ok(_) => (),
+                    Err(error) if damaged(&error) || missing(&error) => {
+                        self.replace_damaged(temporary, dest, expected)?
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             Err(e) => return Err(e.into()),
         }
-        sync_directory(dest.parent().unwrap())?;
-        drop(guard);
-        Ok(result)
+        sync_directory(dest.parent().unwrap())
+    }
+
+    /// 壊れた実体を `<hash>.<UUID>.damaged` へ退けて、検証済みの中身を公開する。
+    /// 退けたファイルは調査と利用者の判断のために残し、この crate では消さない。
+    fn replace_damaged(&self, temporary: &Path, dest: &Path, expected: &FileChunk) -> Result<()> {
+        // 同じ実体を同時に直す書き手が、互いの修復結果を壊れたものとして退けないようにする。
+        // 棚は一つの処理だけが開くので、処理内で順番にすれば足りる。
+        static REPAIR: Mutex<()> = Mutex::new(());
+        let _turn = REPAIR.lock().unwrap_or_else(PoisonError::into_inner);
+        match self.read_chunk(expected) {
+            // 待っているあいだに別の書き手が直した。
+            Ok(_) => return Ok(()),
+            Err(error) if missing(&error) => (),
+            Err(error) if damaged(&error) => {
+                let kept = dest.with_extension(format!("{}.damaged", uuid::Uuid::now_v7()));
+                fs::rename(dest, kept)?;
+            }
+            Err(error) => return Err(error),
+        }
+        publish_new(temporary, dest)?;
+        self.read_chunk(expected).map(|_| ())
     }
 
     fn decode(&self, path: &Path, expected: &FileChunk) -> Result<Vec<u8>> {
@@ -335,7 +438,19 @@ impl ObjectStore {
         decode_object(File::open(path)?, meta.len(), expected)
     }
 
+    /// 保存済みの実体を検証して状態を返す。壊れた実体は `put`・`import_chunk` で
+    /// 正しい中身を渡すと置き換わるので、受信し直す対象として扱える。
+    pub fn chunk_state(&self, expected: &FileChunk) -> Result<ChunkState> {
+        match self.read_chunk(expected) {
+            Ok(_) => Ok(ChunkState::Verified),
+            Err(error) if missing(&error) => Ok(ChunkState::Missing),
+            Err(error) if damaged(&error) => Ok(ChunkState::Damaged),
+            Err(error) => Err(error),
+        }
+    }
+
     /// 未受信だけを false とする。破損はエラーで、再利用可能とは扱わない。
+    /// 受信し直す部分を決めるときは、破損も区別できる `chunk_state` を使う。
     pub fn has_verified_chunk(&self, expected: &FileChunk) -> Result<bool> {
         match self.read_chunk(expected) {
             Ok(_) => Ok(true),
@@ -367,15 +482,8 @@ impl ObjectStore {
         drop(file);
         // キャッシュ済みでも受信内容を検証し、破損した入力を成功扱いしない。
         self.decode(&pending.0, expected)?;
-        match publish_new(&pending.0, &dest) {
-            Ok(()) => (),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.read_chunk(expected)?;
-            }
-            Err(e) => return Err(e.into()),
-        }
-        sync_directory(dest.parent().unwrap())?;
-        Ok(())
+        // 既存の実体が壊れていれば、受信して検証した中身と置き換える。
+        self.publish_verified(&pending.0, &dest, expected)
     }
 
     /// 検証した圧縮済みバイト列をそのまま送る。元ファイルを再圧縮しない。
@@ -641,9 +749,48 @@ mod tests {
         *bytes.last_mut().unwrap() ^= 1;
         fs::write(&path, bytes).unwrap();
         assert!(store.verify(&file).is_err());
-        assert!(store.put(Cursor::new(b"content")).is_err());
+        assert_eq!(
+            store.chunk_state(&file.chunks[0]).unwrap(),
+            ChunkState::Damaged
+        );
+        assert!(store.has_verified_chunk(&file.chunks[0]).is_err());
         let dest = temp.0.join("not-published");
         assert!(store.export_new(&file, &dest).is_err());
         assert!(!dest.exists());
+    }
+
+    fn files_with_extension(root: &Path, extension: &str) -> Vec<PathBuf> {
+        fs::read_dir(root)
+            .unwrap()
+            .flat_map(|dir| fs::read_dir(dir.unwrap().path()).unwrap())
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == extension))
+            .collect()
+    }
+
+    #[test]
+    fn saving_the_same_content_again_replaces_a_damaged_object_and_keeps_it_aside() {
+        let temp = Temp::new();
+        let store = ObjectStore::open(&temp.0).unwrap();
+        // raw は SHA-256 の不一致、zstd は展開の失敗として壊れ方が違う。
+        for (index, input) in [b"content".to_vec(), vec![b'z'; 30_000]].iter().enumerate() {
+            let file = store.put(Cursor::new(input)).unwrap();
+            let path = store.chunk_path(file.chunks[0].id, false).unwrap();
+            let mut bytes = fs::read(&path).unwrap();
+            let middle = bytes.len() - 2;
+            bytes[middle] ^= 0x55;
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                store.chunk_state(&file.chunks[0]).unwrap(),
+                ChunkState::Damaged
+            );
+            assert_eq!(store.put(Cursor::new(input)).unwrap(), file);
+            store.verify(&file).unwrap();
+            let kept = files_with_extension(&temp.0, "damaged");
+            assert_eq!(kept.len(), index + 1);
+            assert!(kept.iter().any(|kept| fs::read(kept).unwrap() == bytes));
+        }
+        assert!(files_with_extension(&temp.0, "part").is_empty());
+        assert_eq!(store.stats().unwrap().chunks, 2);
     }
 }
