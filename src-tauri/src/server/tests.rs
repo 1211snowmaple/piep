@@ -152,6 +152,25 @@ fn fixture(root: &Path) -> Fixture {
         EntityProfileFreshness::RemoteChecked,
     )
     .expect("author profile");
+    db.upsert_download_person(work_id, "fanbox", "banner-only", "author", "背景だけの作者")
+        .unwrap();
+    let banner = app_data.join("profiles/fanbox/banner-only/v1/cover.png");
+    write_image(&banner, [30, 80, 100]);
+    db.upsert_person_profile(
+        "fanbox",
+        "banner-only",
+        "背景だけの作者",
+        None,
+        banner.to_str(),
+        None,
+        None,
+        "banner-hash",
+        profile_json.to_str().unwrap(),
+        1,
+        0,
+        EntityProfileFreshness::RemoteChecked,
+    )
+    .unwrap();
     let series_cover = app_data.join("series/pixiv/test-series/v1/cover.png");
     write_image(&series_cover, [80, 180, 120]);
     let series_json = series_cover.with_file_name("series.json");
@@ -247,6 +266,85 @@ async fn assert_read_api(
     assert_eq!(authors["items"][0]["sourceKey"], "test-author");
     assert_eq!(authors["items"][0]["hasCover"], true);
     assert!(!authors.to_string().contains(&private_root));
+
+    let banner_person: serde_json::Value = client
+        .get(format!(
+            "{url}/api/v1/entities/people/detail?source=fanbox&key=banner-only"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(banner_person["hasCover"], false);
+    assert_eq!(banner_person["hasBanner"], true);
+    assert_eq!(
+        client
+            .get(format!(
+                "{url}/api/v1/entities/people/cover?source=fanbox&key=banner-only"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        client
+            .get(format!(
+                "{url}/api/v1/entities/people/cover?source=fanbox&key=banner-only&variant=banner"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    for endpoint in [
+        "/api/v1/search/suggest?text=試験",
+        "/api/v1/works/lookup?source=pixiv&key=server-test",
+    ] {
+        assert_eq!(
+            client
+                .get(format!("{url}{endpoint}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let value: serde_json::Value = client
+            .get(format!("{url}{endpoint}"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(!value.to_string().contains(&private_root));
+        if endpoint.contains("suggest") {
+            assert!(!value["items"].as_array().unwrap().is_empty());
+        } else {
+            assert_eq!(value["id"], work_id);
+        }
+    }
+    let missing: serde_json::Value = client
+        .get(format!(
+            "{url}/api/v1/works/lookup?source=pixiv&key=missing"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(missing.is_null());
 
     let sorted: serde_json::Value = client
         .get(format!("{url}/api/v1/entities/people?sort=name&order=asc"))
@@ -398,7 +496,7 @@ async fn assert_read_api(
         .await
         .expect("metadata JSON");
     assert_eq!(metadata["work"]["title"], "サーバー接続試験");
-    assert_eq!(metadata["people"].as_array().unwrap().len(), 2);
+    assert_eq!(metadata["people"].as_array().unwrap().len(), 3);
     assert_eq!(metadata["series"][0]["key"], "test-series");
     assert!(!metadata.to_string().contains(&private_root));
 
@@ -3098,4 +3196,173 @@ fn failures_during_stale_removal_or_recording_restore_the_entire_commit() {
         assert!(!stale.exists());
         assert_eq!(fs::read(&original).unwrap(), content);
     }
+}
+
+// 手動の AVD 検証用。通常のテストでは動かさず、本番の本棚には触れない。
+// PIEP_ANDROID_QA_DIR に登録文字列を置く。stop ファイルで終了する。
+#[tokio::test]
+#[ignore]
+async fn mobile_reader_emulator_fixture() {
+    let output = PathBuf::from(std::env::var("PIEP_ANDROID_QA_DIR").expect("QA output directory"));
+    fs::create_dir_all(&output).unwrap();
+    let root = TestRoot::new("mobile-reader-qa");
+    let fixture = fixture(&root.0);
+    let _id = add_mobile_version_fixture(&fixture);
+    let server = DesktopServer::new(&fixture.app_data).unwrap();
+    server
+        .start_embedded(
+            Arc::clone(&fixture.state),
+            EmbeddedSettings {
+                ip: Some("127.0.0.1".into()),
+                ..Default::default()
+            },
+            0,
+        )
+        .await
+        .unwrap();
+    let mut payloads = Vec::new();
+    for _ in 0..2 {
+        payloads.push(server.create_reader_pairing().await.unwrap().payload);
+    }
+    fs::write(
+        output.join("pairings.json"),
+        serde_json::to_vec(&payloads).unwrap(),
+    )
+    .unwrap();
+    for _ in 0..2400 {
+        if output.join("stop").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    server.stop_embedded().await.unwrap();
+}
+
+fn add_mobile_version_fixture(fixture: &Fixture) -> i64 {
+    let storage = fixture.app_data.join("downloads");
+    let (id, old) = add_work(
+        &fixture.state.db,
+        &storage,
+        "990001",
+        "読書操作の確認",
+        "[chapter:第一版] 第一版の本文です。",
+    );
+    fixture
+        .state
+        .db
+        .insert_version(&crate::database::NewVersion {
+            download_id: id,
+            version: 1,
+            content_hash: Some("990001-content".into()),
+            text_length: 20,
+            json_path: old.to_string_lossy().into_owned(),
+            original_json_path: Some(old.to_string_lossy().into_owned()),
+            asset_count: 0,
+            file_size_bytes: 100,
+            created_at: "2026-11-06T00:00:00Z".into(),
+            change_summary: None,
+        })
+        .unwrap();
+    let next = storage.join("pixiv/990001/v2/original.json");
+    fs::create_dir_all(next.parent().unwrap()).unwrap();
+    let body = format!("[chapter:第二版] {}\n[[jumpuri:次の作品 > https://www.pixiv.net/novel/show.php?id=990002]]\n[[jumpuri:作者 > https://www.pixiv.net/users/12345]]", "静かな夜、窓の外を眺めながら本を読んだ。長押しで選択して検索できる。\n".repeat(100));
+    fs::write(&next, serde_json::json!({"text": body}).to_string()).unwrap();
+    let conn = rusqlite::Connection::open(fixture.app_data.join("piep.db")).unwrap();
+    conn.execute("UPDATE downloads SET current_version=2, content_hash='qa-v2', json_path=?1, original_json_path=?1 WHERE id=?2", rusqlite::params![next.to_string_lossy(), id]).unwrap();
+    fixture
+        .state
+        .db
+        .insert_version(&crate::database::NewVersion {
+            download_id: id,
+            version: 2,
+            content_hash: Some("qa-v2".into()),
+            text_length: body.chars().count() as i64,
+            json_path: next.to_string_lossy().into_owned(),
+            original_json_path: Some(next.to_string_lossy().into_owned()),
+            asset_count: 0,
+            file_size_bytes: 100,
+            created_at: "2026-11-07T00:00:00Z".into(),
+            change_summary: None,
+        })
+        .unwrap();
+    fixture.state.db.reindex_download(id).unwrap();
+    add_work(
+        &fixture.state.db,
+        &storage,
+        "990002",
+        "リンク先の作品",
+        "リンク先の本文です。",
+    );
+    fixture
+        .state
+        .db
+        .upsert_download_person(id, "pixiv", "12345", "author", "リンク先作者")
+        .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn explicit_reader_versions_return_their_own_content_hash_and_outline() {
+    let root = TestRoot::new("mobile-versions");
+    let fixture = fixture(&root.0);
+    let id = add_mobile_version_fixture(&fixture);
+    let server = DesktopServer::new(&fixture.app_data).unwrap();
+    server
+        .start_embedded(
+            Arc::clone(&fixture.state),
+            EmbeddedSettings {
+                ip: Some("127.0.0.1".into()),
+                ..Default::default()
+            },
+            0,
+        )
+        .await
+        .unwrap();
+    let url = server
+        .status()
+        .await
+        .embedded_url
+        .unwrap()
+        .trim_end_matches('/')
+        .to_string();
+    let client = reqwest::Client::builder()
+        .tls_backend_rustls()
+        .tls_danger_accept_invalid_certs(true)
+        .no_proxy()
+        .build()
+        .unwrap();
+    let pairing: serde_json::Value =
+        serde_json::from_str(&server.create_reader_pairing().await.unwrap().payload).unwrap();
+    let credentials = pair_with(&client, &url, pairing["secret"].as_str().unwrap()).await;
+    let token = credentials["token"].as_str().unwrap();
+    for (query, version, hash, heading) in [
+        ("?version=1", 1, "990001-content", "第一版"),
+        ("?version=2", 2, "qa-v2", "第二版"),
+        ("", 2, "qa-v2", "第二版"),
+    ] {
+        let page: serde_json::Value = client
+            .get(format!("{url}/api/v1/works/{id}/pages/0{query}"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(page["revision"]["currentVersion"], version);
+        assert_eq!(page["revision"]["contentHash"], hash);
+        assert!(page["revision"]["activeEditHash"].is_null());
+        assert!(page["html"].as_str().unwrap().contains(heading));
+        let outline: serde_json::Value = client
+            .get(format!("{url}/api/v1/works/{id}/outline{query}"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(outline[0]["title"], heading);
+    }
+    server.stop_embedded().await.unwrap();
 }

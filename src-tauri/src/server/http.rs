@@ -53,12 +53,21 @@ const READER_PAIRING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const PAIR_ATTEMPTS_PER_MINUTE: usize = 10;
 
 /// `hello` で知らせる機能の一覧。
-const CAPABILITIES_EMBEDDED: &[&str] = &["read", "reading-sync", "entity-detail", "favorite-write"];
+const CAPABILITIES_EMBEDDED: &[&str] = &[
+    "read",
+    "reading-sync",
+    "entity-detail",
+    "favorite-write",
+    "search-suggest",
+    "work-lookup",
+];
 const CAPABILITIES_STANDALONE: &[&str] = &[
     "read",
     "reading-sync",
     "entity-detail",
     "favorite-write",
+    "search-suggest",
+    "work-lookup",
     "admin-sync",
 ];
 /// デスクトップ版の作者・シリーズの並び順と同じ語彙。
@@ -373,6 +382,8 @@ fn read_routes(ctx: Ctx) -> Router {
     Router::new()
         .route("/api/v1/about", get(about))
         .route("/api/v1/works/search", post(search))
+        .route("/api/v1/search/suggest", get(search_suggest))
+        .route("/api/v1/works/lookup", get(work_lookup))
         .route("/api/v1/works/{id}", get(metadata))
         .route("/api/v1/works/{id}/pages/{page}", get(page))
         .route("/api/v1/works/{id}/outline", get(outline))
@@ -629,6 +640,54 @@ async fn search(
     Ok(Json(MobileSearchPage::from(result)))
 }
 
+// デスクトップと同じ候補を、パスや本文を含めずに返す。
+async fn search_suggest(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    Query(mut params): Query<crate::database::SearchSuggestParams>,
+) -> Result<Json<crate::database::SearchSuggestResult>, ApiError> {
+    require_device(&ctx, &headers)?;
+    if params
+        .text
+        .as_ref()
+        .is_some_and(|text| text.chars().count() > 200)
+    {
+        return Err(ApiError::invalid("検索語が長すぎます"));
+    }
+    params.limit = Some(params.limit.unwrap_or(8).clamp(1, 12));
+    Ok(Json(
+        with_db(&ctx, move |db| {
+            db.search_suggest(&params).map_err(|_| ApiError::internal())
+        })
+        .await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkLookupQuery {
+    source: String,
+    key: String,
+}
+
+async fn work_lookup(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    Query(query): Query<WorkLookupQuery>,
+) -> Result<Json<Option<super::dto::MobileWork>>, ApiError> {
+    require_device(&ctx, &headers)?;
+    if !valid_entity_key(&query.source, &query.key) {
+        return Err(ApiError::not_found());
+    }
+    Ok(Json(
+        with_db(&ctx, move |db| {
+            db.get_download_by_source(&query.source, &query.key)
+                .map(|work| work.map(super::dto::MobileWork::from))
+                .map_err(|_| ApiError::internal())
+        })
+        .await?,
+    ))
+}
+
 #[derive(Debug, Deserialize)]
 struct EntityListQuery {
     text: Option<String>,
@@ -685,7 +744,15 @@ async fn entities(
         let next_offset =
             (offset + (items.len() as i64) < total).then_some(offset + items.len() as i64);
         Ok(MobileEntityPage {
-            items: items.into_iter().map(MobileEntity::from).collect(),
+            items: items
+                .into_iter()
+                .map(|mut entity| {
+                    if kind == "person" {
+                        entity.cover_path = entity.icon_path.clone();
+                    }
+                    MobileEntity::from(entity)
+                })
+                .collect(),
             next_offset,
             total,
         })
@@ -745,8 +812,8 @@ async fn entity_detail(
                     .list_collections_for_person(&source, &key)
                     .map_err(internal)?;
                 Ok(MobileEntityDetail {
-                    has_cover: person.icon_path.is_some() || person.cover_path.is_some(),
-                    has_banner: person.icon_path.is_some() && person.cover_path.is_some(),
+                    has_cover: person.icon_path.is_some(),
+                    has_banner: person.cover_path.is_some(),
                     links: profile_links(person.links_json.as_deref()),
                     display_name: person.display_name,
                     description: person.description,
@@ -882,7 +949,7 @@ async fn entity_cover(
                 let path = if banner {
                     person.cover_path
                 } else {
-                    person.icon_path.or(person.cover_path)
+                    person.icon_path
                 };
                 (path, "profiles")
             }
@@ -1073,9 +1140,27 @@ async fn page(
     let sizes = ctx.clone();
     let result = with_db(&ctx, move |db| {
         let revision = || -> Result<MobileRevision, String> {
-            Ok(MobileRevision::from(&MobileMetadata::from(
-                db.get_reader_metadata(id)?,
-            )))
+            let metadata = MobileMetadata::from(db.get_reader_metadata(id)?);
+            if let Some(selected) = query.version {
+                if selected == metadata.work.current_version {
+                    return Ok(MobileRevision {
+                        current_version: selected,
+                        content_hash: metadata.work.content_hash.clone(),
+                        active_edit_hash: None,
+                    });
+                }
+                let version = metadata
+                    .versions
+                    .iter()
+                    .find(|item| item.version == selected)
+                    .ok_or_else(|| "版がありません".to_string())?;
+                return Ok(MobileRevision {
+                    current_version: selected,
+                    content_hash: version.content_hash.clone(),
+                    active_edit_hash: None,
+                });
+            }
+            Ok(MobileRevision::from(&metadata))
         };
         // 本文を組むあいだに版が変わると、古い本文に新しい版の印を付けてしまう。
         // 前後で同じだったときだけ、その版の本文として返す。
