@@ -1,5 +1,5 @@
 use super::LegacyImporter;
-use crate::library::{Error, LibraryId, Result};
+use crate::library::{Error, Library, LibraryId, Result};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -54,6 +54,84 @@ impl LegacyRow {
     pub fn time(&self, key: &str) -> Result<i64> {
         self.optional_time(key)?
             .ok_or_else(|| Error::Integrity(format!("旧記録の {key} の日時がありません")))
+    }
+    /// 移行対応表の鍵。型が不正な行でも鍵を作れるよう、値をそのまま文字にしてつなぐ。
+    pub fn label(&self, columns: &[&str]) -> String {
+        columns
+            .iter()
+            .map(|column| match self.0.get(*column) {
+                None | Some(Value::Null) => String::new(),
+                Some(Value::String(text)) => text.clone(),
+                Some(value) => value.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(":")
+    }
+}
+
+/// 一件の旧記録の異常として残し、ほかの記録の移行を続けてよい失敗。
+/// 中止・錠・保存先や DB の障害は、どの記録にも起きるので全体を止める。
+pub(super) fn anomaly(error: &Error) -> bool {
+    match error {
+        Error::Integrity(_)
+        | Error::Unsupported(_)
+        | Error::Json(_)
+        | Error::UnsafePath(_)
+        | Error::ResourceUnavailable
+        | Error::InvalidRange
+        | Error::Superseded => true,
+        Error::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData
+        ),
+        Error::Sql(rusqlite::Error::QueryReturnedNoRows) => true,
+        Error::Sql(rusqlite::Error::SqliteFailure(failure, _)) => {
+            failure.code == rusqlite::ErrorCode::ConstraintViolation
+        }
+        Error::Sql(_) | Error::Busy | Error::Canceled => false,
+    }
+}
+
+/// 異常な旧記録を、理由と一緒に未解決として残す。理由は再起動後も読める。
+pub(super) fn mark_unresolved(
+    target: &Library,
+    tx: &Transaction<'_>,
+    table: &str,
+    key: &str,
+    reason: &str,
+) -> Result<()> {
+    let evidence = target.store_bytes(&serde_json::to_vec(
+        &serde_json::json!({"table":table,"key":key,"reason":reason}),
+    )?)?;
+    Library::register_file(tx, &evidence)?;
+    tx.execute("INSERT INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES(?1,?2,?3,'unresolved') ON CONFLICT(source_table,source_key) DO UPDATE SET evidence_file_id=excluded.evidence_file_id,status='unresolved'",params![table,key,evidence.file.id.0.as_slice()])?;
+    Ok(())
+}
+
+/// 一件の旧記録の移行を savepoint で囲む。異常ならその行の書き込みだけを戻し、
+/// 未解決として記録して次へ進む。一件の異常で表全体の移行を止めない。
+pub(super) fn guarded_row(
+    target: &Library,
+    tx: &Transaction<'_>,
+    table: &str,
+    key: &str,
+    anomalies: &mut Vec<String>,
+    work: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    tx.execute_batch("SAVEPOINT legacy_row")?;
+    match work() {
+        Ok(()) => {
+            tx.execute_batch("RELEASE legacy_row")?;
+            Ok(())
+        }
+        Err(error) if anomaly(&error) => {
+            tx.execute_batch("ROLLBACK TO legacy_row; RELEASE legacy_row")?;
+            let reason = error.to_string();
+            mark_unresolved(target, tx, table, key, &reason)?;
+            anomalies.push(format!("{table} {key}: {reason}"));
+            Ok(())
+        }
+        Err(error) => Err(error),
     }
 }
 

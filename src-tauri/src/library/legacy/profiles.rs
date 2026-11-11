@@ -1,5 +1,5 @@
 use super::{
-    rows::{mark_row, mark_table, marked, LegacyRow},
+    rows::{anomaly, guarded_row, mark_row, mark_table, mark_unresolved, marked, LegacyRow},
     LegacyImporter,
 };
 use crate::library::{
@@ -12,22 +12,52 @@ use std::{
     collections::BTreeMap,
     fs,
     io::Read,
+    path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
 
+/// 旧プロフィールの版のフォルダーにあった画像。
+struct ProfileImage {
+    name: String,
+    path: PathBuf,
+    size: u64,
+    /// 中身がまったく同じ別名のファイル。同じ画像として扱い、どちらのパスも移行済みにする。
+    duplicates: Vec<PathBuf>,
+}
+
+/// `icon.png` のように、版が書いた固定名のファイルか。
+fn fixed_name(name: &str, slot: &str) -> bool {
+    std::path::Path::new(name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        == Some(slot)
+}
+
+fn same_bytes(left: &ProfileImage, right: &ProfileImage) -> Result<bool> {
+    // プロフィール画像は小さい。大きなものを読み比べて止まらないよう上限を置く。
+    const LIMIT: u64 = 64 * 1024 * 1024;
+    if left.size != right.size || left.size > LIMIT {
+        return Ok(false);
+    }
+    Ok(fs::read(&left.path)? == fs::read(&right.path)?)
+}
+
 impl LegacyImporter {
+    /// 移行できた版の数と、個別に未解決として残した記録を返す。
+    /// 一つの版・一人の作者の異常で、ほかのプロフィールの移行を止めない。
     pub(super) fn normalize_profiles(
         &self,
         target: &Library,
         cancel: &AtomicBool,
-    ) -> Result<usize> {
+    ) -> Result<(usize, Vec<String>)> {
         let mut versions = self.conn.prepare(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='entity_versions'",
         )?;
         if !versions.exists([])? {
-            return Ok(0);
+            return Ok((0, Vec::new()));
         }
         let mut count = 0;
+        let mut anomalies = Vec::new();
         // each_row は表の物理順ではなく、版の順を指定して呼ぶ。
         let mut stmt = self.conn.prepare(
             "SELECT id FROM entity_versions ORDER BY entity_type,source,source_key,version,id",
@@ -36,18 +66,33 @@ impl LegacyImporter {
             if cancel.load(Ordering::Acquire) {
                 return Err(Error::Canceled);
             }
-            self.each_row_matching("entity_versions", "id", old?, |row| {
+            let old = old?;
+            match self.each_row_matching("entity_versions", "id", old, |row| {
                 self.import_profile_version(target, row)
-            })?;
-            count += 1;
+            }) {
+                Ok(_) => count += 1,
+                Err(error) if anomaly(&error) => {
+                    let reason = error.to_string();
+                    let mut conn = target.conn.lock().map_err(|_| Error::Busy)?;
+                    let tx = conn.transaction()?;
+                    mark_unresolved(target, &tx, "entity_versions", &old.to_string(), &reason)?;
+                    tx.commit()?;
+                    anomalies.push(format!("entity_versions {old}: {reason}"));
+                }
+                Err(error) => return Err(error),
+            }
         }
+        let versions_complete = anomalies.is_empty();
         let mut conn = target.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         for (table, kind) in [("people", "person"), ("series", "series")] {
             if marked(&tx, table)? {
                 continue;
             }
+            let before = anomalies.len();
             self.each_row(table,|row| {
+                let label = row.label(&["id"]);
+                guarded_row(target, &tx, table, &label, &mut anomalies, || {
                 let (source,key)=(row.text("source")?,row.text("source_key")?);
                 let version=row.integer("current_version")?;
                 let old:i64=self.conn.query_row("SELECT id FROM entity_versions WHERE entity_type=?1 AND source=?2 AND source_key=?3 AND version=?4",params![kind,source,key,version],|r|r.get(0))?;
@@ -65,13 +110,18 @@ impl LegacyImporter {
                 }
                 tx.execute("INSERT INTO source_entity_state(entity_id,last_checked_at,last_fetched_at) VALUES(?1,?2,?3) ON CONFLICT(entity_id) DO UPDATE SET last_checked_at=excluded.last_checked_at,last_fetched_at=excluded.last_fetched_at",params![entity,row.optional_time("last_checked_at")?,row.optional_time("last_fetched_at")?])?;
                 let id=LibraryId::from_slice(&entity).map_err(|_|Error::Integrity("プロフィールの識別子が不正です".into()))?;
-                mark_row(&tx,table,&row.integer("id")?.to_string(),id)
+                mark_row(&tx,table,&label,id)
+                })
             })?;
-            mark_table(&tx, table)?;
+            if anomalies.len() == before {
+                mark_table(&tx, table)?;
+            }
         }
-        mark_table(&tx, "entity_versions")?;
+        if versions_complete {
+            mark_table(&tx, "entity_versions")?;
+        }
         tx.commit()?;
-        Ok(count)
+        Ok((count, anomalies))
     }
 
     fn import_profile_version(&self, target: &Library, row: LegacyRow) -> Result<()> {
@@ -143,8 +193,7 @@ impl LegacyImporter {
             .parent()
             .ok_or_else(|| Error::UnsafePath(path.clone()))?
             .join("assets");
-        let mut images = BTreeMap::new();
-        let mut total = bytes.len() as u64;
+        let mut found = BTreeMap::<&'static str, Vec<ProfileImage>>::new();
         if dir.try_exists()? {
             super::super::store::regular_directory(&dir)?;
             for entry in fs::read_dir(&dir)? {
@@ -166,51 +215,120 @@ impl LegacyImporter {
                         "プロフィール {old} に用途の不明なファイルがあります"
                     )));
                 };
-                total = total
-                    .checked_add(fs::metadata(&file)?.len())
-                    .ok_or_else(|| {
-                        Error::Integrity("プロフィールの容量が上限を超えました".into())
-                    })?;
-                if images.insert(slot, (name, file)).is_some() {
+                found.entry(slot).or_default().push(ProfileImage {
+                    size: fs::metadata(&file)?.len(),
+                    name,
+                    path: file,
+                    duplicates: Vec::new(),
+                });
+            }
+        }
+        let recorded_url = |slot: &str| {
+            data.get(if slot == "icon" {
+                "iconUrl"
+            } else {
+                "coverUrl"
+            })
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+        };
+        let mut images = BTreeMap::<&'static str, ProfileImage>::new();
+        for (slot, mut files) in found {
+            files.sort_by(|left, right| left.name.cmp(&right.name));
+            // 旧実装は名前の付け方を途中で変えたので、同じ中身が別名で並ぶ版がある。
+            // 中身がまったく同じものは一つの画像として扱い、版が書いた固定名を残す。
+            let mut distinct = Vec::<ProfileImage>::new();
+            for mut file in files {
+                let mut same = None;
+                for (index, kept) in distinct.iter().enumerate() {
+                    if same_bytes(kept, &file)? {
+                        same = Some(index);
+                        break;
+                    }
+                }
+                match same {
+                    Some(index) => {
+                        let kept = &mut distinct[index];
+                        if fixed_name(&file.name, slot) && !fixed_name(&kept.name, slot) {
+                            std::mem::swap(kept, &mut file);
+                            kept.duplicates.append(&mut file.duplicates);
+                        }
+                        kept.duplicates.push(file.path);
+                    }
+                    None => distinct.push(file),
+                }
+            }
+            let chosen = if distinct.len() == 1 {
+                distinct.remove(0)
+            } else {
+                // 中身の違う画像が並ぶ版は、後から別の画像が同じ場所へ足されたもの。
+                // その版の原本が記録した URL から付いた名前の一枚だけを、当時の画像とする。
+                // 残りは使わずに置き、管理領域の全件照合で所属の未解決として残す。
+                let expected = recorded_url(slot).map(|url| {
+                    let base = url.rsplit('/').next().unwrap_or(url);
+                    format!("{slot}_{}", base.split(['?', '#']).next().unwrap_or(base))
+                });
+                let mut named = distinct
+                    .into_iter()
+                    .filter(|file| Some(&file.name) == expected.as_ref())
+                    .collect::<Vec<_>>();
+                if named.len() != 1 {
                     return Err(Error::Integrity(format!(
                         "プロフィール {old} の画像が重複しています"
                     )));
                 }
-            }
+                named.remove(0)
+            };
+            images.insert(slot, chosen);
         }
-        // 初期の人物スナップショット（icon.png 等の固定名）は画像だけを集計していた。
-        // その既知の形式でも JSON 自体は必ず保管し、任意の容量差を許容しない。
-        let legacy_asset_accounting = kind == EntityKind::Person
-            && !images.is_empty()
-            && images.values().all(|(name, _)| {
-                matches!(
-                    std::path::Path::new(name)
-                        .file_stem()
-                        .and_then(|s| s.to_str()),
-                    Some("icon" | "cover")
-                )
-            });
-        if row.optional_integer("asset_count")?.unwrap_or(0) != images.len() as i64
-            || row
-                .optional_integer("file_size_bytes")?
-                .is_some_and(|size| {
-                    size < 0
-                        || (size as u64 != total
-                            && !(legacy_asset_accounting
-                                && size as u64 == total - bytes.len() as u64))
-                })
-        {
-            return Err(Error::Integrity(format!(
-                "プロフィール {old} のファイル数・容量が記録と違います"
-            )));
+        let asset_count = row.optional_integer("asset_count")?.unwrap_or(0);
+        let recorded_size = row.optional_integer("file_size_bytes")?;
+        let accounted = |images: &BTreeMap<&'static str, ProfileImage>| -> Result<bool> {
+            let mut assets = 0u64;
+            for image in images.values() {
+                assets = assets.checked_add(image.size).ok_or_else(|| {
+                    Error::Integrity("プロフィールの容量が上限を超えました".into())
+                })?;
+            }
+            // 初期の人物スナップショット（icon.png 等の固定名）は画像だけを集計していた。
+            // その既知の形式でも JSON 自体は必ず保管し、任意の容量差を許容しない。
+            let legacy_asset_accounting = kind == EntityKind::Person
+                && !images.is_empty()
+                && images
+                    .iter()
+                    .all(|(slot, image)| fixed_name(&image.name, slot));
+            Ok(asset_count == images.len() as i64
+                && recorded_size.is_none_or(|size| {
+                    size >= 0
+                        && (size as u64 == bytes.len() as u64 + assets
+                            || (legacy_asset_accounting && size as u64 == assets))
+                }))
+        };
+        if !accounted(&images)? {
+            // 版より前の配置から残った画像が同じ場所にある版がある。原本に URL の記録がない
+            // 用途の画像を外すと版の記録（個数・容量）にちょうど合う場合だけ、その版の画像と
+            // みなさない。外した画像は使わずに置き、全件照合で未解決として残す。
+            let total = images.len();
+            let (recorded, _left): (BTreeMap<_, _>, BTreeMap<_, _>) = images
+                .into_iter()
+                .partition(|(slot, _)| recorded_url(slot).is_some());
+            if recorded.len() == total || !accounted(&recorded)? {
+                return Err(Error::Integrity(format!(
+                    "プロフィール {old} のファイル数・容量が記録と違います"
+                )));
+            }
+            images = recorded;
         }
         let mut media = Vec::new();
         let mut image_paths = Vec::new();
         for (slot, url_field) in [("icon", "iconUrl"), ("cover", "coverUrl")] {
-            let saved = images.remove(slot);
-            if let Some((_, path)) = &saved {
-                image_paths.push((slot, path.clone()));
-            }
+            let saved = images.remove(slot).map(|image| {
+                image_paths.push((slot, image.path.clone()));
+                for duplicate in image.duplicates {
+                    image_paths.push((slot, duplicate));
+                }
+                (image.name, image.path)
+            });
             let url = data
                 .get(url_field)
                 .and_then(Value::as_str)
@@ -423,6 +541,131 @@ INSERT INTO series VALUES(8,'pixiv','series','Series title',1,NULL,NULL,1,3);").
         backup.objects.export(&file, &mut bytes).unwrap();
         assert_eq!(bytes, b"exact image bytes 1\0ICC");
         backup.verify().unwrap();
+    }
+
+    #[test]
+    fn duplicate_names_and_later_additions_resolve_while_one_broken_version_stays_alone() {
+        // 稼働棚で見つかった三つの形。同じ中身の別名、後から同じ場所へ足された別の表紙、
+        // どちらとも決められない二枚。最後の一つだけが未解決に残り、ほかは移行する。
+        let fixture = Fixture::new();
+        let old = fixture.0.join("old");
+        let person = old.join("profiles/pixiv/author/v1/assets");
+        fs::copy(person.join("icon_image.png"), person.join("icon.png")).unwrap();
+        let series = old.join("series/pixiv/series/v1/assets");
+        fs::rename(
+            series.join("cover_image.png"),
+            series.join("cover_series.png"),
+        )
+        .unwrap();
+        fs::write(series.join("cover_later.png"), b"a different, later cover").unwrap();
+        let broken = old.join("profiles/pixiv/other/v1");
+        fs::create_dir_all(broken.join("assets")).unwrap();
+        let raw = serde_json::to_vec(&json!({"source":"pixiv","sourceKey":"other","displayName":"Other","links":[],"iconUrl":"https://i.pximg.net/unrelated.png"})).unwrap();
+        fs::write(broken.join("original.json"), &raw).unwrap();
+        fs::write(broken.join("assets/icon_a.png"), b"first").unwrap();
+        fs::write(broken.join("assets/icon_b.png"), b"second").unwrap();
+        let conn = rusqlite::Connection::open(old.join("piep.db")).unwrap();
+        conn.execute(
+            "INSERT INTO entity_versions VALUES(4,'person','pixiv','other',1,'profiles/pixiv/other/v1/original.json',1,?1)",
+            [raw.len() as i64 + 5],
+        )
+        .unwrap();
+        drop(conn);
+        let library = Library::create(&fixture.0.join("new")).unwrap();
+        let source = LegacyImporter::open(&old).unwrap();
+        let report = source
+            .import(&library, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        assert_eq!(report.profile_snapshots, 3, "{:?}", report.unresolved);
+        assert!(
+            report
+                .unresolved
+                .iter()
+                .any(|line| line.starts_with("entity_versions 4: ")),
+            "{:?}",
+            report.unresolved
+        );
+        let (series_id, snapshot) = {
+            let conn = library.conn.lock().unwrap();
+            let status = |table: &str, key: &str| -> Option<String> {
+                conn.query_row(
+                    "SELECT status FROM migration_records WHERE source_table=?1 AND source_key=?2",
+                    [table, key],
+                    |r| r.get(0),
+                )
+                .ok()
+            };
+            for key in ["1", "2", "3"] {
+                assert_eq!(status("entity_versions", key).as_deref(), Some("imported"));
+            }
+            assert_eq!(
+                status("entity_versions", "4").as_deref(),
+                Some("unresolved")
+            );
+            assert_ne!(
+                status("entity_versions", "__all_rows__").as_deref(),
+                Some("imported")
+            );
+            // 現在の状態の照合は、異常のあった版と関係のない作者・シリーズでは終わる。
+            assert_eq!(status("people", "7").as_deref(), Some("imported"));
+            assert_eq!(status("series", "8").as_deref(), Some("imported"));
+            // 同じ中身の別名は、どちらのパスも移行済みになる。
+            for name in ["icon.png", "icon_image.png"] {
+                assert_eq!(
+                    status(
+                        "__filesystem__",
+                        &format!("profiles/pixiv/author/v1/assets/{name}")
+                    )
+                    .as_deref(),
+                    Some("imported")
+                );
+            }
+            // 後から足された一枚は当時の表紙にせず、所属の未解決として残す。
+            assert_eq!(
+                status(
+                    "__filesystem__",
+                    "series/pixiv/series/v1/assets/cover_series.png"
+                )
+                .as_deref(),
+                Some("imported")
+            );
+            assert_eq!(
+                status(
+                    "__filesystem__",
+                    "series/pixiv/series/v1/assets/cover_later.png"
+                )
+                .as_deref(),
+                Some("unresolved")
+            );
+            let id: Vec<u8> = conn
+                .query_row(
+                    "SELECT entity_id FROM external_identities WHERE kind='series'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let id = LibraryId::from_slice(&id).unwrap();
+            let snapshot: Vec<u8> = conn
+                .query_row(
+                    "SELECT snapshot_id FROM entity_current WHERE entity_id=?1",
+                    [id.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            (id, LibraryId::from_slice(&snapshot).unwrap())
+        };
+        let cover = library.media_file(series_id, snapshot, "cover").unwrap();
+        assert_eq!(cover.id, Fingerprint::of(b"exact image bytes 3\0ICC"));
+        // 未解決は、足された一枚と、決められなかった版の三ファイル。
+        assert_eq!(report.unresolved_files, 4);
+        assert!(!library.activation_problems().unwrap().is_empty());
+        library.verify().unwrap();
+        // やり直しても、移行済みの版を重ねない。
+        let again = source
+            .import(&library, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        assert_eq!(again.unresolved_files, 4);
+        assert_eq!(library.snapshots(series_id).unwrap().len(), 1);
     }
 
     #[test]

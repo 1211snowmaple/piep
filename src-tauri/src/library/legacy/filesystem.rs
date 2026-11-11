@@ -2,6 +2,7 @@ use super::LegacyImporter;
 use crate::library::{store, Error, Library, Result};
 use rusqlite::{params, OptionalExtension, Transaction};
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -13,6 +14,15 @@ pub(super) const MANAGED_ROOTS: &[&str] = &[
     "collection-covers",
     "templates",
     "fonts",
+];
+
+/// 管理領域の中にあるが、保存済みの作品とモデルの配布元から作り直せるもの。
+/// 全文索引と意味検索のモデルは旧実装が保存フォルダーの下へ置いていた。
+/// 原本として保管せず、読まなかったことを記録する。
+const REBUILDABLE_SUBTREES: &[&str] = &[
+    "downloads/search-index",
+    "downloads/search",
+    "downloads/.search-snapshots",
 ];
 
 #[derive(Default)]
@@ -61,6 +71,63 @@ impl LegacyImporter {
         Ok(())
     }
 
+    /// 版の原本が記録した表紙が、後の補完で別の画像へ差し替えられた跡かを調べる。
+    ///
+    /// 旧実装は不足を補完するとき、その版の画像の記録を新しい画像へ書き換え、最初に
+    /// 受け取った画像をフォルダーに残した。未ログインで受け取った R-18 の制限画像が
+    /// これに当たる。移行済みの版の原本が `cover_url` に記録した名前で、その版の表紙の
+    /// 場所にあるファイルだけを、当時の表紙として結ぶ。名前の似た別のファイルは対象にしない。
+    fn replaced_cover(&self, tx: &Transaction<'_>, key: &str) -> Result<Option<Vec<u8>>> {
+        let parts: Vec<&str> = key.split('/').collect();
+        let [first, provider, work, version, "data_assets", "cover", name] = parts[..] else {
+            return Ok(None);
+        };
+        if first != "downloads" {
+            return Ok(None);
+        }
+        let original = format!("downloads/{provider}/{work}/{version}/original.json");
+        let imported: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM migration_records WHERE source_table='__used_files__' AND source_key=?1 AND status='imported')",
+            [&original],
+            |r| r.get(0),
+        )?;
+        if !imported {
+            return Ok(None);
+        }
+        let path = self.root.join(&original);
+        store::regular_file(&path)?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)?
+            .take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Ok(None);
+        }
+        let Ok(data) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return Ok(None);
+        };
+        let url = ["/cover_url", "/detail/cover_url", "/coverImageUrl"]
+            .iter()
+            .find_map(|pointer| data.pointer(pointer).and_then(serde_json::Value::as_str));
+        let Some(url) = url else {
+            return Ok(None);
+        };
+        let base = url.rsplit('/').next().unwrap_or(url);
+        if base.split(['?', '#']).next() != Some(name) {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::to_vec(&serde_json::json!({
+            "path": key,
+            "version_original": original,
+            "cover_url": url,
+            "reason": if url.contains("/common/images/limit_") {
+                "restricted_placeholder_replaced_in_place"
+            } else {
+                "recorded_cover_replaced_in_place"
+            },
+        }))?))
+    }
+
     /// DB に載らないファイルも含め、管理領域全体を保管する。元の棚には書かない。
     pub(super) fn normalize_filesystem(
         &self,
@@ -98,6 +165,8 @@ impl LegacyImporter {
                 "models" | "NVIDIA" | "search" | ".search-snapshots" => ("rebuildable_cache", true),
                 "browsing-profile" => ("browser_credentials_and_cache", true),
                 "window-color-scheme" => ("machine_window_preference", true),
+                // 以前のバックアップは変換も整理もしない。元の場所に残す。
+                _ if name.starts_with("backup-") => ("existing_backup_left_in_place", true),
                 "settings.json" | "server" => ("settings_or_device_state_not_yet_migrated", false),
                 _ => ("unrecognized_root_entry_not_read", false),
             };
@@ -123,13 +192,25 @@ impl LegacyImporter {
                 let metadata = std::fs::symlink_metadata(&path)?;
                 if metadata.is_dir() {
                     store::regular_directory(&path)?;
+                    let subtree = self.relative_file_key(&path)?;
+                    if REBUILDABLE_SUBTREES.contains(&subtree.as_str()) {
+                        let evidence = serde_json::to_vec(&serde_json::json!({
+                            "entry": subtree,
+                            "reason": "rebuildable_cache",
+                            "contents_read": false
+                        }))?;
+                        let file = target.store_original(&evidence.into())?;
+                        let conn = target.conn.lock().map_err(|_| Error::Busy)?;
+                        conn.execute("INSERT INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES('__excluded_entries__',?1,?2,'imported') ON CONFLICT(source_table,source_key) DO UPDATE SET evidence_file_id=excluded.evidence_file_id,status=excluded.status",params![subtree,file.id.0.as_slice()])?;
+                        continue;
+                    }
                     directories.push(path);
                     continue;
                 }
                 store::regular_file(&path)?;
                 let key = self.relative_file_key(&path)?;
-                let file = target.objects.put_path(&path)?;
-                let prepared = target.prepare_file(&file)?;
+                let prepared = target.store_path(&path)?;
+                let file = prepared.file.clone();
                 let mut conn = target.conn.lock().map_err(|_| Error::Busy)?;
                 let tx = conn.transaction()?;
                 Library::register_file(&tx, &prepared)?;
@@ -138,8 +219,16 @@ impl LegacyImporter {
                 tx.execute("INSERT OR IGNORE INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES('__filesystem_copies__',?1,?2,'imported')",params![copy_key,file.id.0.as_slice()])?;
                 let first: Option<Vec<u8>>=tx.query_row("SELECT evidence_file_id FROM migration_records WHERE source_table='__filesystem__' AND source_key=?1",[&key],|r|r.get(0)).optional()?.flatten();
                 let used: Option<Vec<u8>>=tx.query_row("SELECT evidence_file_id FROM migration_records WHERE source_table='__used_files__' AND source_key=?1",[&key],|r|r.get(0)).optional()?.flatten();
-                let known = used.as_deref() == Some(file.id.0.as_slice())
-                    && first.as_ref().is_none_or(|f| f == &file.id.0);
+                let unchanged = first.as_ref().is_none_or(|f| f == &file.id.0);
+                let mut known = used.as_deref() == Some(file.id.0.as_slice()) && unchanged;
+                if !known && used.is_none() && unchanged {
+                    if let Some(evidence) = self.replaced_cover(&tx, &key)? {
+                        let evidence = target.store_bytes(&evidence)?;
+                        Library::register_file(&tx, &evidence)?;
+                        tx.execute("INSERT INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES('__replaced_in_place__',?1,?2,'imported') ON CONFLICT(source_table,source_key) DO UPDATE SET evidence_file_id=excluded.evidence_file_id,status=excluded.status",params![key,evidence.file.id.0.as_slice()])?;
+                        known = true;
+                    }
+                }
                 tx.execute("INSERT INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES('__filesystem__',?1,?2,?3) ON CONFLICT(source_table,source_key) DO UPDATE SET evidence_file_id=coalesce(migration_records.evidence_file_id,excluded.evidence_file_id),status=excluded.status",params![key,file.id.0.as_slice(),if known {"imported"} else {"unresolved"}])?;
                 tx.commit()?;
                 drop(conn);

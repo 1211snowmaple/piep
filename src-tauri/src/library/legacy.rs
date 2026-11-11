@@ -38,7 +38,18 @@ pub struct LegacyImportReport {
     pub unresolved_files: u64,
     pub unresolved: Vec<String>,
     pub preserved_tables: BTreeMap<String, usize>,
+    /// 作り直せるので中身を保管しなかった旧表と、その行数。
+    pub rebuildable_tables: BTreeMap<String, usize>,
 }
+
+/// 保存済みの作品から作り直せる索引の状態と、旧スキーマの版の印。
+/// 利用者の判断や取得した内容を含まないので、行を原記録として保管しない。
+const REBUILDABLE_TABLES: &[&str] = &[
+    "schema_marker",
+    "search_index_meta",
+    "search_index_state",
+    "semantic_index_state",
+];
 
 pub struct LegacyImporter {
     root: PathBuf,
@@ -143,7 +154,10 @@ impl LegacyImporter {
         self.preserve_tables(target, &mut report)?;
         let profiles = self
             .normalize_profiles(target, cancel)
-            .map(|count| report.profile_snapshots = count);
+            .map(|(count, anomalies)| {
+                report.profile_snapshots = count;
+                report.unresolved.extend(anomalies);
+            });
         self.finish_normalization(
             target,
             "profiles",
@@ -284,11 +298,14 @@ impl LegacyImporter {
             self.normalize_tags(target),
             &mut report,
         )?;
+        let relations = self
+            .normalize_source_relations(target)
+            .map(|anomalies| report.unresolved.extend(anomalies));
         self.finish_normalization(
             target,
             "source_relations",
             "作者・シリーズの所属の照合",
-            self.normalize_source_relations(target),
+            relations,
             &mut report,
         )?;
         self.finish_normalization(
@@ -627,6 +644,28 @@ impl LegacyImporter {
             {
                 return Err(Error::Unsupported("旧テーブル名が不正です".into()));
             }
+            if REBUILDABLE_TABLES.contains(&table.as_str()) {
+                let count =
+                    self.conn
+                        .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |r| {
+                            r.get::<_, i64>(0)
+                        })? as usize;
+                // 索引の進み具合は旧アプリを使うたびに変わる。行数や中身を証跡に入れず、
+                // 保管しなかった理由だけを残す。
+                let evidence = target.store_bytes(&serde_json::to_vec(&json!({
+                    "table": table,
+                    "reason": "rebuildable_index_state",
+                    "contents_preserved": false
+                }))?)?;
+                let mut conn = target.conn.lock().map_err(|_| Error::Busy)?;
+                let tx = conn.transaction()?;
+                Library::register_file(&tx, &evidence)?;
+                tx.execute("INSERT INTO migration_records(source_table,source_key,status) VALUES('__normalization__','migration','unresolved') ON CONFLICT(source_table,source_key) DO UPDATE SET status='unresolved'",[])?;
+                tx.execute("INSERT INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES(?1,'__all_rows__',?2,'imported') ON CONFLICT(source_table,source_key) DO UPDATE SET evidence_file_id=excluded.evidence_file_id,status='imported'",params![table,evidence.file.id.0.as_slice()])?;
+                tx.commit()?;
+                report.rebuildable_tables.insert(table, count);
+                continue;
+            }
             let mut statement = self.conn.prepare(&format!("SELECT * FROM \"{table}\""))?;
             let columns: Vec<_> = statement
                 .column_names()
@@ -662,8 +701,8 @@ impl LegacyImporter {
             }
             output.sync_all()?;
             drop(output);
-            let file = target.objects.put_path(&path)?;
-            let prepared = target.prepare_file(&file)?;
+            let prepared = target.store_path(&path)?;
+            let file = prepared.file.clone();
             {
                 let mut conn = target.conn.lock().map_err(|_| Error::Busy)?;
                 let tx = conn.transaction()?;
