@@ -200,7 +200,7 @@ impl Library {
         entity: LibraryId,
         snapshot: LibraryId,
     ) -> Result<Option<SourceBody>> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         self.source_body_from_conn(&conn, entity, snapshot)
     }
 

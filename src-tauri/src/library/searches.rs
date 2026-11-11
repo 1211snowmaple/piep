@@ -116,12 +116,12 @@ pub(super) fn verify_searches(conn: &Connection) -> Result<()> {
 
 impl Library {
     pub fn saved_search(&self, user: LibraryId, id: LibraryId) -> Result<SavedSearch> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         load(&conn, user, id)?.ok_or_else(|| Error::Integrity("保存した検索がありません".into()))
     }
 
     pub fn saved_searches(&self, user: LibraryId) -> Result<Vec<SavedSearch>> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let mut stmt=conn.prepare(&format!("SELECT {COLUMNS} FROM saved_searches WHERE user_id=?1 AND deleted_at IS NULL ORDER BY position,id"))?;
         let rows = stmt.query_map([user.as_bytes().as_slice()], decode)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)

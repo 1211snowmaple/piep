@@ -39,7 +39,7 @@ fn decode_uuid(bytes: Vec<u8>) -> Result<LibraryId> {
 
 impl Library {
     pub fn collections(&self) -> Result<Vec<CollectionInfo>> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let mut statement = conn.prepare(
             "SELECT id,title,description,ordered,generation FROM collections ORDER BY title,id",
         )?;

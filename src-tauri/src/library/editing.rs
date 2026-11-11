@@ -110,7 +110,7 @@ impl EditContent {
 impl Library {
     pub fn edit_state(&self, work: LibraryId, user: LibraryId) -> Result<EditState> {
         use rusqlite::OptionalExtension;
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         conn.query_row(
             "SELECT id FROM works WHERE id=?1",
             [work.as_bytes().as_slice()],
@@ -180,7 +180,7 @@ impl Library {
 
     pub fn edit(&self, work: LibraryId, edit: LibraryId) -> Result<EditInfo> {
         let (base, parent, file, created_at) = {
-            let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+            let conn = self.reader()?;
             let (base,parent,file,created_at):(Vec<u8>,Option<Vec<u8>>,Vec<u8>,i64)=conn.query_row("SELECT base_snapshot_id,parent_id,content_file_id,created_at FROM edit_revisions WHERE id=?1 AND work_id=?2 AND sealed=1",params![edit.as_bytes().as_slice(),work.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
             let file = Self::file_from_conn(
                 &conn,
@@ -201,7 +201,7 @@ impl Library {
         let content: EditContent = serde_json::from_slice(&bytes)?;
         content.validate()?;
         {
-            let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+            let conn = self.reader()?;
             self.check_edit_relations(&conn, edit, &content)?;
         }
         let id = |bytes: Vec<u8>| {

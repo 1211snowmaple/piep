@@ -37,10 +37,10 @@ impl LegacyImporter {
                 .filter(|s| !s.is_empty())
             {
                 let path = self.managed_path(path)?;
-                let file = target.objects.put_path(&path)?;
+                let prepared = target.store_path(&path)?;
                 covers.insert(
                     row.text("id")?.to_owned(),
-                    (file.id, target.prepare_file(&file)?, path),
+                    (prepared.file.id, prepared, path),
                 );
             }
             Ok(())
@@ -48,15 +48,13 @@ impl LegacyImporter {
         self.each_row("update_candidates", |row| {
             let payload = row.text("payload_json")?;
             let _: serde_json::Value = serde_json::from_str(payload)?;
-            let file = target
-                .objects
-                .put(std::io::Cursor::new(payload.as_bytes()))?;
+            let prepared = target.store_bytes(payload.as_bytes())?;
             candidate_files.insert(
                 (
                     row.text("source")?.to_owned(),
                     row.text("source_id")?.to_owned(),
                 ),
-                (file.id, target.prepare_file(&file)?),
+                (prepared.file.id, prepared),
             );
             Ok(())
         })?;

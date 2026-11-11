@@ -58,11 +58,13 @@ impl From<Vec<u8>> for CaptureSource {
     }
 }
 impl CaptureSource {
-    pub(super) fn store(&self, objects: &ObjectStore) -> Result<ContentFile> {
-        match self {
-            Self::Bytes(bytes) => objects.put(Cursor::new(bytes)).map_err(Into::into),
-            Self::File(path) => objects.put_path(path).map_err(Into::into),
+    /// 保管と復元検査を一度で済ませ、DB へ登録できる形で返す。
+    pub(super) fn store(&self, objects: &ObjectStore) -> Result<PreparedFile> {
+        Ok(match self {
+            Self::Bytes(bytes) => objects.put_stored(Cursor::new(bytes))?,
+            Self::File(path) => objects.put_path_stored(path)?,
         }
+        .into())
     }
 }
 
@@ -156,13 +158,55 @@ pub struct Library {
     root: PathBuf,
     pub id: LibraryId,
     pub objects: ObjectStore,
+    /// 書き込みはこの一本だけが行う。
     pub(crate) conn: Mutex<Connection>,
+    /// 使い終えた読み取り専用の接続。`reader` が貸し出す。
+    readers: Mutex<Vec<Connection>>,
     _process_lock: File,
 }
 
+/// 読み取り専用の接続。借りているあいだは同じ時点の状態を読み、手放すと戻る。
+/// WAL なので、保存の確定や長い検証と互いに待たない。
+pub(crate) struct Reader<'a> {
+    conn: Option<Connection>,
+    pool: &'a Mutex<Vec<Connection>>,
+}
+
+impl std::ops::Deref for Reader<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("借りている間は接続がある")
+    }
+}
+
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        let Some(conn) = self.conn.take() else { return };
+        // 読み取りを閉じられなかった接続は、古い時点を見せ続けないよう捨てる。
+        if conn.execute_batch("ROLLBACK").is_err() {
+            return;
+        }
+        if let Ok(mut pool) = self.pool.lock() {
+            if pool.len() < Library::IDLE_READERS {
+                pool.push(conn);
+            }
+        }
+    }
+}
+
+/// 実体を読んで確かめ終えた、DB へ登録できるファイル。
 pub(crate) struct PreparedFile {
     pub(crate) file: ContentFile,
-    encodings: Vec<(&'static str, u64)>,
+    encodings: Vec<piep_storage::ChunkEncoding>,
+}
+
+impl From<piep_storage::StoredFile> for PreparedFile {
+    fn from(stored: piep_storage::StoredFile) -> Self {
+        Self {
+            file: stored.file,
+            encodings: stored.encodings,
+        }
+    }
 }
 
 fn sql_size(value: u64) -> Result<i64> {
@@ -267,6 +311,7 @@ impl Library {
             id,
             objects,
             conn: Mutex::new(conn),
+            readers: Mutex::new(Vec::new()),
             _process_lock: lock,
         })
     }
@@ -302,6 +347,7 @@ impl Library {
             id: marker.library_id,
             objects,
             conn: Mutex::new(conn),
+            readers: Mutex::new(Vec::new()),
             _process_lock: lock,
         })
     }
@@ -335,9 +381,37 @@ impl Library {
         &self.root
     }
 
+    /// 同時に何本でも借りられるが、使い終えて残すのはこの本数まで。
+    const IDLE_READERS: usize = 4;
+
+    /// 読み取り専用の接続を借りる。書き込み用の一本をふさがないので、
+    /// 一覧・読書・配信・検証が保存の確定を待たず、互いにも待たない。
+    pub(crate) fn reader(&self) -> Result<Reader<'_>> {
+        let idle = self.readers.lock().map_err(|_| Error::Busy)?.pop();
+        let conn = match idle {
+            Some(conn) => conn,
+            None => {
+                let conn = Connection::open_with_flags(
+                    self.root.join("library.db"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )?;
+                conn.busy_timeout(std::time::Duration::from_secs(5))?;
+                conn.pragma_update(None, "query_only", true)?;
+                conn
+            }
+        };
+        // 複数の問い合わせが、途中で確定した保存をまたいで別々の時点を読まないようにする。
+        conn.execute_batch("BEGIN")?;
+        Ok(Reader {
+            conn: Some(conn),
+            pool: &self.readers,
+        })
+    }
+
     /// 未解決の移行記録を、再起動後も確認できる。本番への切り替え前に必ず検査する。
     pub fn activation_problems(&self) -> Result<Vec<String>> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let mut statement=conn.prepare("SELECT source_table,source_key FROM migration_records WHERE status='unresolved' ORDER BY source_table,source_key")?;
         let result = statement
             .query_map([], |r| {
@@ -351,17 +425,19 @@ impl Library {
         Ok(result)
     }
 
+    /// 保管済みのファイルを DB へ登録する前に、実体を一度だけ読んで確かめる。
+    /// いま保管したばかりのものは `store_bytes`・`store_path` を使い、読み直しを重ねない。
     pub(crate) fn prepare_file(&self, file: &ContentFile) -> Result<PreparedFile> {
-        self.objects.verify(file)?;
-        let encodings = file
-            .chunks
-            .iter()
-            .map(|chunk| self.objects.chunk_info(chunk))
-            .collect::<piep_storage::Result<_>>()?;
-        Ok(PreparedFile {
-            file: file.clone(),
-            encodings,
-        })
+        Ok(self.objects.inspect(file)?.into())
+    }
+
+    /// 保管の中で読み戻して確かめた結果を、そのまま登録に使う。
+    pub(crate) fn store_bytes(&self, bytes: &[u8]) -> Result<PreparedFile> {
+        Ok(self.objects.put_stored(Cursor::new(bytes))?.into())
+    }
+
+    pub(crate) fn store_path(&self, path: &Path) -> Result<PreparedFile> {
+        Ok(self.objects.put_path_stored(path)?.into())
     }
 
     pub(crate) fn register_file(tx: &Transaction<'_>, prepared: &PreparedFile) -> Result<()> {
@@ -399,8 +475,12 @@ impl Library {
             ));
         }
         let mut offset = 0;
-        for (i, (chunk, (codec, stored))) in file.chunks.iter().zip(&prepared.encodings).enumerate()
-        {
+        if file.chunks.len() != prepared.encodings.len() {
+            return Err(Error::Integrity(
+                "部分実体と保存表現の個数が一致しません".into(),
+            ));
+        }
+        for (i, (chunk, encoding)) in file.chunks.iter().zip(&prepared.encodings).enumerate() {
             tx.execute(
                 "INSERT OR IGNORE INTO chunks VALUES(?1,?2)",
                 params![chunk.id.0.as_slice(), sql_size(chunk.length)?],
@@ -409,8 +489,8 @@ impl Library {
                 "INSERT OR IGNORE INTO chunk_storage VALUES(?1,?2,?3,?4)",
                 params![
                     chunk.id.0.as_slice(),
-                    codec,
-                    sql_size(*stored)?,
+                    encoding.codec,
+                    sql_size(encoding.stored_bytes)?,
                     chrono::Utc::now().timestamp_millis()
                 ],
             )?;
@@ -473,19 +553,18 @@ impl Library {
     }
 
     pub fn file(&self, id: Fingerprint) -> Result<ContentFile> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         Self::file_from_conn(&conn, id)
     }
 
     /// 編集時に追加する画像等を、元バイト列のまま保管する。
     pub fn store_original(&self, source: &CaptureSource) -> Result<ContentFile> {
-        let file = source.store(&self.objects)?;
-        let prepared = self.prepare_file(&file)?;
+        let prepared = source.store(&self.objects)?;
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         Self::register_file(&tx, &prepared)?;
         tx.commit()?;
-        Ok(file)
+        Ok(prepared.file)
     }
 
     /// オフライン入力の取り込み用。ネットワーク取得は開始記録を作ってから完了する。
@@ -565,15 +644,19 @@ impl Library {
             let conn = self.conn.lock().map_err(|_| Error::Busy)?;
             conn.query_row("SELECT c.snapshot_id FROM entity_current c JOIN external_identities e ON e.entity_id=c.entity_id WHERE e.provider=?1 AND e.kind=?2 AND e.external_key=?3",params![capture.provider,capture.kind.name(),capture.external_key],|r|r.get::<_,Vec<u8>>(0)).optional()?
         };
-        let raw = capture.raw.store(&self.objects)?;
+        // 保管の中で読み戻して確かめた結果を集め、登録前にもう一度読むことを避ける。
+        let raw_prepared = capture.raw.store(&self.objects)?;
+        let raw = raw_prepared.file.clone();
+        let mut stored = Vec::new();
         let input_body = capture
             .body
             .as_ref()
             .map(|body| -> Result<StagedBody> {
+                let prepared = self.store_bytes(body.storage_bytes()?.as_ref())?;
+                let file = prepared.file.clone();
+                stored.push(prepared);
                 Ok(StagedBody {
-                    file: self
-                        .objects
-                        .put(Cursor::new(body.storage_bytes()?.as_ref()))?,
+                    file,
                     format: body.format(),
                     semantic: body.semantic_fingerprint()?,
                     text_length: body.text_content().chars().count() as u64,
@@ -608,11 +691,15 @@ impl Library {
                     quality: &m.quality,
                     original_name: &m.original_name,
                     mime_type: &m.mime_type,
-                    file: m
-                        .bytes
-                        .as_ref()
-                        .map(|source| source.store(&self.objects))
-                        .transpose()?,
+                    file: match &m.bytes {
+                        Some(source) => {
+                            let prepared = source.store(&self.objects)?;
+                            let file = prepared.file.clone();
+                            stored.push(prepared);
+                            Some(file)
+                        }
+                        None => None,
+                    },
                 })
             })
             .collect::<Result<_>>()?;
@@ -620,12 +707,10 @@ impl Library {
             .attachments
             .iter()
             .map(|a| {
-                Ok((
-                    &a.slot,
-                    &a.original_name,
-                    &a.mime_type,
-                    a.bytes.store(&self.objects)?,
-                ))
+                let prepared = a.bytes.store(&self.objects)?;
+                let file = prepared.file.clone();
+                stored.push(prepared);
+                Ok((&a.slot, &a.original_name, &a.mime_type, file))
             })
             .collect::<Result<_>>()?;
         let request_bytes = serde_json::to_vec(&(
@@ -650,21 +735,11 @@ impl Library {
         } else {
             request_bytes
         };
-        let request_file = self.objects.put(Cursor::new(request_bytes))?;
-        let request_hash = request_file.id;
-        // 復元検査・ファイル読み込みは DB の書き込みトランザクションより前に済ませる。
-        let mut prepared = vec![self.prepare_file(&raw)?, self.prepare_file(&request_file)?];
-        if let Some(body) = &input_body {
-            prepared.push(self.prepare_file(&body.file)?);
-        }
-        for item in &media {
-            if let Some(file) = &item.file {
-                prepared.push(self.prepare_file(file)?);
-            }
-        }
-        for (_, _, _, file) in &attachments {
-            prepared.push(self.prepare_file(file)?);
-        }
+        let request_prepared = self.store_bytes(&request_bytes)?;
+        let request_hash = request_prepared.file.id;
+        // 復元検査・ファイル読み込みは DB の書き込みトランザクションより前に済ませてある。
+        let mut prepared = vec![raw_prepared, request_prepared];
+        prepared.extend(stored);
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         let receipt = tx.query_row("SELECT entity_id,result_snapshot_id,created_revision,request_hash FROM acquisition_observations WHERE request_id=?1",[capture.request_id.as_bytes().as_slice()],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,bool>(2)?,r.get::<_,Vec<u8>>(3)?))).optional()?;
@@ -1425,7 +1500,7 @@ impl Library {
     }
 
     pub fn works(&self, limit: usize) -> Result<Vec<WorkSummary>> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let mut stmt = conn.prepare("SELECT work_id,snapshot_id,title,author_name,text_length,logical_size,published_at FROM work_current_projection ORDER BY title,work_id LIMIT ?1")?;
         let rows = stmt.query_map([limit.min(1000) as i64], |r| {
             Ok((
@@ -1454,8 +1529,10 @@ impl Library {
         .collect()
     }
 
+    /// 全ファイルを復元して確かめる。棚の大きさに比例して時間がかかるので、
+    /// 書き込み用の接続をふさがず、一ファイルごとに読み取りを手放す。
     pub fn verify(&self) -> Result<u64> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let unsealed: i64 = conn.query_row(
             "SELECT (SELECT count(*) FROM content_files WHERE sealed=0)+(SELECT count(*) FROM revision_snapshots WHERE published=0)+(SELECT count(*) FROM edit_revisions WHERE sealed=0)",
             [],
@@ -1474,16 +1551,22 @@ impl Library {
         if check != "ok" {
             return Err(Error::Integrity(check));
         }
-        let mut stmt = conn.prepare("SELECT id FROM content_files")?;
+        let ids = conn
+            .prepare("SELECT id FROM content_files")?
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(conn);
         let mut count = 0;
-        for id in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
-            let id: [u8; 32] = id?
+        for id in ids {
+            let id: [u8; 32] = id
                 .try_into()
                 .map_err(|_| Error::Integrity("ファイル ID が不正です".into()))?;
-            self.objects
-                .verify(&Self::file_from_conn(&conn, Fingerprint(id))?)?;
+            // 確定済みのファイルの構成は変わらない。復元の間は DB を読み続けない。
+            let file = Self::file_from_conn(&*self.reader()?, Fingerprint(id))?;
+            self.objects.verify(&file)?;
             count += 1;
         }
+        let conn = self.reader()?;
         self.verify_edit_documents(&conn)?;
         self.verify_source_bodies(&conn)?;
         self.verify_reading_positions(&conn)?;
@@ -1502,6 +1585,41 @@ impl Library {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reading_and_verifying_do_not_wait_for_a_save_that_is_being_committed() {
+        let temp = Temp::new();
+        let library = Library::create(&temp.0).unwrap();
+        let saved = library.capture(capture("work")).unwrap();
+        // 保存の確定の途中を模す。書き込み用の接続を持ったまま、未確定の変更を置く。
+        let writer = library.conn.lock().unwrap();
+        writer
+            .execute_batch("BEGIN IMMEDIATE; UPDATE library_meta SET generation=generation+100")
+            .unwrap();
+        // 接続が一本だった頃は、ここで永久に待った。今は確定済みの状態を読んで返る。
+        assert_eq!(
+            library.current_snapshot(saved.entity_id).unwrap(),
+            saved.snapshot_id
+        );
+        assert_eq!(library.snapshots(saved.entity_id).unwrap().len(), 1);
+        assert_eq!(library.works(10).unwrap().len(), 1);
+        let files = library.verify().unwrap();
+        assert!(files > 0);
+        // 借りた接続は書き込めない。
+        assert!(library
+            .reader()
+            .unwrap()
+            .execute("UPDATE library_meta SET generation=0", [])
+            .is_err());
+        writer.execute_batch("ROLLBACK").unwrap();
+        drop(writer);
+        // 確定した保存は、次に借りた接続から見える。
+        let mut another = capture("another work");
+        another.external_key = "456".into();
+        library.capture(another).unwrap();
+        assert_eq!(library.works(10).unwrap().len(), 2);
+        assert!(library.verify().unwrap() > files);
+    }
 
     #[test]
     fn profile_preview_urls_and_object_key_order_do_not_change_source_content() {

@@ -260,7 +260,7 @@ impl Library {
     }
 
     pub fn acquisition_status(&self, id: LibraryId) -> Result<AcquisitionInfo> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         load_info(&conn, id)
     }
 
@@ -284,8 +284,8 @@ impl Library {
                 ));
             }
         }
-        let file = source.store(&self.objects)?;
-        let prepared = self.prepare_file(&file)?;
+        let prepared = source.store(&self.objects)?;
+        let file = prepared.file.clone();
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         let previous:Option<Vec<u8>>=tx.query_row("SELECT file_id FROM acquisition_inputs WHERE attempt_id=?1 AND role='raw_part' AND slot=?2",params![id.as_bytes().as_slice(),slot],|r|r.get(0)).optional()?;

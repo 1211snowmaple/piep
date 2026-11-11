@@ -6,7 +6,6 @@ use crate::library::{EntityKind, Error, Library, Result};
 use rusqlite::params;
 use std::{
     collections::BTreeMap,
-    io::Cursor,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -63,9 +62,8 @@ impl LegacyImporter {
                 ));
             }
             let _: &serde_json::value::RawValue = serde_json::from_str(payload)?;
-            let file = target.objects.put(Cursor::new(payload.as_bytes()))?;
             if payloads
-                .insert(row.integer("id")?, target.prepare_file(&file)?)
+                .insert(row.integer("id")?, target.store_bytes(payload.as_bytes())?)
                 .is_some()
             {
                 return Err(Error::Integrity(

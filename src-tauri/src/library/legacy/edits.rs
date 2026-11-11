@@ -60,8 +60,7 @@ impl LegacyImporter {
                         if size < 0 || std::fs::metadata(&path)?.len() != size as u64 {
                             return Err(Error::Integrity(format!("編集画像 {asset} の容量が記録と違います")));
                         }
-                        let file = target.objects.put_path(&path)?;
-                        entry.insert(PreparedMedia { file: target.prepare_file(&file)?, name, mime });
+                        entry.insert(PreparedMedia { file: target.store_path(&path)?, name, mime });
                     }
                 }
                 let attrs = block.optional_text("attrs_json")?
@@ -79,8 +78,8 @@ impl LegacyImporter {
                 blocks:blocks.iter().map(|(_,b)|b.clone()).collect(),
                 media:media.iter().map(|(old,m)|EditMedia {slot:format!("legacy-asset:{old}"),file:m.file.file.id,original_name:m.name.clone(),mime_type:m.mime.clone()}).collect(),
                 provenance:Some(json!({"legacy":row.0}))};
-            let file = target.objects.put(std::io::Cursor::new(document.encode()?))?;
-            edits.push(PreparedEdit { row, id, content:target.prepare_file(&file)?, document, blocks, media });
+            let content = target.store_bytes(&document.encode()?)?;
+            edits.push(PreparedEdit { row, id, content, document, blocks, media });
             Ok(())
         })?;
         let total_blocks = self.each_row("work_edit_blocks", |_| Ok(()))?;

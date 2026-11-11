@@ -39,7 +39,7 @@ pub struct TagUpdate {
 
 impl Library {
     pub fn source_tags(&self, work: LibraryId, snapshot: LibraryId) -> Result<Vec<String>> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         conn.query_row(
             "SELECT id FROM revision_snapshots WHERE entity_id=?1 AND id=?2 AND published=1",
             params![work.as_bytes().as_slice(), snapshot.as_bytes().as_slice()],
@@ -52,7 +52,7 @@ impl Library {
 
     /// 作者のタグとは別の正本を持つ。作者の保存版を変更しない。
     pub fn user_tags(&self, work: LibraryId, user: LibraryId) -> Result<UserTags> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         conn.query_row(
             "SELECT id FROM works WHERE id=?1",
             [work.as_bytes().as_slice()],

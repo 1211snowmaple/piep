@@ -116,7 +116,7 @@ impl Library {
     }
 
     pub fn reading_position(&self, work: LibraryId, user: LibraryId) -> Result<ReadingPosition> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         conn.query_row(
             "SELECT id FROM works WHERE id=?1",
             [work.as_bytes().as_slice()],

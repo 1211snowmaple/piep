@@ -13,7 +13,7 @@ pub struct SourceEntityState {
 
 impl Library {
     pub fn source_entity_state(&self, entity: LibraryId) -> Result<SourceEntityState> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         Ok(conn.query_row("SELECT s.last_checked_at,s.last_fetched_at,s.last_deep_checked_at FROM entities e LEFT JOIN source_entity_state s ON s.entity_id=e.id WHERE e.id=?1 AND e.kind IN ('work','person','series')",[entity.as_bytes().as_slice()],|r|Ok(SourceEntityState {entity,last_checked_at:r.get(0)?,last_fetched_at:r.get(1)?,last_deep_checked_at:r.get(2)?}))?)
     }
 }

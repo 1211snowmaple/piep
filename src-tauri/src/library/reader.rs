@@ -291,7 +291,7 @@ impl Library {
         entity: LibraryId,
         snapshot: LibraryId,
     ) -> Result<ReaderBindingSet> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         Self::reader_bindings_from_conn(&conn, entity, snapshot)
     }
     pub(super) fn reader_bindings_from_conn(
@@ -311,7 +311,7 @@ impl Library {
         if let ResourceScope::Edit(edit) = scope {
             let edit = self.edit(entity, edit)?;
             let metadata = {
-                let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+                let conn = self.reader()?;
                 let json:String=conn.query_row("SELECT metadata_json FROM revision_snapshots WHERE entity_id=?1 AND id=?2 AND published=1",params![entity.as_bytes().as_slice(),edit.base.as_bytes().as_slice()],|r|r.get(0))?;
                 serde_json::from_str(&json)?
             };
@@ -336,7 +336,7 @@ impl Library {
             .source_body(entity, snapshot)?
             .ok_or(Error::ResourceUnavailable)?;
         let (metadata, plan) = {
-            let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+            let conn = self.reader()?;
             let header = header(&conn, entity, snapshot)?;
             let plan = load(&conn, entity, snapshot, &header)?;
             (header.metadata, plan)

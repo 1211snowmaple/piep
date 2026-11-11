@@ -68,7 +68,7 @@ impl Library {
         entity: LibraryId,
         snapshot: LibraryId,
     ) -> Result<MaintenanceHistory> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         revision(&conn, entity, snapshot)?;
         let mut stmt=conn.prepare("SELECT id,entity_id,snapshot_id,origin,attempted_at,evidence_file_id FROM repair_attempt_markers WHERE entity_id=?1 AND snapshot_id=?2 ORDER BY attempted_at,id")?;
         let repairs = stmt
@@ -108,7 +108,7 @@ impl Library {
         entity: LibraryId,
         snapshot: LibraryId,
     ) -> Result<Option<RepairAttemptMarker>> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let revision = revision(&conn, entity, snapshot)?;
         Ok(conn.query_row("SELECT r.id,r.entity_id,r.snapshot_id,r.origin,r.attempted_at,r.evidence_file_id FROM repair_attempt_markers r JOIN revision_snapshots s ON s.id=r.snapshot_id AND s.entity_id=r.entity_id WHERE r.entity_id=?1 AND s.revision_id=?2 ORDER BY r.attempted_at DESC,r.id DESC LIMIT 1",params![entity.as_bytes().as_slice(),revision],repair).optional()?)
     }

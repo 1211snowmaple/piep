@@ -78,7 +78,7 @@ fn id(bytes: Vec<u8>) -> Result<LibraryId> {
 impl Library {
     /// 提案は当時のラベル・根拠・選択を返す。現在の作品情報で上書きしない。
     pub fn collection_suggestion(&self, suggestion: LibraryId) -> Result<CollectionSuggestion> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let mut output = conn.query_row("SELECT title,ordered,track,origin,decision,score,rule_version,explanation,name_options_json,created_at,updated_at,generation FROM collection_suggestions WHERE id=?1",[suggestion.as_bytes().as_slice()],|r|Ok(CollectionSuggestion {
             id:suggestion,title:r.get(0)?,ordered:r.get(1)?,track:r.get(2)?,origin:r.get(3)?,decision:SuggestionDecision::parse(&r.get::<_,String>(4)?).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?,score:r.get(5)?,rule_version:r.get(6)?,explanation:r.get(7)?,name_options:serde_json::from_str(&r.get::<_,String>(8)?).map_err(|e|rusqlite::Error::FromSqlConversionFailure(8,rusqlite::types::Type::Text,Box::new(e)))?,created_at:r.get(9)?,updated_at:r.get(10)?,generation:r.get(11)?,seeds:vec![],members:vec![],
         }))?;

@@ -67,6 +67,24 @@ fn missing(error: &Error) -> bool {
     matches!(error, Error::Io(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
+/// 一つの実体の保存表現。容量の集計と、呼び手の台帳の記録に使う。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkEncoding {
+    /// `raw` か `zstd`。
+    pub codec: &'static str,
+    /// ヘッダーを含む、保存したファイルの長さ。
+    pub stored_bytes: u64,
+}
+
+/// 保管して検証を終えたファイル。`put_stored` と `inspect` だけが作る。
+/// 受け取った時点で、全部分の展開結果と元ハッシュをディスクから読んで確かめてある。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredFile {
+    pub file: ContentFile,
+    /// `file.chunks` と同じ順番。
+    pub encodings: Vec<ChunkEncoding>,
+}
+
 #[derive(Clone, Copy, Default, Debug, Serialize)]
 pub struct StorageStats {
     pub chunks: u64,
@@ -234,11 +252,16 @@ fn validate_header(
     Ok((original, stored))
 }
 
-fn decode_object(
+fn decode_object(source: impl Read, encoded_length: u64, expected: &FileChunk) -> Result<Vec<u8>> {
+    decode_encoded(source, encoded_length, expected).map(|(bytes, _)| bytes)
+}
+
+/// 展開結果と一緒に、読んだ実体の保存表現も返す。同じ実体を二度読まずに済ませる。
+fn decode_encoded(
     mut source: impl Read,
     encoded_length: u64,
     expected: &FileChunk,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, ChunkEncoding)> {
     if !(HEADER_BYTES..=MAX_ENCODED_CHUNK_BYTES).contains(&encoded_length) {
         return Err(Error::Integrity("部分実体の保存サイズが不正です".into()));
     }
@@ -264,7 +287,11 @@ fn decode_object(
             expected.id
         )));
     }
-    Ok(bytes)
+    let encoding = ChunkEncoding {
+        codec: if header[8] == 1 { "zstd" } else { "raw" },
+        stored_bytes: encoded_length,
+    };
+    Ok((bytes, encoding))
 }
 
 /// 固定した v1 のデコーダー。出力・圧縮ウィンドウ・入力サイズを制限する。
@@ -298,7 +325,13 @@ impl ObjectStore {
     }
 
     /// 任意の読取元を、最大約 8 MiB の入力バッファで保管する。
-    pub fn put(&self, mut source: impl Read) -> Result<ContentFile> {
+    pub fn put(&self, source: impl Read) -> Result<ContentFile> {
+        self.put_stored(source).map(|stored| stored.file)
+    }
+
+    /// `put` と同じ保管をして、各部分の保存表現も返す。
+    /// 保管の中で全部分を読み戻して確かめるので、直後に `verify` を重ねる必要はない。
+    pub fn put_stored(&self, mut source: impl Read) -> Result<StoredFile> {
         let mut initial = Vec::new();
         source
             .by_ref()
@@ -307,10 +340,13 @@ impl ObjectStore {
         let mut whole = Sha256::new();
         let mut length = 0u64;
         let mut chunks = Vec::new();
+        let mut encodings = Vec::new();
         if initial.len() <= SINGLE_FILE_BYTES {
             whole.update(&initial);
             length = initial.len() as u64;
-            chunks.push(self.put_chunk(&initial)?);
+            let (chunk, encoding) = self.put_chunk(&initial)?;
+            chunks.push(chunk);
+            encodings.push(encoding);
         } else {
             let mut source = Cursor::new(initial).chain(source);
             loop {
@@ -326,22 +362,31 @@ impl ObjectStore {
                 length = length
                     .checked_add(block.len() as u64)
                     .ok_or_else(|| Error::Integrity("元サイズが上限を超えました".into()))?;
-                chunks.push(self.put_chunk(&block)?);
+                let (chunk, encoding) = self.put_chunk(&block)?;
+                chunks.push(chunk);
+                encodings.push(encoding);
             }
         }
-        Ok(ContentFile {
-            id: Fingerprint(whole.finalize().into()),
-            length,
-            chunks,
+        Ok(StoredFile {
+            file: ContentFile {
+                id: Fingerprint(whole.finalize().into()),
+                length,
+                chunks,
+            },
+            encodings,
         })
     }
 
     pub fn put_path(&self, path: &Path) -> Result<ContentFile> {
-        regular_file(path)?;
-        self.put(File::open(path)?)
+        self.put_path_stored(path).map(|stored| stored.file)
     }
 
-    fn put_chunk(&self, original: &[u8]) -> Result<FileChunk> {
+    pub fn put_path_stored(&self, path: &Path) -> Result<StoredFile> {
+        regular_file(path)?;
+        self.put_stored(File::open(path)?)
+    }
+
+    fn put_chunk(&self, original: &[u8]) -> Result<(FileChunk, ChunkEncoding)> {
         if original.len() > SINGLE_FILE_BYTES {
             return Err(Error::Integrity("部分実体が上限を超えています".into()));
         }
@@ -352,8 +397,10 @@ impl ObjectStore {
         };
         let dest = self.chunk_path(id, true)?;
         // 壊れた既存の実体は再利用しない。下で検証した中身と置き換える。
-        if self.chunk_state(&result)? == ChunkState::Verified {
-            return Ok(result);
+        match self.load(&dest, &result) {
+            Ok((_, encoding)) => return Ok((result, encoding)),
+            Err(error) if missing(&error) || damaged(&error) => (),
+            Err(error) => return Err(error),
         }
         let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3)?;
         encoder.include_checksum(true)?;
@@ -388,19 +435,34 @@ impl ObjectStore {
         if self.decode(&temporary, &result)? != original {
             return Err(Error::Integrity("保存直後の復元結果が一致しません".into()));
         }
-        self.publish_verified(&temporary, &dest, &result)?;
+        let published = self.publish_verified(&temporary, &dest, &result)?;
         drop(guard);
-        Ok(result)
+        let encoding = if published {
+            ChunkEncoding {
+                codec: if use_compressed { "zstd" } else { "raw" },
+                stored_bytes: HEADER_BYTES + payload.len() as u64,
+            }
+        } else {
+            // 同時に保管した別の書き手の実体が残った。表現が違うことがあるので読んで確かめる。
+            self.load(&dest, &result)?.1
+        };
+        Ok((result, encoding))
     }
 
     /// 検証済みの一時ファイルを公開する。同じ実体がすでにあれば、それを検証して使う。
     /// 既存の実体が壊れていたときだけ、それを消さずに隔離してから置き換える。
-    fn publish_verified(&self, temporary: &Path, dest: &Path, expected: &FileChunk) -> Result<()> {
-        match publish_new(temporary, dest) {
-            Ok(()) => (),
+    /// 渡した一時ファイルが実体になったときに true を返す。
+    fn publish_verified(
+        &self,
+        temporary: &Path,
+        dest: &Path,
+        expected: &FileChunk,
+    ) -> Result<bool> {
+        let published = match publish_new(temporary, dest) {
+            Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 match self.read_chunk(expected) {
-                    Ok(_) => (),
+                    Ok(_) => false,
                     Err(error) if damaged(&error) || missing(&error) => {
                         self.replace_damaged(temporary, dest, expected)?
                     }
@@ -408,20 +470,21 @@ impl ObjectStore {
                 }
             }
             Err(e) => return Err(e.into()),
-        }
-        sync_directory(dest.parent().unwrap())
+        };
+        sync_directory(dest.parent().unwrap())?;
+        Ok(published)
     }
 
     /// 壊れた実体を `<hash>.<UUID>.damaged` へ退けて、検証済みの中身を公開する。
     /// 退けたファイルは調査と利用者の判断のために残し、この crate では消さない。
-    fn replace_damaged(&self, temporary: &Path, dest: &Path, expected: &FileChunk) -> Result<()> {
+    fn replace_damaged(&self, temporary: &Path, dest: &Path, expected: &FileChunk) -> Result<bool> {
         // 同じ実体を同時に直す書き手が、互いの修復結果を壊れたものとして退けないようにする。
         // 棚は一つの処理だけが開くので、処理内で順番にすれば足りる。
         static REPAIR: Mutex<()> = Mutex::new(());
         let _turn = REPAIR.lock().unwrap_or_else(PoisonError::into_inner);
         match self.read_chunk(expected) {
             // 待っているあいだに別の書き手が直した。
-            Ok(_) => return Ok(()),
+            Ok(_) => return Ok(false),
             Err(error) if missing(&error) => (),
             Err(error) if damaged(&error) => {
                 let kept = dest.with_extension(format!("{}.damaged", uuid::Uuid::now_v7()));
@@ -430,12 +493,16 @@ impl ObjectStore {
             Err(error) => return Err(error),
         }
         publish_new(temporary, dest)?;
-        self.read_chunk(expected).map(|_| ())
+        self.read_chunk(expected).map(|_| true)
     }
 
     fn decode(&self, path: &Path, expected: &FileChunk) -> Result<Vec<u8>> {
+        self.load(path, expected).map(|(bytes, _)| bytes)
+    }
+
+    fn load(&self, path: &Path, expected: &FileChunk) -> Result<(Vec<u8>, ChunkEncoding)> {
         let meta = regular_file(path)?;
-        decode_object(File::open(path)?, meta.len(), expected)
+        decode_encoded(File::open(path)?, meta.len(), expected)
     }
 
     /// 保存済みの実体を検証して状態を返す。壊れた実体は `put`・`import_chunk` で
@@ -483,7 +550,8 @@ impl ObjectStore {
         // キャッシュ済みでも受信内容を検証し、破損した入力を成功扱いしない。
         self.decode(&pending.0, expected)?;
         // 既存の実体が壊れていれば、受信して検証した中身と置き換える。
-        self.publish_verified(&pending.0, &dest, expected)
+        self.publish_verified(&pending.0, &dest, expected)?;
+        Ok(())
     }
 
     /// 検証した圧縮済みバイト列をそのまま送る。元ファイルを再圧縮しない。
@@ -504,17 +572,10 @@ impl ObjectStore {
         self.decode(&self.chunk_path(chunk.id, false)?, chunk)
     }
 
+    /// 実体を検証して保存表現を返す。読むのは一度だけ。
     pub fn chunk_info(&self, chunk: &FileChunk) -> Result<(&'static str, u64)> {
-        let path = self.chunk_path(chunk.id, false)?;
-        self.decode(&path, chunk)?;
-        let mut input = File::open(&path)?;
-        input.seek(SeekFrom::Start(8))?;
-        let mut codec = [0];
-        input.read_exact(&mut codec)?;
-        Ok((
-            if codec[0] == 1 { "zstd" } else { "raw" },
-            fs::metadata(path)?.len(),
-        ))
+        let (_, encoding) = self.load(&self.chunk_path(chunk.id, false)?, chunk)?;
+        Ok((encoding.codec, encoding.stored_bytes))
     }
 
     fn validate_manifest(file: &ContentFile) -> Result<()> {
@@ -557,24 +618,43 @@ impl ObjectStore {
     }
 
     /// 呼び手は成功するまで出力を公開しない。途中失敗時に成功扱いしない。
-    pub fn export(&self, file: &ContentFile, mut destination: impl Write) -> Result<()> {
+    pub fn export(&self, file: &ContentFile, destination: impl Write) -> Result<()> {
+        self.restore(file, destination).map(|_| ())
+    }
+
+    /// 全部分を一度ずつ読み、元ファイル全体のハッシュまで確かめながら書き出す。
+    fn restore(
+        &self,
+        file: &ContentFile,
+        mut destination: impl Write,
+    ) -> Result<Vec<ChunkEncoding>> {
         Self::validate_manifest(file)?;
         let mut hash = Sha256::new();
+        let mut encodings = Vec::with_capacity(file.chunks.len());
         for chunk in &file.chunks {
-            let bytes = self.read_chunk(chunk)?;
+            let (bytes, encoding) = self.load(&self.chunk_path(chunk.id, false)?, chunk)?;
             hash.update(&bytes);
             destination.write_all(&bytes)?;
+            encodings.push(encoding);
         }
         if Fingerprint(hash.finalize().into()) != file.id {
             return Err(Error::Integrity(
                 "元ファイル全体のハッシュが一致しません".into(),
             ));
         }
-        Ok(())
+        Ok(encodings)
     }
 
     pub fn verify(&self, file: &ContentFile) -> Result<()> {
         self.export(file, std::io::sink())
+    }
+
+    /// `verify` と同じ検査を一度の読み取りで行い、各部分の保存表現も返す。
+    pub fn inspect(&self, file: &ContentFile) -> Result<StoredFile> {
+        Ok(StoredFile {
+            encodings: self.restore(file, std::io::sink())?,
+            file: file.clone(),
+        })
     }
 
     /// 別の棚へ検証済み実体だけを複製する。全ファイルを一度に展開しない。
@@ -582,7 +662,7 @@ impl ObjectStore {
         Self::validate_manifest(file)?;
         for chunk in &file.chunks {
             let bytes = self.read_chunk(chunk)?;
-            if destination.put_chunk(&bytes)? != *chunk {
+            if destination.put_chunk(&bytes)?.0 != *chunk {
                 return Err(Error::Integrity("複製した実体の識別が変わりました".into()));
             }
         }
@@ -715,6 +795,51 @@ mod tests {
         let stats = store.stats().unwrap();
         assert_eq!(stats.chunks, 4);
         assert_eq!(stats.compressed_chunks, 1);
+    }
+
+    #[test]
+    fn stored_encodings_match_the_objects_on_disk_for_new_reused_and_split_files() {
+        let temp = Temp::new();
+        let store = ObjectStore::open(&temp.0).unwrap();
+        let split: Vec<_> = (0..SINGLE_FILE_BYTES + 7123)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        for input in [
+            b"short raw".to_vec(),
+            vec![b'x'; 30_000],
+            (0..30_000).map(|_| rand::random::<u8>()).collect(),
+            split,
+        ] {
+            let stored = store.put_stored(Cursor::new(&input)).unwrap();
+            assert_eq!(stored.encodings.len(), stored.file.chunks.len());
+            // 保存表現は、実体のヘッダーとファイルの長さから読んだものと同じ。
+            for (chunk, encoding) in stored.file.chunks.iter().zip(&stored.encodings) {
+                let path = store.chunk_path(chunk.id, false).unwrap();
+                assert_eq!(encoding.stored_bytes, fs::metadata(&path).unwrap().len());
+                assert_eq!(
+                    encoding.codec,
+                    if fs::read(&path).unwrap()[8] == 1 {
+                        "zstd"
+                    } else {
+                        "raw"
+                    }
+                );
+                assert_eq!(
+                    store.chunk_info(chunk).unwrap(),
+                    (encoding.codec, encoding.stored_bytes)
+                );
+            }
+            // すでにある実体を使った二度目の保管も、検査だけの読み取りも同じ結果を返す。
+            assert_eq!(store.put_stored(Cursor::new(&input)).unwrap(), stored);
+            assert_eq!(store.inspect(&stored.file).unwrap(), stored);
+        }
+        // 壊れた実体は、検査でも保管済みの扱いにしない。
+        let stored = store.put_stored(Cursor::new(b"to be damaged")).unwrap();
+        let path = store.chunk_path(stored.file.chunks[0].id, false).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&path, bytes).unwrap();
+        assert!(store.inspect(&stored.file).is_err());
     }
 
     #[test]

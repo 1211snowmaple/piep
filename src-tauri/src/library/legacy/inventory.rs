@@ -64,8 +64,8 @@ impl LegacyImporter {
             let path=self.managed_path(row.text("local_path")?)?;
             let size=row.integer("file_size_bytes")?;
             if size<0 || std::fs::metadata(&path)?.len()!=size as u64 {return Err(Error::Integrity(format!("元ファイル {old} の容量が記録と違います")));}
-            let file=target.objects.put_path(&path)?;
-            let prepared=target.prepare_file(&file)?;
+            let prepared=target.store_path(&path)?;
+            let file=prepared.file.clone();
             let mut conn=target.conn.lock().map_err(|_|Error::Busy)?;
             let tx=conn.transaction()?;
             let work=self.work_from_old(&tx,row.integer("download_id")?)?;

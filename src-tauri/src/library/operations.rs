@@ -5,7 +5,7 @@ use super::{
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::{Cursor, Write};
+use std::io::Write;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SnapshotInfo {
@@ -49,7 +49,7 @@ fn fingerprint(bytes: Vec<u8>) -> Result<Fingerprint> {
 
 impl Library {
     pub fn current_snapshot(&self, entity: LibraryId) -> Result<LibraryId> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let snapshot: Vec<u8> = conn.query_row(
             "SELECT snapshot_id FROM entity_current WHERE entity_id=?1",
             [entity.as_bytes().as_slice()],
@@ -58,7 +58,7 @@ impl Library {
         id(snapshot)
     }
     pub fn snapshots(&self, entity: LibraryId) -> Result<Vec<SnapshotInfo>> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let mut stmt=conn.prepare("SELECT s.id,s.revision_id,r.ordinal,r.classification,s.metadata_json,s.field_states_json,s.body_file_id,s.sequence,s.created_at,s.body_format FROM revision_snapshots s JOIN source_revisions r ON r.id=s.revision_id WHERE s.entity_id=?1 AND s.published=1 ORDER BY s.sequence")?;
         let rows = stmt.query_map([entity.as_bytes().as_slice()], |r| {
             Ok((
@@ -136,7 +136,7 @@ impl Library {
     }
 
     pub fn user_state(&self, work: LibraryId, user: LibraryId) -> Result<UserState> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         // 未保存作品の識別も対象にできるが、存在しない ID は成功にしない。
         conn.query_row(
             "SELECT id FROM works WHERE id=?1",
@@ -237,8 +237,8 @@ impl Library {
         if expected < 0 {
             return Err(Error::Integrity("更新世代が不正です".into()));
         }
-        let file = self.objects.put(Cursor::new(content.encode()?))?;
-        let prepared = self.prepare_file(&file)?;
+        let prepared = self.store_bytes(&content.encode()?)?;
+        let file = prepared.file.clone();
         let media = content
             .media
             .iter()

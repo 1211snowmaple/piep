@@ -122,7 +122,7 @@ impl Library {
         limit: usize,
     ) -> Result<Vec<JobHistory>> {
         let limit = page_limit(limit)?;
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let before = before
             .map(|id| {
                 conn.query_row(
@@ -145,7 +145,7 @@ impl Library {
     }
 
     pub fn job_history_entry(&self, job: LibraryId) -> Result<JobHistory> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         conn.query_row(
             &format!("SELECT {SUMMARY} FROM job_history WHERE id=?1 AND sealed=1"),
             [job.as_bytes().as_slice()],
@@ -162,7 +162,7 @@ impl Library {
         limit: usize,
     ) -> Result<Vec<JobHistoryItem>> {
         let limit = page_limit(limit)?;
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         require_job(&conn, job)?;
         let mut stmt = conn.prepare("SELECT id,sequence,item_type,entity_id,title,payload_file_id,status,error,result_work_id,created_at,updated_at,target_type FROM job_history_items WHERE job_id=?1 AND (?2 IS NULL OR sequence>?2) ORDER BY sequence LIMIT ?3")?;
         let rows = stmt
@@ -201,7 +201,7 @@ impl Library {
         limit: usize,
     ) -> Result<Vec<JobHistoryLog>> {
         let limit = page_limit(limit)?;
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         require_job(&conn, job)?;
         let mut stmt = conn.prepare("SELECT id,sequence,log_type,message,created_at FROM job_history_logs WHERE job_id=?1 AND (?2 IS NULL OR sequence>?2) ORDER BY sequence LIMIT ?3")?;
         let rows = stmt
@@ -220,7 +220,7 @@ impl Library {
 
     /// 対象のジョブと項目の所属を照合し、元の JSON の字句を返す。
     pub fn job_history_payload(&self, job: LibraryId, item: LibraryId) -> Result<String> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let hash: Option<Vec<u8>> = conn.query_row("SELECT i.payload_file_id FROM job_history_items i JOIN job_history j ON j.id=i.job_id WHERE j.id=?1 AND j.sealed=1 AND i.id=?2",params![job.as_bytes().as_slice(),item.as_bytes().as_slice()],|r|r.get(0)).optional()?;
         let hash = hash.ok_or(Error::ResourceUnavailable)?;
         let hash = Fingerprint(

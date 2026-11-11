@@ -254,7 +254,7 @@ impl Library {
         entity: LibraryId,
         scope: ResourceScope,
     ) -> Result<ResourceManifest> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         let base_snapshot = require_scope(&conn, entity, scope)?;
         let mut resources = resources(&conn, scope, None)?;
         resources.sort_by(|a, b| a.reference.cmp(&b.reference));
@@ -272,7 +272,7 @@ impl Library {
         scope: ResourceScope,
         reference: &ResourceReference,
     ) -> Result<ResourceInfo> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         require_scope(&conn, entity, scope)?;
         resources(&conn, scope, Some(reference))?
             .pop()
@@ -285,7 +285,7 @@ impl Library {
         scope: ResourceScope,
         reference: &ResourceReference,
     ) -> Result<ContentFile> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let conn = self.reader()?;
         require_scope(&conn, entity, scope)?;
         let file = resources(&conn, scope, Some(reference))?
             .pop()

@@ -87,9 +87,8 @@ impl LegacyImporter {
                             .and_then(|n| n.to_str())
                             .ok_or_else(|| Error::UnsafePath(path.clone()))?
                             .to_owned();
-                        let file = target.objects.put_path(&path)?;
                         Ok::<_, Error>(PreparedPreview {
-                            file: target.prepare_file(&file)?,
+                            file: target.store_path(&path)?,
                             name,
                             path,
                         })
