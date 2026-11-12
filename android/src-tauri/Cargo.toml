@@ -21,6 +21,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
+# サーバーから受け取るデータの型。サーバーと同じ定義を使う。
+piep-mobile-api = { path = "../../crates/piep-mobile-api" }
 serde_json = "1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "gzip"] }
 rustls = { version = "0.23", features = ["ring"] }

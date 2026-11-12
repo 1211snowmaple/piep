@@ -2,43 +2,28 @@
 //!
 //! SQLite のモデルをそのまま JSON 化すると Windows の絶対パスを公開する。
 //! 読み手の API は必ずここで公開専用の型へ変換する。
+//!
+//! 型そのものは `crates/piep-mobile-api` にある（携帯の Rust と画面の型が同じ定義を使う）。
+//! ここには DB の行からの変換を置く。
 
 use crate::database::{
     AssetEntry, DownloadEntry, DownloadPerson, DownloadSeries, EntityFacet, ReaderContentPage,
     ReaderMetadata, SearchV2Params, SearchV2Result, WorkCollection, WorkCollectionSummary,
 };
 use chrono::NaiveDate;
+pub use piep_mobile_api::{
+    MobileCollection, MobileCollectionCoverTile, MobileCollectionDetail, MobileCollectionMember,
+    MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage, MobileFacet,
+    MobileMetadata, MobilePage, MobilePerson, MobileRevision, MobileSearchPage,
+    MobileSeriesMembership, MobileVersion, MobileWork,
+};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
 /// Keep numbered-page jumps within the same work budget as the desktop UI.
 const MAX_NUMBERED_OFFSET: i64 = 5_000;
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileWork {
-    pub id: i64,
-    pub source: String,
-    pub source_id: String,
-    pub title: String,
-    pub author_name: String,
-    pub author_id: String,
-    pub content_type: String,
-    pub tags: Vec<String>,
-    pub excerpt: Option<String>,
-    pub text_length: i64,
-    pub asset_count: i64,
-    pub has_cover: bool,
-    pub current_version: i64,
-    pub content_hash: Option<String>,
-    pub favorite: bool,
-    pub series_title: Option<String>,
-    pub series_id: Option<String>,
-    pub source_created_at: Option<String>,
-    pub downloaded_at: String,
-}
 
 impl From<DownloadEntry> for MobileWork {
     fn from(work: DownloadEntry) -> Self {
@@ -64,15 +49,6 @@ impl From<DownloadEntry> for MobileWork {
             downloaded_at: work.downloaded_at,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileSearchPage {
-    pub items: Vec<MobileWork>,
-    pub next_cursor: Option<String>,
-    pub total_estimate: Option<i64>,
-    pub index_complete: bool,
 }
 
 impl From<SearchV2Result> for MobileSearchPage {
@@ -294,19 +270,6 @@ impl MobileSearchRequest {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileEntity {
-    pub source: String,
-    pub source_key: String,
-    pub display_name: String,
-    pub count: i64,
-    pub description: Option<String>,
-    pub sample_title: Option<String>,
-    pub has_cover: bool,
-    pub is_concluded: Option<bool>,
-}
-
 impl From<EntityFacet> for MobileEntity {
     fn from(entity: EntityFacet) -> Self {
         Self {
@@ -320,78 +283,6 @@ impl From<EntityFacet> for MobileEntity {
             is_concluded: entity.is_concluded,
         }
     }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileEntityPage {
-    pub items: Vec<MobileEntity>,
-    pub next_offset: Option<i64>,
-    pub total: i64,
-}
-
-/// 作者の中のシリーズ一覧。続きは不透明なカーソルで辿る。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileEntitySeriesPage {
-    pub items: Vec<MobileEntity>,
-    pub next_cursor: Option<String>,
-    pub total: i64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileFacet {
-    pub name: String,
-    pub count: i64,
-}
-
-/// 作者・シリーズの画面を一度で描くための情報。保存先のパスは含めない。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileEntityDetail {
-    pub source: String,
-    pub source_key: String,
-    pub display_name: String,
-    pub description: Option<String>,
-    pub work_count: i64,
-    pub has_cover: bool,
-    pub has_banner: bool,
-    pub is_concluded: Option<bool>,
-    pub published_count: Option<i64>,
-    pub links: Vec<String>,
-    pub tags: Vec<MobileFacet>,
-    pub series_count: Option<i64>,
-    pub collections: Vec<MobileCollection>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileCollection {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub collection_kind: String,
-    pub member_count: i64,
-    pub available_count: i64,
-    pub cover_work_id: Option<i64>,
-    pub cover_mode: String,
-    pub cover_revision: i64,
-    pub has_single_cover: bool,
-    pub has_file_cover: bool,
-    pub cover_tiles: Vec<MobileCollectionCoverTile>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub position: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileCollectionCoverTile {
-    pub source: String,
-    pub source_id: String,
-    pub title: String,
-    pub author_name: String,
-    pub has_cover: bool,
 }
 
 impl From<WorkCollectionSummary> for MobileCollection {
@@ -424,23 +315,6 @@ impl From<WorkCollectionSummary> for MobileCollection {
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileCollectionMember {
-    pub title: String,
-    pub author_name: String,
-    pub position: i64,
-    pub work: Option<MobileWork>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileCollectionDetail {
-    #[serde(flatten)]
-    pub summary: MobileCollection,
-    pub members: Vec<MobileCollectionMember>,
-}
-
 impl From<WorkCollection> for MobileCollectionDetail {
     fn from(collection: WorkCollection) -> Self {
         Self {
@@ -459,25 +333,6 @@ impl From<WorkCollection> for MobileCollectionDetail {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileVersion {
-    pub version: i64,
-    pub content_hash: Option<String>,
-    pub text_length: i64,
-    pub asset_count: i64,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobilePerson {
-    pub source: String,
-    pub key: String,
-    pub role: String,
-    pub display_name: String,
-}
-
 impl From<DownloadPerson> for MobilePerson {
     fn from(person: DownloadPerson) -> Self {
         Self {
@@ -489,15 +344,6 @@ impl From<DownloadPerson> for MobilePerson {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileSeriesMembership {
-    pub source: String,
-    pub key: String,
-    pub title: String,
-    pub content_order: Option<i64>,
-}
-
 impl From<DownloadSeries> for MobileSeriesMembership {
     fn from(series: DownloadSeries) -> Self {
         Self {
@@ -507,18 +353,6 @@ impl From<DownloadSeries> for MobileSeriesMembership {
             content_order: series.content_order,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileMetadata {
-    pub work: MobileWork,
-    pub people: Vec<MobilePerson>,
-    pub series: Vec<MobileSeriesMembership>,
-    pub versions: Vec<MobileVersion>,
-    pub is_edited: bool,
-    pub active_edit_id: Option<i64>,
-    pub active_edit_hash: Option<String>,
 }
 
 impl From<ReaderMetadata> for MobileMetadata {
@@ -546,37 +380,6 @@ impl From<ReaderMetadata> for MobileMetadata {
             is_edited: metadata.is_edited,
             active_edit_id,
             active_edit_hash,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobilePage {
-    pub page: usize,
-    pub page_count: usize,
-    pub html: String,
-    pub total_plain_text_chars: usize,
-    pub source_page_starts: Vec<usize>,
-    /// この本文がどの版のものか。端末が本文の前後でメタデータを取り直さずに済む。
-    pub revision: MobileRevision,
-}
-
-/// 本文の版を見分ける三つ組み。`MobileMetadata` の同じ値と一致する。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileRevision {
-    pub current_version: i64,
-    pub content_hash: Option<String>,
-    pub active_edit_hash: Option<String>,
-}
-
-impl From<&MobileMetadata> for MobileRevision {
-    fn from(metadata: &MobileMetadata) -> Self {
-        Self {
-            current_version: metadata.work.current_version,
-            content_hash: metadata.work.content_hash.clone(),
-            active_edit_hash: metadata.active_edit_hash.clone(),
         }
     }
 }
@@ -655,7 +458,7 @@ pub fn mobile_page(
         html,
         total_plain_text_chars: page.total_plain_text_chars,
         source_page_starts: page.source_page_starts,
-        revision,
+        revision: Some(revision),
     })
 }
 
@@ -706,7 +509,7 @@ mod tests {
         assert!(!safe.html.contains("width="));
         assert!(!safe.html.contains("C:\\Users"));
         assert!(!safe.html.contains("data-local-path"));
-        assert_eq!(safe.revision, revision);
+        assert_eq!(safe.revision.as_ref(), Some(&revision));
         let sized = mobile_page(page.clone(), &assets, revision.clone(), |_| {
             Some((1200, 1697))
         })

@@ -1,0 +1,11 @@
+[package]
+name = "api-types"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "携帯へ渡すデータの型（crates/piep-mobile-api）から TypeScript の型を生成する。"
+
+# ipc-extract と同じく、ソースを「テキストとして」読むだけ。アプリには依存しない。
+[dependencies]
+syn = { version = "2", features = ["full", "parsing"] }
+anyhow = "1"

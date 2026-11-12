@@ -1,3 +1,7 @@
+import type {
+  MobileCollection, MobileCollectionMember, MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage,
+  MobileMetadata, MobilePage, MobilePerson, MobileRevision, MobileSearchPage, MobileSeriesMembership, MobileWork,
+} from "@shared/mobileApi";
 import { invoke } from "@tauri-apps/api/core";
 import { markFavoriteRead, nextFavoriteRevision } from "./favoriteFreshness";
 
@@ -26,88 +30,32 @@ export function pcConnectionIssue(status: PcConnectionStatus): string | null {
   return pcConnectionIssueText[status.issue];
 }
 
-export interface PcWork {
-  id: number;
-  source: string;
-  sourceId: string;
-  title: string;
-  authorName: string;
-  authorId: string;
-  contentType: string;
-  tags: string[];
-  excerpt: string | null;
-  textLength: number;
-  assetCount: number;
-  hasCover: boolean;
-  currentVersion: number;
-  contentHash: string | null;
-  favorite: boolean;
+// サーバーから届く型は shared/mobileApi.ts（Rust の定義から生成）にある。
+// ここでは、画面だけが持つ項目と、端末に残っている古い保存分には無い項目を足し引きする。
+
+type Older<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
+
+export type PcWork = Older<MobileWork, "sourceCreatedAt" | "downloadedAt"> & {
   /** フロント側だけの取得順。お気に入りの書き込みより新しい応答を見分ける。 */
   favoriteReadSequence?: number;
-  seriesTitle: string | null;
-  seriesId: string | null;
-  sourceCreatedAt?: string | null;
-  downloadedAt?: string;
-}
+};
 
-export interface PcEntity {
-  source: string;
-  sourceKey: string;
-  displayName: string;
-  count: number;
-  description: string | null;
-  sampleTitle: string | null;
-  hasCover: boolean;
-  isConcluded: boolean | null;
-}
+export type PcEntity = MobileEntity;
 
-export interface PcEntityPage {
-  items: PcEntity[];
-  nextOffset: number | null;
-  total: number;
-}
+export type PcEntityPage = MobileEntityPage;
 
-export interface PcEntitySeriesPage {
-  items: PcEntity[];
-  nextCursor: string | null;
-  total: number;
-}
+export type PcEntitySeriesPage = MobileEntitySeriesPage;
 
-export interface PcEntityDetail {
-  source: string;
-  sourceKey: string;
-  displayName: string;
-  description: string | null;
-  workCount: number;
-  hasCover: boolean;
-  hasBanner: boolean;
-  isConcluded: boolean | null;
-  publishedCount: number | null;
-  links: string[];
-  tags: { name: string; count: number }[];
-  seriesCount: number | null;
-  collections: PcCollection[];
-}
+export type PcEntityDetail = Omit<MobileEntityDetail, "collections"> & { collections: PcCollection[] };
 
-export interface PcCollection {
-  id: string;
-  name: string;
-  description: string | null;
-  collectionKind: string;
-  memberCount: number;
-  availableCount: number;
-  coverWorkId: number | null;
+export type PcCollection = Older<Omit<MobileCollection, "coverMode" | "position">, "coverRevision" | "hasSingleCover" | "hasFileCover" | "coverTiles"> & {
   coverMode?: "mosaic" | "spine" | "single" | "sigil" | "file";
-  coverRevision?: number;
-  hasSingleCover?: boolean;
-  hasFileCover?: boolean;
-  coverTiles?: { source: string; sourceId: string; title: string; authorName: string; hasCover: boolean }[];
   position?: number | null;
-}
+};
 
-export interface PcCollectionDetail extends PcCollection {
-  members: { title: string; authorName: string; position: number; work: PcWork | null }[];
-}
+export type PcCollectionDetail = PcCollection & {
+  members: (Omit<MobileCollectionMember, "work"> & { work: PcWork | null })[];
+};
 
 export interface PcWorkScope {
   kind: "person" | "series";
@@ -115,12 +63,7 @@ export interface PcWorkScope {
   key: string;
 }
 
-export interface PcSearchPage {
-  items: PcWork[];
-  nextCursor: string | null;
-  totalEstimate: number | null;
-  indexComplete: boolean;
-}
+export type PcSearchPage = Omit<MobileSearchPage, "items"> & { items: PcWork[] };
 
 export interface PcSearchCriteria {
   text: string;
@@ -155,45 +98,19 @@ export type PcWorkSearch = Omit<PcSearchCriteria, "sort"> & { sort: PcWorkSort }
 
 export const defaultPcSearch: PcSearchCriteria = { text: "", source: "", contentType: "", author: "", authorExclude: "", favorite: false, tag: "", tagExclude: "", tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", revision: "", edit: "", cover: "", dateField: "downloaded_at", dateFrom: "", dateTo: "", sort: "remembered" };
 
-export interface PcMetadata {
+export type PcMetadata = Omit<MobileMetadata, "work" | "people" | "series"> & {
   work: PcWork;
   people?: PcPerson[];
   series?: PcSeriesMembership[];
-  versions: { version: number; contentHash: string | null; textLength: number; assetCount: number; createdAt: string }[];
-  isEdited: boolean;
-  activeEditId: number | null;
-  activeEditHash: string | null;
-}
+};
 
-export interface PcPerson {
-  source: string;
-  key: string;
-  role: string;
-  displayName: string;
-}
+export type PcPerson = MobilePerson;
 
-export interface PcSeriesMembership {
-  source: string;
-  key: string;
-  title: string;
-  contentOrder: number | null;
-}
+export type PcSeriesMembership = MobileSeriesMembership;
 
-export interface PcPage {
-  page: number;
-  pageCount: number;
-  html: string;
-  totalPlainTextChars: number;
-  sourcePageStarts: number[];
-  /** この本文の版。古いサーバーは返さない。 */
-  revision?: PcRevision;
-}
+export type PcPage = MobilePage;
 
-export interface PcRevision {
-  currentVersion: number;
-  contentHash: string | null;
-  activeEditHash: string | null;
-}
+export type PcRevision = MobileRevision;
 
 export interface OfflinePage extends PcPage {
   generation: string;

@@ -2831,6 +2831,7 @@ version = "0.7.4"
 dependencies = [
  "base64 0.23.1",
  "image",
+ "piep-mobile-api",
  "regex",
  "reqwest",
  "rusqlite",
@@ -2845,6 +2846,13 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "piep-mobile-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
