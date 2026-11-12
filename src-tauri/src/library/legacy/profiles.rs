@@ -297,11 +297,14 @@ impl LegacyImporter {
                 && images
                     .iter()
                     .all(|(slot, image)| fixed_name(&image.name, slot));
+            // 画像を一枚も持たない版は、作者・シリーズとも容量を 0 と記録していた。
+            let recorded_no_assets = images.is_empty() && recorded_size == Some(0);
             Ok(asset_count == images.len() as i64
                 && recorded_size.is_none_or(|size| {
                     size >= 0
                         && (size as u64 == bytes.len() as u64 + assets
-                            || (legacy_asset_accounting && size as u64 == assets))
+                            || (legacy_asset_accounting && size as u64 == assets)
+                            || recorded_no_assets)
                 }))
         };
         if !accounted(&images)? {
@@ -312,12 +315,19 @@ impl LegacyImporter {
             let (recorded, _left): (BTreeMap<_, _>, BTreeMap<_, _>) = images
                 .into_iter()
                 .partition(|(slot, _)| recorded_url(slot).is_some());
-            if recorded.len() == total || !accounted(&recorded)? {
+            let none = BTreeMap::new();
+            images = if recorded.len() < total && accounted(&recorded)? {
+                recorded
+            } else if accounted(&none)? {
+                // 版は「画像なし・容量 0」と記録している。フォルダーにある画像は、その版を
+                // 保存した後で同じ場所へ足されたもの。当時は未取得として移し、足された
+                // 画像は使わずに置いて、全件照合で未解決として残す。
+                none
+            } else {
                 return Err(Error::Integrity(format!(
                     "プロフィール {old} のファイル数・容量が記録と違います"
                 )));
-            }
-            images = recorded;
+            };
         }
         let mut media = Vec::new();
         let mut image_paths = Vec::new();
@@ -666,6 +676,62 @@ INSERT INTO series VALUES(8,'pixiv','series','Series title',1,NULL,NULL,1,3);").
             .unwrap();
         assert_eq!(again.unresolved_files, 4);
         assert_eq!(library.snapshots(series_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn versions_recorded_without_images_migrate_and_leave_later_files_unresolved() {
+        // 稼働棚の 784 版と同じ形。画像なし・容量 0 と記録され、うち一部は後から
+        // 同じ場所へ表紙が足されている。
+        let fixture = Fixture::new();
+        let old = fixture.0.join("old");
+        let conn = rusqlite::Connection::open(old.join("piep.db")).unwrap();
+        for (id, key, later) in [(4, "bare", false), (5, "added", true)] {
+            let dir = format!("series/pixiv/{key}/v1");
+            fs::create_dir_all(old.join(&dir).join("assets")).unwrap();
+            let raw = serde_json::to_vec(&json!({"source":"pixiv","sourceKey":key,"title":"Title","coverUrl":"https://i.pximg.net/c/240x480_80/cover.jpg"})).unwrap();
+            fs::write(old.join(&dir).join("original.json"), &raw).unwrap();
+            if later {
+                fs::write(
+                    old.join(&dir).join("assets/cover_later.jpg"),
+                    b"added later",
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO entity_versions VALUES(?1,'series','pixiv',?2,1,?3,0,0)",
+                params![id, key, format!("{dir}/original.json")],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let library = Library::create(&fixture.0.join("new")).unwrap();
+        let source = LegacyImporter::open(&old).unwrap();
+        let report = source
+            .import(&library, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        assert_eq!(report.profile_snapshots, 5, "{:?}", report.unresolved);
+        assert_eq!(report.unresolved_files, 1, "{:?}", report.unresolved);
+        let conn = library.conn.lock().unwrap();
+        // 当時の表紙は、URL だけが分かっている未取得として残る。
+        let unsaved: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM snapshot_media m JOIN revision_snapshots s ON s.id=m.snapshot_id JOIN external_identities e ON e.entity_id=s.entity_id WHERE e.external_key IN ('bare','added') AND m.slot='cover' AND m.rendition_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unsaved, 2);
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM migration_records WHERE source_table='__filesystem__' AND source_key='series/pixiv/added/v1/assets/cover_later.jpg'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap(),
+            "unresolved"
+        );
+        drop(conn);
+        library.verify().unwrap();
     }
 
     #[test]
