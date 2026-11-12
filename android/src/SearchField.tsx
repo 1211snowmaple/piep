@@ -1,5 +1,5 @@
+import { Icons } from "./icons";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { Search, X } from "lucide-react";
 import { searchPcSuggestions, type SearchSuggestion } from "./pcApi";
 
 /**
@@ -44,7 +44,7 @@ export function SearchField({ value, placeholder, label, onChange, onSubmit, onS
     else { onSubmit(value.trim()); setDismissed(true); input.current?.blur(); }
   }}>
     <div className="search-field" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false); }}>
-      <button type="submit" className="search-field-go" aria-label="検索"><Search aria-hidden="true" /></button>
+      <button type="submit" className="search-field-go" aria-label="検索"><Icons.search aria-hidden="true" /></button>
       <input ref={input} type="search" enterKeyHint="search" aria-label={label} placeholder={placeholder} value={value}
         role={onSuggestion ? "combobox" : undefined} aria-autocomplete={onSuggestion ? "list" : undefined}
         aria-expanded={onSuggestion ? expanded : undefined} aria-controls={expanded ? id : undefined}
@@ -59,7 +59,7 @@ export function SearchField({ value, placeholder, label, onChange, onSubmit, onS
             setActive((old) => event.key === "ArrowDown" ? (old + 1) % items.length : old <= 0 ? items.length - 1 : old - 1);
           }
         }} onChange={(event) => { setDismissed(false); onChange(event.target.value); }} />
-      {value && <button type="button" className="search-field-clear" aria-label="検索語を消す" onClick={() => { onChange(""); onSubmit(""); }}><X aria-hidden="true" /></button>}
+      {value && <button type="button" className="search-field-clear" aria-label="検索語を消す" onClick={() => { onChange(""); onSubmit(""); }}><Icons.cancel aria-hidden="true" /></button>}
       {expanded && <div className="search-suggestions" id={id} role="listbox" aria-label="検索候補">{items.map((item, index) => <button
         key={`${item.kind}:${item.source ?? ""}:${item.sourceKey ?? item.value}`} id={`${id}-${index}`} type="button" role="option" tabIndex={-1} aria-selected={active === index}
         onMouseDown={(event) => event.preventDefault()} onClick={() => choose(item)}>

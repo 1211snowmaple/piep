@@ -1,4 +1,4 @@
-import { ChevronRight } from "lucide-react";
+import { Icons } from "./icons";
 import type { PcWork } from "./pcApi";
 import { WorkThumbnail } from "./WorkThumbnail";
 import type { RecentWork } from "./recentReading";
@@ -14,7 +14,7 @@ import { readingPercent } from "./workText";
 export function ContinueShelf({ items, onOpen, onAll }: { items: RecentWork[]; onOpen: (work: PcWork) => void; onAll: () => void }) {
   if (!items.length) return null;
   return <section className="continue-shelf" aria-label="続きを読む">
-    <div className="continue-heading"><h2>続きを読む</h2><button type="button" className="continue-all" onClick={onAll}>すべて<ChevronRight aria-hidden="true" /></button></div>
+    <div className="continue-heading"><h2>続きを読む</h2><button type="button" className="continue-all" onClick={onAll}>すべて<Icons.next aria-hidden="true" /></button></div>
     <div className="continue-row">{items.slice(0, 12).map(({ work, progress }) => {
       const percent = readingPercent(progress);
       return <button type="button" className="continue-item" key={work.id} aria-label={`${work.title}の続きを読む（${percent}%）`} title={work.title} onClick={() => onOpen(work)}>

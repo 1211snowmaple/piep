@@ -1,5 +1,5 @@
+import { Icons } from "./icons";
 import { useEffect, useRef, useState } from "react";
-import { ArrowDownWideNarrow, Check } from "lucide-react";
 import { relevanceLabel, sortGroups, sortLabels, type MenuGroup } from "./librarySort";
 
 export { relevanceLabel };
@@ -46,11 +46,11 @@ export function ChoiceMenu<T extends string>({ current, label, groups, note, mar
 
   return <div className="sort-menu" ref={root}>
     <button ref={trigger} type="button" className="sort-button" data-condition={marked ? "" : undefined} aria-haspopup="menu" aria-expanded={open} aria-label={`並び替え（現在は${label}）`} onClick={() => setOpen((value) => !value)}>
-      <ArrowDownWideNarrow aria-hidden="true" />
+      <Icons.sort aria-hidden="true" />
     </button>
     {open && <div className="sort-popover" role="menu" aria-label="並び替え">
       {note && <p className="sort-popover-note">{note}</p>}
-      {groups.map((group) => <div className="sort-popover-group" key={group.label}><span>{group.label}</span>{group.items.map((item) => <button key={item.value} type="button" role="menuitemradio" aria-checked={current === item.value} onClick={() => choose(item.value)}><span>{item.label}</span>{current === item.value && <Check aria-hidden="true" />}</button>)}</div>)}
+      {groups.map((group) => <div className="sort-popover-group" key={group.label}><span>{group.label}</span>{group.items.map((item) => <button key={item.value} type="button" role="menuitemradio" aria-checked={current === item.value} onClick={() => choose(item.value)}><span>{item.label}</span>{current === item.value && <Icons.confirm aria-hidden="true" />}</button>)}</div>)}
     </div>}
   </div>;
 }

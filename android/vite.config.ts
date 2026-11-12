@@ -7,6 +7,9 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(() => ({
   plugins: [react()],
+  // リポジトリの根の postcss.config.cjs はデスクトップ（Mantine）のもの。拾うと light-dark() が
+  // Mantine の属性向けに書き換えられ、携帯の暗い配色が効かなくなる。
+  css: { postcss: { plugins: [] } },
   // デスクトップと共通の規則は、リポジトリの根の shared/ に置いてある。
   // shared/ から読む依存も、携帯に入れたものを使う（根の node_modules はデスクトップのもの）。
   resolve: {

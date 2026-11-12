@@ -4,7 +4,8 @@ import { rememberWindowColorScheme, showStartupFailure, waitForLibrary } from "@
 import indexHtml from "../../index.html?raw";
 import screenColours from "../../public/startup.css?raw";
 import windowColours from "../../src-tauri/src/commands/startup.rs?raw";
-import appColours from "../styles/app.css?raw";
+// アプリの地の色は、携帯と共通の定義にある。
+import appColours from "@shared/design/tokens.css?raw";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), convertFileSrc: (path: string) => path }));
 
@@ -61,7 +62,7 @@ describe("startup colours", () => {
   ])("agree in $name", ({ hex, rust }) => {
     expect(windowColours).toContain(rust);
     expect(screenColours).toContain(`--startup-background: ${hex}`);
-    expect(appColours).toContain(hex);
+    expect(appColours).toContain(`--piep-bg: ${hex};`);
   });
 
   it("keeps index.html free of <style>, which would switch off Mantine's runtime styles", () => {

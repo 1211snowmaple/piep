@@ -1,4 +1,4 @@
-import { Minus, Plus } from "lucide-react";
+import { Icons } from "./icons";
 import { typeLimits, type ReaderBehavior, type ReaderFont, type ReaderTheme, type ReaderType } from "./readerPrefs";
 
 const themes: { id: ReaderTheme; label: string }[] = [
@@ -34,9 +34,9 @@ function SliderRow({ label, value, display, min, max, step, stepBy = step, onCha
   return <div className={className ? `reader-slider ${className}` : "reader-slider"}>
     <div className="reader-control-heading"><span>{label}</span><strong>{display}</strong></div>
     <div className="reader-slider-row">
-      <button type="button" className="reader-step" disabled={value <= min} onClick={() => onChange(clamp(value - stepBy))} aria-label={decrease}><Minus aria-hidden="true" /></button>
+      <button type="button" className="reader-step" disabled={value <= min} onClick={() => onChange(clamp(value - stepBy))} aria-label={decrease}><Icons.remove aria-hidden="true" /></button>
       <input type="range" min={min} max={max} step={step} value={value} aria-label={label} onChange={(event) => onChange(Number(event.target.value))} />
-      <button type="button" className="reader-step" disabled={value >= max} onClick={() => onChange(clamp(value + stepBy))} aria-label={increase}><Plus aria-hidden="true" /></button>
+      <button type="button" className="reader-step" disabled={value >= max} onClick={() => onChange(clamp(value + stepBy))} aria-label={increase}><Icons.add aria-hidden="true" /></button>
     </div>
   </div>;
 }

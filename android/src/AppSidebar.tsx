@@ -1,8 +1,8 @@
+import { Icons } from "./icons";
 import { useEffect, useState, type ReactNode, type Ref } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
-import { BookMarked, BookOpen, Heart, History, LibraryBig, Rows3, Search, Settings, X } from "lucide-react";
 import { PiepLockup } from "./PiepLockup";
 import type { AppPage } from "./appHistory";
 import { defaultPcSearch, searchPcWorks, type PcConnectionStatus, type PcSearchCriteria } from "./pcApi";
@@ -96,23 +96,23 @@ export function AppSidebar({ open, section, page, status, savedConditions, first
   return <aside className={open ? "sidebar mobile-open" : "sidebar"} id="app-navigation" aria-label="サイドバー">
     <div className="brand"><PiepLockup size={24} /></div>
     <nav className="side-nav" aria-label="画面の移動">
-      <div className="side-destination">{destination("pc", "ライブラリ", <LibraryBig className="icon" aria-hidden="true" />)}</div>
+      <div className="side-destination">{destination("pc", "ライブラリ", <Icons.library className="icon" aria-hidden="true" />)}</div>
       <div className="shelf-list">
-        <ShelfItem buttonRef={firstControlRef} icon={<Rows3 aria-hidden="true" />} label="すべて" count={all} active={active === "all"} onClick={() => onShelf("all")} />
-        <ShelfItem icon={<Heart aria-hidden="true" />} label="お気に入り" count={favorite} active={active === "favorite"} onClick={() => onShelf("favorite")} />
-        <ShelfItem icon={<BookMarked aria-hidden="true" />} label="読みかけ" count={reading.length || null} active={active === "reading"} onClick={() => onShelf("reading")} />
-        <ShelfItem icon={<BookOpen aria-hidden="true" />} label="読了" count={finished.length || null} active={active === "finished"} onClick={() => onShelf("finished")} />
-        <ShelfItem icon={<History aria-hidden="true" />} label="改稿あり" count={revised} active={active === "revised"} onClick={() => onShelf("revised")} />
+        <ShelfItem buttonRef={firstControlRef} icon={<Icons.allWorks aria-hidden="true" />} label="すべて" count={all} active={active === "all"} onClick={() => onShelf("all")} />
+        <ShelfItem icon={<Icons.favorite aria-hidden="true" />} label="お気に入り" count={favorite} active={active === "favorite"} onClick={() => onShelf("favorite")} />
+        <ShelfItem icon={<Icons.reading aria-hidden="true" />} label="読みかけ" count={reading.length || null} active={active === "reading"} onClick={() => onShelf("reading")} />
+        <ShelfItem icon={<Icons.finished aria-hidden="true" />} label="読了" count={finished.length || null} active={active === "finished"} onClick={() => onShelf("finished")} />
+        <ShelfItem icon={<Icons.versionHistory aria-hidden="true" />} label="改稿あり" count={revised} active={active === "revised"} onClick={() => onShelf("revised")} />
       </div>
       <div className="saved-search">
         <span className="sidebar-group-label">保存した検索</span>
         {savedConditions.length > 0
-          ? <ul>{savedConditions.map((condition) => <li key={condition.id}><button type="button" className="shelf-item" onClick={() => onCondition(condition)}><Search aria-hidden="true" /><span>{condition.name}</span></button><button type="button" className="saved-search-remove" aria-label={`${condition.name}を削除`} onClick={() => onRemoveCondition(condition)}><X aria-hidden="true" /></button></li>)}</ul>
+          ? <ul>{savedConditions.map((condition) => <li key={condition.id}><button type="button" className="shelf-item" onClick={() => onCondition(condition)}><Icons.search aria-hidden="true" /><span>{condition.name}</span></button><button type="button" className="saved-search-remove" aria-label={`${condition.name}を削除`} onClick={() => onRemoveCondition(condition)}><Icons.cancel aria-hidden="true" /></button></li>)}</ul>
           : <p>絞り込みの条件を保存すると、ここから開けます。</p>}
       </div>
       <div className="side-destination side-destination--end">
-        {destination("offline", "端末内", <BookOpen className="icon" aria-hidden="true" />)}
-        {destination("settings", "設定", <Settings className="icon" aria-hidden="true" />)}
+        {destination("offline", "端末内", <Icons.offlineShelf className="icon" aria-hidden="true" />)}
+        {destination("settings", "設定", <Icons.settings className="icon" aria-hidden="true" />)}
       </div>
     </nav>
     <div className={reachable ? "sidebar-bottom connected" : "sidebar-bottom"} role="status"><span className="status-dot" aria-hidden="true" /><span className="sidebar-connection">{connectionLabel(status)}</span>{version && <span className="sidebar-version">v{version}</span>}</div>

@@ -1,0 +1,104 @@
+/* piep の見た目の土台。デスクトップと携帯が同じ値を読む。
+   部品の形や並べ方はそれぞれの画面で決める。ここには色と書体の定義だけを置く。
+
+   light-dark() は使わない。デスクトップの PostCSS（postcss-preset-mantine）が
+   `[data-mantine-color-scheme=dark] :root` という、根の要素には決して当たらない
+   書き方へ変えてしまうため。暗い配色は、二つのアプリの切り替え方それぞれに書く。
+   二か所の暗い値が同じであることは tokens.test.ts が見る。 */
+:root {
+  /* ブランドの青と緑。0 が最も淡い。tokens.ts と同じ値。 */
+  --piep-blue-0: #edf8ff;
+  --piep-blue-1: #d8efff;
+  --piep-blue-2: #b8e2ff;
+  --piep-blue-3: #8dd1ff;
+  --piep-blue-4: #59b8ff;
+  --piep-blue-5: #279cff;
+  --piep-blue-6: #0d86f4;
+  --piep-blue-7: #0872d3;
+  --piep-blue-8: #0b61ad;
+  --piep-blue-9: #0c518d;
+  --piep-leaf-0: #f4fae8;
+  --piep-leaf-1: #e7f3cf;
+  --piep-leaf-2: #d0e9a3;
+  --piep-leaf-3: #b5dc72;
+  --piep-leaf-4: #9dcf49;
+  --piep-leaf-5: #86b918;
+  --piep-leaf-6: #729f12;
+  --piep-leaf-7: #5e8310;
+  --piep-leaf-8: #506b13;
+  --piep-leaf-9: #455b15;
+
+  --piep-font: "Segoe UI", "Yu Gothic UI", Meiryo, "Hiragino Sans", system-ui, -apple-system, sans-serif;
+
+  /* 面 */
+  --piep-bg: #f5f7fa;
+  --piep-surface: #fff;
+  --piep-rail: #fbfcfd;
+  --piep-control: #fff;
+  --piep-line: #e4e8ee;
+
+  /* 文字 */
+  --piep-text: #242a31;
+  --piep-muted: #798693;
+
+  /* 主の色。明るい地では 6、暗い地では 5（Mantine の primaryShade と同じ） */
+  --piep-blue: var(--piep-blue-6);
+  --piep-active: #e3f2ff;
+  --piep-active-text: var(--piep-blue-7);
+
+  /* 表紙のない作品の仮の面、タグ */
+  --piep-cover: #edf7f5;
+  --piep-cover-text: #446e65;
+  --piep-tag-bg: #f1f3f5;
+  --piep-tag-text: #495057;
+
+  /* 状態 */
+  --piep-ok: #23865f;
+  --piep-warn: #a9742b;
+  --piep-favorite: #d9486e;
+}
+
+/* 暗い配色を選んだとき。デスクトップは Mantine の属性、携帯は自前の属性で切り替える。 */
+:root[data-mantine-color-scheme="dark"],
+:root[data-piep-appearance="dark"] {
+  --piep-bg: #0d1117;
+  --piep-surface: #12171f;
+  --piep-rail: #11161e;
+  --piep-control: #202630;
+  --piep-line: #2a3039;
+  --piep-text: #e5e9ef;
+  --piep-muted: #9aa5b2;
+  --piep-blue: var(--piep-blue-5);
+  --piep-active: #17364e;
+  --piep-active-text: var(--piep-blue-3);
+  --piep-cover: #1d3532;
+  --piep-cover-text: #a5c5b7;
+  --piep-tag-bg: #2c2e33;
+  --piep-tag-text: #c1c2c5;
+  --piep-ok: #5fd3a2;
+  --piep-warn: #e8b565;
+  --piep-favorite: #ff8fab;
+}
+
+/* 携帯で「端末に合わせる」のとき。 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-mantine-color-scheme]):not([data-piep-appearance="light"]):not([data-piep-appearance="dark"]) {
+    --piep-bg: #0d1117;
+    --piep-surface: #12171f;
+    --piep-rail: #11161e;
+    --piep-control: #202630;
+    --piep-line: #2a3039;
+    --piep-text: #e5e9ef;
+    --piep-muted: #9aa5b2;
+    --piep-blue: var(--piep-blue-5);
+    --piep-active: #17364e;
+    --piep-active-text: var(--piep-blue-3);
+    --piep-cover: #1d3532;
+    --piep-cover-text: #a5c5b7;
+    --piep-tag-bg: #2c2e33;
+    --piep-tag-text: #c1c2c5;
+    --piep-ok: #5fd3a2;
+    --piep-warn: #e8b565;
+    --piep-favorite: #ff8fab;
+  }
+}

@@ -1,7 +1,9 @@
+import { Icons } from "./icons";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { isTauri } from "@tauri-apps/api/core";
-import { ArrowUp, BookOpen, ChevronLeft, LibraryBig, Menu, Plus, Settings } from "lucide-react";
+import "@shared/design/tokens.css";
+import "@shared/design/reader.css";
 import "./App.css";
 import "./App.desktop.css";
 import "./App.reader.css";
@@ -87,7 +89,7 @@ function storeSetting(key: string, value: string): void {
 }
 
 function Icon({ name }: { name: IconName }) {
-  const Component = { computer: LibraryBig, book: BookOpen, settings: Settings, menu: Menu }[name];
+  const Component = { computer: Icons.library, book: Icons.offlineShelf, settings: Icons.settings, menu: Icons.appMenu }[name];
   return <Component className="icon" aria-hidden="true" />;
 }
 
@@ -563,9 +565,9 @@ function App() {
       : reading ? (
       <div className={`reader-screen reader-theme--${readerTheme} reader-bars--pinned`}>
         <header className="reader-toolbar">
-          <button className="reader-icon-button" onClick={closeReader} aria-label="本棚に戻る"><ChevronLeft aria-hidden="true" /></button>
+          <button className="reader-icon-button" onClick={closeReader} aria-label="本棚に戻る"><Icons.navigateUp aria-hidden="true" /></button>
           <span className="reader-toolbar-title">表示サンプル</span>
-          <button className="reader-icon-button" onClick={() => changeReaderType({ fontSize: fontSize >= typeLimits.fontSize.max ? typeLimits.fontSize.min : fontSize + 2 })} aria-label="文字を大きくする"><Plus aria-hidden="true" /></button>
+          <button className="reader-icon-button" onClick={() => changeReaderType({ fontSize: fontSize >= typeLimits.fontSize.max ? typeLimits.fontSize.min : fontSize + 2 })} aria-label="文字を大きくする"><Icons.add aria-hidden="true" /></button>
         </header>
         <main className="reader-scroll" key={page} ref={previewScrollRef} tabIndex={0} aria-label="表示サンプルの本文。Page Up、Page Down、左右矢印、Spaceで移動" onKeyDown={(event) => handleReaderKeyboard(event, page, preview.pages.length, (next, edge) => { previewKeyboardPageChange.current = true; previewKeyboardEnd.current = edge === "end"; setPage(next); })}>
             <article className={`reading-paper reader-font--${fontFamily}`} style={{ maxWidth: `${readerWidth}px`, fontSize: `${fontSize}px`, lineHeight }}>
@@ -591,7 +593,7 @@ function App() {
         <header className="mobile-header"><button ref={sidebarToggleRef} className="sidebar-toggle" type="button" onClick={() => setSidebarOpen((open) => !open)} aria-label={sidebarOpen ? "サイドバーを閉じる" : "サイドバーを開く"} aria-expanded={sidebarOpen} aria-controls="app-navigation"><Icon name="menu" /></button><PiepLockup size={22} /></header>
         {sidebarOpen && <button className="mobile-sidebar-scrim" type="button" onClick={() => setSidebarOpen(false)} aria-label="サイドバーを閉じる" />}
         {/* 一覧の上端に高さ 0 の足場を置き、そこから吊るす。上の見出しの高さや端末の余白に依らず、必ず一覧の上に乗る。 */}
-        <div className="scroll-top-anchor"><PullIndicator {...listPull} />{scrolledFar && <button className="scroll-top" type="button" onClick={() => { setScrolledFar(false); mainRef.current?.scrollTo({ top: 0, behavior: "smooth" }); }}><ArrowUp aria-hidden="true" />一番上へ</button>}</div>
+        <div className="scroll-top-anchor"><PullIndicator {...listPull} />{scrolledFar && <button className="scroll-top" type="button" onClick={() => { setScrolledFar(false); mainRef.current?.scrollTo({ top: 0, behavior: "smooth" }); }}><Icons.up aria-hidden="true" />一番上へ</button>}</div>
         <main className="main-content" ref={mainRef}>
           {currentPage.name === "library" && <AppUpdateNotice info={appUpdate} onOpenSettings={() => showSection("settings")} />}
           {currentPage.name === "library" && <PcLibrary page={currentPage} status={pcConnection} statusLoading={isTauri() && statusQuery.isPending} onOpenWork={openOnlineWork} onOpenDetail={openOnlineDetail} onGoToSettings={() => showSection("settings")} onSaved={savedWorkChanged} onSaveCondition={saveCondition} savedRevision={savedRevision} pagingMode={pagingMode} showContinue={continueShelf === "show"} rememberedSort={rememberedSort} onRememberedSortChange={changeRememberedSort} />}

@@ -1,5 +1,6 @@
+import { CONTENT_TYPE_LABELS } from "@shared/format";
+import { Icons } from "./icons";
 import { useLayoutEffect, useRef, useState } from "react";
-import { Check, Download, LoaderCircle, SquarePen, X } from "lucide-react";
 import { ProviderMark } from "./ProviderMark";
 import { WorkThumbnail } from "./WorkThumbnail";
 import { WorkFacts, workFacts } from "./WorkFacts";
@@ -62,7 +63,7 @@ export function ReaderInfoSheet({ versions, selectedVersion, latestEdited, onVer
           <button type="button" role="tab" aria-selected={activeTab === "outline"} onClick={() => onTabChange("outline")}>目次</button>
           <button type="button" role="tab" aria-selected={activeTab === "info"} onClick={() => onTabChange("info")}>作品情報</button>
         </div> : <h2>作品情報</h2>}
-        <button type="button" className="reader-icon-button" onClick={onClose} aria-label="閉じる"><X aria-hidden="true" /></button>
+        <button type="button" className="reader-icon-button" onClick={onClose} aria-label="閉じる"><Icons.cancel aria-hidden="true" /></button>
       </header>
       <div className="reader-sheet-body">
         {activeTab === "outline" ? <ol className="reader-toc">
@@ -75,7 +76,7 @@ export function ReaderInfoSheet({ versions, selectedVersion, latestEdited, onVer
           <div className="reader-info-hero">
             <span className="reader-info-cover"><WorkThumbnail work={work} offline={offline} snapshotGeneration={snapshotGeneration} variant="detail" /></span>
             <div className="reader-info-heading">
-              <div className="reader-info-labels"><ProviderMark source={work.source} /><span>{work.contentType === "novel" ? "小説" : "作品"}</span>{isEdited && <span><SquarePen aria-hidden="true" />編集版</span>}{offline && <span>端末に保存</span>}</div>
+              <div className="reader-info-labels"><ProviderMark source={work.source} /><span>{CONTENT_TYPE_LABELS[work.contentType] ?? "作品"}</span>{isEdited && <span><Icons.edit aria-hidden="true" />編集版</span>}{offline && <span>端末に保存</span>}</div>
               {work.seriesTitle && (navigation.canBrowseServer && work.seriesId
                 ? <button type="button" className="reader-info-series" onClick={() => navigation.openEntity("series", work.source, work.seriesId!, work.seriesTitle!)}>{work.seriesTitle}</button>
                 : <p className="reader-info-series">{work.seriesTitle}</p>)}
@@ -108,8 +109,8 @@ export function ReaderInfoSheet({ versions, selectedVersion, latestEdited, onVer
       {/* 保存は読むボタンと同じく、面のいちばん下に横いっぱいで置く。 */}
       {activeTab === "info" && !offline && <footer className="reader-info-footer">
         {saveMessage === "端末に保存しました"
-          ? <span className="reader-info-save" data-done="true" role="status"><Check aria-hidden="true" />端末に保存しました</span>
-          : <button type="button" className="reader-info-save" data-busy={saving || undefined} disabled={saving} onClick={onSave}>{saving ? <LoaderCircle aria-hidden="true" /> : <Download aria-hidden="true" />}{saving ? "保存しています…" : selectedVersion !== null ? "最新版を端末に保存" : "端末に保存"}</button>}
+          ? <span className="reader-info-save" data-done="true" role="status"><Icons.confirm aria-hidden="true" />端末に保存しました</span>
+          : <button type="button" className="reader-info-save" data-busy={saving || undefined} disabled={saving} onClick={onSave}>{saving ? <Icons.busy aria-hidden="true" /> : <Icons.saveOffline aria-hidden="true" />}{saving ? "保存しています…" : selectedVersion !== null ? "最新版を端末に保存" : "端末に保存"}</button>}
       </footer>}
     </aside>
   </div>;

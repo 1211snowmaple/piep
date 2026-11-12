@@ -1,4 +1,10 @@
 import {
+  ALargeSmall,
+  ChevronsLeft,
+  ChevronsRight,
+  LoaderCircle,
+  Rows3,
+  TableOfContents,
   Activity,
   Send,
   LogOut,
@@ -312,6 +318,29 @@ export const Icons = {
   secureConnection: LockKeyhole,
   readerSettings: Settings2,
   typography: Type,
+
+  // ---- 携帯だけの役割 -------------------------------------------------------
+  /** 上部のバーで前の画面へ戻る。携帯では矢印でなく山形にする。 */
+  navigateUp: ChevronLeft,
+  /** 棚の「すべて」。 */
+  allWorks: Rows3,
+  /** 棚の「読みかけ」。 */
+  reading: BookMarked,
+  /** 棚の「読了」。 */
+  finished: BookOpen,
+  /** 端末に保存した作品の棚。 */
+  offlineShelf: BookOpen,
+  /** 作品を端末に保存する。 */
+  saveOffline: Download,
+  /** 処理の途中。回して見せる。 */
+  busy: LoaderCircle,
+  /** 読書画面の目次。 */
+  tableOfContents: TableOfContents,
+  /** 読書画面の文字設定。 */
+  textSettings: ALargeSmall,
+  /** 読書画面で、まとめて前へ・先へ送る。 */
+  skipBack: ChevronsLeft,
+  skipForward: ChevronsRight,
 
   // ---- Editor blocks -------------------------------------------------------
   paragraph: Pilcrow,

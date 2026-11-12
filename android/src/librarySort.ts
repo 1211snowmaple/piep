@@ -1,3 +1,4 @@
+import { contentTypeLabel } from "@shared/format";
 import { ENTITY_SORT_OPTIONS, RELEVANCE_SORT_OPTION, SERIES_ORDER_SORT_OPTIONS, WORK_SORT_OPTIONS, sortLabel, type SortChoice } from "@shared/sortOptions";
 import { defaultPcSearch, type OfflineWork, type PcSearchCriteria, type PcSort, type PcWorkSort } from "./pcApi";
 
@@ -105,7 +106,7 @@ export function describeCondition(criteria: PcSearchCriteria): string {
   const parts: string[] = [];
   if (criteria.text) parts.push(`「${criteria.text}」`);
   if (criteria.source) parts.push(criteria.source === "fanbox" ? "FANBOX" : "pixiv");
-  if (criteria.contentType) parts.push({ novel: "小説", article: "記事", text: "テキスト", image: "画像", file: "ファイル" }[criteria.contentType]);
+  if (criteria.contentType) parts.push(contentTypeLabel(criteria.contentType));
   if (criteria.author) parts.push(criteria.author);
   if (criteria.tag) parts.push(`#${criteria.tag}`);
   if (criteria.favorite) parts.push("お気に入り");

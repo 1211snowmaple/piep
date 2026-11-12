@@ -1,5 +1,5 @@
+import { Icons } from "./icons";
 import { useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from "lucide-react";
 
 /**
  * 番号の並びを作る。先頭と末尾は常に出し、離れたところは省略する。
@@ -42,13 +42,13 @@ export function ReaderPager({ page, pageCount, disabled, onChange }: { page: num
     setJumpOpen(false);
   };
   return <nav className="reader-pager" aria-label="ページの移動">
-    {wide && <button type="button" disabled={disabled || current <= 1} onClick={() => go(1)} aria-label="最初のページ"><ChevronsLeft aria-hidden="true" /></button>}
-    <button type="button" disabled={disabled || current <= 1} onClick={() => go(current - 1)} aria-label="前のページ"><ChevronLeft aria-hidden="true" /></button>
+    {wide && <button type="button" disabled={disabled || current <= 1} onClick={() => go(1)} aria-label="最初のページ"><Icons.skipBack aria-hidden="true" /></button>}
+    <button type="button" disabled={disabled || current <= 1} onClick={() => go(current - 1)} aria-label="前のページ"><Icons.previous aria-hidden="true" /></button>
     {pageButtonItems(current, pageCount, wide ? 2 : 0).map((item) => typeof item === "number"
       ? <button key={item} type="button" disabled={disabled} aria-current={item === current ? "page" : undefined} aria-label={`${item} ページ`} onClick={() => { if (item === current) setJumpOpen((open) => !open); else go(item); }}>{item}</button>
       : <button key={item} type="button" className="reader-pager-gap" onClick={() => setJumpOpen((open) => !open)} aria-label="ページ番号を指定">…</button>)}
-    <button type="button" disabled={disabled || current >= pageCount} onClick={() => go(current + 1)} aria-label="次のページ"><ChevronRight aria-hidden="true" /></button>
-    {wide && <button type="button" disabled={disabled || current >= pageCount} onClick={() => go(pageCount)} aria-label="最後のページ"><ChevronsRight aria-hidden="true" /></button>}
+    <button type="button" disabled={disabled || current >= pageCount} onClick={() => go(current + 1)} aria-label="次のページ"><Icons.next aria-hidden="true" /></button>
+    {wide && <button type="button" disabled={disabled || current >= pageCount} onClick={() => go(pageCount)} aria-label="最後のページ"><Icons.skipForward aria-hidden="true" /></button>}
     {jumpOpen && <form className="reader-pager-jump" onSubmit={(event) => { event.preventDefault(); submitJump(); }}>
       <label>移動先のページ<input type="number" inputMode="numeric" min={1} max={pageCount} value={jumpValue} onChange={(event) => setJumpValue(event.target.value)} autoFocus onFocus={(event) => event.target.select()} /></label>
       <span>/ {pageCount}</span>
