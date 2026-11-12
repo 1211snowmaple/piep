@@ -10,6 +10,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 mod annotations;
 mod catalogue;
@@ -36,10 +37,36 @@ pub struct LegacyImportReport {
     pub files: u64,
     pub managed_files: u64,
     pub unresolved_files: u64,
+    /// 未解決として残った移行記録の数。切り替えの可否と件数の報告にはこれを使う。
+    pub unresolved_records: u64,
+    /// 未解決の説明。一つの記録に理由と記録名の二行が付くことがあるので、件数には使わない。
     pub unresolved: Vec<String>,
     pub preserved_tables: BTreeMap<String, usize>,
     /// 作り直せるので中身を保管しなかった旧表と、その行数。
     pub rebuildable_tables: BTreeMap<String, usize>,
+    /// 段階ごとにかかった時間。走った順。
+    pub stages: Vec<StageTime>,
+    #[serde(skip)]
+    lap: Option<Instant>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StageTime {
+    pub stage: String,
+    pub seconds: f64,
+}
+
+impl LegacyImportReport {
+    /// 前の区切りからここまでを一つの段階として記録する。
+    fn lap(&mut self, stage: &str) {
+        let now = Instant::now();
+        if let Some(since) = self.lap.replace(now) {
+            self.stages.push(StageTime {
+                stage: stage.to_owned(),
+                seconds: (now - since).as_secs_f64(),
+            });
+        }
+    }
 }
 
 /// 保存済みの作品から作り直せる索引の状態と、旧スキーマの版の印。
@@ -150,8 +177,15 @@ impl LegacyImporter {
             return Err(Error::UnsafePath(target.root().into()));
         }
         self.validate_migration_target(target)?;
-        let mut report = LegacyImportReport::default();
+        // 同じファイルを作品・資産の照合・全件照合で保管し直す。保管した実体は最後の
+        // `verify` で全件読むので、その間は一度確かめた実体を読み直さない。
+        let _verified = target.objects.verified_session();
+        let mut report = LegacyImportReport {
+            lap: Some(Instant::now()),
+            ..Default::default()
+        };
         self.preserve_tables(target, &mut report)?;
+        report.lap("preserve_tables");
         let profiles = self
             .normalize_profiles(target, cancel)
             .map(|(count, anomalies)| {
@@ -256,6 +290,7 @@ impl LegacyImporter {
             let _ = (title, author); // 現在値で過去の不明項目を埋めない。
             progress(&report);
         }
+        report.lap("works");
         self.finish_normalization(
             target,
             "current_versions",
@@ -360,8 +395,14 @@ impl LegacyImporter {
             &mut report,
         )?;
         report.files = target.verify()?;
+        report.lap("verify");
         target.conn.lock().map_err(|_|Error::Busy)?.execute("DELETE FROM migration_records WHERE source_table='__normalization__' AND source_key='migration'",[])?;
         report.unresolved.extend(target.activation_problems()?);
+        report.unresolved_records = target.reader()?.query_row(
+            "SELECT count(*) FROM migration_records WHERE status='unresolved'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64;
         report.unresolved.sort();
         report.unresolved.dedup();
         Ok(report)
@@ -378,6 +419,7 @@ impl LegacyImporter {
         if matches!(&result, Err(Error::Canceled)) {
             return Err(Error::Canceled);
         }
+        report.lap(domain);
         let conn = target.conn.lock().map_err(|_| Error::Busy)?;
         match result {
             Ok(()) => {

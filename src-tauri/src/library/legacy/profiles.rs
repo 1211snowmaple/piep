@@ -711,6 +711,10 @@ INSERT INTO series VALUES(8,'pixiv','series','Series title',1,NULL,NULL,1,3);").
             .unwrap();
         assert_eq!(report.profile_snapshots, 5, "{:?}", report.unresolved);
         assert_eq!(report.unresolved_files, 1, "{:?}", report.unresolved);
+        // 件数は説明の行数でなく、未解決の移行記録の数で数える。
+        assert_eq!(report.unresolved_records, 1, "{:?}", report.unresolved);
+        assert!(report.stages.iter().any(|s| s.stage == "filesystem"));
+        assert_eq!(report.stages.last().unwrap().stage, "verify");
         let conn = library.conn.lock().unwrap();
         // 当時の表紙は、URL だけが分かっている未取得として残る。
         let unsaved: i64 = conn
