@@ -23,7 +23,7 @@ body,
 }
 
 body {
-  background: light-dark(#f5f7fa, #0d1117);
+  background: var(--piep-bg);
   /* 日本語の折り返しを、文節の切れ目に寄せる。
      既定の `normal` は CJK をどの文字の間でも折るので、
      「入れられま／す。」「キモデブ／が溺愛されて」のように
@@ -132,7 +132,7 @@ select {
 
 .app-navbar {
   border-color: var(--app-shell-border-color);
-  background: light-dark(#fbfcfd, #11161e);
+  background: var(--piep-rail);
 }
 
 .app-main {
@@ -147,7 +147,7 @@ select {
   overflow-anchor: none;
   background:
     radial-gradient(circle at 85% -10%, light-dark(rgb(13 134 244 / 7%), rgb(39 156 255 / 9%)), transparent 32rem),
-    light-dark(#f5f7fa, #0d1117);
+    var(--piep-bg);
 }
 
 /* スクロールバーはアプリ全体で一つに決める。
@@ -157,8 +157,14 @@ select {
    Mantine の ScrollArea は中身に重なるので、幅を奪わない。 */
 :root {
   --piep-scrollbar-size: 10px;
-  --piep-scrollbar-thumb: light-dark(rgb(26 36 50 / 26%), rgb(255 255 255 / 22%));
-  --piep-scrollbar-thumb-hover: light-dark(rgb(26 36 50 / 44%), rgb(255 255 255 / 38%));
+  --piep-scrollbar-thumb: rgb(26 36 50 / 26%);
+  --piep-scrollbar-thumb-hover: rgb(26 36 50 / 44%);
+}
+/* 根の要素では light-dark() を使わない。PostCSS が `[data-mantine-color-scheme=dark] :root` へ
+   変えるので、暗い配色の値が当たらず、暗い地に暗いつまみが出ていた。 */
+:root[data-mantine-color-scheme="dark"] {
+  --piep-scrollbar-thumb: rgb(255 255 255 / 22%);
+  --piep-scrollbar-thumb-hover: rgb(255 255 255 / 38%);
 }
 ::-webkit-scrollbar { width: var(--piep-scrollbar-size); height: var(--piep-scrollbar-size); }
 ::-webkit-scrollbar-track,
@@ -2911,7 +2917,7 @@ textarea { scrollbar-gutter: stable; }
   outline-offset: -6px;
 }
 
-.candidate-pane { background: light-dark(#fbfcfd, #11161e); }
+.candidate-pane { background: var(--piep-rail); }
 .candidate-pane[data-collapsed] { display: block; }
 .candidate-rail { width: 100%; min-height: 0; }
 .candidate-rail__spacer { flex: 1; min-height: 8px; }
@@ -3193,8 +3199,8 @@ textarea { scrollbar-gutter: stable; }
 :root {
   --flag-off: #868e96;      /* gray 6 */
   --flag-favorite: #fa5252; /* red 6 */
-  --flag-watch: #0872d3;    /* piep 7 */
-  --flag-epub: #729f12;     /* leaf 6 */
+  --flag-watch: var(--piep-blue-7);
+  --flag-epub: var(--piep-leaf-6);
 
   /* A glyph on its own is a thin mark against white, and a row of them is easy
      to miss. On a light ground the flag that is on sits on a wash of its own
@@ -3207,8 +3213,8 @@ textarea { scrollbar-gutter: stable; }
 :root[data-mantine-color-scheme="dark"] {
   --flag-off: #8b95a1;
   --flag-favorite: #ff8787; /* red 4 */
-  --flag-watch: #8dd1ff;    /* piep 3 */
-  --flag-epub: #9dcf49;     /* leaf 4 */
+  --flag-watch: var(--piep-blue-3);
+  --flag-epub: var(--piep-leaf-4);
 
   /* Nothing behind the glyph here: a bright mark on a dark ground already
      carries, and a wash under it only muddies the row. */

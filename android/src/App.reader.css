@@ -10,7 +10,7 @@
   --reader-surface: #fff;
   --reader-control: #f1f3f6;
   --reader-control-ink: #242a31;
-  --reader-accent: #0872d3;
+  --reader-accent: var(--piep-blue-7);
   --reader-accent-ink: #fff;
   --reader-accent-soft: #e3f2ff;
   --reader-shadow: rgb(16 28 45 / 16%);

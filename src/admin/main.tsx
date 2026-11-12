@@ -7,6 +7,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import "@mantine/core/styles.css";
 import "@mantine/notifications/styles.css";
 import { theme } from "@/theme";
+import "@shared/design/tokens.css";
 import "@/styles/app.css";
 import "@/styles/server.css";
 import "./admin.css";

@@ -2,6 +2,7 @@ import { Icons } from "./icons";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { isTauri } from "@tauri-apps/api/core";
+import "@shared/design/tokens.css";
 import "./App.css";
 import "./App.desktop.css";
 import "./App.reader.css";

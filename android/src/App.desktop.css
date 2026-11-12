@@ -1,24 +1,8 @@
-/* デスクトップ版 theme.ts / styles/app.css の色、ロゴ比率、面の使い方に合わせる。 */
+/* 色と書体は、デスクトップと同じ定義（shared/design/tokens.css）から読む。
+   ここでは明暗の切り替えと、携帯だけの文字の大きさの段階を決める。 */
 :root {
-  font-family: "Segoe UI", "Yu Gothic UI", Meiryo, "Hiragino Sans", system-ui, sans-serif;
+  font-family: var(--piep-font);
   color-scheme: light;
-  --piep-bg: #f5f7fa;
-  --piep-surface: #fff;
-  --piep-rail: #fbfcfd;
-  --piep-text: #242a31;
-  --piep-muted: #798693;
-  --piep-line: #e4e8ee;
-  --piep-blue: #0d86f4;
-  --piep-active: #e3f2ff;
-  --piep-active-text: #0872d3;
-  --piep-cover: #edf7f5;
-  --piep-cover-text: #446e65;
-  --piep-control: #fff;
-  --piep-tag-bg: #f1f3f5;
-  --piep-tag-text: #495057;
-  --piep-ok: light-dark(#23865f, #5fd3a2);
-  --piep-warn: light-dark(#a9742b, #e8b565);
-  --piep-favorite: light-dark(#d9486e, #ff8fab);
   /* 文字の大きさの段階。携帯で読める下限をそろえ、タブレットでは一段上げる。 */
   --fs-tiny: 11px;
   --fs-small: 12px;
@@ -31,41 +15,9 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-piep-appearance="light"]) {
-    color-scheme: dark;
-    --piep-bg: #0d1117;
-    --piep-surface: #12171f;
-    --piep-rail: #11161e;
-    --piep-text: #e5e9ef;
-    --piep-muted: #9aa5b2;
-    --piep-line: #2a3039;
-    --piep-blue: #279cff;
-    --piep-active: #17364e;
-    --piep-active-text: #8dd1ff;
-    --piep-cover: #1d3532;
-    --piep-cover-text: #a5c5b7;
-    --piep-control: #202630;
-    --piep-tag-bg: #2c2e33;
-    --piep-tag-text: #c1c2c5;
-  }
+  :root:not([data-piep-appearance="light"]) { color-scheme: dark; }
 }
-:root[data-piep-appearance="dark"] {
-  color-scheme: dark;
-  --piep-bg: #0d1117;
-  --piep-surface: #12171f;
-  --piep-rail: #11161e;
-  --piep-text: #e5e9ef;
-  --piep-muted: #9aa5b2;
-  --piep-line: #2a3039;
-  --piep-blue: #279cff;
-  --piep-active: #17364e;
-  --piep-active-text: #8dd1ff;
-  --piep-cover: #1d3532;
-  --piep-cover-text: #a5c5b7;
-  --piep-control: #202630;
-  --piep-tag-bg: #2c2e33;
-  --piep-tag-text: #c1c2c5;
-}
+:root[data-piep-appearance="dark"] { color-scheme: dark; }
 
 @media (min-width: 600px) {
   :root {
@@ -144,7 +96,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 .primary-button, .secondary-button { border-radius: 8px; font-weight: 600; box-shadow: none; }
 .primary-button { background: var(--piep-blue); color: #fff; }
-.primary-button:hover { background: #0872d3; }
+.primary-button:hover { background: var(--piep-blue-7); }
 .secondary-button { border: 1px solid var(--piep-line); background: var(--piep-control); color: var(--piep-text); }
 .secondary-button:hover { background: var(--piep-active); }
 .section-heading { margin: 24px 0 13px; }
@@ -163,7 +115,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .group-search input { flex: 1; min-width: 0; border: 1px solid var(--piep-line); border-radius: 8px; padding: 10px 12px; background: var(--piep-control); color: var(--piep-text); }
 .group-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(275px, 1fr)); gap: 12px; }
 .group-card { display: flex; align-items: center; gap: 12px; min-height: 102px; width: 100%; padding: 12px; border: 1px solid var(--piep-line); border-radius: 12px; background: var(--piep-surface); color: var(--piep-text); text-align: left; }
-.group-card:hover { border-color: #8dd1ff; }
+.group-card:hover { border-color: var(--piep-blue-3); }
 .group-card-art { display: grid; place-items: center; flex: none; width: 65px; height: 91px; border-radius: 7px; background: var(--piep-cover); color: var(--piep-cover-text); font-family: serif; font-size: 27px; overflow: hidden; }
 .group-card-art img { display: block; width: 100%; height: 100%; border-radius: inherit; object-fit: contain; }
 .group-card-art svg { width: 28px; height: 28px; stroke-width: 1.6; }
@@ -357,8 +309,6 @@ button.work-tag-overflow:active { background: var(--piep-tag-bg); }
   .mobile-header .piep-lockup, .mobile-header .piep-lockup span { margin-left: 0; }
   .mobile-header .piep-lockup__mark { width: calc(var(--lockup-size) * 1.99); height: auto; }
   .mobile-header .piep-lockup__word { font-size: var(--lockup-size); font-weight: 700; letter-spacing: .005em; }
-  .mobile-header .piep-lockup__pi { color: #0096fa; }
-  .mobile-header .piep-lockup__ep { color: #86b918; }
   .mobile-header .piep-lockup__pi, .mobile-header .piep-lockup__ep { font-size: inherit; font-weight: inherit; letter-spacing: inherit; }
 }
 
