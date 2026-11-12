@@ -1,3 +1,4 @@
+import { CONTENT_TYPE_LABELS } from "@shared/format";
 import { Icons } from "./icons";
 import { useLayoutEffect, useRef, useState } from "react";
 import { ProviderMark } from "./ProviderMark";
@@ -75,7 +76,7 @@ export function ReaderInfoSheet({ versions, selectedVersion, latestEdited, onVer
           <div className="reader-info-hero">
             <span className="reader-info-cover"><WorkThumbnail work={work} offline={offline} snapshotGeneration={snapshotGeneration} variant="detail" /></span>
             <div className="reader-info-heading">
-              <div className="reader-info-labels"><ProviderMark source={work.source} /><span>{work.contentType === "novel" ? "小説" : "作品"}</span>{isEdited && <span><Icons.edit aria-hidden="true" />編集版</span>}{offline && <span>端末に保存</span>}</div>
+              <div className="reader-info-labels"><ProviderMark source={work.source} /><span>{CONTENT_TYPE_LABELS[work.contentType] ?? "作品"}</span>{isEdited && <span><Icons.edit aria-hidden="true" />編集版</span>}{offline && <span>端末に保存</span>}</div>
               {work.seriesTitle && (navigation.canBrowseServer && work.seriesId
                 ? <button type="button" className="reader-info-series" onClick={() => navigation.openEntity("series", work.source, work.seriesId!, work.seriesTitle!)}>{work.seriesTitle}</button>
                 : <p className="reader-info-series">{work.seriesTitle}</p>)}

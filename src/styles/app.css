@@ -2225,11 +2225,9 @@ textarea { scrollbar-gutter: stable; }
   position: relative;
   height: 100%;
   overflow: hidden;
-  background: #f2ede4;
+  /* 色は shared/design/reader.css（携帯と共通）。 */
+  background: var(--reader-desk);
 }
-
-.reader-theme--white { background: #f7f8fa; }
-.reader-theme--night { background: #0c1016; }
 
 .reader-toolbar {
   position: absolute;
@@ -2275,14 +2273,12 @@ textarea { scrollbar-gutter: stable; }
   width: min(100%, var(--reader-max-width));
   margin-inline: auto;
   padding: 0;
-  color: #292622;
+  color: var(--reader-ink);
   background: transparent;
 }
 
-.reader-theme--white .reader-stage { background: #fff; }
-.reader-theme--paper .reader-stage { background: #fffdf8; }
-.reader-theme--night .reader-stage { color: #dce2e9; background: #151a22; }
-.reader-theme--night .reader-paper { color: #dce2e9; }
+.reader-page .reader-stage { background: var(--reader-bg); }
+.reader-theme--night .reader-stage { color: var(--reader-ink); }
 
 /* 紙面の色は読書設定で決まり、アプリの明暗とは別に動く。紙面の上の部品
    （題名ページの「元ページをブラウザで」、薄い文字など）は、アプリの明暗の色を
@@ -2290,27 +2286,25 @@ textarea { scrollbar-gutter: stable; }
    紙面の中だけ、紙面の明暗に合った値に置き換える。 */
 .reader-theme--white .reader-stage,
 .reader-theme--paper .reader-stage {
-  --mantine-color-text: #292622;
-  --mantine-color-dimmed: #6f6a63;
+  --mantine-color-text: var(--reader-ink);
+  --mantine-color-dimmed: var(--reader-muted);
   --mantine-color-gray-light-color: #3f3b36;
   --mantine-color-gray-light-hover: rgb(41 38 34 / 7%);
   --mantine-color-disabled: #f1f0ee;
   --mantine-color-disabled-color: #a9a49d;
-  --mantine-color-disabled-border: #dedbd6;
+  --mantine-color-disabled-border: var(--reader-line);
 }
 .reader-theme--night .reader-stage {
-  --mantine-color-text: #dce2e9;
-  --mantine-color-dimmed: #8d97a3;
+  --mantine-color-text: var(--reader-ink);
+  --mantine-color-dimmed: var(--reader-muted);
   --mantine-color-gray-light-color: #c9d1da;
   --mantine-color-gray-light-hover: rgb(220 226 233 / 8%);
   --mantine-color-disabled: #1f252e;
   --mantine-color-disabled-color: #5d6773;
-  --mantine-color-disabled-border: #2d3540;
+  --mantine-color-disabled-border: var(--reader-line);
 }
 /* 区切り線は Mantine が要素そのものに色を置くので、上の置き換えが届かない。 */
-.reader-theme--white .reader-stage .mantine-Divider-root,
-.reader-theme--paper .reader-stage .mantine-Divider-root { --divider-color: #dedbd6; }
-.reader-theme--night .reader-stage .mantine-Divider-root { --divider-color: #2d3540; }
+.reader-page .reader-stage .mantine-Divider-root { --divider-color: var(--reader-line); }
 
 /* The title page follows the reading column rather than being centred inside
    it: the source opens the block on the left, the author closes it on the

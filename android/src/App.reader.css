@@ -1,11 +1,9 @@
 /* 読書画面。読書背景に合わせて、メニューや設定の面まで同じ色でそろえる。 */
 .reader-overlay { position: fixed; z-index: 50; inset: 0; }
 
+/* 紙面・文字・線の色は shared/design/reader.css（デスクトップと共通）。
+   ここでは携帯の操作のための面だけを決める。 */
 .reader-screen {
-  --reader-bg: #fff;
-  --reader-ink: #292622;
-  --reader-muted: #667380;
-  --reader-line: #e6e8ec;
   --reader-chrome: rgb(255 255 255);
   --reader-surface: #fff;
   --reader-control: #f1f3f6;
@@ -25,25 +23,12 @@
   color-scheme: light;
 }
 .reader-theme--paper {
-  --reader-bg: #f8f2e4;
-  --reader-ink: #33291c;
-  --reader-muted: #75674f;
-  --reader-line: #e4dac6;
-  --reader-chrome: rgb(248 242 228);
-  --reader-surface: #fbf7ec;
-  --reader-control: #efe7d5;
-  --reader-control-ink: #33291c;
-  --reader-accent: #8a5a1c;
-  --reader-accent-ink: #fff;
-  --reader-accent-soft: #eddfc3;
-  --reader-shadow: rgb(60 45 20 / 18%);
-  --reader-link: #80561f;
+  --reader-chrome: rgb(255 253 248);
+  --reader-surface: var(--reader-paper);
+  --reader-control: #f1f0ee;
+  --reader-control-ink: var(--reader-ink-light);
 }
 .reader-theme--night {
-  --reader-bg: #151a22;
-  --reader-ink: #dce2e9;
-  --reader-muted: #9aa5b2;
-  --reader-line: #2c333d;
   --reader-chrome: rgb(27 33 42);
   --reader-surface: #1c222c;
   --reader-control: #29313c;
@@ -80,7 +65,6 @@
 .reader-screen[data-bars="hidden"] .reader-toolbar { transform: translateY(-101%); }
 .reader-bars--pinned .reader-toolbar { position: relative; flex: none; }
 .reader-toolbar-title { flex: 1; min-width: 0; overflow: hidden; color: var(--reader-control-ink); font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.reader-toolbar-actions { display: flex; align-items: center; flex: none; gap: 2px; }
 
 .reader-toasts { position: absolute; z-index: 25; top: calc(var(--piep-safe-top) + 64px); right: 12px; left: 12px; display: grid; justify-items: center; gap: 8px; pointer-events: none; }
 .reader-notice { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 2px 8px; max-width: min(560px, 100%); padding: 8px 8px 8px 16px; border: 1px solid var(--reader-line); border-radius: 14px; background: var(--reader-surface); box-shadow: 0 8px 24px var(--reader-shadow); color: var(--reader-control-ink); font-size: 14px; pointer-events: auto; }
@@ -207,9 +191,9 @@
 .reader-swatch { display: grid; justify-items: center; gap: 2px; min-height: 76px; border: 2px solid transparent; border-radius: 14px; padding: 8px 4px; box-shadow: inset 0 0 0 1px rgb(120 130 140 / 35%); }
 .reader-swatch > span { font-size: 24px; line-height: 1.2; font-weight: 500; }
 .reader-swatch > small { font-size: 13px; }
-.reader-swatch--white { background: #fff; color: #292622; }
-.reader-swatch--paper { background: #f8f2e4; color: #33291c; }
-.reader-swatch--night { background: #151a22; color: #dce2e9; }
+.reader-swatch--white { background: var(--reader-white); color: var(--reader-ink-light); }
+.reader-swatch--paper { background: var(--reader-paper); color: var(--reader-ink-light); }
+.reader-swatch--night { background: var(--reader-night); color: var(--reader-ink-night); }
 .reader-swatch[aria-pressed="true"], .reader-font-choices button[aria-pressed="true"] { border-color: var(--reader-accent); box-shadow: none; }
 .reader-font-choices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .reader-font-choices button { display: grid; justify-items: center; gap: 2px; min-height: 76px; border: 2px solid transparent; border-radius: 14px; padding: 8px 4px; background: var(--reader-control); color: var(--reader-control-ink); }

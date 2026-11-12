@@ -1,0 +1,28 @@
+/* 読書画面の配色。背景は読書設定で選び、アプリの明暗とは別に動く。
+   デスクトップと携帯で、同じ名前の背景が同じ色になるようにここで決める。
+
+   紙面（--reader-bg）と、その上の文字・薄い文字・線、紙面の外側の机（--reader-desk）。
+   操作のための面（バーやシートなど）は、それぞれの画面が自分で決める。 */
+:root {
+  --reader-white: #fff;
+  --reader-paper: #fffdf8;
+  --reader-night: #151a22;
+  --reader-ink-light: #292622;
+  --reader-ink-night: #dce2e9;
+}
+
+.reader-theme--white,
+.reader-theme--paper {
+  --reader-ink: var(--reader-ink-light);
+  --reader-muted: #6f6a63;
+  --reader-line: #dedbd6;
+}
+.reader-theme--white { --reader-bg: var(--reader-white); --reader-desk: #f7f8fa; }
+.reader-theme--paper { --reader-bg: var(--reader-paper); --reader-desk: #f2ede4; }
+.reader-theme--night {
+  --reader-bg: var(--reader-night);
+  --reader-desk: #0c1016;
+  --reader-ink: var(--reader-ink-night);
+  --reader-muted: #8d97a3;
+  --reader-line: #2d3540;
+}

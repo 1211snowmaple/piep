@@ -13,6 +13,7 @@ import { queryClient } from "@/lib/queryClient";
 import { showStartupFailure, waitForLibrary } from "@/services/startupApi";
 import { theme } from "@/theme";
 import "@shared/design/tokens.css";
+import "@shared/design/reader.css";
 import "@/styles/app.css";
 import "@/styles/motion.css";
 

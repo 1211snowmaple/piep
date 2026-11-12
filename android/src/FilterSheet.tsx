@@ -1,3 +1,4 @@
+import { CONTENT_TYPE_LABELS } from "@shared/format";
 import { Icons } from "./icons";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -113,7 +114,7 @@ export function FilterSheet({ criteria, onApply, onSaveCondition, onClose, scope
       <div className="filter-body">
         <Section title="基本">
           <Chips label="取得元" value={draft.source} options={[{ id: "", label: "すべて" }, { id: "pixiv", label: "pixiv" }, { id: "fanbox", label: "FANBOX" }]} onChange={(source) => set({ source })} />
-          <Chips label="種類" value={draft.contentType} options={[{ id: "", label: "すべて" }, { id: "novel", label: "小説" }, { id: "article", label: "記事" }, { id: "text", label: "テキスト" }, { id: "image", label: "画像" }, { id: "file", label: "ファイル" }]} onChange={(contentType) => set({ contentType })} />
+          <Chips label="種類" value={draft.contentType} options={[{ id: "", label: "すべて" }, ...(["novel", "article", "text", "image", "file"] as const).map((id) => ({ id, label: CONTENT_TYPE_LABELS[id] }))]} onChange={(contentType) => set({ contentType })} />
           <Chips label="お気に入り" value={draft.favorite ? "on" : "off"} options={[{ id: "off", label: "すべて" }, { id: "on", label: "お気に入りのみ" }]} onChange={(value) => set({ favorite: value === "on" })} />
         </Section>
         <Section title={scope === "person" ? "タグ" : "作者とタグ"}>

@@ -1,3 +1,4 @@
+import { contentTypeLabel } from "@shared/format";
 import { dateFieldLabel } from "@shared/dateFields";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Icons } from "./icons";
@@ -111,7 +112,7 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
   const filterChips: { key: string; text: string; clear: Partial<PcSearchCriteria> }[] = [];
   if (tab === "works") {
     if (criteria.source) filterChips.push({ key: "source", text: criteria.source === "fanbox" ? "FANBOX" : "pixiv", clear: { source: "" } });
-    if (criteria.contentType) filterChips.push({ key: "type", text: { novel: "小説", article: "記事", text: "テキスト", image: "画像", file: "ファイル" }[criteria.contentType], clear: { contentType: "" } });
+    if (criteria.contentType) filterChips.push({ key: "type", text: contentTypeLabel(criteria.contentType), clear: { contentType: "" } });
     if (criteria.favorite) filterChips.push({ key: "favorite", text: "お気に入り", clear: { favorite: false } });
     if (criteria.author) filterChips.push({ key: "author", text: `作者: ${criteria.author}`, clear: { author: "" } });
     if (criteria.authorExclude) filterChips.push({ key: "authorExclude", text: `除外作者: ${criteria.authorExclude}`, clear: { authorExclude: "" } });

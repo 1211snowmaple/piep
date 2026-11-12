@@ -1,3 +1,4 @@
+import { CONTENT_TYPE_LABELS } from "@shared/format";
 import { Icons } from "./icons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -13,7 +14,6 @@ import { plainText } from "./workText";
 
 export type SelectedWork = { work: PcWork; offline: false } | { work: PcWork; offline: true; snapshot: OfflineWork };
 
-const typeLabels: Record<string, string> = { novel: "小説", article: "記事", text: "テキスト", image: "画像", file: "ファイル" };
 
 /**
  * 作品の詳細。ここへ来るのは「読む前に確かめたい」か「作者やシリーズへ移りたい」とき。
@@ -96,7 +96,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
           <div className="detail-cover"><WorkThumbnail work={work} offline={selected.offline} snapshotGeneration={selected.offline ? selected.snapshot.savedAtMs : undefined} variant="detail" /></div>
           <div className="detail-heading">
             <div className="detail-top">
-              <div className="detail-labels"><ProviderMark source={work.source} /><span>{typeLabels[work.contentType] ?? "作品"}</span>{metadata?.isEdited && <span><Icons.edit aria-hidden="true" />編集版</span>}{selected.offline && <span>端末に保存</span>}</div>
+              <div className="detail-labels"><ProviderMark source={work.source} /><span>{CONTENT_TYPE_LABELS[work.contentType] ?? "作品"}</span>{metadata?.isEdited && <span><Icons.edit aria-hidden="true" />編集版</span>}{selected.offline && <span>端末に保存</span>}</div>
               <div className="detail-utility">{menu}<button className="detail-icon detail-close" type="button" onClick={onBack} aria-label="閉じる"><Icons.cancel aria-hidden="true" /></button></div>
             </div>
             {series.map((entry) => {

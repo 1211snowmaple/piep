@@ -1,3 +1,4 @@
+import { readingPercent } from "@shared/readingProgress";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActionIcon,
@@ -790,7 +791,7 @@ export default function ReaderPage() {
         // 全体の割合を丸めると、201ページの本は200ページ目で読了になる。
         // 読書位置を片付ける条件と同じく、最後のページの端まで読んだときだけ。
         const finished = sourcePage >= pageCount && atFlowEdge(viewport, vertical, 1);
-        label.textContent = finished ? "読了" : `${Math.min(99, Math.round(progress))}% · 残り${formatReadingTime(remaining)}`;
+        label.textContent = finished ? "読了" : `${readingPercent(progress / 100)}% · 残り${formatReadingTime(remaining)}`;
       }
       toTopRef.current?.toggleAttribute("data-visible", progress > 8);
       // Only a genuine scroll writes the position. The priming call below runs

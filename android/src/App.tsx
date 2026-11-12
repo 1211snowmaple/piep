@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { isTauri } from "@tauri-apps/api/core";
 import "@shared/design/tokens.css";
+import "@shared/design/reader.css";
 import "./App.css";
 import "./App.desktop.css";
 import "./App.reader.css";
