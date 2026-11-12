@@ -78,6 +78,10 @@ const REBUILDABLE_TABLES: &[&str] = &[
     "semantic_index_state",
 ];
 
+/// アプリの設定を持つ表。棚のデータではないので、行は原記録として保管するが、
+/// 正規化の対象にはしない。切り替えのときにアプリの設定として引き継ぐ。
+const APPLICATION_SETTING_TABLES: &[&str] = &["search_feature_settings"];
+
 pub struct LegacyImporter {
     root: PathBuf,
     conn: Connection,
@@ -757,7 +761,7 @@ impl LegacyImporter {
                 }
                 // 最初の原記録と未完了の印を同時に確定する。正規化開始前に落ちても完成に見せない。
                 tx.execute("INSERT INTO migration_records(source_table,source_key,status) VALUES('__normalization__','migration','unresolved') ON CONFLICT(source_table,source_key) DO UPDATE SET status='unresolved'",[])?;
-                tx.execute("INSERT OR IGNORE INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES(?1,'__all_rows__',?2,?3)",params![table,file.id.0.as_slice(),if count==0 || matches!(table.as_str(),"downloads"|"download_versions") { "imported" } else { "unresolved" }])?;
+                tx.execute("INSERT OR IGNORE INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES(?1,'__all_rows__',?2,?3)",params![table,file.id.0.as_slice(),if count==0 || matches!(table.as_str(),"downloads"|"download_versions") || APPLICATION_SETTING_TABLES.contains(&table.as_str()) { "imported" } else { "unresolved" }])?;
                 tx.commit()?;
             }
             fs::remove_file(path)?;

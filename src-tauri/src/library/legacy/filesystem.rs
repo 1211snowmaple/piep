@@ -19,6 +19,9 @@ pub(super) const MANAGED_ROOTS: &[&str] = &[
 /// 管理領域の中にあるが、保存済みの作品とモデルの配布元から作り直せるもの。
 /// 全文索引と意味検索のモデルは旧実装が保存フォルダーの下へ置いていた。
 /// 原本として保管せず、読まなかったことを記録する。
+/// 利用者が自分で編集するファイルの置き場。作品には属さず、パスで引く。
+const USER_FILES_PREFIX: &str = "templates/";
+
 const REBUILDABLE_SUBTREES: &[&str] = &[
     "downloads/search-index",
     "downloads/search",
@@ -167,7 +170,10 @@ impl LegacyImporter {
                 "window-color-scheme" => ("machine_window_preference", true),
                 // 以前のバックアップは変換も整理もしない。元の場所に残す。
                 _ if name.starts_with("backup-") => ("existing_backup_left_in_place", true),
-                "settings.json" | "server" => ("settings_or_device_state_not_yet_migrated", false),
+                // アプリの設定は棚のデータではない。アプリのフォルダーに残し、棚へは写さない。
+                "settings.json" => ("application_settings_left_in_place", true),
+                // 端末の登録と鍵は残す。読書位置とお気に入りの変更記録を棚へ移す規則がまだない。
+                "server" => ("device_state_not_yet_migrated", false),
                 _ => ("unrecognized_root_entry_not_read", false),
             };
             let evidence = serde_json::to_vec(
@@ -228,6 +234,12 @@ impl LegacyImporter {
                         tx.execute("INSERT INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES('__replaced_in_place__',?1,?2,'imported') ON CONFLICT(source_table,source_key) DO UPDATE SET evidence_file_id=excluded.evidence_file_id,status=excluded.status",params![key,evidence.file.id.0.as_slice()])?;
                         known = true;
                     }
+                }
+                // 利用者が編集するファイル（EPUB の雛形）は、どの作品にも属さない。
+                // 中身と元のパスをそのまま保管し、パスで引けるものとして扱う。
+                if !known && used.is_none() && unchanged && key.starts_with(USER_FILES_PREFIX) {
+                    tx.execute("INSERT INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES('__user_files__',?1,?2,'imported') ON CONFLICT(source_table,source_key) DO UPDATE SET evidence_file_id=excluded.evidence_file_id,status='imported'",params![key,file.id.0.as_slice()])?;
+                    known = true;
                 }
                 tx.execute("INSERT INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES('__filesystem__',?1,?2,?3) ON CONFLICT(source_table,source_key) DO UPDATE SET evidence_file_id=coalesce(migration_records.evidence_file_id,excluded.evidence_file_id),status=excluded.status",params![key,file.id.0.as_slice(),if known {"imported"} else {"unresolved"}])?;
                 tx.commit()?;

@@ -106,7 +106,8 @@ INSERT INTO search_feature_settings VALUES(1,1);",
     for content in [index.as_slice(), model.as_slice()] {
         assert!(library.file(Fingerprint::of(content)).is_err());
     }
-    // 索引の状態は行を保管しない。利用者が選んだ設定は、規則ができるまで未解決のまま残す。
+    // 索引の状態は行を保管しない。利用者が選んだ設定は行を保管するが、棚のデータではないので
+    // 有効化を止めない（アプリの設定として引き継ぐ）。
     assert_eq!(
         report.rebuildable_tables.get("search_index_state"),
         Some(&1)
@@ -117,13 +118,14 @@ INSERT INTO search_feature_settings VALUES(1,1);",
         "imported"
     );
     assert_eq!(
-        record(&library, "search_feature_settings", "__all_rows__").0,
-        "unresolved"
+        report.preserved_tables.get("search_feature_settings"),
+        Some(&1)
     );
     assert_eq!(
-        library.activation_problems().unwrap(),
-        ["search_feature_settings: __all_rows__"]
+        record(&library, "search_feature_settings", "__all_rows__").0,
+        "imported"
     );
+    assert!(library.activation_problems().unwrap().is_empty());
     library.verify().unwrap();
     // 旧アプリを使って索引が進んでも、やり直しを止めない。
     let db = Connection::open(old.join("piep.db")).unwrap();
@@ -385,13 +387,49 @@ fn the_inventory_records_exclusions_and_does_not_copy_credentials_or_unknown_roo
         record(&library, "__excluded_entries__", "browsing-profile").0,
         "imported"
     );
-    for entry in ["settings.json", "server", "unexpected"] {
+    // アプリの設定は棚へ写さず、理由を残して済んだものとする。端末の状態と知らない項目は残す。
+    for (entry, expected) in [
+        ("settings.json", "imported"),
+        ("server", "unresolved"),
+        ("unexpected", "unresolved"),
+    ] {
         let (status, file) = record(&library, "__excluded_entries__", entry);
-        assert_eq!(status, "unresolved");
+        assert_eq!(status, expected, "{entry}");
         let evidence: serde_json::Value =
             serde_json::from_slice(&bytes(&library, file.unwrap())).unwrap();
         assert_eq!(evidence["entry"], entry);
         assert_eq!(evidence["contents_read"], false);
     }
+    library.verify().unwrap();
+}
+
+#[test]
+fn user_templates_are_kept_by_path_and_do_not_block_activation() {
+    let fixture = Fixture::new();
+    let template = b"<html>{{title}}</html>";
+    fs::create_dir_all(fixture.0.join("old/templates/mine")).unwrap();
+    fs::write(fixture.0.join("old/templates/mine/page.xhtml"), template).unwrap();
+    // 作品のフォルダーにある、記録にないファイルは、同じ規則で済ませない。
+    fs::write(fixture.file("stray.xhtml"), template).unwrap();
+    let source = LegacyImporter::open(&fixture.0.join("old")).unwrap();
+    let library = Library::create(&fixture.0.join("new")).unwrap();
+    let report = source
+        .import(&library, &AtomicBool::new(false), |_| {})
+        .unwrap();
+    let key = "templates/mine/page.xhtml";
+    assert_eq!(record(&library, "__filesystem__", key).0, "imported");
+    let (status, file) = record(&library, "__user_files__", key);
+    assert_eq!(status, "imported");
+    assert_eq!(bytes(&library, file.unwrap()), template);
+    assert_eq!(
+        record(
+            &library,
+            "__filesystem__",
+            "downloads/pixiv/one/v1/stray.xhtml"
+        )
+        .0,
+        "unresolved"
+    );
+    assert_eq!(report.unresolved_files, 1, "{:?}", report.unresolved);
     library.verify().unwrap();
 }
