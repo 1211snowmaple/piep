@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -271,6 +271,18 @@ fn decode_object(source: impl Read, encoded_length: u64, expected: &FileChunk) -
 }
 
 /// 展開結果と一緒に、読んだ実体の保存表現も返す。同じ実体を二度読まずに済ませる。
+/// 書き終えた一時ファイルを、開き直さずに頭から読み戻して復元する。
+///
+/// 書いた直後のファイルを開き直すと、Windows では開くたびに数ミリ秒待たされる
+/// （常駐の検査が新しいファイルを開くところで走る）。全棚の移行は実体が 13 万個あり、
+/// 実測では保管の時間の 6 割がこの開き直しだった（`examples/put_cost.rs`）。
+/// 確定（`sync_all`）の後に同じ手で読むので、確かめている中身は開き直した場合と同じ。
+fn read_back(mut file: File, expected: &FileChunk) -> Result<Vec<u8>> {
+    let length = file.metadata()?.len();
+    file.rewind()?;
+    decode_encoded(file, length, expected).map(|(bytes, _)| bytes)
+}
+
 fn decode_encoded(
     mut source: impl Read,
     encoded_length: u64,
@@ -474,6 +486,7 @@ impl ObjectStore {
         let guard = Pending(temporary.clone());
         let mut file = OpenOptions::new()
             .create_new(true)
+            .read(true)
             .write(true)
             .open(&temporary)?;
         file.write_all(MAGIC)?;
@@ -483,9 +496,8 @@ impl ObjectStore {
         file.write_all(&id.0)?;
         file.write_all(payload)?;
         file.sync_all()?;
-        drop(file);
         // 一時ファイルも公開前に読み戻す。既存実体との競合時にも上書きしない。
-        if self.decode(&temporary, &result)? != original {
+        if read_back(file, &result)? != original {
             return Err(Error::Integrity("保存直後の復元結果が一致しません".into()));
         }
         let published = self.publish_verified(&temporary, &dest, &result)?;
@@ -590,6 +602,7 @@ impl ObjectStore {
         let pending = Pending(dest.with_extension(format!("{}.part", uuid::Uuid::now_v7())));
         let mut file = OpenOptions::new()
             .create_new(true)
+            .read(true)
             .write(true)
             .open(&pending.0)?;
         file.write_all(&header)?;
@@ -600,9 +613,8 @@ impl ObjectStore {
             ));
         }
         file.sync_all()?;
-        drop(file);
         // キャッシュ済みでも受信内容を検証し、破損した入力を成功扱いしない。
-        self.decode(&pending.0, expected)?;
+        read_back(file, expected)?;
         // 既存の実体が壊れていれば、受信して検証した中身と置き換える。
         self.publish_verified(&pending.0, &dest, expected)?;
         Ok(())
