@@ -361,7 +361,7 @@ public_url = ""              # 携帯の登録文字列に載せる URL。空な
 案内し、サービスとして登録するコマンドは作らない。
 
 `hello` は `{apiVersion: 2, serverName: "piep", capabilities: [...], beta: true}` を返す。`capabilities` は `read`、
-`reading-sync`、`entity-detail`、`favorite-write`、`admin-sync`、`row-sync`、`backup`、`self-update`、`scheduled-updates` のうちそのサーバーができるもの。
+`reading-sync`、`entity-detail`、`favorite-write`、`search-suggest`、`work-lookup`、`admin-sync`、`row-sync`、`backup`、`self-update`、`scheduled-updates` のうちそのサーバーができるもの。
 アプリの版と `syncFormat`（同期の形式の版）は、管理者の鍵を持つ相手にだけ `GET /admin/status` で返す。公開の口で版を
 出すと、古い版だと分かって狙われるからである。
 
@@ -496,6 +496,19 @@ PCからサーバーへの通信はリダイレクトを追わない。登録の
 - 古いサーバーは `/admin/favorites` を持たない（404）。デスクトップ版は取り込みを飛ばし、送信を続ける。
 - 圏外では押せない。携帯に貯めて後で送る形にすると、デスクトップ版の変更と前後が分からなくなる。
 - 残る食い違い: 携帯の変更を取り込む前にデスクトップ版で同じ作品のハートを押すと、取り込んだ携帯の値が勝つ。
+
+### 携帯の検索候補・本文リンク・版の指定
+
+読み手の API に次を足した。どちらも `capabilities` で知らせ、旧サーバーでは携帯が使わない。
+
+- `GET /api/v1/search/suggest?text=&limit=`（`search-suggest`）: デスクトップ版の検索欄と同じ候補を返す。
+  検索語は 200 文字まで、候補は 1〜12 件（既定 8）。パスや本文は含めない。
+- `GET /api/v1/works/lookup?source=&key=`（`work-lookup`）: 取得元と作品 ID から本棚の作品を返す。
+  無ければ `null`。本文中の pixiv・FANBOX のリンクから、本棚にある作品を読書画面で開くために使う。
+- ページと目次の `?version=N` は、その版の原文を返す。ページに添える `revision` も指定した版の
+  番号とハッシュにし、編集版のハッシュは付けない。携帯は過去版を読むあいだ、最新版の位置を書かない。
+- 作者の `cover` はプロフィールのアイコンだけを返す。背景画像は `variant=banner` で別に返し、
+  `hasCover` と `hasBanner` も別々に決める。アイコンの無い FANBOX の作者に背景を丸く切って出していた。
 
 ### Android 版の変更
 
