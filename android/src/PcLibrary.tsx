@@ -1,6 +1,5 @@
 import { dateFieldLabel } from "@shared/dateFields";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Funnel, X } from "lucide-react";
 import { Icons } from "./icons";
 import { ContinueShelf } from "./ContinueShelf";
 import { activeFilterCount, FilterSheet } from "./FilterSheet";
@@ -135,11 +134,11 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
       else if (item.kind === "title" && item.source) void lookupPcWork(item.source, item.value).then((work) => work ? onOpenWork(work) : submitSearch(item.label)).catch(() => submitSearch(item.label));
       else submitSearch(item.label);
     } : undefined}>
-      {tab === "works" && <button type="button" className="filter-button" data-active={filterCount > 0 || undefined} aria-haspopup="dialog" aria-label={filterCount ? `絞り込み（${filterCount} 個の条件）` : "絞り込み"} onClick={() => setFilterOpen(true)}><Funnel aria-hidden="true" />{filterCount > 0 && <small aria-hidden="true">{filterCount}</small>}</button>}
+      {tab === "works" && <button type="button" className="filter-button" data-active={filterCount > 0 || undefined} aria-haspopup="dialog" aria-label={filterCount ? `絞り込み（${filterCount} 個の条件）` : "絞り込み"} onClick={() => setFilterOpen(true)}><Icons.filter aria-hidden="true" />{filterCount > 0 && <small aria-hidden="true">{filterCount}</small>}</button>}
       {tab === "works" && <SortMenu current={sentSort} relevance={Boolean(criteria.text.trim())} onSelect={selectSort} conditionLabel={conditionSortLabel} />}
       {(tab === "people" || tab === "series") && <ChoiceMenu current={entitySorts[tab]} label={entitySortLabel(entitySorts[tab])} groups={entitySortGroups} onSelect={(sort) => selectEntitySort(tab, sort)} />}
     </SearchField>
-    {filterChips.length > 0 && <div className="active-filters" aria-label="適用中の絞り込み">{filterChips.map((chip) => <button key={chip.key} type="button" className="active-filter" aria-label={`${chip.text}を解除`} onClick={() => changeCriteria({ ...criteria, ...chip.clear })}>{chip.text}<X aria-hidden="true" /></button>)}{filterChips.length > 1 && <button type="button" className="quiet-button active-filters-clear" onClick={() => changeCriteria({ ...defaultPcSearch, text: criteria.text })}>すべて解除</button>}</div>}
+    {filterChips.length > 0 && <div className="active-filters" aria-label="適用中の絞り込み">{filterChips.map((chip) => <button key={chip.key} type="button" className="active-filter" aria-label={`${chip.text}を解除`} onClick={() => changeCriteria({ ...criteria, ...chip.clear })}>{chip.text}<Icons.cancel aria-hidden="true" /></button>)}{filterChips.length > 1 && <button type="button" className="quiet-button active-filters-clear" onClick={() => changeCriteria({ ...defaultPcSearch, text: criteria.text })}>すべて解除</button>}</div>}
     {filterOpen && <FilterSheet criteria={criteria} onClose={() => setFilterOpen(false)} onSaveCondition={onSaveCondition} onApply={(next) => { setFilterOpen(false); changeCriteria(next); }} />}
     <nav className="library-tabs" aria-label="ライブラリの種類">{tabs.map(([id, label, icon]) => <button key={id} type="button" className={tab === id ? "active" : ""} aria-current={tab === id ? "page" : undefined} onClick={() => move({ tab: id, collectionId: null, listPage: 1 })}>{icon}{label}</button>)}</nav>
     {tab === "people" && <EntityBrowser kind="people" query={queries.people} sort={entitySorts.people} onOpen={(entity) => navigation.openEntity("person", entity.source, entity.sourceKey, entity.displayName)} />}

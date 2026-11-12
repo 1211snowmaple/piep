@@ -1,6 +1,6 @@
+import { Icons } from "./icons";
 import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { BookOpen, UserRound } from "lucide-react";
 import { getPcCollection, listPcCollections, listPcEntities, pcErrorMessage, type PcCollection, type PcEntity, type PcWork } from "./pcApi";
 import { WorkCard } from "./WorkCard";
 import { ProviderMark } from "./ProviderMark";
@@ -14,7 +14,7 @@ export function GroupArtwork({ kind, src, initial }: { kind: "people" | "series"
   const [failed, setFailed] = useState(() => imageRecentlyFailed(src));
   useEffect(() => { setFailed(imageRecentlyFailed(src)); }, [src]);
   return <span className={`group-card-art group-card-art--${kind}`} aria-hidden="true">
-    {kind === "people" ? <UserRound /> : kind === "series" ? <BookOpen /> : initial}
+    {kind === "people" ? <Icons.person /> : kind === "series" ? <Icons.series /> : initial}
     {src && !failed && <SmoothImage src={src} alt="" onFailed={() => setFailed(true)} />}
   </span>;
 }

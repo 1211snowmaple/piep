@@ -1,6 +1,6 @@
+import { Icons } from "./icons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Check, ChevronRight, Download, LoaderCircle, MoreHorizontal, RefreshCw, SquarePen, Trash2, X } from "lucide-react";
 import { AuthorAvatar } from "./WorkCard";
 import { ProviderMark } from "./ProviderMark";
 import { WorkThumbnail } from "./WorkThumbnail";
@@ -87,7 +87,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
 
   const readLabel = resume ? "続きから読む" : selected.offline ? "端末の保存で読む" : "読む";
 
-  const menu = saved && <div className="detail-menu-root"><button className="detail-icon" type="button" aria-label="その他の操作" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><MoreHorizontal aria-hidden="true" /></button>{menuOpen && <div className="detail-menu"><button type="button" disabled={removing} onClick={() => void remove()}><Trash2 aria-hidden="true" />{removing ? "削除中…" : "端末から削除"}</button></div>}</div>;
+  const menu = saved && <div className="detail-menu-root"><button className="detail-icon" type="button" aria-label="その他の操作" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><Icons.more aria-hidden="true" /></button>{menuOpen && <div className="detail-menu"><button type="button" disabled={removing} onClick={() => void remove()}><Icons.delete aria-hidden="true" />{removing ? "削除中…" : "端末から削除"}</button></div>}</div>;
 
   return <div className="detail" role="dialog" aria-modal="true" aria-label={`${work.title}の詳細`}>
     <main className="detail-scroll">
@@ -96,8 +96,8 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
           <div className="detail-cover"><WorkThumbnail work={work} offline={selected.offline} snapshotGeneration={selected.offline ? selected.snapshot.savedAtMs : undefined} variant="detail" /></div>
           <div className="detail-heading">
             <div className="detail-top">
-              <div className="detail-labels"><ProviderMark source={work.source} /><span>{typeLabels[work.contentType] ?? "作品"}</span>{metadata?.isEdited && <span><SquarePen aria-hidden="true" />編集版</span>}{selected.offline && <span>端末に保存</span>}</div>
-              <div className="detail-utility">{menu}<button className="detail-icon detail-close" type="button" onClick={onBack} aria-label="閉じる"><X aria-hidden="true" /></button></div>
+              <div className="detail-labels"><ProviderMark source={work.source} /><span>{typeLabels[work.contentType] ?? "作品"}</span>{metadata?.isEdited && <span><Icons.edit aria-hidden="true" />編集版</span>}{selected.offline && <span>端末に保存</span>}</div>
+              <div className="detail-utility">{menu}<button className="detail-icon detail-close" type="button" onClick={onBack} aria-label="閉じる"><Icons.cancel aria-hidden="true" /></button></div>
             </div>
             {series.map((entry) => {
               const inner = <><span>{entry.title}</span>{entry.contentOrder != null && <small>第 {entry.contentOrder} 話</small>}</>;
@@ -120,7 +120,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
         <div className="detail-content">
           {tags.length > 0 && <div className="detail-tags" aria-label="タグ">{tags.map((tag, index) => browsable ? <button key={`${tag}:${index}`} type="button" onClick={() => navigation.openTag(tag)}>{tag}</button> : <span key={`${tag}:${index}`}>{tag}</span>)}</div>}
           {description && <section className="detail-section" aria-label="概要"><p ref={descriptionRef} className="detail-description" data-expanded={expanded || undefined}>{description}</p>{(clamped || expanded) && <button type="button" className="detail-more" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>{expanded ? "たたむ" : "すべて表示"}</button>}</section>}
-          {collections.length > 0 && <section className="detail-section"><h2>コレクション</h2><div className="detail-collections">{collections.map((collection) => browsable ? <button key={collection.id} type="button" onClick={() => navigation.push({ page: { ...homePage, criteria: defaultPcSearch, tab: "collections", collectionId: collection.id }, detail: null, reader: null })}>{collection.name}<ChevronRight aria-hidden="true" /></button> : <span key={collection.id}>{collection.name}</span>)}</div></section>}
+          {collections.length > 0 && <section className="detail-section"><h2>コレクション</h2><div className="detail-collections">{collections.map((collection) => browsable ? <button key={collection.id} type="button" onClick={() => navigation.push({ page: { ...homePage, criteria: defaultPcSearch, tab: "collections", collectionId: collection.id }, detail: null, reader: null })}>{collection.name}<Icons.next aria-hidden="true" /></button> : <span key={collection.id}>{collection.name}</span>)}</div></section>}
           {problem && <p className="inline-alert" role="alert">{problem}</p>}
         </div>
       </div>
@@ -129,10 +129,10 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
     <footer className="detail-actions">
       {online && outdated && !saving && <p className="detail-actions-note">端末の保存より新しい版があります</p>}
       <div className="detail-actions-row">
-        <button className="primary-button detail-read" type="button" onClick={onRead}><BookOpen aria-hidden="true" />{readLabel}</button>
+        <button className="primary-button detail-read" type="button" onClick={onRead}><Icons.read aria-hidden="true" />{readLabel}</button>
         {online && (saved && !outdated && !saving
-          ? <span className="card-saved card-saved--large" role="img" aria-label="端末に保存済み" title="端末に保存済み"><Check aria-hidden="true" /></span>
-          : <button className="icon-button icon-button--large" type="button" data-tone={outdated ? "warn" : undefined} data-busy={saving || undefined} disabled={saving} aria-label={saving ? "保存しています" : outdated ? "端末の保存を更新" : "端末に保存"} title={outdated ? "端末の保存を更新" : "端末に保存"} onClick={() => void save()}>{saving ? <LoaderCircle aria-hidden="true" /> : outdated ? <RefreshCw aria-hidden="true" /> : <Download aria-hidden="true" />}</button>)}
+          ? <span className="card-saved card-saved--large" role="img" aria-label="端末に保存済み" title="端末に保存済み"><Icons.confirm aria-hidden="true" /></span>
+          : <button className="icon-button icon-button--large" type="button" data-tone={outdated ? "warn" : undefined} data-busy={saving || undefined} disabled={saving} aria-label={saving ? "保存しています" : outdated ? "端末の保存を更新" : "端末に保存"} title={outdated ? "端末の保存を更新" : "端末に保存"} onClick={() => void save()}>{saving ? <Icons.busy aria-hidden="true" /> : outdated ? <Icons.updates aria-hidden="true" /> : <Icons.saveOffline aria-hidden="true" />}</button>)}
         <WorkFavoriteButton work={work} className="icon-button icon-button--large" readOnly={selected.offline} />
       </div>
     </footer>

@@ -1,6 +1,6 @@
+import { Icons } from "./icons";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Bookmark, Check, X } from "lucide-react";
 import { defaultPcSearch, type PcSearchCriteria } from "./pcApi";
 import { DATE_FIELD_OPTIONS } from "@shared/dateFields";
 import { describeCondition, hasConditionToSave, relevanceLabel, sortGroups, sortLabels } from "./librarySort";
@@ -19,7 +19,7 @@ export function activeFilterCount(criteria: PcSearchCriteria): number {
 function Chips<T extends string>({ label, value, options, onChange }: { label: string; value: T; options: { id: T; label: string }[]; onChange: (value: T) => void }) {
   return <div className="filter-group">
     <span className="filter-label">{label}</span>
-    <div className="filter-chips" role="group" aria-label={label}>{options.map((option) => <button key={option.id} type="button" className="filter-chip" aria-pressed={value === option.id} onClick={() => onChange(option.id)}>{value === option.id && <Check aria-hidden="true" />}{option.label}</button>)}</div>
+    <div className="filter-chips" role="group" aria-label={label}>{options.map((option) => <button key={option.id} type="button" className="filter-chip" aria-pressed={value === option.id} onClick={() => onChange(option.id)}>{value === option.id && <Icons.confirm aria-hidden="true" />}{option.label}</button>)}</div>
   </div>;
 }
 
@@ -108,7 +108,7 @@ export function FilterSheet({ criteria, onApply, onSaveCondition, onClose, scope
       <span className="filter-grab" aria-hidden="true" />
       <header className="filter-header">
         <h2>絞り込み</h2>
-        <button type="button" className="icon-button" aria-label="閉じる" onClick={onClose}><X aria-hidden="true" /></button>
+        <button type="button" className="icon-button" aria-label="閉じる" onClick={onClose}><Icons.cancel aria-hidden="true" /></button>
       </header>
       <div className="filter-body">
         <Section title="基本">
@@ -141,8 +141,8 @@ export function FilterSheet({ criteria, onApply, onSaveCondition, onClose, scope
           <select aria-label="この条件の並び順" className="filter-select" value={draft.sort} onChange={(event) => set({ sort: event.target.value as PcSearchCriteria["sort"] })}><option value="remembered">指定しない</option>{draft.text.trim() && <option value="standard">{relevanceLabel}</option>}{sortGroups.map((group) => <optgroup key={group.label} label={group.label}>{group.items.map((sort) => <option key={sort} value={sort}>{sortLabels[sort]}</option>)}</optgroup>)}</select>
           <p className="filter-hint">指定しなければ、検索欄の横の並び替えで選んだ順になります。ここで選ぶと、この条件で絞り込んでいる間だけその順で並べます。</p>
         </Section>}
-        {!onSaveCondition ? null : naming ? <div className="filter-save"><input autoFocus aria-label="保存する条件の名前" value={name} maxLength={60} placeholder={describeCondition(draft)} onChange={(event) => setName(event.target.value)} /><button type="button" className="secondary-button" onClick={saveCondition}>保存</button><button type="button" className="icon-button" aria-label="保存をやめる" onClick={() => setNaming(false)}><X aria-hidden="true" /></button></div>
-          : <button type="button" className="quiet-button" disabled={!hasConditionToSave(draft)} onClick={() => setNaming(true)}><Bookmark aria-hidden="true" />この条件を保存</button>}
+        {!onSaveCondition ? null : naming ? <div className="filter-save"><input autoFocus aria-label="保存する条件の名前" value={name} maxLength={60} placeholder={describeCondition(draft)} onChange={(event) => setName(event.target.value)} /><button type="button" className="secondary-button" onClick={saveCondition}>保存</button><button type="button" className="icon-button" aria-label="保存をやめる" onClick={() => setNaming(false)}><Icons.cancel aria-hidden="true" /></button></div>
+          : <button type="button" className="quiet-button" disabled={!hasConditionToSave(draft)} onClick={() => setNaming(true)}><Icons.saveSearch aria-hidden="true" />この条件を保存</button>}
         {savedName && <p className="filter-hint" role="status">「{savedName}」を保存しました。サイドバーから開けます。</p>}
         {problem && <p className="inline-alert" role="alert">{problem}</p>}
       </div>

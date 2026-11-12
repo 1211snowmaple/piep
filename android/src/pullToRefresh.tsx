@@ -1,5 +1,5 @@
+import { Icons } from "./icons";
 import { useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
-import { RefreshCw } from "lucide-react";
 
 /** 指を動かした量の半分だけ印を下げる。これだけ下がったら、離したときに読み込み直す。 */
 const triggerAt = 64;
@@ -84,6 +84,6 @@ export function PullIndicator({ pull, refreshing }: { pull: number; refreshing: 
   return <div className="pull-indicator" data-ready={pull >= triggerAt || undefined} data-refreshing={refreshing || undefined}
     style={{ "--pull": `${shown}px`, opacity: Math.min(1, shown / triggerAt) } as CSSProperties}
     role={refreshing ? "status" : undefined} aria-label={refreshing ? "読み込み直しています" : undefined}>
-    <RefreshCw aria-hidden="true" style={refreshing ? undefined : { transform: `rotate(${shown * 4}deg)` }} />
+    <Icons.updates aria-hidden="true" style={refreshing ? undefined : { transform: `rotate(${shown * 4}deg)` }} />
   </div>;
 }

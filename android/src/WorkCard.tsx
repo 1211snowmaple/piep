@@ -1,5 +1,4 @@
 import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
-import { Check, Download, LoaderCircle, RefreshCw } from "lucide-react";
 import { Icons } from "./icons";
 import { WorkFavoriteButton } from "./FavoriteButton";
 import { pcErrorMessage, saveOfflineWork, type PcWork } from "./pcApi";
@@ -28,7 +27,7 @@ export type SavedState = { changed: boolean };
  */
 function CardSave({ work, state, onSaved, onProblem }: { work: PcWork; state: SavedState | null; onSaved?: () => void; onProblem: (message: string | null) => void }) {
   const [saving, setSaving] = useState(false);
-  if (state && !state.changed && !saving) return <span className="card-action" data-tone="ok" role="img" aria-label="端末に保存済み"><Check aria-hidden="true" /></span>;
+  if (state && !state.changed && !saving) return <span className="card-action" data-tone="ok" role="img" aria-label="端末に保存済み"><Icons.confirm aria-hidden="true" /></span>;
   if (!onSaved) return null;
   const save = async () => {
     setSaving(true);
@@ -37,7 +36,7 @@ function CardSave({ work, state, onSaved, onProblem }: { work: PcWork; state: Sa
     catch (error) { onProblem(pcErrorMessage(error)); }
     finally { setSaving(false); }
   };
-  const Icon = saving ? LoaderCircle : state?.changed ? RefreshCw : Download;
+  const Icon = saving ? Icons.busy : state?.changed ? Icons.updates : Icons.saveOffline;
   const label = saving ? `${work.title}を保存しています` : state?.changed ? `${work.title}の端末の保存を更新` : `${work.title}を端末に保存`;
   return <button type="button" className="card-action" data-tone={state?.changed ? "warn" : undefined} data-busy={saving || undefined} disabled={saving} aria-label={label} onClick={() => void save()}><Icon aria-hidden="true" /></button>;
 }
