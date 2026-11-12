@@ -1,3 +1,4 @@
+import { dateFieldLabel } from "@shared/dateFields";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Funnel, X } from "lucide-react";
 import { Icons } from "./icons";
@@ -118,11 +119,11 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
     if (criteria.tag) filterChips.push({ key: "tag", text: `タグ: ${criteria.tag}${criteria.tagMode === "or" ? "（いずれか）" : ""}`, clear: { tag: "" } });
     if (criteria.tagExclude) filterChips.push({ key: "tagExclude", text: `除外タグ: ${criteria.tagExclude}`, clear: { tagExclude: "" } });
     if (criteria.minChars || criteria.maxChars) filterChips.push({ key: "chars", text: `文字数: ${criteria.minChars || "0"}〜${criteria.maxChars || "上限なし"}`, clear: { minChars: "", maxChars: "" } });
-    if (criteria.minAssets || criteria.maxAssets) filterChips.push({ key: "assets", text: `画像数: ${criteria.minAssets || "0"}〜${criteria.maxAssets || "上限なし"}`, clear: { minAssets: "", maxAssets: "" } });
+    if (criteria.minAssets || criteria.maxAssets) filterChips.push({ key: "assets", text: `添付数: ${criteria.minAssets || "0"}〜${criteria.maxAssets || "上限なし"}`, clear: { minAssets: "", maxAssets: "" } });
     if (criteria.revision) filterChips.push({ key: "revision", text: criteria.revision === "revised" ? "改稿あり" : "初版のみ", clear: { revision: "" } });
     if (criteria.edit) filterChips.push({ key: "edit", text: criteria.edit === "edited" ? "編集あり" : "編集なし", clear: { edit: "" } });
     if (criteria.cover) filterChips.push({ key: "cover", text: criteria.cover === "has_cover" ? "表紙あり" : "表紙なし", clear: { cover: "" } });
-    if (criteria.dateFrom || criteria.dateTo) filterChips.push({ key: "date", text: `${criteria.dateField === "downloaded_at" ? "追加日" : criteria.dateField === "source_created_at" ? "公開日" : "更新日"}: ${criteria.dateFrom || "指定なし"}〜${criteria.dateTo || "指定なし"}`, clear: { dateFrom: "", dateTo: "" } });
+    if (criteria.dateFrom || criteria.dateTo) filterChips.push({ key: "date", text: `${dateFieldLabel(criteria.dateField)}: ${criteria.dateFrom || "指定なし"}〜${criteria.dateTo || "指定なし"}`, clear: { dateFrom: "", dateTo: "" } });
     if (conditionSortLabel) filterChips.push({ key: "sort", text: `並び順: ${conditionSortLabel}`, clear: { sort: "remembered" } });
   }
 

@@ -8,7 +8,13 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(() => ({
   plugins: [react()],
   // デスクトップと共通の規則は、リポジトリの根の shared/ に置いてある。
-  resolve: { alias: { "@shared": path.resolve(import.meta.dirname, "../shared") } },
+  // shared/ から読む依存も、携帯に入れたものを使う（根の node_modules はデスクトップのもの）。
+  resolve: {
+    alias: {
+      "@shared": path.resolve(import.meta.dirname, "../shared"),
+      "lucide-react": path.resolve(import.meta.dirname, "node_modules/lucide-react"),
+    },
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

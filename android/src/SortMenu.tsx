@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowDownWideNarrow, Check } from "lucide-react";
-import { sortGroups, sortLabels, type MenuGroup } from "./librarySort";
+import { relevanceLabel, sortGroups, sortLabels, type MenuGroup } from "./librarySort";
+
+export { relevanceLabel };
 import type { PcSort } from "./pcApi";
 
-export const relevanceLabel = "関連度順";
 
 /** 検索欄の横に置く並び替えの入れ物。作品でも作者でも形を同じにする。
  * 携帯やタブレットでは横幅が足りないので印だけにする。いまの順は読み上げと開いた一覧で分かる。 */
