@@ -15,7 +15,9 @@
     "jsx": "react-jsx",
     /* デスクトップと共通の規則。リポジトリの根の shared/ を指す */
     "paths": {
-      "@shared/*": ["../shared/*"]
+      "@shared/*": ["../shared/*"],
+      /* shared/ から読む依存も、携帯に入れたものを使う */
+      "lucide-react": ["./node_modules/lucide-react"]
     },
 
     /* Linting */
