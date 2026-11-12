@@ -4,19 +4,19 @@ import { cachedShelf, isLocalReadingLoaded, loadLocalReading, loadShelf, shelfCh
 export { rememberReading, setReadingServer, type RecentWork } from "./localReading";
 
 /** 読み終えたものは棚から外す。新しく読んだ順。記録は端末の SQLite から読む。 */
-export function useReadingShelf(): RecentWork[] {
-  const [items, setItems] = useState<RecentWork[]>(cachedShelf);
+export function useReadingShelf(finished = false): RecentWork[] {
+  const [items, setItems] = useState<RecentWork[]>(() => cachedShelf(finished));
   useEffect(() => {
     let alive = true;
     let latest = 0;
     const update = () => {
       const request = ++latest;
-      void loadShelf().then((next) => { if (alive && request === latest) setItems(next); });
+      void loadShelf(finished).then((next) => { if (alive && request === latest) setItems(next); });
     };
     update();
     window.addEventListener(shelfChangedEvent, update);
     return () => { alive = false; window.removeEventListener(shelfChangedEvent, update); };
-  }, []);
+  }, [finished]);
   return items;
 }
 

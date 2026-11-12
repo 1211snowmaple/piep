@@ -358,6 +358,12 @@ fn cache_path(dir: &Path, server: &str, path: &str) -> PathBuf {
     let mut hasher = Sha256::new();
     // APNG 検査のない旧版が保存した画像を、検査済みとして使い回さない。
     hasher.update(b"display-image-validation-v2\0");
+    // 作者の丸い枠に背景画像を流用していた旧サーバーの返却を使い回さない。
+    let person = percent_decode(path.trim_start_matches('/'))
+        .is_some_and(|decoded| decoded.starts_with("entity/people/"));
+    if person {
+        hasher.update(b"profile-icon-only-v1\0");
+    }
     hasher.update(server.as_bytes());
     hasher.update([0]);
     hasher.update(path.as_bytes());
@@ -685,6 +691,30 @@ mod tests {
             cache_path(dir, "https://a/", "/work%2F1"),
             cache_path(dir, "https://b/", "/work%2F1")
         );
+    }
+
+    #[test]
+    fn only_person_images_skip_the_old_cache() {
+        // 旧版の鍵を再現して、作者の画像だけが別の鍵になることを確かめる。
+        let old_key = |path: &str| {
+            let mut hasher = Sha256::new();
+            hasher.update(b"display-image-validation-v2\0");
+            hasher.update(b"https://a/");
+            hasher.update([0]);
+            hasher.update(path.as_bytes());
+            let name: String = hasher
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            Path::new("covers").join(name)
+        };
+        let dir = Path::new("covers");
+        let person = "/entity%2Fpeople%2Fpixiv%2Fa";
+        assert_ne!(cache_path(dir, "https://a/", person), old_key(person));
+        for path in ["/entity%2Fseries%2Fpixiv%2Fpeople", "/work%2F1"] {
+            assert_eq!(cache_path(dir, "https://a/", path), old_key(path), "{path}");
+        }
     }
 
     #[test]

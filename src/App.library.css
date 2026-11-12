@@ -431,3 +431,11 @@ button.detail-series:active, button.detail-person:active { color: var(--piep-act
   .skeleton-block, .icon-button[data-busy] svg, .card-action[data-busy] svg { animation: none; }
   .work-card, .card-action { transition: none; }
 }
+
+/* 候補は検索欄の直下。キーボードを出した携帯でも一覧を送れる高さにする。 */
+.search-field { position: relative; }
+.search-suggestions { position: absolute; z-index: 20; inset: calc(100% + 4px) 0 auto; max-height: min(40dvh, 320px); overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--piep-line); border-radius: 10px; background: var(--piep-surface); box-shadow: 0 8px 24px rgb(0 0 0 / 14%); }
+.search-suggestions button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 48px; padding: 10px 12px; border: 0; text-align: left; background: transparent; color: var(--piep-text); }
+.search-suggestions button[aria-selected="true"], .search-suggestions button:active { background: var(--piep-active); }
+.search-suggestions button > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.search-suggestion-kind, .search-suggestions small { flex: none; font-size: var(--fs-tiny); color: var(--piep-muted); }

@@ -1,7 +1,10 @@
 import { adoptLocalPosition, flushLocalReading, hasLocalPosition, localPage, localPosition, localReadingTime, markLocalReading, rememberReading, saveLocalPage, saveLocalPosition, type SavedPosition } from "./localReading";
 import { progressLabel } from "./workText";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { followContentLink } from "./contentLinks";
+import { useAppNavigation } from "./appHistory";
+import { useReaderSelection } from "./readerSelection";
+import { readerMetadataForVersion, readerVersions } from "./readerVersion";
 import { ALargeSmall, ChevronLeft, TableOfContents, X } from "lucide-react";
 import { Icons } from "./icons";
 import { WorkFavoriteButton } from "./FavoriteButton";
@@ -65,7 +68,10 @@ function stepHeight(viewport: HTMLElement): number {
   return Math.max(1, viewport.clientHeight - keep);
 }
 
-export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBehaviorChange, backLabel = "作品一覧に戻る", onSaved, offline = false, offlineCollections, offlineAuthorCover = false, offlineEditHash = null, snapshotGeneration, startPage }: { work: PcWork; type: ReaderType; behavior: ReaderBehavior; onBack: () => void; onTypeChange: (patch: Partial<ReaderType>) => void; onBehaviorChange: (patch: Partial<ReaderBehavior>) => void; backLabel?: string; onSaved?: () => void; offline?: boolean; offlineCollections?: PcCollection[]; offlineAuthorCover?: boolean; offlineEditHash?: string | null; snapshotGeneration?: number; /** 本文検索から開くときのページ。保存した作品だけ。 */ startPage?: number }) {
+export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBehaviorChange, backLabel = "作品一覧に戻る", onSaved, offline = false, offlineCollections, offlineAuthorCover = false, offlineEditHash = null, snapshotGeneration, startPage, selectedVersion = null }: { work: PcWork; type: ReaderType; behavior: ReaderBehavior; onBack: () => void; onTypeChange: (patch: Partial<ReaderType>) => void; onBehaviorChange: (patch: Partial<ReaderBehavior>) => void; backLabel?: string; onSaved?: () => void; offline?: boolean; offlineCollections?: PcCollection[]; offlineAuthorCover?: boolean; offlineEditHash?: string | null; snapshotGeneration?: number; /** 本文検索から開くときのページ。保存した作品だけ。 */ startPage?: number; selectedVersion?: number | null }) {
+  const navigation = useAppNavigation();
+  const textSelection = useReaderSelection();
+  const [sourceMetadata, setSourceMetadata] = useState<PcMetadata | null>(null);
   const { fontSize, lineHeight, readerWidth, fontFamily, readerTheme } = type;
   const continuous = behavior.layout === "continuous";
   const [activeEditHash, setActiveEditHash] = useState<string | null | undefined>(offline ? offlineEditHash : undefined);
@@ -125,6 +131,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   const currentPage = useRef(pageIndex);
   currentPage.current = pageIndex;
   const readingWork = detailWork ?? work;
+  const loadMetadata = async () => readerMetadataForVersion(await getPcMetadata(work.id), selectedVersion);
   const positionKey = activeEditHash === undefined ? null : readingKey(readingWork, activeEditHash);
 
   useLayoutEffect(() => {
@@ -164,21 +171,21 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
    * サーバーが版を本文に添えるので、確かめるための往復は増えない。添えない古いサーバーにだけ一度尋ねる。
    */
   const readPage = async (target: number): Promise<PcPage | null> => {
-    const next = await fetchPage(work.id, target);
+    const next = await fetchPage(work.id, target, selectedVersion);
     const revision = next.revision;
     if (revision && revision.currentVersion === readingWork.currentVersion && revision.contentHash === readingWork.contentHash && revision.activeEditHash === activeEditHash) return next;
-    const metadata = await getPcMetadata(work.id);
+    const metadata = await loadMetadata();
     if (adoptRevision(metadata)) return null;
     if (!revision) return next;
     // 版は変わっていない。覚えていた本文のほうが古かった。
     forgetWorkPages(work.id);
-    return fetchPage(work.id, target);
+    return fetchPage(work.id, target, selectedVersion);
   };
 
   /** 次に読まれるページを先に受け取る。今のページの描画が済んでから。 */
   const prefetchNext = (shown: PcPage) => {
     if (offline || shown.page + 1 >= shown.pageCount) return;
-    window.setTimeout(() => prefetchPage(work.id, shown.page + 1), PREFETCH_DELAY_MS);
+    window.setTimeout(() => prefetchPage(work.id, shown.page + 1, selectedVersion), PREFETCH_DELAY_MS);
   };
 
   const imageSource = (assetId: number, width: number, generation: string | null): string | Promise<string> => {
@@ -192,10 +199,12 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     if (offline) return;
     let alive = true;
     // 版と同期の確認を待つあいだに本文も受け取っておく。位置が同じなら待ち時間がなくなる。
-    prefetchPage(work.id, savedPage(work, null));
-    void Promise.all([getPcMetadata(work.id), refreshReadingWithin(SYNC_WAIT_MS)]).then(async ([metadata]) => {
-      const start = await remoteStartFor(metadata.work, metadata.activeEditHash);
+    prefetchPage(work.id, selectedVersion === null ? savedPage(work, null) : 0, selectedVersion);
+    void Promise.all([getPcMetadata(work.id), selectedVersion === null ? refreshReadingWithin(SYNC_WAIT_MS) : Promise.resolve()]).then(async ([original]) => {
+      const metadata = readerMetadataForVersion(original, selectedVersion);
+      const start = selectedVersion === null ? await remoteStartFor(metadata.work, metadata.activeEditHash) : null;
       if (!alive) return;
+      setSourceMetadata(original);
       setDetailWork(metadata.work);
       setIsEdited(metadata.isEdited);
       if (start) {
@@ -206,8 +215,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
         pendingRestore.current = start.guide ? null : adopted;
         setPageIndex(start.page);
       } else {
-        pendingRestore.current = readSavedPosition(metadata.work, metadata.activeEditHash);
-        setPageIndex(savedPage(metadata.work, metadata.activeEditHash));
+        pendingRestore.current = selectedVersion === null ? readSavedPosition(metadata.work, metadata.activeEditHash) : null;
+        setPageIndex(selectedVersion === null ? savedPage(metadata.work, metadata.activeEditHash) : 0);
       }
       setActiveEditHash(metadata.activeEditHash);
     }).catch(() => {
@@ -257,7 +266,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   const queueReadingWrite = (pageNumber: number, ratio: number, pageCount: number) => {
-    if (!positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    if (selectedVersion !== null || !positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
     const time = Date.now();
     markLocalReading(readingWork, activeEditHash, time);
     setRemoteOffer(null);
@@ -298,7 +307,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   useEffect(() => {
-    if (!positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    if (selectedVersion !== null || !positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
     let alive = true;
     const check = () => {
       void refreshReading().then(() => remoteStartFor(readingWork, activeEditHash)).then((start) => {
@@ -406,7 +415,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
 
   useEffect(() => {
     // 版が分からないあいだの位置は、どの本文のものか決まらないので残さない。
-    if (!positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    if (selectedVersion !== null || !positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
     saveLocalPage(readingWork, activeEditHash, pageIndex);
   }, [positionKey, pageIndex]);
 
@@ -450,7 +459,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     const flush = () => {
       if (!changed || !restored || !latest) return;
       changed = false;
-      if (activeEditHash !== undefined && activeEditHash !== "unknown") saveLocalPosition(readingWork, activeEditHash, latest);
+      if (selectedVersion === null && activeEditHash !== undefined && activeEditHash !== "unknown") saveLocalPosition(readingWork, activeEditHash, latest);
       // 位置を戻しただけのスクロールは、読み進めた印ではない。
       if (restoredTop === null || Math.abs(latest.top - restoredTop) > 2) queueReadingWrite(pageIndex, latest.ratio, pageCount);
     };
@@ -529,10 +538,10 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     let alive = true;
     void (async () => {
       try {
-        const entries = await (offline ? getOfflineOutline(work.id, offlineGeneration!) : getPcOutline(work.id));
+        const entries = await (offline ? getOfflineOutline(work.id, offlineGeneration!) : getPcOutline(work.id, selectedVersion));
         if (!alive) return;
         if (!offline) {
-          const after = await getPcMetadata(work.id);
+          const after = await loadMetadata();
           if (!alive || adoptRevision(after)) return;
         }
         setOutline(entries);
@@ -649,7 +658,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     }
     const href = anchor.getAttribute("href");
     if (href && /^https?:\/\//i.test(href)) {
-      void openUrl(href).catch(() => setSaveMessage("リンクを開けませんでした"));
+      void followContentLink(href, navigation).catch(() => setSaveMessage("リンクを開けませんでした"));
     }
   };
 
@@ -722,7 +731,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     const start = touchStart.current;
     touchStart.current = null;
     touching.current = false;
-    if (!behavior.swipe || !start || event.changedTouches.length !== 1) return;
+    if (textSelection.selecting() || !behavior.swipe || !start || event.changedTouches.length !== 1) return;
     const dx = event.changedTouches[0].clientX - start.x;
     const dy = event.changedTouches[0].clientY - start.y;
     if (Math.abs(dx) < 85 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
@@ -731,6 +740,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   const tapReader = (event: React.MouseEvent<HTMLElement>) => {
+    if (textSelection.selecting()) return;
     if (swallowClick.current) { swallowClick.current = false; return; }
     if ((event.target as Element).closest("a[href], button, input, summary, label")) return;
     const selection = window.getSelection();
@@ -793,7 +803,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   const continuousCommit = (position: LivePosition) => {
-    if (!positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    if (selectedVersion !== null || !positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
     const saved: SavedPosition = { page: position.page, top: position.top, ratio: position.ratio, fontSize, lineHeight, readerWidth, fontFamily, layout: "continuous" };
     saveLocalPosition(readingWork, activeEditHash, saved);
     queueReadingWrite(position.page, position.ratio, position.pageCount);
@@ -828,17 +838,17 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
 
   return <div className={`reader-screen reader-theme--${readerTheme} ${pinned ? "reader-bars--pinned" : "reader-bars--auto"}`} data-bars={barsVisible ? "shown" : "hidden"} data-pager={showPager && behavior.pageButtons === "menu" ? "menu" : undefined}>
     <span className="reader-safe-top" aria-hidden="true" />
-    <header className="reader-toolbar">
+    <header className="reader-toolbar" aria-hidden={infoOpen || typeOpen} inert={infoOpen || typeOpen}>
       <button className="reader-icon-button" onClick={onBack} aria-label={backLabel}><ChevronLeft aria-hidden="true" /></button>
-      <span className="reader-toolbar-title">{work.title}</span>
+      <span className="reader-toolbar-title">{selectedVersion !== null ? `第${selectedVersion}版 · ${work.title}` : work.title}</span>
     </header>
-    <div className="reader-toasts">
+    <div className="reader-toasts" aria-hidden={infoOpen || typeOpen} inert={infoOpen || typeOpen}>
       {saveMessage && !infoOpen && <div className="reader-notice" role="status"><span>{saveMessage}</span><button type="button" onClick={() => setSaveMessage(null)} aria-label="閉じる"><X aria-hidden="true" /></button></div>}
       {remoteOffer && <div className="reader-notice reader-sync-offer" role="status"><span>{remoteOffer.guide ? "別の版を" : "別の端末で"} {remoteOffer.page + 1} ページまで読んでいます</span><button onClick={acceptRemote}>そこへ移動</button><button onClick={dismissRemote}>閉じる</button></div>}
     </div>
-    <div className="reader-body" ref={bodyRef}>
+    <div className="reader-body" ref={bodyRef} aria-hidden={infoOpen || typeOpen} inert={infoOpen || typeOpen}>
       <PullIndicator {...retryPull} />
-    <main className="reader-scroll" ref={scrollRef} key={continuous ? "continuous" : pageIndex} tabIndex={0} aria-label="本文。Page Up、Page Down、左右矢印、Spaceで移動" onClick={tapReader} onKeyDown={(event) => {
+    <main className="reader-scroll" ref={scrollRef} key={continuous ? "continuous" : pageIndex} tabIndex={0} aria-label="本文。Page Up、Page Down、左右矢印、Spaceで移動" onClick={tapReader} {...textSelection.handlers} onContextMenu={(event) => { if (!textSelection.selecting()) event.preventDefault(); }} onKeyDown={(event) => {
       const direction = readerKeyDirection(event);
       if (!direction || infoOpen || typeOpen) return;
       event.preventDefault();
@@ -847,7 +857,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     }} onTouchStart={(event) => {
       touching.current = true;
       if (event.touches.length === 1) touchStart.current = { x: event.touches[0].clientX, y: event.touches[0].clientY };
-    }} onTouchMove={() => { if (behavior.bars === "auto" && barsShown) setBarsShown(false); }} onTouchEnd={finishHorizontalSwipe}><article className={`reading-paper online-paper reader-font--${fontFamily}${!continuous && enterDirection ? ` reader-enter--${enterDirection}` : ""}`} style={{ maxWidth: `${readerWidth}px`, fontSize: `${fontSize}px`, lineHeight }}>
+    }} onTouchMove={() => { if (!textSelection.selecting() && behavior.bars === "auto" && barsShown) setBarsShown(false); }} onTouchEnd={finishHorizontalSwipe}><article className={`reading-paper online-paper reader-font--${fontFamily}${!continuous && enterDirection ? ` reader-enter--${enterDirection}` : ""}`} style={{ maxWidth: `${readerWidth}px`, fontSize: `${fontSize}px`, lineHeight, userSelect: textSelection.enabled ? "text" : "none", WebkitUserSelect: textSelection.enabled ? "text" : "none" }}>
       {continuous
         ? activeEditHash !== undefined && <ContinuousDocument key={`${positionKey}:${retry}`} viewportRef={scrollRef} load={loadSection} imageSource={imageSource} isSnapshotChange={(error) => offline && offlineSnapshotChanged(error)} onSnapshotChanged={() => setRetry((current) => current + 1)} start={continuousStart} target={continuousTarget} typeKey={`${fontSize}:${lineHeight}:${readerWidth}:${fontFamily}`} header={titleBlock} onInfo={continuousInfo} onPosition={continuousPosition} onCommit={continuousCommit} onLink={openContentLink} onStartRejected={rejectContinuousStart} flushRef={flushContinuous} />
         : <>
@@ -857,7 +867,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     </article></main>
     <ReaderRail progress={shownProgress} interactive={barsVisible && !loading && !problem} label={dragLabel} onPreview={setDragPosition} onCommit={(value) => { goToProgress(value); setDragPosition(null); }} />
     </div>
-    <div className="reader-bottom">
+    <div className="reader-bottom" aria-hidden={infoOpen || typeOpen} inert={infoOpen || typeOpen}>
       <div className="reader-panel" aria-hidden={!barsVisible} inert={!barsVisible}>
         {/* 読みながら触るものを一行に。字の説明は付けず、印だけを親指の届く下に置く。進み具合の棒は右端の縦の列。 */}
         <div className="reader-progress-row">
@@ -888,6 +898,6 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
         <div className="reader-sheet-body">{typeTab === "type" ? <ReaderTypeControls value={type} onChange={changeType} /> : <ReaderBehaviorControls value={behavior} onChange={changeBehavior} />}</div>
       </aside>
     </div>}
-    {infoOpen && <ReaderInfoSheet tab={infoTab} onTabChange={setInfoTab} onClose={() => setInfoOpen(false)} work={sidebarWork} isEdited={isEdited} offline={offline} offlineAuthorCover={offlineAuthorCover} snapshotGeneration={snapshotGeneration} outline={outline} currentPage={pageIndex} pageCount={pageCount} progress={progress} collections={collections} saving={saving} saveMessage={saveMessage} onSave={() => void save()} onOutline={jumpToOutline} />}
+    {infoOpen && <ReaderInfoSheet versions={sourceMetadata ? readerVersions(sourceMetadata) : []} selectedVersion={selectedVersion} latestEdited={sourceMetadata?.isEdited ?? false} onVersion={(version) => navigation.replace({ reader: { kind: "online", work, ...(version === null ? {} : { version }) } })} tab={infoTab} onTabChange={setInfoTab} onClose={() => setInfoOpen(false)} work={sidebarWork} isEdited={isEdited} offline={offline} offlineAuthorCover={offlineAuthorCover} snapshotGeneration={snapshotGeneration} outline={outline} currentPage={pageIndex} pageCount={pageCount} progress={progress} collections={collections} saving={saving} saveMessage={saveMessage} onSave={() => void save()} onOutline={jumpToOutline} />}
   </div>;
 }

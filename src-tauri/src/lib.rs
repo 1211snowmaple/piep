@@ -58,6 +58,8 @@ pub fn run() {
             pc_client::pc_connection_status,
             pc_client::pc_disconnect,
             pc_client::pc_search_works,
+            pc_client::pc_search_suggest,
+            pc_client::pc_lookup_work,
             pc_client::pc_list_entities,
             pc_client::pc_get_entity_detail,
             pc_client::pc_list_entity_series,

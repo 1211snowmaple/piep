@@ -62,7 +62,7 @@ let flushing: Promise<void> | null = null;
 let currentServer: string | null = null;
 let shelfNoticeAt = 0;
 let shelfTimer: number | undefined;
-let lastShelf: { server: string; items: RecentWork[] } | null = null;
+const lastShelves = new Map<boolean, { server: string; items: RecentWork[] }>();
 
 const keyOf = (source: string, sourceId: string) => `${source}:${sourceId}`;
 const workKey = (work: Pick<PcWork, "source" | "sourceId">) => keyOf(work.source, work.sourceId);
@@ -238,23 +238,24 @@ export function readingServer(): string | null {
 export const shelfChangedEvent = shelfChanged;
 
 /** 前に読み込んだ棚。画面を開き直したとき、読み込みを待たずに同じ棚を出す。 */
-export function cachedShelf(): RecentWork[] {
+export function cachedShelf(finished = false): RecentWork[] {
+  const lastShelf = lastShelves.get(finished);
   return lastShelf && lastShelf.server === currentServer ? lastShelf.items : [];
 }
 
 /** 読み終えたものを除いた「続きを読む」。新しく読んだ順。 */
-export async function loadShelf(): Promise<RecentWork[]> {
+export async function loadShelf(finished = false): Promise<RecentWork[]> {
   const server = currentServer;
   if (!server || !isTauri()) return [];
   await flushLocalReading();
   try {
-    const rows = await invoke<LocalReading[]>("reading_local_shelf", { serverUrl: server, limit: shelfLimit });
+    const rows = await invoke<LocalReading[]>("reading_local_shelf", { serverUrl: server, limit: finished ? 200 : shelfLimit, finished });
     for (const row of rows) if (!queued.has(workKey(row))) cache.set(workKey(row), row);
     // 0.6 までは少しでも動かせば棚に載せたので、頭にいる作品が記録に残っている。
-    const items = rows.filter((row) => row.work && partRead(row.progress)).map((row) => ({ work: row.work!, at: row.readAt, progress: row.progress, finished: row.finished, server: row.serverUrl ?? undefined }));
-    lastShelf = { server, items };
+    const items = rows.filter((row) => row.work && row.finished === finished && (finished || partRead(row.progress))).map((row) => ({ work: row.work!, at: row.readAt, progress: row.progress, finished: row.finished, server: row.serverUrl ?? undefined }));
+    lastShelves.set(finished, { server, items });
     return items;
-  } catch { return cachedShelf(); }
+  } catch { return cachedShelf(finished); }
 }
 
 // ---- 0.5 までの localStorage からの移行 ----

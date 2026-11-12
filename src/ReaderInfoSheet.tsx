@@ -4,13 +4,17 @@ import { ProviderMark } from "./ProviderMark";
 import { WorkThumbnail } from "./WorkThumbnail";
 import { WorkFacts, workFacts } from "./WorkFacts";
 import { AuthorAvatar } from "./WorkCard";
-import type { PcCollection, PcOutlineEntry, PcWork } from "./pcApi";
+import type { PcMetadata, PcCollection, PcOutlineEntry, PcWork } from "./pcApi";
 import { useAppNavigation } from "./appHistory";
 import { plainText, progressLabel, readingPercent } from "./workText";
 
 export type InfoTab = "outline" | "info";
 
-export function ReaderInfoSheet({ tab, onTabChange, onClose, work, isEdited, offline, offlineAuthorCover, snapshotGeneration, outline, currentPage, pageCount, progress, collections, saving, saveMessage, onSave, onOutline }: {
+export function ReaderInfoSheet({ versions, selectedVersion, latestEdited, onVersion, tab, onTabChange, onClose, work, isEdited, offline, offlineAuthorCover, snapshotGeneration, outline, currentPage, pageCount, progress, collections, saving, saveMessage, onSave, onOutline }: {
+  versions: PcMetadata["versions"];
+  selectedVersion: number | null;
+  latestEdited: boolean;
+  onVersion: (version: number | null) => void;
   tab: InfoTab;
   onTabChange: (tab: InfoTab) => void;
   onClose: () => void;
@@ -83,6 +87,11 @@ export function ReaderInfoSheet({ tab, onTabChange, onClose, work, isEdited, off
               <WorkFacts items={workFacts(work)} />
             </div>
           </div>
+          {!offline && (versions.length > 1 || latestEdited) && <label className="reader-version-select">読む版<select aria-label="読む版" value={selectedVersion ?? "latest"} onChange={(event) => onVersion(event.target.value === "latest" ? null : Number(event.target.value))}>
+            <option value="latest">最新版{latestEdited ? "（編集版）" : ""}</option>
+            {[...versions].sort((a, b) => b.version - a.version).map((entry) => <option key={entry.version} value={entry.version}>第{entry.version}版（原文）</option>)}
+          </select></label>}
+          {offline && <p className="settings-help">端末に保存した第{work.currentVersion}版を表示しています。版の切り替えはオンラインで利用できます。</p>}
           <div className="reader-info-progress">
             <div><strong>{progressLabel(progress, pageCount)}</strong>{pageCount > 1 && <span>{currentPage + 1} / {pageCount} ページ</span>}</div>
             <span className="reader-progress-track" aria-hidden="true"><span style={{ width: `${percent}%` }} /></span>
@@ -100,7 +109,7 @@ export function ReaderInfoSheet({ tab, onTabChange, onClose, work, isEdited, off
       {activeTab === "info" && !offline && <footer className="reader-info-footer">
         {saveMessage === "端末に保存しました"
           ? <span className="reader-info-save" data-done="true" role="status"><Check aria-hidden="true" />端末に保存しました</span>
-          : <button type="button" className="reader-info-save" data-busy={saving || undefined} disabled={saving} onClick={onSave}>{saving ? <LoaderCircle aria-hidden="true" /> : <Download aria-hidden="true" />}{saving ? "保存しています…" : "端末に保存"}</button>}
+          : <button type="button" className="reader-info-save" data-busy={saving || undefined} disabled={saving} onClick={onSave}>{saving ? <LoaderCircle aria-hidden="true" /> : <Download aria-hidden="true" />}{saving ? "保存しています…" : selectedVersion !== null ? "最新版を端末に保存" : "端末に保存"}</button>}
       </footer>}
     </aside>
   </div>;

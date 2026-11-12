@@ -184,7 +184,7 @@
 
 /* 面: 携帯は下から、広い画面は右から出す。 */
 .reader-sheet-layer { position: absolute; z-index: 40; inset: 0; display: flex; align-items: flex-end; justify-content: center; }
-.reader-sheet-scrim { position: absolute; inset: 0; width: 100%; border: 0; padding: 0; background: rgb(16 28 45 / 42%); }
+.reader-sheet-scrim { position: absolute; inset: 0 0 var(--piep-safe-bottom); width: 100%; border: 0; padding: 0; background: rgb(16 28 45 / 42%); }
 .reader-sheet-layer--clear .reader-sheet-scrim { background: transparent; }
 .reader-sheet { position: relative; display: flex; flex-direction: column; width: 100%; max-height: 86dvh; border-radius: 20px 20px 0 0; background: var(--reader-surface); box-shadow: 0 -8px 32px var(--reader-shadow); color: var(--reader-control-ink); animation: reader-sheet-up .18s ease-out; }
 .reader-type-sheet { max-height: 62dvh; }
@@ -319,3 +319,6 @@
   .reader-enter--next, .reader-enter--prev, .reader-sheet { animation: none; }
   .reader-toolbar, .reader-panel, .reader-toggle-track, .reader-toggle-track span { transition: none; }
 }
+
+.reader-version-select { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-block: 16px; color: var(--reader-muted); }
+.reader-version-select select { min-width: 0; max-width: 75%; min-height: 44px; padding: 8px; border: 1px solid var(--reader-line); border-radius: 8px; background: var(--reader-surface); color: var(--reader-ink); font: inherit; }

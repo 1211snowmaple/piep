@@ -13,7 +13,7 @@
 // 何か見つかれば終了コード 1。--out を付けると各大きさの画面写真も残す。
 // 開発用の WebView（デバッグ版 APK）でだけ動く。製品の機能には含めない。
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const args = process.argv.slice(2);
@@ -21,6 +21,11 @@ const device = args.shift();
 if (!device) throw new Error("端末名（例: emulator-5556）を渡してください");
 const outAt = args.indexOf("--out");
 const out = outAt >= 0 ? args.splice(outAt, 2)[1] : null;
+// 回転・密度変更で Activity が作り直される端末では、毎回対象画面を開き直す。
+const prepareAt = args.indexOf("--prepare");
+const prepare = prepareAt >= 0 ? readFileSync(args.splice(prepareAt, 2)[1], "utf8") : null;
+const packageAt = args.indexOf("--package");
+const packageId = packageAt >= 0 ? args.splice(packageAt, 2)[1] : null;
 const specs = args.length ? args : ["1080x2400:480", "1080x2400:420", "1080x2400:360", "1600x2560:400", "1600x2560:320", "2560x1600:440", "2560x1600:400", "2560x1600:320"];
 const port = 9400 + Math.floor(Math.random() * 500);
 
@@ -28,11 +33,12 @@ const adb = (...rest) => execFileSync("adb", ["-s", device, ...rest]).toString()
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function evaluate(expression) {
-  const socket = [...new Set(adb("shell", "cat", "/proc/net/unix").match(/webview_devtools_remote_\d+/g) ?? [])].pop();
+  const socket = packageId ? `webview_devtools_remote_${adb("shell", "pidof", packageId).trim().split(/\s+/)[0]}` : [...new Set(adb("shell", "cat", "/proc/net/unix").match(/webview_devtools_remote_\d+/g) ?? [])].pop();
   if (!socket) throw new Error("piep の WebView が見つかりません（デバッグ版を起動していますか）");
   adb("forward", `tcp:${port}`, `localabstract:${socket}`);
   const tabs = await fetch(`http://127.0.0.1:${port}/json`).then((response) => response.json());
-  const tab = tabs.find((item) => item.type === "page" && item.url.startsWith("http://tauri.localhost")) ?? tabs.find((item) => item.type === "page");
+  const attached = tabs.filter((item) => { try { return JSON.parse(item.description).attached !== false; } catch { return true; } });
+  const tab = attached.find((item) => item.type === "page" && item.url.startsWith("http://tauri.localhost")) ?? attached.find((item) => item.type === "page");
   const ws = new WebSocket(tab.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
   const result = await new Promise((resolve) => {
@@ -40,6 +46,7 @@ async function evaluate(expression) {
     ws.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, awaitPromise: true, returnByValue: true } }));
   });
   ws.close();
+  if (result.error || result.result?.exceptionDetails) throw new Error("画面の準備・点検に失敗しました: " + JSON.stringify(result.error ?? result.result.exceptionDetails));
   return result.result?.result?.value;
 }
 
@@ -92,7 +99,7 @@ function audit() {
   }
   // 字が別の要素の下に隠れていないか。真ん中の点を一番上で描いているのが、その字の要素かどうかで見る。
   // スクロールして見出しやメニューの下へ流れた行と、意図して重ねる浮かぶ面は数えない。
-  const floating = ".scroll-top,.app-toast,.reader-rail,.reader-toolbar,.reader-panel,.reader-toasts,.mobile-header,.bottom-nav,.mobile-sidebar-scrim,.sidebar.mobile-open,[role=dialog],.reader-sheet-layer,.filter-layer";
+  const floating = ".search-suggestions,.scroll-top,.app-toast,.reader-rail,.reader-toolbar,.reader-panel,.reader-toasts,.mobile-header,.bottom-nav,.mobile-sidebar-scrim,.sidebar.mobile-open,[role=dialog],.reader-sheet-layer,.filter-layer";
   const leaves = all.filter((el) => [...el.childNodes].some((node) => node.nodeType === 3 && node.textContent.trim()));
   for (const el of leaves) {
     const r = el.getBoundingClientRect();
@@ -132,6 +139,7 @@ try {
     adb("shell", "wm", "size", size);
     if (density) adb("shell", "wm", "density", density);
     await sleep(4000);
+    if (prepare) { await evaluate(prepare); await sleep(300); }
     const result = await evaluate(`(${audit.toString()})()`);
     console.log(`== ${spec}  ${result.width}x${result.height}`);
     for (const line of result.found) console.log(`  ${line}`);
