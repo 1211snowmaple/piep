@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Bookmark, Check, X } from "lucide-react";
 import { defaultPcSearch, type PcSearchCriteria } from "./pcApi";
-import { describeCondition, hasConditionToSave, sortGroups, sortLabels } from "./librarySort";
+import { DATE_FIELD_OPTIONS } from "@shared/dateFields";
+import { describeCondition, hasConditionToSave, relevanceLabel, sortGroups, sortLabels } from "./librarySort";
 
 /** 検索語を除いて、効いている条件を数える。上限と下限は合わせて一つと考える。 */
 export function activeFilterCount(criteria: PcSearchCriteria): number {
@@ -28,7 +29,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 function problemOf(draft: PcSearchCriteria): string | null {
   if (draft.minChars && draft.maxChars && Number(draft.minChars) > Number(draft.maxChars)) return "文字数の下限は上限以下にしてください。";
-  if (draft.minAssets && draft.maxAssets && Number(draft.minAssets) > Number(draft.maxAssets)) return "画像数の下限は上限以下にしてください。";
+  if (draft.minAssets && draft.maxAssets && Number(draft.minAssets) > Number(draft.maxAssets)) return "添付数の下限は上限以下にしてください。";
   if (draft.dateFrom && draft.dateTo && draft.dateFrom > draft.dateTo) return "日付の開始日は終了日以前にしてください。";
   for (const value of [draft.author, draft.authorExclude, draft.tag, draft.tagExclude]) {
     if (value.split(/[\n,、]+/).filter((part) => part.trim()).length > 10) return "作者とタグはそれぞれ 10 件まで指定できます。";
@@ -132,12 +133,12 @@ export function FilterSheet({ criteria, onApply, onSaveCondition, onClose, scope
         </Section>
         <Section title="分量と日付">
           {range("文字数", "minChars", "maxChars", "1000000000")}
-          {range("画像数", "minAssets", "maxAssets", "1000000")}
-          <Chips label="日付の種類" value={draft.dateField} options={[{ id: "downloaded_at", label: "追加日" }, { id: "source_created_at", label: "公開日" }, { id: "source_updated_at", label: "更新日" }]} onChange={(dateField) => set({ dateField })} />
+          {range("添付数", "minAssets", "maxAssets", "1000000")}
+          <Chips label="日付の種類" value={draft.dateField} options={DATE_FIELD_OPTIONS.map((option) => ({ id: option.value, label: option.label }))} onChange={(dateField) => set({ dateField })} />
           <div className="filter-range"><span className="filter-label">期間</span><input aria-label="開始日" type="date" value={draft.dateFrom} onChange={(event) => set({ dateFrom: event.target.value })} /><span aria-hidden="true">〜</span><input aria-label="終了日" type="date" value={draft.dateTo} onChange={(event) => set({ dateTo: event.target.value })} /></div>
         </Section>
         {!scope && <Section title="この条件の並び順">
-          <select aria-label="この条件の並び順" className="filter-select" value={draft.sort} onChange={(event) => set({ sort: event.target.value as PcSearchCriteria["sort"] })}><option value="remembered">指定しない</option>{draft.text.trim() && <option value="standard">関連度順</option>}{sortGroups.map((group) => <optgroup key={group.label} label={group.label}>{group.items.map((sort) => <option key={sort} value={sort}>{sortLabels[sort]}</option>)}</optgroup>)}</select>
+          <select aria-label="この条件の並び順" className="filter-select" value={draft.sort} onChange={(event) => set({ sort: event.target.value as PcSearchCriteria["sort"] })}><option value="remembered">指定しない</option>{draft.text.trim() && <option value="standard">{relevanceLabel}</option>}{sortGroups.map((group) => <optgroup key={group.label} label={group.label}>{group.items.map((sort) => <option key={sort} value={sort}>{sortLabels[sort]}</option>)}</optgroup>)}</select>
           <p className="filter-hint">指定しなければ、検索欄の横の並び替えで選んだ順になります。ここで選ぶと、この条件で絞り込んでいる間だけその順で並べます。</p>
         </Section>}
         {!onSaveCondition ? null : naming ? <div className="filter-save"><input autoFocus aria-label="保存する条件の名前" value={name} maxLength={60} placeholder={describeCondition(draft)} onChange={(event) => setName(event.target.value)} /><button type="button" className="secondary-button" onClick={saveCondition}>保存</button><button type="button" className="icon-button" aria-label="保存をやめる" onClick={() => setNaming(false)}><X aria-hidden="true" /></button></div>

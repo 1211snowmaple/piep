@@ -1,14 +1,22 @@
+import { ENTITY_SORT_OPTIONS, RELEVANCE_SORT_OPTION, SERIES_ORDER_SORT_OPTIONS, WORK_SORT_OPTIONS, sortLabel, type SortChoice } from "@shared/sortOptions";
 import { defaultPcSearch, type OfflineWork, type PcSearchCriteria, type PcSort, type PcWorkSort } from "./pcApi";
 
 export type FixedSort = Exclude<PcSort, "standard">;
 export type MenuGroup<T extends string> = { label: string; items: { value: T; label: string }[] };
 
-export const sortLabels: Record<FixedSort, string> = {
-  dateDesc: "追加日：新しい順", dateAsc: "追加日：古い順", publishedDesc: "公開日：新しい順", publishedAsc: "公開日：古い順",
-  titleAsc: "タイトル：昇順", titleDesc: "タイトル：降順", authorAsc: "作者名：昇順", authorDesc: "作者名：降順",
-  lengthDesc: "文字数：多い順", lengthAsc: "文字数：少ない順", assetsDesc: "画像数：多い順", assetsAsc: "画像数：少ない順",
-  versionDesc: "版番号：大きい順", versionAsc: "版番号：小さい順",
+/** 携帯の順の名前と、デスクトップと共通の順の対応。呼び名は共通の定義から引く。 */
+const sortChoices: Record<FixedSort, SortChoice> = {
+  dateDesc: "downloaded_at:desc", dateAsc: "downloaded_at:asc", publishedDesc: "source_created_at:desc", publishedAsc: "source_created_at:asc",
+  titleAsc: "title:asc", titleDesc: "title:desc", authorAsc: "author_name:asc", authorDesc: "author_name:desc",
+  lengthDesc: "text_length:desc", lengthAsc: "text_length:asc", assetsDesc: "asset_count:desc", assetsAsc: "asset_count:asc",
+  versionDesc: "current_version:desc", versionAsc: "current_version:asc",
 };
+
+export const sortLabels = Object.fromEntries(
+  Object.entries(sortChoices).map(([sort, choice]) => [sort, sortLabel(WORK_SORT_OPTIONS, choice)]),
+) as Record<FixedSort, string>;
+
+export const relevanceLabel = RELEVANCE_SORT_OPTION.label;
 
 export const sortGroups: { label: string; items: FixedSort[] }[] = [
   { label: "日付", items: ["dateDesc", "dateAsc", "publishedDesc", "publishedAsc"] },
@@ -116,20 +124,13 @@ export function hasConditionToSave(criteria: PcSearchCriteria): boolean {
 export type EntitySortField = "work_count" | "downloaded_at" | "source_created_at" | "source_updated_at" | "name" | "text_length" | "file_size_bytes" | "asset_count" | "current_version";
 export type EntitySort = `${EntitySortField}:${"asc" | "desc"}`;
 
+const entityItems = (...sorts: EntitySort[]) => sorts.map((value) => ({ value, label: sortLabel(ENTITY_SORT_OPTIONS, value) }));
+
 export const entitySortGroups: MenuGroup<EntitySort>[] = [
-  { label: "作品数", items: [{ value: "work_count:desc", label: "作品数：多い順" }, { value: "work_count:asc", label: "作品数：少ない順" }] },
-  { label: "日付", items: [
-    { value: "downloaded_at:desc", label: "追加日：新しい順" }, { value: "downloaded_at:asc", label: "追加日：古い順" },
-    { value: "source_created_at:desc", label: "公開日：新しい順" }, { value: "source_created_at:asc", label: "公開日：古い順" },
-    { value: "source_updated_at:desc", label: "更新日：新しい順" }, { value: "source_updated_at:asc", label: "更新日：古い順" },
-  ] },
-  { label: "名前", items: [{ value: "name:asc", label: "名前：昇順" }, { value: "name:desc", label: "名前：降順" }] },
-  { label: "合計", items: [
-    { value: "text_length:desc", label: "合計文字数：多い順" }, { value: "text_length:asc", label: "合計文字数：少ない順" },
-    { value: "file_size_bytes:desc", label: "合計容量：大きい順" }, { value: "file_size_bytes:asc", label: "合計容量：小さい順" },
-    { value: "asset_count:desc", label: "合計添付数：多い順" }, { value: "asset_count:asc", label: "合計添付数：少ない順" },
-    { value: "current_version:desc", label: "改稿回数：多い順" }, { value: "current_version:asc", label: "改稿回数：少ない順" },
-  ] },
+  { label: "作品数", items: entityItems("work_count:desc", "work_count:asc") },
+  { label: "日付", items: entityItems("downloaded_at:desc", "downloaded_at:asc", "source_created_at:desc", "source_created_at:asc", "source_updated_at:desc", "source_updated_at:asc") },
+  { label: "名前", items: entityItems("name:asc", "name:desc") },
+  { label: "合計", items: entityItems("text_length:desc", "text_length:asc", "file_size_bytes:desc", "file_size_bytes:asc", "asset_count:desc", "asset_count:asc", "current_version:desc", "current_version:asc") },
 ];
 
 const entitySortValues = new Map(entitySortGroups.flatMap((group) => group.items).map((item) => [item.value as string, item.label]));
@@ -160,7 +161,7 @@ export function saveEntitySort(kind: "people" | "series" | typeof entitySeriesKe
 // ---- 作者・シリーズの中の作品の順。
 
 export type EntityWorkSort = FixedSort | "seriesAsc" | "seriesDesc";
-const seriesOrderLabels = { seriesAsc: "シリーズ内順：先頭から", seriesDesc: "シリーズ内順：末尾から" } as const;
+const seriesOrderLabels = { seriesAsc: sortLabel(SERIES_ORDER_SORT_OPTIONS, "series_order:asc"), seriesDesc: sortLabel(SERIES_ORDER_SORT_OPTIONS, "series_order:desc") };
 const entityWorkSortKey = (kind: string) => `piep.android.entity-work-sort.${kind}`;
 
 export function entityWorkSortLabel(sort: EntityWorkSort): string {
@@ -173,7 +174,7 @@ export function entityWorkSortLabel(sort: EntityWorkSort): string {
  */
 export function entityWorkSortGroups(kind: "person" | "series", hasQuery: boolean): MenuGroup<PcWorkSort>[] {
   const groups: MenuGroup<PcWorkSort>[] = [];
-  if (hasQuery) groups.push({ label: "この検索だけ", items: [{ value: "standard", label: "関連度順" }] });
+  if (hasQuery) groups.push({ label: "この検索だけ", items: [{ value: "standard", label: relevanceLabel }] });
   if (kind === "series") groups.push({ label: "シリーズ内順", items: [{ value: "seriesAsc", label: seriesOrderLabels.seriesAsc }, { value: "seriesDesc", label: seriesOrderLabels.seriesDesc }] });
   for (const group of sortGroups) {
     const items = group.items.filter((sort) => sort !== "authorAsc" && sort !== "authorDesc");
