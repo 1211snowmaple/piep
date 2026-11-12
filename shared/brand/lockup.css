@@ -1,0 +1,13 @@
+/* piep のロゴ。図と「piep」の文字を、文字の大きさ（--lockup-size）から組む。
+   デスクトップと携帯で同じ比率・同じ色にする。 */
+.piep-lockup { display: inline-flex; align-items: center; gap: calc(var(--lockup-size, 26px) * 0.27); white-space: nowrap; }
+.piep-lockup__mark { display: block; width: calc(var(--lockup-size, 26px) * 1.99); height: auto; }
+.piep-lockup__word {
+  font-family: "Bauhaus 93", "Century Gothic", "Futura", "Trebuchet MS", sans-serif;
+  font-size: var(--lockup-size, 26px);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.005em;
+}
+.piep-lockup__pi { color: #0096fa; }
+.piep-lockup__ep { color: #86b918; }

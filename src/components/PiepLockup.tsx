@@ -1,4 +1,5 @@
-import piepMark from "@/assets/mark.svg";
+import piepMark from "@shared/brand/mark.svg";
+import "@shared/brand/lockup.css";
 
 /**
  * The lockup is laid out in HTML rather than shipped as one SVG.
