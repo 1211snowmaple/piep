@@ -1,3 +1,5 @@
+import { normalizeContentLinkUrl } from "@shared/contentLinkTarget";
+
 export interface SavedSourceTarget {
   source: "pixiv" | "fanbox";
   sourceId: string;
@@ -83,18 +85,6 @@ export interface SidebarAnalysisState {
   items: SidebarItem[];
   downloadType: SidebarDownloadType;
   analyzedAt: number;
-}
-
-export function normalizeContentLinkUrl(url: string): string {
-  const deepLink = url.match(/^pixiv:\/\/(illusts?|novels?|users?)\/(\d+)\/?(\?[^#]*)?(#.*)?$/i);
-  if (!deepLink) return url;
-  const [, kind, id, query = "", fragment = ""] = deepLink;
-  if (/^novels?$/i.test(kind)) {
-    const extra = new URLSearchParams(query.slice(1)).toString();
-    return `https://www.pixiv.net/novel/show.php?id=${id}${extra ? `&${extra}` : ""}${fragment}`;
-  }
-  const path = /^users?$/i.test(kind) ? `users/${id}` : `artworks/${id}`;
-  return `https://www.pixiv.net/${path}${query}${fragment}`;
 }
 
 function sourceUrl(raw: string): URL | null {
@@ -271,3 +261,5 @@ export function downloadTargetKey(url: string): string {
   parsed.searchParams.delete("p");
   return `page:${parsed.hostname}${sourcePath(parsed.pathname)}${parsed.search}`;
 }
+
+export { normalizeContentLinkUrl };

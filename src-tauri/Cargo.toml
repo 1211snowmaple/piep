@@ -23,6 +23,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset", "unstable"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
+# 携帯へ渡すデータの型。携帯の Rust と同じ定義を使う。
+piep-mobile-api = { path = "../crates/piep-mobile-api" }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 reqwest = { version = "0.13.4", features = ["form", "json", "query", "stream", "rustls"] }
 tokio = { version = "1.53.1", features = ["full"] }

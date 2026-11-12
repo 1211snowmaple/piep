@@ -4840,6 +4840,7 @@ dependencies = [
  "parking_lot",
  "pdfium-render",
  "piep-library-protocol",
+ "piep-mobile-api",
  "piep-storage",
  "r2d2",
  "r2d2_sqlite",
@@ -4889,6 +4890,13 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "piep-mobile-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

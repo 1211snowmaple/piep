@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    /* デスクトップと共通の規則。リポジトリの根の shared/ を指す */
+    "paths": {
+      "@shared/*": ["../shared/*"],
+      /* shared/ から読む依存も、携帯に入れたものを使う */
+      "lucide-react": ["./node_modules/lucide-react"]
+    },
+
+    /* Linting */
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src", "../shared"],
+  /* shared/ の試験はデスクトップ側の vitest が回す。携帯の依存だけでは型が解けない */
+  "exclude": ["../shared/**/*.test.ts"],
+  "references": [{ "path": "./tsconfig.node.json" }]
+}

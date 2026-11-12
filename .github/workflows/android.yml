@@ -1,0 +1,36 @@
+name: "Android"
+
+# 携帯アプリの画面側だけを確かめる。APK の組み立ては NDK と署名が要るので、
+# 手元の android/tools/release.ps1 で行う。
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "android/**"
+      - "shared/**"
+      - ".github/workflows/android.yml"
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - "shared/**"
+      - ".github/workflows/android.yml"
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          check-latest: true
+          cache: npm
+          cache-dependency-path: android/package-lock.json
+      - run: npm ci
+      # 型検査と本番用の組み立て。
+      - run: npm run build
+      - run: npm test

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The book only: it stays inside the safe circle, whatever shape the launcher masks to. -->
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
+    android:src="@drawable/piep_launcher_book"
+    android:gravity="fill" />

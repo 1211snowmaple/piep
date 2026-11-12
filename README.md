@@ -54,6 +54,13 @@ GitHub Releasesでの更新確認、利用者が明示的に設定したAI補助
 
 ## 開発
 
+Android 版は [`android/`](android/README.md) にあります。デスクトップ版とは別の Tauri プロジェクトで、
+コマンドは `android/` の中で実行します。APK の配布先は今までどおり
+[piep-android の配布ページ](https://github.com/1211snowmaple/piep-android/releases/latest)です。
+
+デスクトップと携帯で同じでなければならない規則（表紙の模様、本文リンクの宛先の解釈）は
+`shared/` に置き、両方から `@shared/…` で読み込みます。見た目を持つ部品は置きません。
+
 ### 必要なもの
 
 - Node.js 24.x

@@ -1,3 +1,4 @@
+import { DATE_FIELD_OPTIONS, dateFieldLabel } from "@shared/dateFields";
 import { SeriesFilterSelect } from "./SeriesFilterSelect";
 import { ActionRow } from "@/components/ActionRow";
 import { parseSearchMode, useDefaultSearchMode } from "@/lib/searchPreferences";
@@ -2258,9 +2259,7 @@ function coverFilterName(value: LibraryCoverFilter) {
 }
 
 function dateFieldName(value: LibraryDateField) {
-  if (value === "source_created_at") return "公開日";
-  if (value === "source_updated_at") return "更新日";
-  return "保存日";
+  return dateFieldLabel(value);
 }
 
 function FacetSelectionPanel({ kind, facets, include, exclude, headerAction, onToggle }: {
@@ -2949,7 +2948,7 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
 
           {activeSection === "dates" && (
             <Stack gap="sm">
-              <FilterChoiceGroup label="日付の種類" allLabel={null} value={draft.dateField} options={[{ value: "downloaded_at", label: "保存日" }, { value: "source_created_at", label: "公開日" }, { value: "source_updated_at", label: "更新日" }]} onChange={(dateField) => setDraft({ ...draft, dateField: parseDateField(dateField) })} />
+              <FilterChoiceGroup label="日付の種類" allLabel={null} value={draft.dateField} options={DATE_FIELD_OPTIONS} onChange={(dateField) => setDraft({ ...draft, dateField: parseDateField(dateField) })} />
               {/* よく使う幅はひと押しで。日付を二つ入れるのは、決まった期間を見たいときだけ。 */}
               <FilterChoiceGroup label="期間" allLabel="指定なし" value={recentDatePreset(draft.dateFrom, draft.dateTo)} options={RECENT_DATE_PRESETS} onChange={(preset) => setDraft({ ...draft, dateFrom: preset ? recentDateFrom(preset) : "", dateTo: "" })} />
               <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
@@ -3015,7 +3014,7 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
         {conditions.filter((condition) => condition.active && !condition.id.startsWith("section:") && condition.id !== "versions:current" && condition.id !== "tagmode:and").map((condition) => <FilterToken key={condition.id} label={condition.label} onRemove={() => condition.id === "versions:all" ? setVersionScopeDraft("current") : applyCondition(condition.id)} />)}
         {draft.seriesKey && <FilterToken label={`シリーズ: ${draft.seriesLabel || draft.seriesKey}`} onRemove={() => setDraft({ ...draft, seriesKey: null, seriesSource: null, seriesLabel: "" })} />}
         {([['minChars','文字数 ≥'],['maxChars','文字数 ≤'],['minAssets','添付数 ≥'],['maxAssets','添付数 ≤'],['minSizeMb','容量(MB) ≥'],['maxSizeMb','容量(MB) ≤']] as const).filter(([key]) => draft[key] !== "").map(([key,label]) => <FilterToken key={key} label={`${label} ${draft[key]}`} onRemove={() => setDraft({ ...draft, [key]: "" })} />)}
-        {(draft.dateFrom || draft.dateTo) && <FilterToken label={`${draft.dateField === "downloaded_at" ? "保存日" : draft.dateField === "source_created_at" ? "公開日" : "更新日"}: ${draft.dateFrom || "指定なし"}〜${draft.dateTo || "指定なし"}`} onRemove={() => setDraft({ ...draft, dateFrom: "", dateTo: "" })} />}
+        {(draft.dateFrom || draft.dateTo) && <FilterToken label={`${dateFieldLabel(draft.dateField)}: ${draft.dateFrom || "指定なし"}〜${draft.dateTo || "指定なし"}`} onRemove={() => setDraft({ ...draft, dateFrom: "", dateTo: "" })} />}
       </Group>}
       <FacetSelectionSummary filters={draft} onRemove={toggleFacet} />
       <div className="filter-form__actions">

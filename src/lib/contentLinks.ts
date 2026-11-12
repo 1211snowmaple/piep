@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { MouseEvent } from "react";
 import { useAppNavigate } from "@/app/router";
-import { normalizeContentLinkUrl } from "@/features/browser/downloadCandidates";
+import { contentLinkTarget, normalizeContentLinkUrl } from "@shared/contentLinkTarget";
+import type { ContentLinkTarget } from "@shared/contentLinkTarget";
 import { getDownloadBySource, getPerson, getSeries, isTauriRuntime } from "@/services/dbApi";
 import { openExternalUrl } from "@/services/openerApi";
 
@@ -14,61 +15,6 @@ import { openExternalUrl } from "@/services/openerApi";
  * app, and sending them to a browser to look at their own library is the wrong
  * answer.
  */
-export type ContentLinkTarget =
-  | { kind: "work"; source: string; sourceId: string }
-  | { kind: "person"; source: string; sourceKey: string }
-  | { kind: "series"; source: string; sourceKey: string };
-
-/** The creator subdomain, when a FANBOX address carries one. */
-function fanboxCreator(url: URL): string | null {
-  const host = url.hostname.replace(/^www\./, "");
-  if (host.endsWith(".fanbox.cc")) return host.slice(0, -".fanbox.cc".length) || null;
-  const inPath = url.pathname.match(/^\/@([^/]+)/);
-  return inPath?.[1] ?? null;
-}
-
-/**
- * What a link inside saved text names, if it names anything the app holds.
- *
- * pixiv writes its own captions with `pixiv://` deep links for the app, so the
- * addresses that most want resolving are the ones a browser cannot open either.
- */
-export function contentLinkTarget(raw: string): ContentLinkTarget | null {
-  let url: URL;
-  try {
-    url = new URL(normalizeContentLinkUrl(raw.trim()));
-  } catch {
-    return null;
-  }
-  // 取得元の内部リンクとして扱うのは、ブラウザで同じサービスへ安全に渡せる
-  // 形だけ。`http:` や資格情報付きの見た目だけ FANBOX の URL を、手元の作品へ
-  // 解決して本物らしく見せない。
-  if (url.protocol !== "https:" || url.port || url.username || url.password) return null;
-  const host = url.hostname.replace(/^www\./, "");
-
-  if (host === "pixiv.net") {
-    const series = url.pathname.match(/\/novel\/series\/(\d+)/);
-    if (series) return { kind: "series", source: "pixiv", sourceKey: series[1] };
-    const user = url.pathname.match(/^\/(?:[a-z]{2}\/)?users\/(\d+)/);
-    if (user) return { kind: "person", source: "pixiv", sourceKey: user[1] };
-    const novelId = url.pathname.match(/^\/(?:[a-z]{2}\/)?novel\/show\.php$/) ? url.searchParams.get("id") : null;
-    const novelPath = url.pathname.match(/^\/(?:[a-z]{2}\/)?novels?\/(\d+)/);
-    const id = novelId ?? novelPath?.[1];
-    if (id && /^\d+$/.test(id)) return { kind: "work", source: "pixiv", sourceId: id };
-    return null;
-  }
-
-  if (host === "fanbox.cc" || host.endsWith(".fanbox.cc")) {
-    const post = url.pathname.match(/\/posts\/(\d+)/);
-    if (post) return { kind: "work", source: "fanbox", sourceId: post[1] };
-    const creator = fanboxCreator(url);
-    if (creator) return { kind: "person", source: "fanbox", sourceKey: creator };
-    return null;
-  }
-
-  return null;
-}
-
 /** 手元にあると分かったもの。作品だけは、行き先が画面によって変わる。 */
 type ResolvedLink =
   | { kind: "work"; downloadId: number; title: string }
@@ -238,3 +184,6 @@ export function useLibraryLinkMarks(
     return () => { cancelled = true; };
   }, [container, revision]);
 }
+
+export { contentLinkTarget };
+export type { ContentLinkTarget };

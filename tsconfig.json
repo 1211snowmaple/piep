@@ -16,7 +16,8 @@
     "jsx": "react-jsx",
     /* TypeScript 7 で baseUrl は廃止。paths は tsconfig からの相対で解決される */
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@shared/*": ["./shared/*"]
     },
 
     /* Linting */
@@ -25,6 +26,6 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
+  "include": ["src", "shared"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }
