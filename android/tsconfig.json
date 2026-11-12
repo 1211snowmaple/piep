@@ -13,6 +13,10 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
+    /* デスクトップと共通の規則。リポジトリの根の shared/ を指す */
+    "paths": {
+      "@shared/*": ["../shared/*"]
+    },
 
     /* Linting */
     "strict": true,
@@ -20,6 +24,6 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
+  "include": ["src", "../shared"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

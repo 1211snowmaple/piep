@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import { authorHue, sigilCells } from "./coverSigil";
+import { authorHue, sigilCells } from "@shared/coverSigil";
 import { collectionCoverUrl, savedCollectionCoverUrl, savedCoverUrl, SmoothImage, workCoverUrlById } from "./images";
 import type { OfflineWork, PcCollection } from "./pcApi";
 
