@@ -1,0 +1,51 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Local verification output and emulator screenshots.
+/probe-data/
+/probe-search-data/
+/release-output/
+/.playwright-mcp/
+/*.png
+/SETUP.private.md
+/PLAN.private.md
+/DESKTOP-PARITY.private.md
+
+# Local credentials and release signing material.
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+
+# Build output and tool caches.
+*.apk
+*.aab
+**/.kotlin/
+**/.gradle/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
