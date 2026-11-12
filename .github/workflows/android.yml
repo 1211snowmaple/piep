@@ -7,11 +7,13 @@ on:
   pull_request:
     paths:
       - "android/**"
+      - "shared/**"
       - ".github/workflows/android.yml"
   push:
     branches: [main]
     paths:
       - "android/**"
+      - "shared/**"
       - ".github/workflows/android.yml"
 
 jobs:

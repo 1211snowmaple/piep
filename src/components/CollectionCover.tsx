@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Box } from "@mantine/core";
 import { WorkCover } from "@/components/WorkCover";
-import { authorHue, sigilCells } from "@/lib/coverSigil";
+import { authorHue, sigilCells } from "@shared/coverSigil";
 import { getAssetUrl } from "@/services/dbApi";
 import type { CollectionCoverTile, WorkCollectionSummary } from "@/types/collections";
 

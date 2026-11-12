@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { authorHue, coverSigil, sigilCells, titleScale } from "@/lib/coverSigil";
+import { authorHue, coverSigil, sigilCells, titleScale } from "./coverSigil";
 
 describe("coverSigil", () => {
   it("draws the same tile for the same work every time", () => {

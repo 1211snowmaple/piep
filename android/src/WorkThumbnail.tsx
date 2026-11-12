@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import type { PcWork } from "./pcApi";
-import { coverSigil, titleScale } from "./coverSigil";
+import { coverSigil, titleScale } from "@shared/coverSigil";
 import { imageRecentlyFailed, savedCoverUrl, SmoothImage, workCoverUrl } from "./images";
 
 /**

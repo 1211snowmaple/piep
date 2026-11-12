@@ -13,6 +13,10 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
+    /* デスクトップと共通の規則。リポジトリの根の shared/ を指す */
+    "paths": {
+      "@shared/*": ["../shared/*"]
+    },
 
     /* Linting */
     "strict": true,
@@ -20,6 +24,8 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
+  "include": ["src", "../shared"],
+  /* shared/ の試験はデスクトップ側の vitest が回す。携帯の依存だけでは型が解けない */
+  "exclude": ["../shared/**/*.test.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

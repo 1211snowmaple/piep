@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Box, Image, Text } from "@mantine/core";
 import { getProvider } from "@/lib/providers";
 import { getAssetUrl } from "@/services/dbApi";
-import { coverSigil, titleScale } from "@/lib/coverSigil";
+import { coverSigil, titleScale } from "@shared/coverSigil";
 import type { DownloadEntry } from "@/types/library";
 
 type WorkCoverData = Pick<DownloadEntry, "coverPath" | "source" | "sourceId" | "title" | "authorName"> &

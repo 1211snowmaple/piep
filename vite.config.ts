@@ -9,7 +9,7 @@ export default defineConfig(async () => ({
   plugins: [react()],
   resolve: {
     alias: {
-      "@": path.resolve(import.meta.dirname, "./src"),
+      "@": path.resolve(import.meta.dirname, "./src"), "@shared": path.resolve(import.meta.dirname, "./shared"),
     },
   },
 
