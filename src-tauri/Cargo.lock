@@ -4814,6 +4814,7 @@ dependencies = [
  "oxipng",
  "parking_lot",
  "pdfium-render",
+ "piep-mobile-api",
  "r2d2",
  "r2d2_sqlite",
  "rand 0.10.3",
@@ -4851,6 +4852,13 @@ dependencies = [
  "windows",
  "zenjpeg",
  "zip",
+]
+
+[[package]]
+name = "piep-mobile-api"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

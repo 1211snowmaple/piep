@@ -16,6 +16,13 @@ use tauri::State;
 use url::Url;
 
 use crate::secret_cipher::SecretCipher;
+// サーバーから受け取る型。サーバーと同じ定義（crates/piep-mobile-api）を使う。
+pub use piep_mobile_api::{
+    MobileCollection, MobileCollectionCoverTile, MobileCollectionDetail, MobileCollectionMember,
+    MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage, MobileFacet,
+    MobileMetadata, MobilePage, MobilePerson, MobileRevision, MobileSearchPage as SearchPage,
+    MobileSeriesMembership, MobileVersion, MobileWork,
+};
 
 pub mod cover_protocol;
 pub(crate) mod device_db;
@@ -880,42 +887,6 @@ fn check_response(response: reqwest::Response) -> Result<reqwest::Response, Clie
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileWork {
-    id: i64,
-    source: String,
-    source_id: String,
-    title: String,
-    author_name: String,
-    #[serde(default)]
-    author_id: String,
-    content_type: String,
-    tags: Vec<String>,
-    excerpt: Option<String>,
-    text_length: i64,
-    asset_count: i64,
-    has_cover: bool,
-    current_version: i64,
-    content_hash: Option<String>,
-    favorite: bool,
-    series_title: Option<String>,
-    series_id: Option<String>,
-    #[serde(default)]
-    source_created_at: Option<String>,
-    #[serde(default)]
-    downloaded_at: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchPage {
-    items: Vec<MobileWork>,
-    next_cursor: Option<String>,
-    total_estimate: Option<i64>,
-    index_complete: bool,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PcSearchCriteria {
@@ -1196,27 +1167,6 @@ fn validate_numbered_offset(offset: Option<i64>, cursor: Option<&str>) -> Result
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileEntity {
-    source: String,
-    source_key: String,
-    display_name: String,
-    count: i64,
-    description: Option<String>,
-    sample_title: Option<String>,
-    has_cover: bool,
-    is_concluded: Option<bool>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileEntityPage {
-    items: Vec<MobileEntity>,
-    next_offset: Option<i64>,
-    total: i64,
-}
-
 fn valid_entity_identity(source: &str, key: &str) -> bool {
     matches!(source, "pixiv" | "fanbox") && !key.is_empty() && key.chars().count() <= 200
 }
@@ -1274,31 +1224,6 @@ pub async fn pc_list_entities(
         .await
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileFacet {
-    name: String,
-    count: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileEntityDetail {
-    source: String,
-    source_key: String,
-    display_name: String,
-    description: Option<String>,
-    work_count: i64,
-    has_cover: bool,
-    has_banner: bool,
-    is_concluded: Option<bool>,
-    published_count: Option<i64>,
-    links: Vec<String>,
-    tags: Vec<MobileFacet>,
-    series_count: Option<i64>,
-    collections: Vec<MobileCollection>,
-}
-
 #[tauri::command]
 pub async fn pc_get_entity_detail(
     state: State<'_, PcClientState>,
@@ -1322,14 +1247,6 @@ pub async fn pc_get_entity_detail(
     .await?
     .bounded_json()
     .await
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileEntitySeriesPage {
-    items: Vec<MobileEntity>,
-    next_cursor: Option<String>,
-    total: i64,
 }
 
 #[tauri::command]
@@ -1373,57 +1290,6 @@ pub async fn pc_list_entity_series(
     .await?
     .bounded_json()
     .await
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileCollection {
-    id: String,
-    name: String,
-    description: Option<String>,
-    collection_kind: String,
-    member_count: i64,
-    available_count: i64,
-    cover_work_id: Option<i64>,
-    #[serde(default)]
-    cover_mode: String,
-    #[serde(default)]
-    cover_revision: i64,
-    #[serde(default)]
-    has_single_cover: bool,
-    #[serde(default)]
-    has_file_cover: bool,
-    #[serde(default)]
-    cover_tiles: Vec<MobileCollectionCoverTile>,
-    #[serde(default)]
-    position: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileCollectionCoverTile {
-    source: String,
-    source_id: String,
-    title: String,
-    author_name: String,
-    has_cover: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileCollectionMember {
-    title: String,
-    author_name: String,
-    position: i64,
-    work: Option<MobileWork>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileCollectionDetail {
-    #[serde(flatten)]
-    summary: MobileCollection,
-    members: Vec<MobileCollectionMember>,
 }
 
 #[tauri::command]
@@ -1569,48 +1435,6 @@ pub async fn pc_lookup_work(
         .await
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileMetadata {
-    work: MobileWork,
-    #[serde(default)]
-    people: Vec<MobilePerson>,
-    #[serde(default)]
-    series: Vec<MobileSeriesMembership>,
-    versions: Vec<MobileVersion>,
-    is_edited: bool,
-    active_edit_id: Option<i64>,
-    active_edit_hash: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobilePerson {
-    pub source: String,
-    pub key: String,
-    pub role: String,
-    pub display_name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileSeriesMembership {
-    pub source: String,
-    pub key: String,
-    pub title: String,
-    pub content_order: Option<i64>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileVersion {
-    version: i64,
-    content_hash: Option<String>,
-    text_length: i64,
-    asset_count: i64,
-    created_at: String,
-}
-
 #[tauri::command]
 pub async fn pc_get_metadata(
     state: State<'_, PcClientState>,
@@ -1623,27 +1447,6 @@ pub async fn pc_get_metadata(
         .await?
         .bounded_json()
         .await
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobilePage {
-    page: usize,
-    page_count: usize,
-    html: String,
-    total_plain_text_chars: usize,
-    source_page_starts: Vec<usize>,
-    /// この本文の版。古いサーバーは返さない。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    revision: Option<MobileRevision>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MobileRevision {
-    current_version: i64,
-    content_hash: Option<String>,
-    active_edit_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
