@@ -83,6 +83,35 @@ impl LegacyImporter {
             }
         }
         let versions_complete = anomalies.is_empty();
+        // 現在の行だけが持つ値を、同じ改稿への補完として足す。表の正規化より前に済ませる。
+        for (table, kind) in [
+            ("people", EntityKind::Person),
+            ("series", EntityKind::Series),
+        ] {
+            {
+                let conn = target.conn.lock().map_err(|_| Error::Busy)?;
+                if marked(&conn, table)? {
+                    continue;
+                }
+            }
+            let mut rows = Vec::new();
+            self.each_row(table, |row| {
+                rows.push(row);
+                Ok(())
+            })?;
+            for row in rows {
+                if cancel.load(Ordering::Acquire) {
+                    return Err(Error::Canceled);
+                }
+                match self.supplement_current_profile(target, table, kind, &row) {
+                    Ok(()) => {}
+                    Err(error) if anomaly(&error) => {
+                        anomalies.push(format!("{table} {} の補完: {error}", row.label(&["id"])))
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         let mut conn = target.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         for (table, kind) in [("people", "person"), ("series", "series")] {
@@ -99,8 +128,10 @@ impl LegacyImporter {
                 let snapshot:Vec<u8>=tx.query_row("SELECT target_id FROM migration_records WHERE source_table='entity_versions' AND source_key=?1 AND status='imported'",[old.to_string()],|r|r.get(0))?;
                 let entity:Vec<u8>=tx.query_row("SELECT entity_id FROM external_identities WHERE provider=?1 AND kind=?2 AND external_key=?3",params![source,kind,key],|r|r.get(0))?;
                 let current:Vec<u8>=tx.query_row("SELECT snapshot_id FROM entity_current WHERE entity_id=?1",[&entity],|r|r.get(0))?;
-                if current!=snapshot {return Err(Error::Integrity(format!("{kind} {key} の現在版が履歴の末尾と一致しません")));}
-                let metadata:String=tx.query_row("SELECT metadata_json FROM revision_snapshots WHERE id=?1",[&snapshot],|r|r.get(0))?;
+                // 現在の状態は、履歴の末尾の版か、その版への補完のどちらか。
+                let supplement:Option<Vec<u8>>=tx.query_row("SELECT target_id FROM migration_records WHERE source_table='__profile_supplements__' AND source_key=?1 AND status='imported'",[format!("{table}:{label}")],|r|r.get(0)).optional()?;
+                if current!=snapshot && Some(&current)!=supplement.as_ref() {return Err(Error::Integrity(format!("{kind} {key} の現在版が履歴の末尾と一致しません")));}
+                let metadata:String=tx.query_row("SELECT metadata_json FROM revision_snapshots WHERE id=?1",[&current],|r|r.get(0))?;
                 let metadata:Value=serde_json::from_str(&metadata)?;
                 for (old,new) in [("display_name","display_name"),("title","title"),("description","description"),("is_concluded","is_concluded"),("published_content_count","published_content_count")] {
                     if let Some(value)=row.0.get(old).filter(|v|!v.is_null()) {
@@ -122,6 +153,213 @@ impl LegacyImporter {
         }
         tx.commit()?;
         Ok((count, anomalies))
+    }
+
+    /// 現在の行だけが持つ値を、履歴の末尾の版への補完として保存する。
+    ///
+    /// 旧アプリは、軽い確認で分かった値を版を作らずに行へ書き込んでいた。
+    /// - シリーズの「完結」の印: 版の原本には項目がなく、行にだけ値がある。
+    /// - 表紙・アイコン: 版を保存した後で同じフォルダーへ足され、行のパスがそれを指している。
+    ///
+    /// どちらも作者による変更ではなく、同じ改稿について後から分かったことなので、
+    /// 改稿は作らず、保存状態を一つ足す。行のパスが指さない画像には触れない。
+    fn supplement_current_profile(
+        &self,
+        target: &Library,
+        table: &str,
+        kind: EntityKind,
+        row: &LegacyRow,
+    ) -> Result<()> {
+        let (source, key) = (row.text("source")?, row.text("source_key")?);
+        let label = row.label(&["id"]);
+        let kind_name = if kind == EntityKind::Person {
+            "person"
+        } else {
+            "series"
+        };
+        let version = row.integer("current_version")?;
+        // 版の行や移行済みの版がなければ、何も足さない。表の正規化が未解決として報告する。
+        let Some((old, json_path)) = self.conn.query_row("SELECT id,json_path FROM entity_versions WHERE entity_type=?1 AND source=?2 AND source_key=?3 AND version=?4",params![kind_name,source,key,version],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?))).optional()? else {
+            return Ok(());
+        };
+        let (known, saved) = {
+            let conn = target.conn.lock().map_err(|_| Error::Busy)?;
+            let Some(snapshot) = conn.query_row("SELECT target_id FROM migration_records WHERE source_table='entity_versions' AND source_key=?1 AND status='imported'",[old.to_string()],|r|r.get::<_,Vec<u8>>(0)).optional()? else {
+                return Ok(());
+            };
+            let metadata: String = conn.query_row(
+                "SELECT metadata_json FROM revision_snapshots WHERE id=?1",
+                [&snapshot],
+                |r| r.get(0),
+            )?;
+            let known: BTreeMap<String, Value> = serde_json::from_str(&metadata)?;
+            let mut saved = BTreeMap::<String, Option<Vec<u8>>>::new();
+            let mut stmt = conn.prepare("SELECT m.slot,r.file_id FROM snapshot_media m LEFT JOIN media_renditions r ON r.id=m.rendition_id WHERE m.snapshot_id=?1")?;
+            for item in stmt.query_map([&snapshot], |r| Ok((r.get(0)?, r.get(1)?)))? {
+                let (slot, file) = item?;
+                saved.insert(slot, file);
+            }
+            (known, saved)
+        };
+        let mut metadata = BTreeMap::new();
+        let mut states = BTreeMap::new();
+        if kind == EntityKind::Series {
+            // 版の原本に項目がなく、行にだけ値があるもの。稼働棚では同じ 142 件が両方を持つ。
+            if !known.contains_key("is_concluded") {
+                if let Some(value) = row.0.get("is_concluded").filter(|v| !v.is_null()) {
+                    let concluded = match value.as_i64() {
+                        Some(0) => false,
+                        Some(1) => true,
+                        _ => {
+                            return Err(Error::Integrity(format!(
+                                "{table} {label} の is_concluded が真偽値ではありません"
+                            )))
+                        }
+                    };
+                    metadata.insert("is_concluded".to_owned(), Value::Bool(concluded));
+                    states.insert("is_concluded".to_owned(), "known".to_owned());
+                }
+            }
+            if !known.contains_key("published_content_count") {
+                if let Some(value) = row
+                    .0
+                    .get("published_content_count")
+                    .filter(|v| !v.is_null())
+                {
+                    let count = value.as_u64().ok_or_else(|| {
+                        Error::Integrity(format!(
+                            "{table} {label} の published_content_count が件数ではありません"
+                        ))
+                    })?;
+                    metadata.insert("published_content_count".to_owned(), Value::from(count));
+                    states.insert("published_content_count".to_owned(), "known".to_owned());
+                }
+            }
+        }
+        let assets = self
+            .managed_path(&json_path)?
+            .parent()
+            .ok_or_else(|| Error::UnsafePath(json_path.clone().into()))?
+            .join("assets");
+        let mut media = Vec::new();
+        let mut image_paths = Vec::new();
+        for (slot, column) in [("icon", "icon_path"), ("cover", "cover_path")] {
+            let Some(stored) = row
+                .0
+                .get(column)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let path = self.managed_path(stored)?;
+            // 現在の版のフォルダーにある画像だけを扱う。ほかの場所を指すパスは推測しない。
+            if path.parent() != Some(assets.as_path()) || !path.try_exists()? {
+                continue;
+            }
+            super::super::store::regular_file(&path)?;
+            let bytes = fs::read(&path)?;
+            let id = crate::library::Fingerprint::of(&bytes);
+            if saved.get(slot).and_then(Option::as_deref) == Some(id.0.as_slice()) {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    Error::Integrity("プロフィール画像名が UTF-8 ではありません".into())
+                })?
+                .to_owned();
+            let mime = match path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "webp" => "image/webp",
+                _ => "application/octet-stream",
+            };
+            media.push(CapturedMedia {
+                slot: slot.into(),
+                role: if slot == "cover" && kind == EntityKind::Person {
+                    "banner"
+                } else {
+                    slot
+                }
+                .into(),
+                // どこから取った画像かは記録がない。URL を推測して付けない。
+                source_key: None,
+                source_url: None,
+                quality: "unknown".into(),
+                original_name: name,
+                mime_type: mime.into(),
+                bytes: Some(CaptureSource::File(path.clone())),
+            });
+            image_paths.push((slot, path));
+        }
+        if metadata.is_empty() && media.is_empty() {
+            return Ok(());
+        }
+        let record = format!("{table}:{label}");
+        let request = {
+            let conn = target.conn.lock().map_err(|_| Error::Busy)?;
+            let request:Option<Vec<u8>>=conn.query_row("SELECT request_id FROM migration_requests WHERE source_table='__profile_supplements__' AND source_key=?1",[&record],|r|r.get(0)).optional()?;
+            match request {
+                Some(id) => LibraryId::from_slice(&id)
+                    .map_err(|_| Error::Integrity("補完の移行要求 ID が不正です".into()))?,
+                None => {
+                    let id = LibraryId::now_v7();
+                    conn.execute(
+                        "INSERT INTO migration_requests VALUES('__profile_supplements__',?1,?2)",
+                        params![record, id.as_bytes().as_slice()],
+                    )?;
+                    id
+                }
+            }
+        };
+        // 補完の根拠は旧い行そのもの。行をそのまま原本として残す。
+        let raw = serde_json::to_vec(&serde_json::json!({"legacy_table": table, "row": row.0}))?;
+        let result = target.capture_with_legacy_classification(
+            Capture {
+                acquired_at: row
+                    .0
+                    .contains_key("updated_at")
+                    .then(|| row.optional_time("updated_at"))
+                    .transpose()?
+                    .flatten(),
+                request_id: request,
+                provider: source.into(),
+                external_key: key.into(),
+                kind,
+                route: "legacy-current-row".into(),
+                raw: CaptureSource::Bytes(raw),
+                metadata,
+                field_states: states,
+                body: None,
+                media,
+                attachments: vec![],
+            },
+            // 旧記録の補完として扱う。作者側の差が見つからないかぎり、改稿を作らない。
+            Some("repair"),
+        )?;
+        if result.created_revision {
+            return Err(Error::Integrity(format!(
+                "{table} {label} の補完が改稿として保存されました"
+            )));
+        }
+        let mut conn = target.conn.lock().map_err(|_| Error::Busy)?;
+        let tx = conn.transaction()?;
+        mark_row(&tx, "__profile_supplements__", &record, result.snapshot_id)?;
+        for (slot, path) in image_paths {
+            let file:Vec<u8>=tx.query_row("SELECT r.file_id FROM snapshot_media m JOIN media_renditions r ON r.id=m.rendition_id WHERE m.snapshot_id=?1 AND m.slot=?2",params![result.snapshot_id.as_bytes().as_slice(),slot],|r|r.get(0))?;
+            self.mark_used_file(&tx, &path, &file)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     fn import_profile_version(&self, target: &Library, row: LegacyRow) -> Result<()> {
@@ -734,6 +972,186 @@ INSERT INTO series VALUES(8,'pixiv','series','Series title',1,NULL,NULL,1,3);").
             .unwrap(),
             "unresolved"
         );
+        drop(conn);
+        library.verify().unwrap();
+    }
+
+    #[test]
+    fn values_only_the_current_row_holds_become_supplements_of_the_same_revision() {
+        // 稼働棚の形。軽い確認が版を作らずに書いた「完結」の印（142 件）と、
+        // 版の保存後に足されて行が指している表紙（シリーズ 73 件）。
+        let fixture = Fixture::new();
+        let old = fixture.0.join("old");
+        let conn = rusqlite::Connection::open(old.join("piep.db")).unwrap();
+        conn.execute_batch("ALTER TABLE series ADD COLUMN cover_path TEXT; ALTER TABLE series ADD COLUMN updated_at TEXT;").unwrap();
+        // 原本に完結の項目も表紙の URL もなく、画像なしと記録された版。行だけが値を持つ。
+        for (id, key, concluded) in [(4, "later", 1), (5, "open", 0)] {
+            let dir = format!("series/pixiv/{key}/v1");
+            fs::create_dir_all(old.join(&dir).join("assets")).unwrap();
+            let raw =
+                serde_json::to_vec(&json!({"source":"pixiv","sourceKey":key,"title":"Title"}))
+                    .unwrap();
+            fs::write(old.join(&dir).join("original.json"), &raw).unwrap();
+            fs::write(
+                old.join(&dir).join("assets/cover_later.jpg"),
+                format!("added later {key}"),
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO entity_versions VALUES(?1,'series','pixiv',?2,1,?3,0,0)",
+                params![id, key, format!("{dir}/original.json")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO series VALUES(?1,'pixiv',?2,'Title',1,NULL,NULL,?3,12,?4,'2026-02-01 00:00:00')",
+                params![id + 10, key, concluded, format!("{dir}/assets/cover_later.jpg")],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let library = Library::create(&fixture.0.join("new")).unwrap();
+        let source = LegacyImporter::open(&old).unwrap();
+        let report = source
+            .import(&library, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        // 行が指していない画像を補完にしないことは、上の試験（行のない版）が見ている。
+        assert_eq!(report.unresolved_files, 0, "{:?}", report.unresolved);
+        assert_eq!(report.unresolved_records, 0, "{:?}", report.unresolved);
+        {
+            let conn = library.conn.lock().unwrap();
+            for (key, concluded) in [("later", true), ("open", false)] {
+                let (revisions, snapshots, metadata, cover): (i64, i64, String, Vec<u8>) = conn
+                    .query_row(
+                        "SELECT (SELECT count(*) FROM source_revisions v WHERE v.entity_id=e.entity_id),(SELECT count(*) FROM revision_snapshots s WHERE s.entity_id=e.entity_id),s.metadata_json,r.file_id FROM external_identities e JOIN entity_current c ON c.entity_id=e.entity_id JOIN revision_snapshots s ON s.id=c.snapshot_id JOIN snapshot_media m ON m.snapshot_id=s.id AND m.slot='cover' JOIN media_renditions r ON r.id=m.rendition_id WHERE e.external_key=?1",
+                        [key],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .unwrap();
+                // 改稿は増えず、保存状態が一つ増える。現在の状態は補完のほう。
+                assert_eq!((revisions, snapshots), (1, 2), "{key}");
+                let metadata: Value = serde_json::from_str(&metadata).unwrap();
+                assert_eq!(metadata["is_concluded"], json!(concluded), "{key}");
+                assert_eq!(metadata["published_content_count"], json!(12), "{key}");
+                assert_eq!(
+                    cover,
+                    crate::library::Fingerprint::of(format!("added later {key}").as_bytes()).0
+                );
+                for (name, status) in [("cover_later.jpg", "imported")] {
+                    assert_eq!(
+                        conn.query_row(
+                            "SELECT status FROM migration_records WHERE source_table='__filesystem__' AND source_key=?1",
+                            [format!("series/pixiv/{key}/v1/assets/{name}")],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .unwrap(),
+                        status,
+                        "{key} {name}"
+                    );
+                }
+            }
+        }
+        library.verify().unwrap();
+        // やり直しても、補完を重ねない。
+        drop(source);
+        let source = LegacyImporter::open(&old).unwrap();
+        let again = source
+            .import(&library, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        assert_eq!(again.unresolved_records, 0, "{:?}", again.unresolved);
+        let snapshots: i64 = library
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM revision_snapshots s JOIN external_identities e ON e.entity_id=s.entity_id WHERE e.external_key IN ('later','open')", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(snapshots, 4);
+        library.verify().unwrap();
+    }
+
+    #[test]
+    fn an_old_version_copy_of_an_image_saved_by_a_later_version_is_not_left_unresolved() {
+        // 稼働棚の 35 枚と同じ形。v1 は画像なしと記録され、後から v2 の表紙と同じ中身の
+        // ファイルが v1 のフォルダーにも置かれた。行は v2 の表紙を指している。
+        let fixture = Fixture::new();
+        let old = fixture.0.join("old");
+        let conn = rusqlite::Connection::open(old.join("piep.db")).unwrap();
+        let cover = b"the cover both folders hold";
+        for (id, version, recorded) in [(4, 1, false), (5, 2, true)] {
+            let dir = format!("series/pixiv/copied/v{version}");
+            fs::create_dir_all(old.join(&dir).join("assets")).unwrap();
+            let raw = serde_json::to_vec(&json!({"source":"pixiv","sourceKey":"copied","title":format!("Title {version}"),"coverUrl":"https://i.pximg.net/cover.jpg"})).unwrap();
+            fs::write(old.join(&dir).join("original.json"), &raw).unwrap();
+            fs::write(old.join(&dir).join("assets/cover_cover.jpg"), cover).unwrap();
+            let (count, size) = if recorded {
+                (1, (raw.len() + cover.len()) as i64)
+            } else {
+                (0, 0)
+            };
+            conn.execute(
+                "INSERT INTO entity_versions VALUES(?1,'series','pixiv','copied',?2,?3,?4,?5)",
+                params![id, version, format!("{dir}/original.json"), count, size],
+            )
+            .unwrap();
+        }
+        // DB に版の行がない作者のフォルダー（保存の途中で残ったもの）。
+        fs::create_dir_all(old.join("profiles/pixiv/gone/v3/assets")).unwrap();
+        fs::write(old.join("profiles/pixiv/gone/v3/original.json"), b"{}").unwrap();
+        fs::write(
+            old.join("profiles/pixiv/gone/v3/assets/icon_left.png"),
+            b"left behind",
+        )
+        .unwrap();
+        // 別のシリーズにある同じ中身は、持ち主が違うので済んだものとしない。
+        fs::create_dir_all(old.join("series/pixiv/series/v1/assets")).unwrap();
+        fs::write(
+            old.join("series/pixiv/series/v1/assets/cover_other.jpg"),
+            cover,
+        )
+        .unwrap();
+        drop(conn);
+        let library = Library::create(&fixture.0.join("new")).unwrap();
+        let source = LegacyImporter::open(&old).unwrap();
+        let report = source
+            .import(&library, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        let conn = library.conn.lock().unwrap();
+        let status = |table: &str, key: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT status FROM migration_records WHERE source_table=?1 AND source_key=?2",
+                [table, key],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap()
+        };
+        let copy = "series/pixiv/copied/v1/assets/cover_cover.jpg";
+        assert_eq!(
+            status("__filesystem__", copy).as_deref(),
+            Some("imported"),
+            "{:?}",
+            report.unresolved
+        );
+        assert_eq!(
+            status("__same_as_saved_media__", copy).as_deref(),
+            Some("imported")
+        );
+        let other = "series/pixiv/series/v1/assets/cover_other.jpg";
+        assert_eq!(status("__same_as_saved_media__", other), None);
+        assert_eq!(status("__unrecorded_version__", other), None);
+        // 版の行がないフォルダーは、中身を保管して理由を残す。
+        for name in ["original.json", "assets/icon_left.png"] {
+            let key = format!("profiles/pixiv/gone/v3/{name}");
+            assert_eq!(
+                status("__filesystem__", &key).as_deref(),
+                Some("imported"),
+                "{key}"
+            );
+            assert_eq!(
+                status("__unrecorded_version__", &key).as_deref(),
+                Some("imported"),
+                "{key}"
+            );
+        }
         drop(conn);
         library.verify().unwrap();
     }

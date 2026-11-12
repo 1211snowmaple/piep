@@ -28,6 +28,46 @@ const REBUILDABLE_SUBTREES: &[&str] = &[
     "downloads/.search-snapshots",
 ];
 
+/// 作者・シリーズの版のフォルダーにあるファイルの持ち主。
+struct ProfileVersionFile<'a> {
+    kind: &'static str,
+    provider: &'a str,
+    entity: &'a str,
+    version: i64,
+    image: bool,
+}
+
+/// `profiles/<取得元>/<作者>/v<版>/original.json` か `…/v<版>/assets/<名前>` の形だけを読む。
+/// シリーズは `series/…`。ほかの場所や形は推測しない。
+fn profile_version_file(key: &str) -> Option<ProfileVersionFile<'_>> {
+    let parts: Vec<&str> = key.split('/').collect();
+    let (root, provider, entity, version, image) = match parts.as_slice() {
+        [root, provider, entity, version, "original.json"] => {
+            (root, provider, entity, version, false)
+        }
+        [root, provider, entity, version, "assets", _name] => {
+            (root, provider, entity, version, true)
+        }
+        _ => return None,
+    };
+    let kind = match *root {
+        "profiles" => "person",
+        "series" => "series",
+        _ => return None,
+    };
+    let number = version.strip_prefix('v')?;
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(ProfileVersionFile {
+        kind,
+        provider,
+        entity,
+        version: number.parse().ok()?,
+        image,
+    })
+}
+
 #[derive(Default)]
 pub(super) struct FileInventory {
     pub files: u64,
@@ -183,6 +223,8 @@ impl LegacyImporter {
             let conn = target.conn.lock().map_err(|_| Error::Busy)?;
             conn.execute("INSERT INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES('__excluded_entries__',?1,?2,?3) ON CONFLICT(source_table,source_key) DO UPDATE SET evidence_file_id=excluded.evidence_file_id,status=excluded.status",params![name,file.id.0.as_slice(),if resolved {"imported"} else {"unresolved"}])?;
         }
+        // 版の表がない旧棚では、「版の行がない」を根拠にしない。
+        let versions_recorded = self.has_column("entity_versions", "version")?;
         let mut seen = BTreeSet::new();
         while let Some(directory) = directories.pop() {
             if cancel.load(Ordering::Acquire) {
@@ -233,6 +275,30 @@ impl LegacyImporter {
                         Library::register_file(&tx, &evidence)?;
                         tx.execute("INSERT INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES('__replaced_in_place__',?1,?2,'imported') ON CONFLICT(source_table,source_key) DO UPDATE SET evidence_file_id=excluded.evidence_file_id,status=excluded.status",params![key,evidence.file.id.0.as_slice()])?;
                         known = true;
+                    }
+                }
+                // 作者・シリーズの版のフォルダーにある画像で、同じ作者・シリーズの保存状態が
+                // すでに同じ中身を持っているもの。旧アプリが新しい版の画像を古い版の
+                // フォルダーにも置いた写しで、中身は失われない。稼働棚に 35 枚ある。
+                if !known && used.is_none() && unchanged {
+                    if let Some(owner) = profile_version_file(&key) {
+                        let saved: bool = owner.image && tx.query_row("SELECT EXISTS(SELECT 1 FROM external_identities e JOIN revision_snapshots s ON s.entity_id=e.entity_id JOIN snapshot_media m ON m.snapshot_id=s.id JOIN media_renditions r ON r.id=m.rendition_id WHERE e.provider=?1 AND e.kind=?2 AND e.external_key=?3 AND r.file_id=?4)",params![owner.provider,owner.kind,owner.entity,file.id.0.as_slice()],|r|r.get(0))?;
+                        // 旧 DB に版の行がないフォルダー。保存の途中で残ったもので、どの版の
+                        // 記録にも属さない。中身と元のパスを保管し、理由を残す。稼働棚に 5 ファイル。
+                        let unrecorded = !saved
+                            && versions_recorded
+                            && !self.conn.query_row("SELECT EXISTS(SELECT 1 FROM entity_versions WHERE entity_type=?1 AND source=?2 AND source_key=?3 AND version=?4)",params![owner.kind,owner.provider,owner.entity,owner.version],|r|r.get::<_,bool>(0))?;
+                        let reason = if saved {
+                            Some("__same_as_saved_media__")
+                        } else if unrecorded {
+                            Some("__unrecorded_version__")
+                        } else {
+                            None
+                        };
+                        if let Some(reason) = reason {
+                            tx.execute("INSERT INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES(?1,?2,?3,'imported') ON CONFLICT(source_table,source_key) DO UPDATE SET evidence_file_id=excluded.evidence_file_id,status='imported'",params![reason,key,file.id.0.as_slice()])?;
+                            known = true;
+                        }
                     }
                 }
                 // 利用者が編集するファイル（EPUB の雛形）は、どの作品にも属さない。

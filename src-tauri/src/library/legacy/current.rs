@@ -9,7 +9,7 @@ impl LegacyImporter {
         // 再開時は、各表の原記録のハッシュを preserve_tables で照合する。
         let resuming:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM migration_records WHERE source_key='__all_rows__' AND evidence_file_id IS NOT NULL)",[],|r|r.get(0))?;
         if resuming {
-            let advanced:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM acquisition_observations WHERE route NOT IN ('legacy-import','legacy-profile-import')) OR EXISTS(SELECT 1 FROM acquisition_attempts)",[],|r|r.get(0))?;
+            let advanced:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM acquisition_observations WHERE route NOT IN ('legacy-import','legacy-profile-import','legacy-current-row')) OR EXISTS(SELECT 1 FROM acquisition_attempts)",[],|r|r.get(0))?;
             if advanced {
                 return Err(Error::Integrity(
                     "移行後に取得や利用者の変更が保存されています。移行先は新しい空のライブラリにしてください"
