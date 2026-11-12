@@ -1,0 +1,67 @@
+# Android 開発環境
+
+このリポジトリは Windows 版 piep の閲覧用 Android アプリです。デスクトップ版は別リポジトリで開発します。Android Studio、Android SDK、JDK 17、Rust の Android ターゲット、Node.js を用意します。Tauri 2 の [Android 前提条件](https://v2.tauri.app/start/prerequisites/) を参照してください。
+
+## エミュレーターで起動
+
+Android Studio の Device Manager で仮想端末を起動し、このリポジトリで次を実行します。
+
+```powershell
+npm ci
+npx tauri android dev
+```
+
+コマンドラインで既存のスマホ・タブレット AVD を使う場合は、次のように名前を確認し、起動コマンドを別々の PowerShell 窓で実行します。名前は手元の `-list-avds` の出力に読み替えてください。
+
+```powershell
+& "$env:ANDROID_HOME\emulator\emulator.exe" -list-avds
+& "$env:ANDROID_HOME\emulator\emulator.exe" -avd Piep_Pixel_8_API_36
+& "$env:ANDROID_HOME\emulator\emulator.exe" -avd Piep_Pad5_Layout_API_36
+adb devices -l
+```
+
+画面を APK に同梱した状態で確認するときは、両端末の起動後に次を実行します。`emulator-5554` と `emulator-5556` は `adb devices -l` の結果に合わせてください。
+
+```powershell
+npx tauri android build --debug --apk --target x86_64 --ci
+$apk = "src-tauri\gen\android\app\build\outputs\apk\universal\debug\app-universal-debug.apk"
+adb -s emulator-5554 install -r $apk
+adb -s emulator-5556 install -r $apk
+adb -s emulator-5554 shell monkey -p io.github.u1211snowmaple.piep.android 1
+adb -s emulator-5556 shell monkey -p io.github.u1211snowmaple.piep.android 1
+```
+
+Windows では Tauri のシンボリックリンク生成に開発者モードが必要です。JDK の版が合わない場合は `JAVA_HOME` を JDK 17 のインストール先に設定してください。
+
+サーバーの本棚に接続するには、デスクトップ版の「設定 → サーバー（β）」で「携帯を追加」を押し、Android 版の「設定 → サーバーとの接続」に登録文字列を貼り付けます。エミュレーターから PC のループバックで待ち受けるサーバーへつなぐ場合は、接続前に次の転送を設定できます。
+
+```powershell
+adb reverse tcp:38777 tcp:38777
+```
+
+2 台を同時に使う場合は `adb -s emulator-5554 reverse tcp:38777 tcp:38777` のように端末を指定し、それぞれに設定します。
+
+転送はエミュレーターの再起動などで消えることがあります。`adb reverse --list` で確認できます。家庭内ネットワークから接続する場合は、内蔵サーバーの待ち受け先に LAN アドレスを選びます。
+
+## 確認
+
+```powershell
+npm run build
+npx tauri android build --debug --apk
+```
+
+### 画面の崩れの点検
+
+デバッグ APK を入れた端末で、確かめたい画面（ライブラリ、読書画面など）を開いてから次を実行します。端末の画面の大きさと密度を順に変え、横へのはみ出し、切れたボタン、下の操作領域（ジェスチャーの線・3 ボタン）への食い込み、下メニューに重なる浮かぶボタンを数えます。終われば元の大きさに戻します。
+
+```powershell
+node tools/layout-audit.mjs emulator-5554 --out $env:TEMP\piep-layout
+node tools/layout-audit.mjs emulator-5556 --out $env:TEMP\piep-layout
+```
+
+何か見つかれば一覧を出して終了コード 1 で終わります。`--out` の先に大きさごとの画面写真が残るので、数で拾えない見た目の崩れはそこで目でも確かめます。下の操作領域の高さは機種で違うため、エミュレーター 1 台の見た目だけで決めず、この点検を通してから出します。
+
+デバッグ APK は動作確認用です。公開配布には署名済みリリースビルドと配布手順が別途必要です。接続方式は [PROTOCOL.md](PROTOCOL.md)、デスクトップ版との表示対応は [DESKTOP-PARITY.md](DESKTOP-PARITY.md) を参照してください。
+実用化の監査項目と検証結果は [QUALITY-PLAN.md](QUALITY-PLAN.md) に記録します。
+
+画面サイズ変更でアプリが一覧へ戻る端末では、`tools/layout-audit.mjs --prepare <JavaScriptファイル>` で点検前に対象画面を開き直せる。ファイルは WebView 内で評価する非同期式とし、対象画面の準備が完了してから返す。複数の WebView が動く場合は `--package <アプリID>` で点検対象のプロセスを指定する。接続文字列・認証鍵を準備用ファイルへ書かない。
