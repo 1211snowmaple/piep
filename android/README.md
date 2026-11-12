@@ -1,6 +1,6 @@
 # piep Android
 
-[piep デスクトップ版](https://github.com/1211snowmaple/piep)の小説を Android で読むための付属アプリです。piep サーバーにつないで本棚を検索して読み、選んだ作品だけ端末に保存してオフラインで読めます。読書位置は端末のあいだで同期します。Android 版はデスクトップ版とは別の Tauri 2 / React / Rust プロジェクトです。
+[piep デスクトップ版](https://github.com/1211snowmaple/piep)の小説を Android で読むための付属アプリです。piep サーバーにつないで本棚を検索して読み、選んだ作品だけ端末に保存してオフラインで読めます。読書位置は端末のあいだで同期します。Android 版はデスクトップ版とは別の Tauri 2 / React / Rust プロジェクトです。ソースはデスクトップ版と同じリポジトリの `android/` にあり、配布だけを piep-android の Releases で続けます。
 
 Android 端末へのインストールは [最新版の配布ページ](https://github.com/1211snowmaple/piep-android/releases/latest) から APK をダウンロードします。操作は [INSTALL.md](INSTALL.md) にまとめました。
 
