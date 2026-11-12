@@ -210,17 +210,7 @@ textarea { scrollbar-gutter: stable; }
    of the book, which puts the mark at about twice the type size, with a gap
    of roughly a quarter of it. Driving all three from one variable keeps that
    relationship at any size. */
-.piep-lockup { display: inline-flex; align-items: center; gap: calc(var(--lockup-size, 26px) * 0.27); }
-.piep-lockup__mark { display: block; width: calc(var(--lockup-size, 26px) * 1.99); height: auto; }
-.piep-lockup__word {
-  font-family: "Bauhaus 93", "Century Gothic", "Futura", "Trebuchet MS", sans-serif;
-  font-size: var(--lockup-size, 26px);
-  font-weight: 700;
-  line-height: 1;
-  letter-spacing: 0.005em;
-}
-.piep-lockup__pi { color: #0096fa; }
-.piep-lockup__ep { color: #86b918; }
+/* ロゴの組み方は shared/brand/lockup.css（PiepLockup が読み込む）。 */
 .app-brand__mark { width: 30px; height: 30px; }
 
 .app-nav__brand { padding: 12px 14px; }

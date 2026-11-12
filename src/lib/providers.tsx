@@ -1,6 +1,11 @@
 import type { ReactNode } from "react";
 import { Box, Text, type BoxProps } from "@mantine/core";
 import { Icons, IconSize } from "@/lib/icons";
+import { BRAND_GLYPHS, PROVIDER_BRANDS, providerLabel } from "@shared/brand/providers";
+import type { BrandGlyph } from "@shared/brand/providers";
+
+export { BRAND_GLYPHS };
+export type { BrandGlyph };
 
 export type ProviderId = "pixiv" | "fanbox" | (string & {});
 
@@ -23,23 +28,6 @@ export interface ProviderDefinition {
   hasProfileImages: boolean;
   icon: ReactNode;
 }
-
-/**
- * A service's mark, described as data rather than as markup.
- *
- * The same mark has to be drawn by React on the author and save screens and by
- * plain DOM inside saved documents, where a link card is built by hand. Two
- * hand-written copies is how pixiv ended up as its own glyph in one place and a
- * generic arrow in the other.
- */
-export type BrandGlyph =
-  | { kind: "path"; d: string }
-  | { kind: "word"; text: string; wide?: boolean };
-
-export const BRAND_GLYPHS: Record<string, BrandGlyph> = {
-  pixiv: { kind: "path", d: "M5.2 14.7V3.3h4.3c2.7 0 4.5 1.7 4.5 4.2s-1.8 4.2-4.5 4.2H7.8v3H5.2Zm2.6-5.3h1.5c1.3 0 2.1-.7 2.1-1.9s-.8-1.9-2.1-1.9H7.8v3.8Z" },
-  fanbox: { kind: "word", text: "F", wide: true },
-};
 
 /** The glyph markup, for anywhere that builds DOM instead of React. */
 export function brandGlyphElement(document: Document, glyph: BrandGlyph): HTMLElement {
@@ -77,10 +65,8 @@ const fanboxGlyph = renderGlyph(BRAND_GLYPHS.fanbox);
 export const providers: Record<string, ProviderDefinition> = {
   pixiv: {
     id: "pixiv",
-    label: "pixiv",
+    ...PROVIDER_BRANDS.pixiv,
     shortLabel: "px",
-    color: "#0096FA",
-    softColor: "#E8F5FF",
     homeUrl: "https://www.pixiv.net/",
     description: "小説・シリーズ・作者ページ",
     capability: "available",
@@ -89,10 +75,8 @@ export const providers: Record<string, ProviderDefinition> = {
   },
   fanbox: {
     id: "fanbox",
-    label: "FANBOX",
+    ...PROVIDER_BRANDS.fanbox,
     shortLabel: "fb",
-    color: "#F2C624",
-    softColor: "#FFF8D9",
     homeUrl: "https://www.fanbox.cc/",
     description: "投稿・クリエイターページ",
     capability: "available",
@@ -104,7 +88,7 @@ export const providers: Record<string, ProviderDefinition> = {
 export function getProvider(id: string): ProviderDefinition {
   return providers[id.toLowerCase()] ?? {
     id,
-    label: id || "その他",
+    label: providerLabel(id),
     shortLabel: (id || "?").slice(0, 2),
     color: "#68707A",
     softColor: "#F1F3F5",

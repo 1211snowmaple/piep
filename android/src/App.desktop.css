@@ -85,11 +85,7 @@ body, .app-shell, .main-column { background: var(--piep-bg); color: var(--piep-t
 button, input, select, textarea { font-family: inherit; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--piep-blue); outline-offset: 2px; }
 
-.piep-lockup { display: inline-flex; align-items: center; gap: calc(var(--lockup-size) * .27); white-space: nowrap; }
-.piep-lockup__mark { display: block; width: calc(var(--lockup-size) * 1.99); height: auto; }
-.piep-lockup__word { font-family: "Bauhaus 93", "Century Gothic", "Futura", "Trebuchet MS", sans-serif; font-size: var(--lockup-size); font-weight: 700; letter-spacing: .005em; line-height: 1; }
-.piep-lockup__pi { color: #0096fa; }
-.piep-lockup__ep { color: #86b918; }
+/* ロゴの組み方は shared/brand/lockup.css（PiepLockup が読み込む）。 */
 .brand .piep-lockup__mark { width: calc(var(--lockup-size) * 1.99); height: auto; }
 
 .sidebar { width: 244px; flex-basis: 244px; height: calc(100dvh - var(--piep-visual-viewport-bottom-inset, 0px)); overflow-y: auto; scroll-padding-block: 16px; padding: 13px 11px 8px; border-right: 1px solid var(--piep-line); background: var(--piep-rail); }
