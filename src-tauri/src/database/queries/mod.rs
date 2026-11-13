@@ -12307,7 +12307,9 @@ fn fallback_sort_value(params: &SearchV2Params, item: &DownloadEntry) -> Option<
 ///
 /// 一覧・並べ替え・索引の**すべて**がここを通る。片方だけを変えると、棚では
 /// 元の題なのに開くと違う題、という状態ができてしまう。
-const EFFECTIVE_TITLE_SQL: &str = "COALESCE(NULLIF(TRIM((SELECT r.title FROM work_edit_revisions r WHERE r.download_id = d.id AND r.status = 'active' ORDER BY r.updated_at DESC, r.id DESC LIMIT 1)), ''), d.title)";
+// 取得元の題も前後の空白を落とす。先頭に空白の付いた題は、並べ替えで
+// 「あ」より前に来てしまい、タイトル順の先頭がいつも同じ作品になる。
+const EFFECTIVE_TITLE_SQL: &str = "COALESCE(NULLIF(TRIM((SELECT r.title FROM work_edit_revisions r WHERE r.download_id = d.id AND r.status = 'active' ORDER BY r.updated_at DESC, r.id DESC LIMIT 1)), ''), TRIM(d.title))";
 
 fn download_select_sql_for_projection(
     projection: Option<&str>,
