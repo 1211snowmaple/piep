@@ -25,6 +25,7 @@ mod reader;
 mod relations;
 mod rows;
 mod searches;
+mod server_state;
 mod state;
 mod suggestions;
 
@@ -380,6 +381,13 @@ impl LegacyImporter {
             "collection_suggestions",
             "コレクション提案と判断の正規化",
             self.normalize_suggestions(target, cancel),
+            &mut report,
+        )?;
+        self.finish_normalization(
+            target,
+            "server_state",
+            "携帯の読書位置とお気に入りの変更の移行",
+            self.normalize_server_state(target),
             &mut report,
         )?;
         let inventory = self

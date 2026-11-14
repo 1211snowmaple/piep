@@ -7,9 +7,42 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReadingAnchor {
-    TextByte { offset: u64 },
-    BodyBlock { index: u64, offset: u64 },
-    EditBlock { block: LibraryId, offset: u64 },
+    TextByte {
+        offset: u64,
+    },
+    BodyBlock {
+        index: u64,
+        offset: u64,
+    },
+    EditBlock {
+        block: LibraryId,
+        offset: u64,
+    },
+    /// 旧系統の読書画面が記録した位置。本文のページ区切り（pixiv の `[newpage]`、編集の
+    /// `page_break`）で数えたページ（0 から）と、そのページの中のスクロールの割合
+    /// （百万分率）。割合は表示の幅で変わるので、文字の位置へ推測して直さない。
+    /// 読書画面はこの位置から開き、次に読み進めたときに文字の位置で書き直す。
+    Page {
+        page: u64,
+        ratio_ppm: u32,
+    },
+}
+
+/// 割合の上限（百万分率で 1.0）。
+pub const PAGE_RATIO_SCALE: u32 = 1_000_000;
+
+fn page_within(pages: usize, page: u64, ratio_ppm: u32) -> Result<()> {
+    let page = usize::try_from(page).map_err(|_| invalid_anchor())?;
+    if page < pages && ratio_ppm <= PAGE_RATIO_SCALE {
+        Ok(())
+    } else {
+        Err(invalid_anchor())
+    }
+}
+
+/// pixiv の本文のページ数。旧系統の読書画面と同じく `[newpage]` だけで区切る。
+fn pixiv_pages(text: &str) -> usize {
+    text.matches("[newpage]").count() + 1
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,12 +120,29 @@ fn check_source_anchor(body: &SourceBody, anchor: &ReadingAnchor) -> Result<()> 
                 *offset,
             )
         }
+        (SourceBody::PixivText(text), ReadingAnchor::Page { page, ratio_ppm }) => {
+            page_within(pixiv_pages(text), *page, *ratio_ppm)
+        }
+        // pixiv 以外の本文は旧系統でも一続きの一ページだった。
+        (
+            SourceBody::PlainText(_) | SourceBody::FanboxBody(_),
+            ReadingAnchor::Page { page, ratio_ppm },
+        ) => page_within(1, *page, *ratio_ppm),
         _ => Err(invalid_anchor()),
     }
 }
 
+/// 編集のページ数。`page_break` のブロックで区切る。
+fn edit_pages(breaks: usize) -> usize {
+    breaks + 1
+}
+
 impl Library {
-    fn check_reading_location(&self, work: LibraryId, location: &ReadingLocation) -> Result<()> {
+    pub(super) fn check_reading_location(
+        &self,
+        work: LibraryId,
+        location: &ReadingLocation,
+    ) -> Result<()> {
         match location {
             ReadingLocation::Source { snapshot, anchor } => {
                 let body = self
@@ -102,15 +152,25 @@ impl Library {
             }
             ReadingLocation::Edit { edit, anchor } => {
                 let content = self.edit(work, *edit)?.content;
-                let ReadingAnchor::EditBlock { block, offset } = anchor else {
-                    return Err(invalid_anchor());
-                };
-                let block = content
-                    .blocks
-                    .iter()
-                    .find(|b| b.id == *block)
-                    .ok_or_else(invalid_anchor)?;
-                text_boundary(block.text.as_deref().unwrap_or(""), *offset)
+                match anchor {
+                    ReadingAnchor::EditBlock { block, offset } => {
+                        let block = content
+                            .blocks
+                            .iter()
+                            .find(|b| b.id == *block)
+                            .ok_or_else(invalid_anchor)?;
+                        text_boundary(block.text.as_deref().unwrap_or(""), *offset)
+                    }
+                    ReadingAnchor::Page { page, ratio_ppm } => {
+                        let breaks = content
+                            .blocks
+                            .iter()
+                            .filter(|b| b.kind == "page_break")
+                            .count();
+                        page_within(edit_pages(breaks), *page, *ratio_ppm)
+                    }
+                    _ => Err(invalid_anchor()),
+                }
             }
         }
     }
@@ -259,13 +319,18 @@ impl Library {
                         .ok_or_else(invalid_anchor)?;
                     check_source_anchor(&body, &anchor)?;
                 }
-                (None, Some(edit)) => {
-                    let ReadingAnchor::EditBlock { block, offset } = anchor else {
-                        return Err(invalid_anchor());
-                    };
-                    let text:Option<String> = conn.query_row("SELECT b.text FROM edit_blocks b JOIN edit_revisions e ON e.id=b.edit_id WHERE e.work_id=?1 AND e.id=?2 AND e.sealed=1 AND b.block_id=?3",params![work.as_bytes().as_slice(),edit,block.as_bytes().as_slice()],|r|r.get(0))?;
-                    text_boundary(text.as_deref().unwrap_or(""), offset)?;
-                }
+                (None, Some(edit)) => match anchor {
+                    ReadingAnchor::EditBlock { block, offset } => {
+                        let text:Option<String> = conn.query_row("SELECT b.text FROM edit_blocks b JOIN edit_revisions e ON e.id=b.edit_id WHERE e.work_id=?1 AND e.id=?2 AND e.sealed=1 AND b.block_id=?3",params![work.as_bytes().as_slice(),edit,block.as_bytes().as_slice()],|r|r.get(0))?;
+                        text_boundary(text.as_deref().unwrap_or(""), offset)?;
+                    }
+                    ReadingAnchor::Page { page, ratio_ppm } => {
+                        let breaks: i64 = conn.query_row("SELECT count(*) FROM edit_blocks b JOIN edit_revisions e ON e.id=b.edit_id WHERE e.work_id=?1 AND e.id=?2 AND e.sealed=1 AND b.kind='page_break'",params![work.as_bytes().as_slice(),edit],|r|r.get(0))?;
+                        let breaks = usize::try_from(breaks).map_err(|_| invalid_anchor())?;
+                        page_within(edit_pages(breaks), page, ratio_ppm)?;
+                    }
+                    _ => return Err(invalid_anchor()),
+                },
                 _ => return Err(invalid_anchor()),
             }
         }
@@ -495,6 +560,42 @@ mod tests {
             )
             .unwrap();
         assert!(library.verify().is_err());
+    }
+
+    #[test]
+    fn page_positions_follow_the_text_page_breaks_and_stay_within_the_page() {
+        let temp = Temp::new();
+        let library = Library::create(&temp.0).unwrap();
+        let paged = library
+            .capture(capture(
+                "paged",
+                SourceBody::PixivText("前[newpage]後".into()),
+            ))
+            .unwrap();
+        let plain = library.capture(capture("plain", "一続き".into())).unwrap();
+        let set = |saved: &crate::library::CaptureResult, page, ratio_ppm| {
+            library.set_reading_position(ReadingUpdate {
+                request: LibraryId::now_v7(),
+                work: saved.entity_id,
+                user: library.id,
+                device: library.id,
+                expected: library
+                    .reading_position(saved.entity_id, library.id)
+                    .unwrap()
+                    .generation,
+                location: Some(ReadingLocation::Source {
+                    snapshot: saved.snapshot_id,
+                    anchor: ReadingAnchor::Page { page, ratio_ppm },
+                }),
+                finished: false,
+            })
+        };
+        assert!(set(&paged, 1, PAGE_RATIO_SCALE).is_ok());
+        assert!(set(&paged, 2, 0).is_err());
+        assert!(set(&paged, 0, PAGE_RATIO_SCALE + 1).is_err());
+        assert!(set(&plain, 0, 500_000).is_ok());
+        assert!(set(&plain, 1, 0).is_err());
+        library.verify().unwrap();
     }
 
     #[test]

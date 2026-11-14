@@ -212,8 +212,13 @@ impl LegacyImporter {
                 _ if name.starts_with("backup-") => ("existing_backup_left_in_place", true),
                 // アプリの設定は棚のデータではない。アプリのフォルダーに残し、棚へは写さない。
                 "settings.json" => ("application_settings_left_in_place", true),
-                // 端末の登録と鍵は残す。読書位置とお気に入りの変更記録を棚へ移す規則がまだない。
-                "server" => ("device_state_not_yet_migrated", false),
+                // サーバー役の状態（端末の登録と鍵・管理者・監査・送信の記録・接続の設定）は
+                // 棚のデータではない。元の場所に残して読まない。利用者の状態（読書位置と
+                // お気に入りの変更）だけは `server_state` の段階が行ごとに移し、記録する。
+                "server" if super::server_state::known_server_entries(&entry.path())? => {
+                    ("server_role_state_left_in_place", true)
+                }
+                "server" => ("server_state_has_unrecognized_entries", false),
                 _ => ("unrecognized_root_entry_not_read", false),
             };
             let evidence = serde_json::to_vec(
