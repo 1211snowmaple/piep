@@ -161,26 +161,107 @@ pub fn upsert_documents(
     storage_dir: &Path,
     docs: &[SemanticIndexDocument],
 ) -> Result<Vec<i64>, String> {
+    upsert_documents_reusing(storage_dir, docs, None).map(|report| report.indexed)
+}
+
+/// 前の索引にある、同じ文書から作ったベクトル。
+pub struct ReusableVectors<'a> {
+    /// 前の索引の置き場（`upsert_documents` に渡したのと同じ `storage_dir`）。
+    pub storage_dir: &'a Path,
+    /// 新しい文書の ID → 前の索引の文書の ID。
+    pub previous_ids: &'a HashMap<i64, i64>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct UpsertReport {
+    pub indexed: Vec<i64>,
+    /// 前の索引から写した説明（題・作者・タグ・シリーズ・説明）のベクトルの数。
+    pub reused_metadata: usize,
+    /// 前の索引から写した本文のベクトルの数。
+    pub reused_content: usize,
+    /// 埋め込んだ断片の数。
+    pub embedded_passages: usize,
+}
+
+/// 写せる前のベクトル。同じモデル・同じ文字列から作ったものだけ。
+#[derive(Clone)]
+struct Previous {
+    metadata: Option<Vec<f32>>,
+    /// 本文の重心と断片の数。本文がない作品は `Some((None, 0))`。
+    content: Option<(Option<Vec<f32>>, i64)>,
+}
+
+/// 文書のベクトルを作って入れる。`reuse` があれば、同じ文字列から作った前のベクトルは
+/// 埋め込み直さずに写す（ベクトルは文字列とモデルだけで決まる）。説明と本文は別々に判定する
+/// ので、タグの並びだけが違う作品は、説明の一断片だけを埋め込めば済む。
+pub fn upsert_documents_reusing(
+    storage_dir: &Path,
+    docs: &[SemanticIndexDocument],
+    reuse: Option<ReusableVectors<'_>>,
+) -> Result<UpsertReport, String> {
+    let mut report = UpsertReport::default();
     if docs.is_empty() {
-        return Ok(Vec::new());
+        return Ok(report);
     }
 
     // Keep the chunks grouped by work. Rebuilding every work's chunks again
     // after inference doubled the text scanning and allocations for long
     // documents, precisely while a large-library rebuild is already busy.
     let chunks_by_doc = docs.iter().map(build_chunks).collect::<Vec<_>>();
+    let previous = match &reuse {
+        Some(reuse) => previous_vectors(reuse, docs, &chunks_by_doc)?,
+        None => vec![None; docs.len()],
+    };
 
-    let passages = chunks_by_doc
-        .iter()
-        .flatten()
-        .map(|record| format!("passage: {}", record.text))
-        .collect::<Vec<_>>();
+    // 埋め込むのは、写せなかった断片だけ。写せた断片の位置には何も置かない。
+    let mut passages = Vec::new();
+    for (chunks, previous) in chunks_by_doc.iter().zip(&previous) {
+        let metadata_known = previous.as_ref().is_some_and(|p| p.metadata.is_some());
+        let content_known = previous.as_ref().is_some_and(|p| p.content.is_some());
+        for chunk in chunks {
+            let known = match chunk.field.as_str() {
+                "metadata" => metadata_known,
+                _ => content_known,
+            };
+            if !known {
+                passages.push(format!("passage: {}", chunk.text));
+            }
+        }
+    }
     let passage_count = passages.len();
-    let vectors = if passages.is_empty() {
+    report.embedded_passages = passage_count;
+    let embedded = if passages.is_empty() {
         Vec::new()
     } else {
         embed_texts(passages)?
     };
+    if passage_count != embedded.len() {
+        return Err(format!(
+            "Semantic embedding count mismatch: sent {}, received {}",
+            passage_count,
+            embedded.len()
+        ));
+    }
+    // 断片ごとのベクトルに戻す。写せた断片は空のまま（使わない）。
+    let mut embedded = embedded.into_iter();
+    let mut vectors = Vec::new();
+    for (chunks, previous) in chunks_by_doc.iter().zip(&previous) {
+        let metadata_known = previous.as_ref().is_some_and(|p| p.metadata.is_some());
+        let content_known = previous.as_ref().is_some_and(|p| p.content.is_some());
+        for chunk in chunks {
+            let known = match chunk.field.as_str() {
+                "metadata" => metadata_known,
+                _ => content_known,
+            };
+            vectors.push(if known {
+                Vec::new()
+            } else {
+                embedded.next().unwrap_or_default()
+            });
+        }
+    }
+    let vectors = vectors;
+    let passage_count = vectors.len();
 
     let conn = open_index(storage_dir)?;
     let tx = conn
@@ -196,14 +277,10 @@ pub fn upsert_documents(
     // **`zip` は短いほうで黙って打ち切る。** 直前にその作品の断片を全部
     // 消しているので、返ったベクトルが足りなければ、消したぶんの一部が二度と
     // 入らない。エラーにもならず、意味検索からその作品が静かに欠ける。
-    if passage_count != vectors.len() {
-        return Err(format!(
-            "Semantic embedding count mismatch: sent {}, received {}",
-            passage_count,
-            vectors.len()
-        ));
+    if passage_count != chunks_by_doc.iter().map(Vec::len).sum::<usize>() {
+        return Err("Semantic work vector range is incomplete".to_string());
     }
-    for vector in &vectors {
+    for vector in vectors.iter().filter(|vector| !vector.is_empty()) {
         if vector.len() != VECTOR_DIMENSION {
             return Err(format!(
                 "Semantic model dimension mismatch: expected {}, got {}",
@@ -215,32 +292,52 @@ pub fn upsert_documents(
 
     let mut offset = 0usize;
     let mut indexed = Vec::with_capacity(docs.len());
-    for (doc, chunks) in docs.iter().zip(chunks_by_doc.iter()) {
+    for ((doc, chunks), previous) in docs.iter().zip(chunks_by_doc.iter()).zip(&previous) {
         let end = offset.saturating_add(chunks.len());
         let doc_vectors = vectors
             .get(offset..end)
             .ok_or_else(|| "Semantic work vector range is incomplete".to_string())?;
         offset = end;
 
-        let body_vectors = chunks
-            .iter()
-            .zip(doc_vectors.iter())
-            .filter(|(chunk, _)| chunk.field == "body")
-            .map(|(_, vector)| vector.as_slice())
-            .collect::<Vec<_>>();
-        let content_vector = mean_normalized_vector(&body_vectors);
+        let (content_vector, content_chunk_count) =
+            match previous.as_ref().and_then(|p| p.content.clone()) {
+                Some(content) => {
+                    report.reused_content += 1;
+                    content
+                }
+                None => {
+                    let body_vectors = chunks
+                        .iter()
+                        .zip(doc_vectors.iter())
+                        .filter(|(chunk, _)| chunk.field == "body")
+                        .map(|(_, vector)| vector.as_slice())
+                        .collect::<Vec<_>>();
+                    (
+                        mean_normalized_vector(&body_vectors),
+                        body_vectors.len() as i64,
+                    )
+                }
+            };
         let content_preview = chunks
             .iter()
             .find(|chunk| chunk.field == "body")
             .map(|chunk| chunk.text.as_str())
             .unwrap_or("");
         let metadata_index = chunks.iter().position(|chunk| chunk.field == "metadata");
+        let reused_metadata = previous.as_ref().and_then(|p| p.metadata.clone());
         // A body-only work is still searchable. Previously it was skipped here
         // but its SQLite coverage row was recorded as successful, making it
         // permanently absent from semantic results. Use the normalized body
         // centroid as its metadata fallback and report only actually inserted
         // ids to the caller.
         let (metadata_text, metadata_vector) = match metadata_index {
+            Some(index) if reused_metadata.is_some() => {
+                report.reused_metadata += 1;
+                (
+                    chunks[index].text.as_str(),
+                    reused_metadata.unwrap_or_default(),
+                )
+            }
             Some(index) => {
                 let Some(vector) = unit_vector(doc_vectors[index].clone()) else {
                     log::warn!(
@@ -275,7 +372,7 @@ pub fn upsert_documents(
                 VECTOR_DIMENSION as i64,
                 vector_to_blob(&metadata_vector),
                 content_vector.as_deref().map(vector_to_blob),
-                body_vectors.len() as i64,
+                content_chunk_count,
                 chrono::Utc::now().to_rfc3339(),
             ],
         )
@@ -284,7 +381,68 @@ pub fn upsert_documents(
     }
     tx.commit()
         .map_err(|e| format!("Semantic transaction commit failed: {}", e))?;
-    Ok(indexed)
+    report.indexed = indexed;
+    Ok(report)
+}
+
+/// 前の索引から、文字列が同じ部分のベクトルを読む。説明は説明の断片の文字列、本文は本文の
+/// 全文のハッシュで比べる（本文の重心は全文と断片の切り方だけで決まる）。
+fn previous_vectors(
+    reuse: &ReusableVectors<'_>,
+    docs: &[SemanticIndexDocument],
+    chunks_by_doc: &[Vec<ChunkInput>],
+) -> Result<Vec<Option<Previous>>, String> {
+    if !index_path(reuse.storage_dir).exists() {
+        return Ok(vec![None; docs.len()]);
+    }
+    let conn = open_index(reuse.storage_dir)?;
+    let mut statement = conn
+        .prepare_cached(
+            "SELECT metadata_hash,content_hash,metadata_vector,content_vector,content_chunk_count
+               FROM semantic_works WHERE download_id=?1 AND model_id=?2 AND dimension=?3",
+        )
+        .map_err(|e| format!("Semantic reuse prepare failed: {e}"))?;
+    let mut previous = Vec::with_capacity(docs.len());
+    for (doc, chunks) in docs.iter().zip(chunks_by_doc) {
+        let Some(old_id) = reuse.previous_ids.get(&doc.download_id) else {
+            previous.push(None);
+            continue;
+        };
+        let row = statement
+            .query_row(params![old_id, MODEL_ID, VECTOR_DIMENSION as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .optional()
+            .map_err(|e| format!("Semantic reuse read failed: {e}"))?;
+        let Some((metadata_hash, content_hash, metadata_blob, content_blob, chunk_count)) = row
+        else {
+            previous.push(None);
+            continue;
+        };
+        let body_chunks = chunks.iter().filter(|chunk| chunk.field == "body").count() as i64;
+        let content = (content_hash == hash_text(&doc.body) && chunk_count == body_chunks)
+            .then(|| {
+                content_blob
+                    .filter(|blob| blob.len() == VECTOR_DIMENSION * std::mem::size_of::<f32>())
+                    .map(|blob| blob_to_vector(&blob))
+            })
+            .filter(|vector| vector.is_some() || body_chunks == 0)
+            .map(|vector| (vector, chunk_count));
+        let metadata = chunks
+            .iter()
+            .find(|chunk| chunk.field == "metadata")
+            .filter(|chunk| hash_text(&chunk.text) == metadata_hash)
+            .filter(|_| metadata_blob.len() == VECTOR_DIMENSION * std::mem::size_of::<f32>())
+            .map(|_| blob_to_vector(&metadata_blob));
+        previous.push(Some(Previous { metadata, content }));
+    }
+    Ok(previous)
 }
 
 #[derive(Debug)]
@@ -316,6 +474,11 @@ impl Ord for RankedSemanticCandidate {
             // At an equal score the smaller id is the stable better result.
             .then_with(|| other.download_id.cmp(&self.download_id))
     }
+}
+
+/// 索引のファイルがあるか（なければ、記録の上で作った作品も作り直す）。
+pub fn index_exists(storage_dir: &Path) -> bool {
+    index_path(storage_dir).exists()
 }
 
 pub fn clear_document(storage_dir: &Path, download_id: i64) -> Result<(), String> {

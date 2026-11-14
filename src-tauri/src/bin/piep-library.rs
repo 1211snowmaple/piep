@@ -13,6 +13,8 @@ mod compare;
 mod filters;
 #[path = "piep-library/search_docs.rs"]
 mod search_docs;
+#[path = "piep-library/search_features.rs"]
+mod search_features;
 #[path = "piep-library/search_results.rs"]
 mod search_results;
 
@@ -203,6 +205,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("compare-search-results") if args.len()==5 || args.len()==6=>{
             let modulus=args.get(5).map(|s|s.parse::<i64>()).transpose()?.unwrap_or(1);
             let report=search_results::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]),modulus)?;
+            println!("{}",serde_json::to_string_pretty(&report)?);
+        },
+        Some("compare-search-features") if args.len()==5=>{
+            let report=search_features::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]))?;
             println!("{}",serde_json::to_string_pretty(&report)?);
         },
         Some("compare-filters") if args.len()==5=>{

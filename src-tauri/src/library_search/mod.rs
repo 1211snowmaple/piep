@@ -7,6 +7,12 @@
 
 mod document;
 mod index;
+mod results;
+mod semantic;
 
 pub use document::{source_url, SearchDocument};
-pub use index::{SearchHit, SearchIndexReport};
+pub use index::{HistoryIndexReport, SearchHit, SearchIndexReport};
+pub use results::{
+    EntityIntent, SearchDecoration, SearchMatch, SearchMode, SearchPage, TextSearch, VersionScope,
+};
+pub use semantic::{SemanticEvidence, SemanticIndexReport, SemanticIndexState};

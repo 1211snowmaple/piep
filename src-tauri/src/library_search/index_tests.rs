@@ -1,5 +1,6 @@
+use super::super::TextSearch;
 use super::*;
-use crate::library::{Capture, EntityKind, TagProvenance, TagUpdate, UserTag};
+use crate::library::{Capture, EntityKind, TagProvenance, TagUpdate, UserTag, WorkListQuery};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -7,6 +8,8 @@ use std::path::PathBuf;
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
+        crate::database::tantivy_index::release_runtime(&self.0.join("derived"));
+        crate::database::tantivy_index::release_runtime(&self.0.join("derived").join("history"));
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -178,7 +181,10 @@ fn search_results_page_by_relevance_and_combine_with_filters_and_sorts() {
     let mut paged = Vec::new();
     let mut scores = Vec::new();
     loop {
-        let page = library.search_works("林檎", &query).unwrap();
+        let page = library
+            .search_works(&TextSearch::current("林檎"), &query)
+            .unwrap()
+            .page;
         if query.after.is_none() {
             assert_eq!(page.total, Some(12));
         }
@@ -199,7 +205,7 @@ fn search_results_page_by_relevance_and_combine_with_filters_and_sorts() {
     // 絞り込みと組み合わせる。
     let favorites = library
         .search_works(
-            "林檎",
+            &TextSearch::current("林檎"),
             &WorkListQuery {
                 sort: WorkSort::Relevance,
                 limit: 50,
@@ -210,7 +216,8 @@ fn search_results_page_by_relevance_and_combine_with_filters_and_sorts() {
                 ..Default::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .page;
     let want: Vec<LibraryId> = expected
         .iter()
         .copied()
@@ -225,7 +232,7 @@ fn search_results_page_by_relevance_and_combine_with_filters_and_sorts() {
     // ほかの鍵で並べるときは一致が絞り込みになる。題の昇順で、別の作品は入らない。
     let by_title = library
         .search_works(
-            "林檎",
+            &TextSearch::current("林檎"),
             &WorkListQuery {
                 sort: WorkSort::Title,
                 descending: false,
@@ -233,15 +240,17 @@ fn search_results_page_by_relevance_and_combine_with_filters_and_sorts() {
                 ..Default::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .page;
     assert_eq!(by_title.total, Some(12));
     let titles: Vec<&str> = by_title.items.iter().map(|c| c.title.as_str()).collect();
     assert_eq!(titles, ["題00", "題01", "題02", "題03"]);
 
     // 一致がなければ空。関連度の順は本文の検索の外では使えない。
     let none = library
-        .search_works("檸檬", &WorkListQuery::default())
-        .unwrap();
+        .search_works(&TextSearch::current("檸檬"), &WorkListQuery::default())
+        .unwrap()
+        .page;
     assert_eq!((none.total, none.items.len()), (Some(0), 0));
     assert!(library
         .list_works(&WorkListQuery {

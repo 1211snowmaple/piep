@@ -104,8 +104,78 @@ impl Library {
         // 保存版の説明をそのまま使う。旧棚の作品の行の説明は、取得の経路によって前後の
         // 空白が落ちていることがある（版の原本には残っている）。前後の空白は語にならない
         // ので、索引で引ける語は変わらない。
-        let excerpt = caption;
-        let snapshot_id = id(&snapshot)?;
+        let head = Head {
+            provider,
+            external_key,
+            author_key,
+            title,
+            author_name,
+            excerpt: caption,
+            text_length,
+            saved_at,
+            published_at,
+        };
+        self.complete_document(conn, work, &snapshot, edit.as_deref(), head)
+            .map(Some)
+    }
+
+    /// 過去の改稿の文書。題・作者・説明・タグ・シリーズ・本文はすべてその改稿の保存版の
+    /// もの（編集は今の版にしか付かないので使わない）。利用者のタグは今のものを入れる。
+    pub(super) fn past_search_document(
+        &self,
+        conn: &Connection,
+        work: LibraryId,
+        snapshot: &[u8],
+    ) -> Result<Option<SearchDocument>> {
+        let row = conn
+            .query_row(
+                &format!(
+                    "SELECT p.provider,p.external_key,
+                        trim(CAST(coalesce(json_extract(s.metadata_json,'$.title'),'') AS TEXT),{SPACES}),
+                        CAST(coalesce(json_extract(s.metadata_json,'$.author_name'),'') AS TEXT),
+                        coalesce((SELECT t.text_length FROM body_text_stats t WHERE t.file_id=s.body_file_id),0),
+                        r.discovered_at,
+                        CASE json_type(s.metadata_json,'$.create_date') WHEN 'integer' THEN json_extract(s.metadata_json,'$.create_date') END,
+                        CAST(coalesce(json_extract(s.metadata_json,'$.author_key'),'') AS TEXT),
+                        CAST(coalesce(json_extract(s.metadata_json,'$.caption'),json_extract(s.metadata_json,'$.excerpt'),'') AS TEXT)
+                     FROM revision_snapshots s JOIN source_revisions r ON r.id=s.revision_id
+                     JOIN work_current_projection p ON p.work_id=s.entity_id
+                     WHERE s.id=?1 AND s.entity_id=?2"
+                ),
+                params![snapshot, work.as_bytes().as_slice()],
+                |r| {
+                    Ok(Head {
+                        provider: r.get(0)?,
+                        external_key: r.get(1)?,
+                        title: r.get(2)?,
+                        author_name: r.get(3)?,
+                        text_length: r.get(4)?,
+                        saved_at: r.get(5)?,
+                        published_at: r.get(6)?,
+                        author_key: r.get(7)?,
+                        excerpt: r.get(8)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(head) = row else {
+            return Ok(None);
+        };
+        self.complete_document(conn, work, snapshot, None, head)
+            .map(Some)
+    }
+
+    /// 保存版から、タグ・シリーズ・資産の種類・本文を足して文書にする。
+    fn complete_document(
+        &self,
+        conn: &Connection,
+        work: LibraryId,
+        snapshot: &[u8],
+        edit: Option<&[u8]>,
+        head: Head,
+    ) -> Result<SearchDocument> {
+        let key = work.as_bytes().to_vec();
+        let snapshot_id = id(snapshot)?;
         let mut tags: Vec<String> = conn
             .prepare_cached(
                 "SELECT t.name FROM snapshot_tags st JOIN tags t ON t.id=st.tag_id WHERE st.snapshot_id=?1
@@ -141,25 +211,25 @@ impl Library {
         }
         asset_kinds.sort_unstable();
         let body = match edit {
-            Some(edit) => self.edit_search_body(conn, &edit)?,
-            None => self.snapshot_search_body(conn, work, snapshot_id, &provider)?,
+            Some(edit) => self.edit_search_body(conn, edit)?,
+            None => self.snapshot_search_body(conn, work, snapshot_id, &head.provider)?,
         };
-        Ok(Some(SearchDocument {
+        Ok(SearchDocument {
             work,
-            provider,
-            external_key,
-            author_key,
-            title,
-            author_name,
+            provider: head.provider,
+            external_key: head.external_key,
+            author_key: head.author_key,
+            title: head.title,
+            author_name: head.author_name,
             tags,
             series_titles,
-            excerpt,
+            excerpt: head.excerpt,
             body,
             asset_kinds,
-            text_length,
-            saved_at,
-            published_at,
-        }))
+            text_length: head.text_length,
+            saved_at: head.saved_at,
+            published_at: head.published_at,
+        })
     }
 
     /// 有効な編集の本文。旧棚と同じく、画像・区切り・改ページ以外の段落の文を空行でつなぐ。
@@ -275,6 +345,22 @@ impl Drop for TextFiles {
         }
     }
 }
+
+/// 保存版ごとに違う、文書の頭の部分。
+struct Head {
+    provider: String,
+    external_key: String,
+    author_key: String,
+    title: String,
+    author_name: String,
+    excerpt: String,
+    text_length: i64,
+    saved_at: i64,
+    published_at: Option<i64>,
+}
+
+/// 一覧の題と同じく、前後から落とす空白（Unicode の空白すべて）。
+const SPACES: &str = "char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)";
 
 fn id(bytes: &[u8]) -> Result<LibraryId> {
     LibraryId::from_slice(bytes).map_err(|_| Error::Integrity("ID が不正です".into()))
