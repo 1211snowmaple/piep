@@ -10,9 +10,11 @@
 //! 画像（表紙・本文の画像）は `piep-library` の URI で、ファイルの識別子（中身の SHA-256）
 //! から返す。画面は `convertFileSrc(識別子, "piep-library")` で URL にする。
 
-use crate::library::{Fingerprint, Library, LibraryId, WorkCard, WorkListQuery};
+use crate::library::{Fingerprint, Library, LibraryId, ResourceScope, WorkCard, WorkListQuery};
 use crate::library_search::{parse_query, SearchDecoration, SearchMatch, SearchPage, TextSearch};
+use crate::library_view::{MediaView, RenderedDocument, VersionView};
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::State;
@@ -52,13 +54,21 @@ pub enum LibraryV2Status {
 pub struct LibraryV2 {
     status: Mutex<LibraryV2Status>,
     library: OnceLock<Arc<Library>>,
+    /// 最近ページに分けた本文。ページをめくるたびに本文全体を組み直さない。
+    documents: Mutex<VecDeque<CachedDocument>>,
 }
+
+type CachedDocument = (LibraryId, ResourceScope, Arc<RenderedDocument>);
+
+/// ページに分けた本文を覚えておく数。作品の画面は一度に一作品で、版を見比べても数冊。
+const DOCUMENT_CACHE: usize = 4;
 
 impl Default for LibraryV2 {
     fn default() -> Self {
         Self {
             status: Mutex::new(LibraryV2Status::Starting),
             library: OnceLock::new(),
+            documents: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -94,6 +104,36 @@ impl LibraryV2 {
             }
             _ => Err("新しい棚は開いていません".to_string()),
         }
+    }
+
+    /// 版（または有効な編集）の本文をページに分けたもの。最近のものは覚えておく。
+    fn document(
+        &self,
+        library: &Library,
+        work: LibraryId,
+        scope: ResourceScope,
+        provider: &str,
+    ) -> Result<Arc<RenderedDocument>, String> {
+        let cached = self.documents.lock().ok().and_then(|documents| {
+            documents
+                .iter()
+                .find(|(w, s, _)| *w == work && *s == scope)
+                .map(|(_, _, document)| Arc::clone(document))
+        });
+        if let Some(document) = cached {
+            return Ok(document);
+        }
+        let document = Arc::new(
+            library
+                .render_document(work, scope, provider)
+                .map_err(|e| e.to_string())?,
+        );
+        if let Ok(mut documents) = self.documents.lock() {
+            documents.retain(|(w, s, _)| !(*w == work && *s == scope));
+            documents.push_front((work, scope, Arc::clone(&document)));
+            documents.truncate(DOCUMENT_CACHE);
+        }
+        Ok(document)
     }
 
     /// 棚を探して開き、本文の検索の索引を同期する。呼んだスレッドで最後まで進む。
@@ -292,19 +332,160 @@ pub async fn library_v2_decorations(
     .map_err(|e| e.to_string())?
 }
 
-/// 作品一件の一覧の項目。
+/// 作品の画面の頭と版の一覧。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkView {
+    #[serde(flatten)]
+    pub card: CardView,
+    /// 取得元の説明（HTML のこともある）。なければ抜粋。
+    pub caption: Option<String>,
+    /// 取得元の作者の ID。作者の画面へのリンクに使う。
+    pub author_key: Option<String>,
+    /// 取得元のシリーズの ID。
+    pub series_key: Option<String>,
+    /// 保存した版（古い順）。
+    pub versions: Vec<VersionView>,
+}
+
+fn text_of(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+/// 作品の画面の頭（一覧の項目・説明・作者とシリーズの ID）と、保存した版。
 #[tauri::command]
-pub async fn library_v2_work_card(
+pub async fn library_v2_work(
     state: State<'_, Arc<LibraryV2>>,
     work: LibraryId,
-) -> Result<CardView, String> {
+) -> Result<WorkView, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let card = state
+        let library = state.library()?;
+        let card = library.work_card(work).map_err(|e| e.to_string())?;
+        let snapshots = library.snapshots(work).map_err(|e| e.to_string())?;
+        let metadata = snapshots
+            .iter()
+            .find(|snapshot| snapshot.id == card.snapshot_id)
+            .or(snapshots.last())
+            .map(|snapshot| snapshot.metadata.clone())
+            .unwrap_or_default();
+        let versions = library.work_versions(work).map_err(|e| e.to_string())?;
+        Ok(WorkView {
+            caption: text_of(metadata.get("caption")).or_else(|| card.excerpt.clone()),
+            author_key: text_of(metadata.get("author_key")),
+            series_key: text_of(metadata.get("series_id")),
+            card: card_view(&card),
+            versions,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 見る保存状態。版を指せばその版、指さなければ今読む本文（有効な編集があればそれ）。
+fn scope_of(card: &WorkCard, snapshot: Option<LibraryId>) -> ResourceScope {
+    match (snapshot, card.edit_id) {
+        (Some(snapshot), _) => ResourceScope::Snapshot(snapshot),
+        (None, Some(edit)) => ResourceScope::Edit(edit),
+        (None, None) => ResourceScope::Snapshot(card.snapshot_id),
+    }
+}
+
+/// 本文の一ページ。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentPageView {
+    /// 0 から。
+    pub page: usize,
+    pub page_count: usize,
+    /// 画像は `data-local-path` にファイルの識別子（添付は `識別子/印`）を持つ。
+    pub html: String,
+}
+
+/// 本文の一ページの HTML。`snapshot` を省くと今読む本文。
+#[tauri::command]
+pub async fn library_v2_content(
+    state: State<'_, Arc<LibraryV2>>,
+    work: LibraryId,
+    snapshot: Option<LibraryId>,
+    page: usize,
+) -> Result<ContentPageView, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        let card = library.work_card(work).map_err(|e| e.to_string())?;
+        let scope = scope_of(&card, snapshot);
+        let document = state.document(&library, work, scope, &card.provider)?;
+        let page_count = document.pages.len().max(1);
+        let page = page.min(page_count - 1);
+        Ok(ContentPageView {
+            page,
+            page_count,
+            html: document.pages.get(page).cloned().unwrap_or_default(),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 版（省くと今読む本文）の画像・添付。
+#[tauri::command]
+pub async fn library_v2_media(
+    state: State<'_, Arc<LibraryV2>>,
+    work: LibraryId,
+    snapshot: Option<LibraryId>,
+) -> Result<Vec<MediaView>, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        let card = library.work_card(work).map_err(|e| e.to_string())?;
+        library
+            .work_media(work, scope_of(&card, snapshot))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 版の本文の平文。版どうしの比較に使う。
+#[tauri::command]
+pub async fn library_v2_version_text(
+    state: State<'_, Arc<LibraryV2>>,
+    work: LibraryId,
+    snapshot: LibraryId,
+) -> Result<String, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        state
             .library()?
-            .work_card(work)
-            .map_err(|e| e.to_string())?;
-        Ok(card_view(&card))
+            .work_text(work, ResourceScope::Snapshot(snapshot))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 版（省くと現在の版）を作った取得元の応答。なければ None。
+#[tauri::command]
+pub async fn library_v2_original(
+    state: State<'_, Arc<LibraryV2>>,
+    work: LibraryId,
+    snapshot: Option<LibraryId>,
+) -> Result<Option<String>, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        let snapshot = match snapshot {
+            Some(snapshot) => snapshot,
+            None => library.work_card(work).map_err(|e| e.to_string())?.snapshot_id,
+        };
+        library
+            .work_original(work, snapshot)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?

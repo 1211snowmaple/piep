@@ -1,0 +1,330 @@
+import { useMemo, useRef, useState } from "react";
+import {
+  ActionIcon,
+  Alert,
+  Anchor,
+  Avatar,
+  Badge,
+  Box,
+  Breadcrumbs,
+  Button,
+  Card,
+  Divider,
+  Grid,
+  Group,
+  Image,
+  Paper,
+  Select,
+  SimpleGrid,
+  Stack,
+  Text,
+  ThemeIcon,
+  Title,
+  Tooltip,
+} from "@mantine/core";
+import { modals } from "@mantine/modals";
+import { useQuery } from "@tanstack/react-query";
+import { MotionTabs as Tabs } from "@/components/MotionTabs";
+import { ActionBar } from "@/components/ActionBar";
+import { AppLink, useAppNavigate, useAppSearchParams, useReturnTo } from "@/app/router";
+import { ErrorState, LoadingState } from "@/components/AsyncState";
+import { ExpandableText } from "@/components/ExpandableText";
+import { WorkCover } from "@/components/WorkCover";
+import { BoundedJsonView } from "@/components/BoundedJsonView";
+import { RevisionDiff } from "@/components/RevisionDiff";
+import { Note } from "@/components/Note";
+import { Icons, IconSize } from "@/lib/icons";
+import { ProviderMark, sourceUrl } from "@/lib/providers";
+import { contentTypeLabel, formatBytes, formatDate, formatNumber } from "@/lib/format";
+import { prepareDocumentHtml } from "@/lib/content";
+import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
+import { isTauriRuntime } from "@/services/dbApi";
+import { openExternalUrl } from "@/services/openerApi";
+import {
+  libraryV2Content,
+  libraryV2Media,
+  libraryV2Original,
+  libraryV2VersionText,
+  libraryV2Work,
+  shelfBodyUrl,
+  shelfFileUrl,
+  type ShelfMedia,
+  type ShelfVersion,
+} from "@/services/libraryV2Api";
+import { shelfEntry } from "@/features/library/shelfV2";
+import { ContentPagination, Info, parseWorkTab } from "@/features/library/workPageParts";
+
+const READ_ONLY = "新しい棚では変えられません";
+
+function versionDate(version: ShelfVersion): string {
+  return formatDate(new Date(version.saved_at).toISOString(), true);
+}
+
+/**
+ * 新しい棚（試験中）の作品の画面。読むだけで、お気に入り・編集・削除などの変更は置かない。
+ *
+ * 旧棚の作品の画面と同じ並び（頭・概要・本文・画像と添付・履歴・保存データ）にして、
+ * 切り替えても見る場所が変わらないようにする。本文は新しい棚の「本文の中の指定 → 画像」の
+ * 対応で画像を引き、旧棚のファイル名には頼らない。
+ */
+export function ShelfWorkPage({ workId }: { workId: string }) {
+  const navigate = useAppNavigate();
+  const returnTo = useReturnTo();
+  const openContentLink = useContentLinkNavigation();
+  const runtime = isTauriRuntime();
+  const [searchParams, setSearchParams] = useAppSearchParams();
+  const tab = parseWorkTab(searchParams.get("tab"));
+  const setTab = (next: string | null) => {
+    const params = new URLSearchParams(searchParams);
+    const normalized = parseWorkTab(next);
+    if (normalized === "overview") params.delete("tab"); else params.set("tab", normalized);
+    setSearchParams(params, { replace: true });
+  };
+  const [contentPage, setContentPage] = useState(1);
+  // 履歴から「この版の本文を見る」で選んだ版。null は今読む本文。
+  const [contentSnapshot, setContentSnapshot] = useState<string | null>(null);
+  const [assetSnapshot, setAssetSnapshot] = useState<string | null>(null);
+  const [selectedSnapshot, setSelectedSnapshot] = useState<string | null>(null);
+  const [visibleAssetCount, setVisibleAssetCount] = useState(80);
+  const contentFrameRef = useRef<HTMLDivElement>(null);
+  const contentBodyRef = useRef<HTMLDivElement>(null);
+
+  const workQuery = useQuery({
+    queryKey: ["library-v2-work", workId],
+    queryFn: () => libraryV2Work(workId),
+    enabled: runtime,
+  });
+  const work = workQuery.data;
+  const versions = useMemo(() => [...(work?.versions ?? [])].sort((left, right) => right.version - left.version), [work?.versions]);
+  const contentQuery = useQuery({
+    queryKey: ["library-v2-content", workId, contentSnapshot, contentPage - 1],
+    queryFn: () => libraryV2Content(workId, contentSnapshot, contentPage - 1),
+    enabled: runtime && tab === "content",
+    placeholderData: (previous) => previous,
+  });
+  const mediaQuery = useQuery({
+    queryKey: ["library-v2-media", workId, assetSnapshot],
+    queryFn: () => libraryV2Media(workId, assetSnapshot),
+    enabled: runtime && tab === "assets",
+  });
+  const originalQuery = useQuery({
+    queryKey: ["library-v2-original", workId],
+    queryFn: () => libraryV2Original(workId, null),
+    enabled: runtime && tab === "json",
+  });
+  // 履歴は、選んだ版と一つ前の版を比べる。何も選んでいなければ現在の版。
+  const selected = versions.find((version) => version.snapshot === selectedSnapshot) ?? versions[0] ?? null;
+  const previous = selected ? versions.find((version) => version.version < selected.version) ?? null : null;
+  const selectedText = useQuery({
+    queryKey: ["library-v2-version-text", workId, selected?.snapshot],
+    queryFn: () => libraryV2VersionText(workId, selected!.snapshot),
+    enabled: runtime && tab === "history" && Boolean(selected),
+  });
+  const previousText = useQuery({
+    queryKey: ["library-v2-version-text", workId, previous?.snapshot],
+    queryFn: () => libraryV2VersionText(workId, previous!.snapshot),
+    enabled: runtime && tab === "history" && Boolean(previous),
+  });
+
+  const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === contentPage - 1;
+  const preparedHtml = useMemo(
+    () => tab === "content" && contentReady ? prepareDocumentHtml(contentQuery.data?.html ?? "", shelfBodyUrl) : "",
+    [contentQuery.data?.html, contentReady, tab],
+  );
+  const preparedMarkup = useMemo(() => ({ __html: preparedHtml }), [preparedHtml]);
+  useLibraryLinkMarks(contentBodyRef, preparedHtml);
+  const captionHtml = useMemo(() => prepareDocumentHtml(work?.caption ?? "", shelfBodyUrl, { inlineLinks: true }), [work?.caption]);
+
+  const goToContentPage = (page: number) => {
+    setContentPage(page);
+    if (contentFrameRef.current) contentFrameRef.current.scrollTop = 0;
+  };
+  const showVersionContent = (snapshot: string | null) => {
+    setContentSnapshot(snapshot);
+    goToContentPage(1);
+    setTab("content");
+  };
+  const handleContentClick = (event: React.MouseEvent<HTMLElement>) => {
+    // 添付の原本は旧棚の保存フォルダーから開く仕組みなので、新しい棚ではまだ開かない。
+    if ((event.target as HTMLElement).closest("button.attachment-original")) {
+      event.preventDefault();
+      return;
+    }
+    void openContentLink(event);
+  };
+
+  if (!runtime) return <div className="page"><Alert color="gray">新しい棚の作品は、デスクトップアプリで開けます。</Alert></div>;
+  if (workQuery.isLoading) return <div className="page"><LoadingState label="作品を開いています" /></div>;
+  if (workQuery.error || !work) return <div className="page"><ErrorState error={workQuery.error ?? "作品が見つかりません"} retry={() => workQuery.refetch()} /></div>;
+
+  const entry = shelfEntry(work);
+  const edited = work.edit_id !== null;
+  const current = versions.find((version) => version.snapshot === work.snapshot_id) ?? versions[0] ?? null;
+  const url = sourceUrl(work.provider, work.external_key, work.content_type, work.authorKey);
+  const openSource = async () => {
+    if (url) await openExternalUrl(url);
+  };
+  const media = mediaQuery.data ?? [];
+  const visibleMedia = media.slice(0, visibleAssetCount);
+  const previewImage = (item: ShelfMedia) => {
+    const src = shelfFileUrl(item.file);
+    if (!src) return;
+    const name = item.name ?? item.role;
+    modals.open({
+      title: name,
+      size: "min(92vw, 1100px)",
+      yOffset: 24,
+      radius: "lg",
+      classNames: { content: "asset-preview-modal" },
+      children: <div className="asset-preview"><div className="asset-preview__canvas"><Image src={src} alt={name} fit="contain" /></div><Group className="asset-preview__footer" justify="space-between"><Text size="sm" c="dimmed">{formatBytes(item.length)}{item.mime_type ? ` · ${item.mime_type.replace("image/", "").toUpperCase()}` : ""}</Text></Group></div>,
+    });
+  };
+
+  return (
+    <div className="page page--contained work-page">
+      <Breadcrumbs mb="md" className="work-breadcrumbs"><Anchor component="button" type="button" size="sm" onClick={() => returnTo("/library")}>ライブラリ</Anchor><Text size="sm" c="dimmed" className="line-clamp-1">{work.title}</Text></Breadcrumbs>
+      <Card className="work-hero" padding={0}>
+        <Grid gap={0} align="stretch">
+          <Grid.Col span={{ base: 12, sm: 4, lg: 3 }}>
+            <Box className="work-hero__cover-stage">
+              <WorkCover work={entry} variant="detail" className="work-hero__cover" />
+            </Box>
+          </Grid.Col>
+          <Grid.Col span={{ base: 12, sm: 8, lg: 9 }}>
+            <Stack p={{ base: "lg", lg: "xl" }} h="100%" gap={0}>
+              <Stack gap="md" mb="md">
+                <Box>
+                  <div className="work-hero__toprow">
+                    <Group gap="xs" wrap="wrap" className="work-hero__marks"><ProviderMark provider={work.provider} /><Badge variant="light" color="gray">{contentTypeLabel(work.content_type)}</Badge>{edited && <Badge color="gray" variant="light">ローカル編集</Badge>}<Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Group>
+                    {url && <Box className="work-hero__utility">
+                      <ActionBar
+                        label="作品の外へ"
+                        items={[
+                          { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: () => navigate(`/save/${work.provider}?url=${encodeURIComponent(url)}`) },
+                          { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSource },
+                        ]}
+                      />
+                    </Box>}
+                  </div>
+                  {work.series_title && (work.seriesKey
+                    ? <Anchor component="button" type="button" size="sm" fw={650} c="dimmed" mb={5} display="block" ta="left" className="work-hero__series-link" onClick={() => navigate(`/series/${encodeURIComponent(work.provider)}/${encodeURIComponent(work.seriesKey!)}`)}>{work.series_title}</Anchor>
+                    : <Text size="sm" c="dimmed" fw={650} mb={5}>{work.series_title}</Text>)}
+                  <Title order={1} className="work-hero__title">{work.title}</Title>
+                  {captionHtml && <ExpandableText className="work-caption" mt="sm" maw={820} lines={4} label="キャプション" html={captionHtml} onClick={openContentLink} />}
+                </Box>
+                <Group gap="lg">
+                  <Button
+                    variant="subtle"
+                    color="gray"
+                    px={0}
+                    className="work-hero__author-link button-plain"
+                    leftSection={<Avatar size={22} radius="xl" color="gray"><Icons.person size={IconSize.inline} /></Avatar>}
+                    disabled={!work.authorKey}
+                    onClick={() => work.authorKey && navigate(`/people/${encodeURIComponent(work.provider)}/${encodeURIComponent(work.authorKey)}`)}
+                  >
+                    {work.author_name}
+                  </Button>
+                </Group>
+                <Group gap={8} className="work-hero__tags">{work.tags.map((tag) => <Badge key={tag} size="md" variant="light" color="gray" component={AppLink} className="work-hero__tag" to={`/library?q=${encodeURIComponent(`tag:${tag}`)}`}>#{tag}</Badge>)}</Group>
+              </Stack>
+              <div className="work-hero__actionbar">
+                <Group gap="md" style={{ rowGap: 2 }} className="work-hero__facts">
+                  <Text size="sm" c="dimmed"><Icons.publishedDate size={IconSize.menu} />公開 {formatDate(entry.sourceCreatedAt)}</Text>
+                  <Text size="sm" c="dimmed"><Icons.textLength size={IconSize.menu} />{edited && "取得元 "}{formatNumber(work.text_length)}字</Text>
+                  {work.media_count > 0 && <Text size="sm" c="dimmed"><Icons.assets size={IconSize.menu} />画像・添付 {formatNumber(work.media_count)}件</Text>}
+                </Group>
+                <Group gap="md" wrap="wrap" justify="flex-end" className="work-hero__actions">
+                  <Group gap={6} wrap="nowrap" role="group" aria-label="中身へ進む">
+                    <Tooltip label="新しい棚の作品は、まだ読む画面で開けません。本文のタブで読めます。"><Button className="work-hero__action work-hero__read" leftSection={<Icons.read size={IconSize.action} />} disabled>読む</Button></Tooltip>
+                  </Group>
+                  <Group gap={6} wrap="nowrap" role="group" aria-label="手元の印">
+                    <Tooltip label={`お気に入り（${READ_ONLY}）`}><ActionIcon className="work-hero__action" size={38} variant="default" style={work.favorite ? { "--ai-color": "var(--flag-favorite)", "--ai-bg": "var(--flag-favorite-bg)" } : undefined} aria-label={`お気に入り（${READ_ONLY}）`} aria-pressed={work.favorite} disabled><Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
+                  </Group>
+                </Group>
+              </div>
+            </Stack>
+          </Grid.Col>
+        </Grid>
+      </Card>
+
+      <Tabs value={tab} onChange={setTab} mt="lg" keepMounted={false}>
+        <Tabs.List>
+          <Tabs.Tab value="overview">概要</Tabs.Tab>
+          <Tabs.Tab value="content">本文</Tabs.Tab>
+          <Tabs.Tab value="assets">画像・添付 <Badge size="xs" variant="light" ml={4}>{work.media_count}</Badge></Tabs.Tab>
+          <Tabs.Tab value="history">履歴</Tabs.Tab>
+          <Tabs.Tab value="json">保存データ</Tabs.Tab>
+        </Tabs.List>
+        <Tabs.Panel value="overview" pt="lg">
+          <Grid gap="lg" align="stretch">
+            <Grid.Col span={{ base: 12, md: 8 }}>
+              <Card p="lg" h="100%"><Title order={3} mb="md">作品情報</Title><Text size="xs" c="dimmed" fw={700} mb="sm">取得元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.author_name} icon={<Icons.person size={IconSize.action} />} /><Info label="公開日" value={formatDate(entry.sourceCreatedAt, true)} icon={<Icons.publishedDate size={IconSize.action} />} />{entry.sourceUpdatedAt && entry.sourceUpdatedAt !== entry.sourceCreatedAt && <Info label="最終更新" value={formatDate(entry.sourceUpdatedAt, true)} icon={<Icons.updates size={IconSize.action} />} />}</SimpleGrid><Divider my="lg" /><Text size="xs" c="dimmed" fw={700} mb="sm">手元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label={edited ? "取得元の文字数" : "文字数"} value={`${formatNumber(work.text_length)}字`} icon={<Icons.read size={IconSize.action} />} /><Info label="容量" value={formatBytes(work.logical_size)} icon={<Icons.openFolder size={IconSize.action} />} /><Info label="バージョン" value={`v${current?.version ?? work.version_number}`} icon={<Icons.versionHistory size={IconSize.action} />} /><Info label="保存日" value={formatDate(entry.downloadedAt, true)} icon={<Icons.epubAdd size={IconSize.action} />} /></SimpleGrid></Card>
+            </Grid.Col>
+            <Grid.Col span={{ base: 12, md: 4 }}>
+              <Note title="新しい棚（試験中）">旧棚から移行した時点の写しを、読むだけで開いています。お気に入り・更新監視・編集・削除・コレクションは、旧棚の作品の画面で変えてください。</Note>
+            </Grid.Col>
+          </Grid>
+        </Tabs.Panel>
+        <Tabs.Panel value="content" pt="lg">
+          {contentQuery.isLoading ? <LoadingState label="本文を読み込んでいます" /> : contentQuery.error ? <ErrorState error={contentQuery.error} retry={() => contentQuery.refetch()} /> : !contentReady ? <LoadingState label="本文を読み込んでいます" /> : <Stack gap="sm">
+            {contentSnapshot !== null && <Group justify="space-between"><Text size="xs" c="dimmed">保存済み v{versions.find((version) => version.snapshot === contentSnapshot)?.version ?? "?"}</Text><Button variant="subtle" size="xs" onClick={() => showVersionContent(null)}>現在の本文へ</Button></Group>}
+            {contentSnapshot === null && edited && <Text size="xs" c="dimmed">編集版の本文です。</Text>}
+            {/* 取得元の応答に本文が無い作品（公開範囲の外の投稿など）。空の枠だけを出さない。 */}
+            {contentQuery.data?.html.trim() ? <Paper className="content-frame" withBorder ref={contentFrameRef}>
+              <div ref={contentBodyRef} className="content-preview content-preview--paged" onClick={handleContentClick} dangerouslySetInnerHTML={preparedMarkup} />
+            </Paper> : <Alert color="gray">この版には本文がありません。</Alert>}
+            <ContentPagination current={contentPage} total={contentQuery.data?.pageCount ?? 1} onChange={goToContentPage} />
+          </Stack>}
+        </Tabs.Panel>
+        <Tabs.Panel value="assets" pt="lg">
+          <Group justify="space-between" mb="md"><Text size="xs" c="dimmed">選んだ保存版の画像・添付を表示します。</Text><Select size="xs" w={160} aria-label="画像・添付の保存版" value={assetSnapshot ?? "current"} onChange={(value) => { setAssetSnapshot(value && value !== "current" ? value : null); setVisibleAssetCount(80); }} allowDeselect={false} data={[{ value: "current", label: `現在（v${current?.version ?? work.version_number}）` }, ...versions.filter((version) => version.snapshot !== current?.snapshot).map((version) => ({ value: version.snapshot, label: `保存済み v${version.version}` }))]} /></Group>
+          {mediaQuery.isLoading ? <LoadingState label="画像・添付を読み込んでいます" /> : mediaQuery.error ? <ErrorState error={mediaQuery.error} retry={() => mediaQuery.refetch()} /> : media.length ? <Stack gap="lg"><SimpleGrid cols={{ base: 2, sm: 3, lg: 4, xl: 5 }} spacing="md">{visibleMedia.map((item, index) => {
+            const src = item.kind === "media" ? shelfFileUrl(item.file) : null;
+            const name = item.name ?? item.role;
+            return <Card key={`${item.kind}-${index}`} p={0} className={src ? "asset-card surface--interactive" : "asset-card"} onClick={src ? () => previewImage(item) : undefined}>
+              <Box className="asset-card__preview">
+                {src ? <Image src={src} alt={name} className="asset-card__image" loading="lazy" decoding="async" /> : <ThemeIcon size={56} variant="light" color="gray"><Icons.file size={IconSize.feature} /></ThemeIcon>}
+                {!item.file && <Badge className="asset-card__badge" size="xs" color="gray" variant="filled">未保存</Badge>}
+              </Box>
+              <Stack gap={2} className="asset-card__meta">
+                <Text size="xs" fw={650} className="asset-card__name" title={name}>{name}</Text>
+                <Group justify="space-between" gap="xs" wrap="nowrap">
+                  <Text size="10px" c="dimmed">{formatBytes(item.length)}</Text>
+                  <Text size="10px" c="dimmed" tt="uppercase">{(item.mime_type || item.kind).split("/").pop()}</Text>
+                </Group>
+              </Stack>
+            </Card>;
+          })}</SimpleGrid>{visibleMedia.length < media.length && <Group justify="center"><Button variant="default" onClick={() => setVisibleAssetCount((count) => Math.min(media.length, count + 80))}>さらに表示（残り{formatNumber(media.length - visibleMedia.length)}件）</Button></Group>}</Stack> : <Alert color="gray" icon={<Icons.imageFile size={IconSize.action} />}>この版に画像・添付はありません。</Alert>}
+        </Tabs.Panel>
+        <Tabs.Panel value="history" pt="lg">
+          {edited && <Alert color="blue" mb="md">編集しても取得元の版は増えません。編集版は取得元の版の上に重ねて保存してあり、いま読む本文に使います。</Alert>}
+          <div className="history-layout">
+            <nav className="history-layout__versions" aria-label="保存した版">
+              {versions.map((version) => <Paper component="button" type="button" key={version.snapshot} p="xs" withBorder className="version-row" data-active={selected?.snapshot === version.snapshot || undefined} onClick={() => setSelectedSnapshot(version.snapshot)}>
+                <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>v{version.version}</Text>{version.snapshot === current?.snapshot && <Badge size="xs">{edited ? "取得元の最新版" : "現在"}</Badge>}</Group>
+                <Text size="xs" c="dimmed">{versionDate(version)}</Text>
+                {version.text_length !== null && <Text size="xs" c="dimmed">{formatNumber(version.text_length)}字</Text>}
+              </Paper>)}
+            </nav>
+            <Card p="lg" className="version-preview">
+              {!selected
+                ? <Alert color="gray">保存した版がありません。</Alert>
+                : selectedText.isLoading || (previous && previousText.isLoading)
+                  ? <LoadingState label="変更内容を読み込んでいます" />
+                  : selectedText.error || previousText.error
+                    ? <ErrorState error={selectedText.error ?? previousText.error} retry={() => { selectedText.refetch(); previousText.refetch(); }} />
+                    : <RevisionDiff
+                        beforeVersion={previous?.version ?? null}
+                        afterVersion={selected.version}
+                        beforeText={previous ? previousText.data ?? "" : null}
+                        afterText={selectedText.data ?? ""}
+                        actions={<Button size="xs" variant="light" onClick={() => showVersionContent(selected.snapshot === current?.snapshot && !edited ? null : selected.snapshot)}>この版の本文を見る</Button>}
+                      />}
+            </Card>
+          </div>
+        </Tabs.Panel>
+        <Tabs.Panel value="json" pt="lg">{originalQuery.isLoading ? <LoadingState /> : originalQuery.error ? <ErrorState error={originalQuery.error} retry={() => originalQuery.refetch()} /> : originalQuery.data ? <BoundedJsonView jsonText={originalQuery.data} description="現在の版を作ったときに取得元から受け取ったデータを表示します（JSON形式）" /> : <Alert color="gray">この版には取得元から受け取ったデータが残っていません。</Alert>}</Tabs.Panel>
+      </Tabs>
+    </div>
+  );
+}

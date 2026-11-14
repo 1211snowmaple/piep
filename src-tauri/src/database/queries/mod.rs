@@ -14690,7 +14690,7 @@ fn reader_source_content(
 /// Converts source-level boundaries into reasonably sized transport pages.
 /// Boundaries always sit between complete source blocks, so a page can be
 /// sanitized independently without producing malformed markup.
-fn paginate_reader_html(html: &str, source: &str) -> (Vec<String>, Vec<usize>) {
+pub(crate) fn paginate_reader_html(html: &str, source: &str) -> (Vec<String>, Vec<usize>) {
     if html.trim().is_empty() {
         return (Vec::new(), Vec::new());
     }

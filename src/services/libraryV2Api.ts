@@ -155,11 +155,74 @@ export function libraryV2Decorations(text: string, matches: ShelfMatch[]): Promi
   return invoke<ShelfDecoration[]>("library_v2_decorations", { text, matches });
 }
 
-export function libraryV2WorkCard(work: string): Promise<ShelfCard> {
-  return invoke<ShelfCard>("library_v2_work_card", { work });
+/** 保存した版の一つ。`version` は取得元の改稿の順（1 から）。 */
+export interface ShelfVersion {
+  snapshot: string;
+  version: number;
+  /** ミリ秒。 */
+  saved_at: number;
+  text_length: number | null;
+}
+
+/** 作品の画面の頭と版の一覧。 */
+export type ShelfWork = ShelfCard & {
+  /** 取得元の説明（HTML のこともある）。 */
+  caption: string | null;
+  authorKey: string | null;
+  seriesKey: string | null;
+  /** 古い順。 */
+  versions: ShelfVersion[];
+};
+
+/** 本文の一ページ。画像は `data-local-path` にファイルの識別子（添付は `識別子/印`）を持つ。 */
+export interface ShelfContentPage {
+  page: number;
+  pageCount: number;
+  html: string;
+}
+
+/** 作品の画像・添付の一件。 */
+export interface ShelfMedia {
+  kind: "media" | "file";
+  role: string;
+  name: string | null;
+  mime_type: string | null;
+  length: number;
+  /** ファイルの識別子。未保存なら null。 */
+  file: string | null;
+}
+
+export function libraryV2Work(work: string): Promise<ShelfWork> {
+  return invoke<ShelfWork>("library_v2_work", { work });
+}
+
+/** `snapshot` を省くと今読む本文（有効な編集があればそれ）。`page` は 0 から。 */
+export function libraryV2Content(work: string, snapshot: string | null, page: number): Promise<ShelfContentPage> {
+  return invoke<ShelfContentPage>("library_v2_content", { work, snapshot, page });
+}
+
+export function libraryV2Media(work: string, snapshot: string | null): Promise<ShelfMedia[]> {
+  return invoke<ShelfMedia[]>("library_v2_media", { work, snapshot });
+}
+
+export function libraryV2VersionText(work: string, snapshot: string): Promise<string> {
+  return invoke<string>("library_v2_version_text", { work, snapshot });
+}
+
+export function libraryV2Original(work: string, snapshot: string | null): Promise<string | null> {
+  return invoke<string | null>("library_v2_original", { work, snapshot });
 }
 
 /** 棚のファイルの識別子を、画面が読める URL にする。 */
 export function shelfFileUrl(fingerprint: string | null | undefined): string | null {
   return fingerprint ? convertFileSrc(fingerprint, "piep-library") : null;
+}
+
+/**
+ * 本文の `data-local-path`（`識別子` か `識別子/印`）を URL にする。棚の識別子でないもの
+ * （旧棚のパスなど）は読まない。
+ */
+export function shelfBodyUrl(localPath: string | null | undefined): string | null {
+  const fingerprint = localPath?.split("/", 1)[0] ?? "";
+  return /^[0-9a-f]{64}$/.test(fingerprint) ? shelfFileUrl(fingerprint) : null;
 }

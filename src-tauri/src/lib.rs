@@ -10,6 +10,7 @@ pub mod fanbox_api;
 /// 元ファイルを保持する新しいライブラリの保管・履歴モデル。
 pub mod library;
 pub mod library_search;
+pub mod library_view;
 mod logging;
 /// 棚の実物で取り出しを確かめる example から触れるように公開している。
 pub mod pdf;
@@ -309,7 +310,11 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_status,
             commands::library_v2::library_v2_search,
             commands::library_v2::library_v2_decorations,
-            commands::library_v2::library_v2_work_card,
+            commands::library_v2::library_v2_work,
+            commands::library_v2::library_v2_content,
+            commands::library_v2::library_v2_media,
+            commands::library_v2::library_v2_version_text,
+            commands::library_v2::library_v2_original,
             // サーバーモード (commands::server)
             commands::server::server_status,
             commands::server::server_embedded_start,
