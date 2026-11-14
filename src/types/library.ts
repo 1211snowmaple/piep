@@ -41,6 +41,22 @@ export interface DownloadEntry {
   historicalMatchCount?: number;
 }
 
+/**
+ * 新しい棚の作品を、一覧のカードが読む形にしたもの（試験中・読むだけ）。
+ *
+ * `id` は新しい棚の作品の ID（UUID の文字列）で、旧棚の番号ではない。旧棚の番号で
+ * 動く操作（お気に入り・更新監視・EPUB・削除・選択）には渡さない。表紙は
+ * `coverUrl` に URL で持つ（旧棚のパスではない）。
+ */
+export interface ShelfEntry extends Omit<DownloadEntry, "id"> {
+  id: string;
+  shelf: "v2";
+  coverUrl: string | null;
+}
+
+/** 一覧に並ぶ作品。旧棚か新しい棚か。 */
+export type ListedWork = DownloadEntry | ShelfEntry;
+
 export interface ScoreReason {
   field: string;
   matchType: string;

@@ -11,7 +11,7 @@
 //! から返す。画面は `convertFileSrc(識別子, "piep-library")` で URL にする。
 
 use crate::library::{Fingerprint, Library, LibraryId, WorkCard, WorkListQuery};
-use crate::library_search::{SearchDecoration, SearchMatch, SearchPage, TextSearch};
+use crate::library_search::{parse_query, SearchDecoration, SearchMatch, SearchPage, TextSearch};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -249,7 +249,7 @@ fn card_view(card: &WorkCard) -> CardView {
     }
 }
 
-/// 一覧・本文の検索。語がなければ一覧（`tag:` などの書き方だけでもよい）。
+/// 一覧・本文の検索。語がなければ一覧（`tag:` などの書き方だけでもよい）で、索引の同期中でも読める。
 #[tauri::command]
 pub async fn library_v2_search(
     state: State<'_, Arc<LibraryV2>>,
@@ -258,7 +258,8 @@ pub async fn library_v2_search(
 ) -> Result<SearchView, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let library = if search.text.trim().is_empty() {
+        // 書き方（`tag:` など）だけで語のない問い合わせは一覧なので、索引の同期中でも読める。
+        let library = if parse_query(&search.text).text.trim().is_empty() {
             state.library()?
         } else {
             state.searchable()?

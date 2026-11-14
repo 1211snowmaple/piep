@@ -49,6 +49,7 @@ import { errorMessage, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { listenForScrollIntent, scrollViewportToTop } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
+import { searchShelf, shelfListable, ShelfUnsupportedError, useLibraryV2Status, useShelfV2Preference, type ShelfSearchResult } from "@/features/library/shelfV2";
 import { LibraryShelfMenu } from "./LibraryShelfMenu";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { parseViewMode, useViewMode } from "@/lib/viewMode";
@@ -98,7 +99,7 @@ import {
   WORK_SORT_OPTIONS,
 } from "@/features/library/sortOptions";
 import type { CollectionSortBy } from "@/types/collections";
-import type { EntityFacet, EntityFacetScope, EntitySortBy, FacetCount, LibraryAssetFilter, LibraryCoverFilter, LibraryDateField, LibraryEditFilter, LibraryRevisionFilter, LibrarySeriesFilter, LibrarySortBy, LibrarySortOrder, LibraryVersionScope, LibraryWatchFilter, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result, UpdateTarget } from "@/types/library";
+import type { EntityFacet, EntityFacetScope, EntitySortBy, FacetCount, LibraryAssetFilter, LibraryCoverFilter, LibraryDateField, LibraryEditFilter, LibraryRevisionFilter, LibrarySeriesFilter, LibrarySortBy, LibrarySortOrder, LibraryVersionScope, LibraryWatchFilter, ListedWork, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result, UpdateTarget } from "@/types/library";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 type LibraryTab = "works" | "people" | "series" | "collections";
@@ -571,6 +572,15 @@ function openManageSavedSearches(saved: SavedSearchRecord[], onDelete: (id: numb
   });
 }
 
+function uniqueShelfWorks(pages: ShelfSearchResult[] | undefined) {
+  const seen = new Set<string>();
+  return pages?.flatMap((page) => page.items.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  })) ?? [];
+}
+
 function uniqueWorks(pages: SearchV2Result[] | undefined) {
   const seen = new Set<number>();
   return pages?.flatMap((page) => page.items.filter((item) => {
@@ -893,7 +903,12 @@ export default function LibraryPage() {
   // Works ranked by relevance have only a score cursor. Entity tabs and
   // explicitly sorted works can use a bounded direct page; everything else
   // drops a stale page parameter rather than silently ignoring it.
-  const numberedPageEnabled = pagingMode === "pages" && (tab !== "works" || sortBy !== "relevance");
+  // 一覧を新しい棚から出す（試験中・読むだけ）。好みが入っていて、棚が一覧を出せる状態の
+  // ときだけ。新しい棚の一覧は続きの位置で読み進めるだけで、ページ番号は持たない。
+  const [shelfV2Preferred] = useShelfV2Preference();
+  const shelfV2Status = useLibraryV2Status(runtime && shelfV2Preferred);
+  const shelfMode = runtime && shelfV2Preferred && shelfListable(shelfV2Status.data);
+  const numberedPageEnabled = pagingMode === "pages" && (tab !== "works" || (sortBy !== "relevance" && !shelfMode));
   const {
     page: pageParam,
     maxPage: maxDirectPage,
@@ -1117,19 +1132,40 @@ export default function LibraryPage() {
     // the page that is already on screen keeps the geometry - and the reader's
     // place in it - still while the next one is fetched.
     placeholderData: keepPreviousData,
-    enabled: tab === "works",
+    enabled: tab === "works" && !shelfMode,
   });
+  // 新しい棚の一覧。旧棚の一覧と同じ条件から引き、別の鍵で持つ（旧棚の一覧の書き換え
+  // ―お気に入りの先回りなど― が触らないように）。
+  const shelfWorks = useInfiniteQuery({
+    ...boundedInfiniteListOptions,
+    queryKey: ["library-v2", params],
+    queryFn: ({ pageParam }) => searchShelf({ ...params, cursor: pageParam }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage, allPages) => {
+      const cursor = lastPage.items.length ? lastPage.nextCursor : null;
+      return cursor && !allPages.slice(0, -1).some((page) => page.nextCursor === cursor) ? cursor : undefined;
+    },
+    placeholderData: keepPreviousData,
+    enabled: tab === "works" && shelfMode,
+    // 使えない条件は何度引いても使えない。
+    retry: (failures, error) => !(error instanceof ShelfUnsupportedError) && failures < 2,
+  });
+  const listing = shelfMode ? shelfWorks : works;
   const facets = useQuery({
     queryKey: ["library-facets"],
     queryFn: () => runtime ? getFilterFacets() : Promise.resolve(demoFacets),
     enabled: filterOpened,
   });
   const loadedItems = useMemo(() => uniqueWorks(works.data?.pages), [works.data?.pages]);
+  const shelfItems = useMemo(() => uniqueShelfWorks(shelfWorks.data?.pages), [shelfWorks.data?.pages]);
+  // 画面に並べる作品。選択・削除・お気に入りの先回りは旧棚の一覧（loadedItems）だけを相手にする。
+  const listedItems: ListedWork[] = shelfMode ? shelfItems : loadedItems;
+  const listingPages = shelfMode ? shelfWorks.data?.pages : works.data?.pages;
   const worksAtCacheLimit = !numberedPages
-    && (works.data?.pages.length ?? 0) >= INFINITE_LIST_MAX_PAGES
-    && Boolean(works.hasNextPage);
-  const totalCount = works.data?.pages[0]?.totalEstimate ?? null;
-  const searchMeta = works.data?.pages[0]?.searchMeta;
+    && (listingPages?.length ?? 0) >= INFINITE_LIST_MAX_PAGES
+    && Boolean(listing.hasNextPage);
+  const totalCount = listingPages?.[0]?.totalEstimate ?? null;
+  const searchMeta = listingPages?.[0]?.searchMeta;
   const workFilterCount = filters.sources.length + Number(Boolean(filters.contentType)) + Number(filters.favorite || filters.excludeFavorite) + Number(filters.readingOnly) + Number(Boolean(filters.watch)) + filters.authorsInclude.length + filters.authorsExclude.length + filters.tagsInclude.length + filters.tagsExclude.length + Number(filters.minChars !== "") + Number(filters.maxChars !== "") + Number(filters.minAssets !== "") + Number(filters.maxAssets !== "") + Number(filters.minSizeMb !== "") + Number(filters.maxSizeMb !== "") + Number(Boolean(filters.assetFilter)) + Number(Boolean(filters.seriesFilter)) + Number(Boolean(filters.seriesKey)) + Number(Boolean(filters.revisionFilter)) + Number(Boolean(filters.acquisitionFilter)) + Number(Boolean(filters.editFilter)) + Number(Boolean(filters.coverFilter)) + Number(Boolean(filters.dateFrom)) + Number(Boolean(filters.dateTo));
   // 束ね自身の条件も「適用中」に数える。数えないと、絞られている理由が
   // どこにも出ない一覧ができる。
@@ -1611,7 +1647,7 @@ export default function LibraryPage() {
   // arrived. A layout effect so it lands in the same frame the new rows are
   // painted in, rather than a frame after them.
   const showingRequestedPage = tab === "works"
-    ? !works.isPlaceholderData && !works.isFetching
+    ? !listing.isPlaceholderData && !listing.isFetching
     : tab === "people" || tab === "series"
       ? !entities.isPlaceholderData && !entities.isFetching
       : true;
@@ -1779,7 +1815,7 @@ export default function LibraryPage() {
             // コレクションの中身では既にそうしてある。 */}
             <PagingModeToggle scope={pagingScope} />
             <Text size="sm" c="dimmed" style={{ whiteSpace: "nowrap" }}>{tab === "works"
-              ? `${formatNumber(totalCount ?? loadedItems.length)}件${totalCount !== null && loadedItems.length < totalCount ? `（${formatNumber(loadedItems.length)}件を表示中）` : ""}`
+              ? `${formatNumber(totalCount ?? listedItems.length)}件${totalCount !== null && listedItems.length < totalCount ? `（${formatNumber(listedItems.length)}件を表示中）` : ""}`
               : entityTotal.data !== undefined
                 ? `${formatNumber(entityTotal.data)}件`
                 : `${formatNumber(entityItems.length)}件${entities.hasNextPage ? "以上" : ""}`}</Text>
@@ -1787,7 +1823,9 @@ export default function LibraryPage() {
               ? <SearchInterpretation meta={searchMeta} />
               : null}
           </Group>
-          {!selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
+          {/* 新しい棚の一覧は読むだけなので、選んでできること（削除・まとめて変更）がない。
+                消すと右端が空いて行が変わって見えるので、押せない形で残す。 */}
+          {!selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} disabled={tab === "works" && shelfMode} onClick={() => setSelectionMode(true)}>複数選択</Button>}
         </Group>}
 
         {tab === "collections" ? <CollectionsPanel query={searchText} sortBy={collectionSortBy} sortOrder={collectionSortOrder} /> : <>
@@ -1826,20 +1864,20 @@ export default function LibraryPage() {
         )}
 
         {tab === "works" ? (
-          works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : loadedItems.length ? (
+          listing.isLoading ? <LoadingState label="ライブラリを検索しています" /> : listing.error ? <ErrorState error={listing.error} retry={() => listing.refetch()} /> : listedItems.length ? (
             <>
-              <VirtualizedWorkList items={loadedItems} view={view} selectionMode={selectionMode} selected={selectedSet} revisedIds={pendingRevisionIds} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
+              <VirtualizedWorkList items={listedItems} view={view} selectionMode={selectionMode} selected={selectedSet} revisedIds={pendingRevisionIds} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
               <ListPager
                 scope={pagingScope}
-                hasNext={Boolean(works.hasNextPage) && !worksAtCacheLimit}
-                loading={works.isFetchingNextPage || works.isFetching}
-                loaded={loadedItems.length}
+                hasNext={Boolean(listing.hasNextPage) && !worksAtCacheLimit}
+                loading={listing.isFetchingNextPage || listing.isFetching}
+                loaded={listedItems.length}
                 total={totalCount}
-                onLoad={() => works.fetchNextPage()}
+                onLoad={() => listing.fetchNextPage()}
                 endMessage={worksAtCacheLimit
                   ? sortBy === "relevance"
-                    ? `メモリ使用量を抑えるため${formatNumber(loadedItems.length)}件で停止しました。検索条件を絞ると続きへ到達できます。`
-                    : `メモリ使用量を抑えるため${formatNumber(loadedItems.length)}件で停止しました。「ページ番号」に切り替えると続きへ移動できます。`
+                    ? `メモリ使用量を抑えるため${formatNumber(listedItems.length)}件で停止しました。検索条件を絞ると続きへ到達できます。`
+                    : `メモリ使用量を抑えるため${formatNumber(listedItems.length)}件で停止しました。${shelfMode ? "検索条件を絞ると続きへ到達できます。" : "「ページ番号」に切り替えると続きへ移動できます。"}`
                   : undefined}
                 pages={{
                   current: pageParam,
@@ -1847,9 +1885,11 @@ export default function LibraryPage() {
                   onGoTo: setPage,
                   maxDirectPage,
                   limitNotice: pageLimitNotice,
-                  unavailableReason: sortBy === "relevance"
-                    ? "関連度順はページ番号で移動できません。並び順を選ぶとページ番号が使えます。"
-                    : null,
+                  unavailableReason: shelfMode
+                    ? "新しい棚の一覧はページ番号で移動できません。"
+                    : sortBy === "relevance"
+                      ? "関連度順はページ番号で移動できません。並び順を選ぶとページ番号が使えます。"
+                      : null,
                 }}
               />
             </>

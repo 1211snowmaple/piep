@@ -17,11 +17,12 @@ import { deleteDownload, getAssetUrl, isTauriRuntime, setFavorite, setWatchUpdat
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
-import type { DownloadEntry } from "@/types/library";
+import type { DownloadEntry, ListedWork, ShelfEntry } from "@/types/library";
+import { isShelfEntry } from "@/features/library/shelfV2";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 interface WorkCardProps {
-  work: DownloadEntry;
+  work: ListedWork;
   /** Lists that already loaded the revision set pass the membership result so
    * hundreds of cards do not each subscribe to and scan the same query. */
   revised?: boolean;
@@ -45,7 +46,7 @@ function isCardControl(target: EventTarget | null) {
  * only once a work has actually been re-saved, and opens the history tab where
  * the earlier revisions can be read and restored.
  */
-function VersionChip({ work, interactive = true }: { work: DownloadEntry; interactive?: boolean }) {
+function VersionChip({ work, interactive = true }: { work: ListedWork; interactive?: boolean }) {
   const navigate = useAppNavigate();
   if (work.currentVersion <= 1) return null;
   return (
@@ -70,7 +71,7 @@ function VersionChip({ work, interactive = true }: { work: DownloadEntry; intera
 }
 
 /** A provider rewrite that has been found but is not one of the saved versions. */
-function PendingRevisionChip({ work, visible, interactive = true }: { work: DownloadEntry; visible: boolean; interactive?: boolean }) {
+function PendingRevisionChip({ work, visible, interactive = true }: { work: ListedWork; visible: boolean; interactive?: boolean }) {
   const navigate = useAppNavigate();
   if (!visible) return null;
   return (
@@ -97,7 +98,7 @@ function PendingRevisionChip({ work, visible, interactive = true }: { work: Down
 }
 
 /** The series above the title doubles as the link to it. */
-function SeriesLink({ work, className, interactive = true }: { work: DownloadEntry; className?: string; interactive?: boolean }) {
+function SeriesLink({ work, className, interactive = true }: { work: ListedWork; className?: string; interactive?: boolean }) {
   const navigate = useAppNavigate();
   if (!work.seriesTitle) return null;
   const key = work.seriesId;
@@ -127,7 +128,7 @@ function SeriesLink({ work, className, interactive = true }: { work: DownloadEnt
  * 3文字に切られたら誰のことか分からない。それでも入りきらない幅では
  * 切るしかないので、切れたぶんはホバーで読めるようにしておく。
  */
-function AuthorLine({ work, size = 20, interactive = true }: { work: DownloadEntry; size?: number; interactive?: boolean }) {
+function AuthorLine({ work, size = 20, interactive = true }: { work: ListedWork; size?: number; interactive?: boolean }) {
   const navigate = useAppNavigate();
   const name = work.personName || work.authorName;
   const icon = getAssetUrl(work.personIconPath);
@@ -170,7 +171,7 @@ const MATCH_FIELD_LABELS: Record<string, string> = {
   metadata: "作品情報",
 };
 
-function SearchMatchReason({ work }: { work: DownloadEntry }) {
+function SearchMatchReason({ work }: { work: ListedWork }) {
   const navigate = useAppNavigate();
   const fields = (work.matchFields ?? []).slice(0, 3);
   const historicalVersion = work.matchedVersion ?? null;
@@ -214,10 +215,10 @@ function SearchMatchReason({ work }: { work: DownloadEntry }) {
 }
 
 function SelectionToggle({ work, selected, compact, onSelect }: {
-  work: DownloadEntry;
+  work: ListedWork;
   selected: boolean;
   compact?: boolean;
-  onSelect?: (id: number, selected: boolean) => void;
+  onSelect: (selected: boolean) => void;
 }) {
   // 一覧（リスト表示）の行は、行そのものが細いので隅の印のまま。
   // 表紙が主役のカードだけ、中央の大きな丸に変える。
@@ -228,7 +229,7 @@ function SelectionToggle({ work, selected, compact, onSelect }: {
         data-checked={selected || undefined}
         aria-label={`${work.title}を${selected ? "選択解除" : "選択"}`}
         aria-pressed={selected}
-        onClick={(event) => { event.stopPropagation(); onSelect?.(work.id, !selected); }}
+        onClick={(event) => { event.stopPropagation(); onSelect(!selected); }}
       >
         <span className="work-selection-toggle__indicator" aria-hidden>{selected && <Icons.confirm size={IconSize.menu} strokeWidth={3} />}</span>
       </UnstyledButton>
@@ -255,7 +256,9 @@ export const WorkCard = memo(function WorkCard({
 }: WorkCardProps) {
   const navigate = useAppNavigate();
   const { addToEpubQueue, removeFromEpubQueue, isQueuedForEpub } = useWorkspace();
-  const queued = isQueuedForEpub(work.id);
+  // 新しい棚の作品は旧棚の番号を持たない。番号で動く操作（選択・EPUB・印の照合）には渡さない。
+  const legacyId = isShelfEntry(work) ? null : work.id;
+  const queued = legacyId !== null && isQueuedForEpub(legacyId);
   // 印の出どころをカードの中に置くのは、カードが出るところすべてで同じ顔に
   // するため。同じキーの問い合わせは共有されるので、何枚並んでも通信は1回。
   const pendingRevisions = useQuery({
@@ -264,15 +267,18 @@ export const WorkCard = memo(function WorkCard({
     // 無効化は更新確認の側から届く（invalidateAfterUpdateJob）。
     // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
     staleTime: 30_000,
-    enabled: revisedFromList === undefined,
+    enabled: revisedFromList === undefined && legacyId !== null,
   });
-  const revised = revisedFromList
-    ?? (pendingRevisions.data ?? []).some((entry) => entry.downloadId === work.id);
+  const revised = legacyId !== null && (revisedFromList
+    ?? (pendingRevisions.data ?? []).some((entry) => entry.downloadId === legacyId));
   const excerpt = work.excerpt ? summaryText(work.excerpt) : "";
+  const select = useCallback((next: boolean) => {
+    if (legacyId !== null) onSelect?.(legacyId, next);
+  }, [legacyId, onSelect]);
   const open = useCallback(() => {
-    if (selectionMode) onSelect?.(work.id, !selected);
+    if (selectionMode) select(!selected);
     else navigate(`/works/${work.id}`);
-  }, [navigate, onSelect, selected, selectionMode, work.id]);
+  }, [navigate, select, selected, selectionMode, work.id]);
   const keyboardOpen = (event: React.KeyboardEvent) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
@@ -288,19 +294,23 @@ export const WorkCard = memo(function WorkCard({
     if (!selectionMode || (event.target instanceof Element && event.target.closest(".work-row__select"))) return;
     event.preventDefault();
     event.stopPropagation();
-    onSelect?.(work.id, !selected);
+    select(!selected);
   };
   const selectFromKeyboardCapture = (event: React.KeyboardEvent<HTMLElement>) => {
     if (!selectionMode || (event.key !== "Enter" && event.key !== " ") || (event.target instanceof Element && event.target.closest(".work-row__select"))) return;
     event.preventDefault();
     event.stopPropagation();
-    onSelect?.(work.id, !selected);
+    select(!selected);
   };
   const actions = (
     <WorkActions
       work={work}
       queued={queued}
-      onQueue={() => queued ? removeFromEpubQueue(work.id) : addToEpubQueue(work.id)}
+      onQueue={() => {
+        if (legacyId === null) return;
+        if (queued) removeFromEpubQueue(legacyId);
+        else addToEpubQueue(legacyId);
+      }}
       onToggleFavorite={onToggleFavorite}
       onToggleWatch={onToggleWatch}
     />
@@ -315,7 +325,7 @@ export const WorkCard = memo(function WorkCard({
         <div className="work-row__grid">
           <div className="work-row__cover">
             <WorkCover work={work} variant="compact" />
-            {selectionMode && <SelectionToggle work={work} selected={Boolean(selected)} compact onSelect={onSelect} />}
+            {selectionMode && <SelectionToggle work={work} selected={Boolean(selected)} compact onSelect={select} />}
           </div>
           <div className="work-row__main" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
             <SeriesLink work={work} className="work-row__series" interactive={!selectionMode} />
@@ -411,19 +421,58 @@ export const WorkCard = memo(function WorkCard({
         </div>
         {/* カード全体を覆う。表紙の上だけに置くと、印がカードの中心ではなく
             表紙の中心に来て、横長のカードでは左に寄って見える。 */}
-        {selectionMode && <SelectionToggle work={work} selected={Boolean(selected)} onSelect={onSelect} />}
+        {selectionMode && <SelectionToggle work={work} selected={Boolean(selected)} onSelect={select} />}
       </div>
     </Card>
   );
 });
 
-function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }: {
-  work: DownloadEntry;
+interface WorkActionsProps {
+  work: ListedWork;
   queued: boolean;
   onQueue: () => void;
   onToggleFavorite?: (id: number, favorite: boolean) => void;
   onToggleWatch?: (id: number, watch: boolean) => void;
-}) {
+}
+
+function WorkActions(props: WorkActionsProps) {
+  const { work } = props;
+  return isShelfEntry(work) ? <ShelfWorkActions work={work} /> : <LegacyWorkActions {...props} work={work} />;
+}
+
+/**
+ * 新しい棚の作品の操作。新しい棚は読むだけの写しなので、書き換える操作（お気に入り・
+ * 更新監視・EPUB・削除）は押せない形で同じ場所に置く（並びと幅を変えない）。読む画面は
+ * まだ新しい棚につないでいない。
+ */
+function ShelfWorkActions({ work }: { work: ShelfEntry }) {
+  const navigate = useAppNavigate();
+  const off = { "--ai-color": "var(--flag-off)" } as React.CSSProperties;
+  return (
+    <Group gap={2} wrap="nowrap" justify="flex-end" className="work-card__actions" onClick={(event) => event.stopPropagation()} data-read-only>
+      <ActionIcon variant="subtle" color="gray" style={off} size="md" disabled aria-label={`${work.title}：読む（新しい棚ではまだ使えません）`}>
+        <Icons.read size={IconSize.action} />
+      </ActionIcon>
+      <ActionIcon variant="subtle" color="gray" style={off} size="md" disabled aria-label={`${work.title}：お気に入り（新しい棚では変えられません）`} aria-pressed={work.favorite}>
+        <Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} />
+      </ActionIcon>
+      <ActionIcon variant="subtle" color="gray" style={off} size="md" disabled aria-label={`${work.title}：更新監視（新しい棚では変えられません）`} aria-pressed={work.watchUpdates}>
+        <Icons.watch size={IconSize.action} />
+      </ActionIcon>
+      <ActionIcon variant="subtle" color="gray" style={off} size="md" disabled aria-label={`${work.title}：EPUBキュー（新しい棚ではまだ使えません）`}>
+        <EpubQueueGlyph queued={false} />
+      </ActionIcon>
+      <Menu position="bottom-end" withinPortal>
+        <Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" style={off} size="md" aria-label={`${work.title}：その他`}><Icons.more size={IconSize.nav} /></ActionIcon></Tooltip></Menu.Target>
+        <Menu.Dropdown>
+          <Menu.Item leftSection={<Icons.workDetail size={IconSize.menu} />} onClick={() => navigate(`/works/${work.id}`)}>詳細</Menu.Item>
+        </Menu.Dropdown>
+      </Menu>
+    </Group>
+  );
+}
+
+function LegacyWorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }: WorkActionsProps & { work: DownloadEntry }) {
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
   const { removeFromEpubQueue } = useWorkspace();

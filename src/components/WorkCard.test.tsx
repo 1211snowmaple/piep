@@ -231,4 +231,24 @@ describe("WorkCard", () => {
     expect(screen.getByLabelText("FANBOX")).toBeInTheDocument();
     expect(screen.queryByText("FANBOX")).toBeNull();
   });
+
+  it("shows a work of the new shelf read-only, by its own id and cover", async () => {
+    updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ downloadId: 101, foundAt: "2026-09-01T00:00:00Z" }]);
+    window.location.hash = "#/library";
+    const shelfId = "0195f1c2-0000-7000-8000-000000000001";
+    const { id: _legacy, ...rest } = demoWorks[0];
+    renderCard({ work: { ...rest, id: shelfId, shelf: "v2", coverUrl: "http://piep-library.localhost/abc", coverPath: null } });
+
+    expect(screen.getByAltText("雨上がりの図書室での表紙")).toHaveAttribute("src", "http://piep-library.localhost/abc");
+    // 書き換える操作は押せない。改稿の印は旧棚の番号で照らすので出さない。
+    expect(screen.getByRole("button", { name: /お気に入り（新しい棚では変えられません）/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /更新監視（新しい棚では変えられません）/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /EPUBキュー（新しい棚ではまだ使えません）/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /読む（新しい棚ではまだ使えません）/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /未保存の改稿を比較/ })).toBeNull();
+    expect(updateJobApi.listPendingRevisionsCommand).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(screen.getByRole("link", { name: /雨上がりの図書室でを開く/ }), { key: "Enter" });
+    expect(window.location.hash).toBe(`#/works/${shelfId}`);
+  });
 });

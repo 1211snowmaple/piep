@@ -38,7 +38,7 @@ import { Note } from "@/components/Note";
 import { runSingleCheck } from "@/features/updates/startSingleCheck";
 import { AppLink, useAppNavigate, useAppRouter, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
-import { ErrorState, LoadingState } from "@/components/AsyncState";
+import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { ExpandableText } from "@/components/ExpandableText";
 import { WorkCover } from "@/components/WorkCover";
 import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
@@ -99,6 +99,8 @@ function locationsFor(client: object) {
 function parseWorkTab(value: string | null): WorkTab {
   return value === "content" || value === "assets" || value === "history" || value === "json" ? value : "overview";
 }
+
+const SHELF_WORK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export default function WorkPage() {
   const navigate = useAppNavigate();
@@ -448,6 +450,11 @@ export default function WorkPage() {
     setContentPage(1);
   }, [historyIndex, id, locations, tab]);
 
+  // 新しい棚の一覧（試験中）から来た作品は、新しい棚の ID（UUID）で指される。作品の画面は
+  // まだ新しい棚につないでいないので、旧棚の作品が見つからない誤りとは分けて言う。
+  if (!validId && SHELF_WORK_ID.test(workId ?? "")) {
+    return <div className="page"><EmptyState title="この作品の画面はまだ開けません" description="新しい棚の作品です。新しい棚でいま試せるのは一覧だけで、作品の画面と読む画面はこれからつなぎます。" action={<Button variant="default" onClick={() => returnTo("/library")}>ライブラリへ戻る</Button>} /></div>;
+  }
   if (documentQuery.isLoading) return <div className="page"><LoadingState label="作品を開いています" /></div>;
   if (documentQuery.error || !documentQuery.data) return <div className="page"><ErrorState error={documentQuery.error ?? "作品が見つかりません"} retry={() => documentQuery.refetch()} /></div>;
   const doc = documentQuery.data;

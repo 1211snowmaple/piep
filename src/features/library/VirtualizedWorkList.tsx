@@ -1,12 +1,13 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { WorkCard } from "@/components/WorkCard";
-import type { DownloadEntry } from "@/types/library";
+import type { ListedWork } from "@/types/library";
+import { isShelfEntry } from "@/features/library/shelfV2";
 
 type WorkListView = "gallery" | "compact";
 
 interface VirtualizedWorkListProps {
-  items: DownloadEntry[];
+  items: ListedWork[];
   view: WorkListView;
   selectionMode?: boolean;
   selected?: ReadonlySet<number>;
@@ -125,19 +126,23 @@ export function VirtualizedWorkList({
   });
   const virtualRows = virtualizer.getVirtualItems();
 
-  const renderWork = (work: DownloadEntry) => (
+  const renderWork = (work: ListedWork) => {
+    // 新しい棚の作品は旧棚の番号を持たないので、番号の集合（改稿の印・選択）とは照らさない。
+    const legacyId = isShelfEntry(work) ? null : work.id;
+    return (
     <WorkCard
       key={work.id}
       compact={view === "compact"}
       work={work}
-      revised={revisedIds?.has(work.id)}
+      revised={legacyId === null ? false : revisedIds?.has(legacyId)}
       selectionMode={selectionMode}
-      selected={selected?.has(work.id)}
+      selected={legacyId !== null && selected?.has(legacyId)}
       onSelect={onSelect}
       onToggleFavorite={onToggleFavorite}
       onToggleWatch={onToggleWatch}
     />
-  );
+    );
+  };
 
   // AppFrame supplies the scroll container in production. Keeping a bounded
   // regular layout until it is discovered avoids an empty first paint and

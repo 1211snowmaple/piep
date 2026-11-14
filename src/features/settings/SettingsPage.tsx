@@ -75,6 +75,7 @@ import { AppUpdateCard } from "@/features/settings/AppUpdateCard";
 import { AssistSection } from "@/features/settings/AssistSection";
 import { ServerSection } from "@/features/settings/ServerSection";
 import { LibrarySidebarSettings } from "./LibrarySidebarSettings";
+import { ShelfV2Settings } from "./ShelfV2Settings";
 import { SectionIntro } from "./SectionIntro";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { searchModes, useDefaultSearchMode } from "@/lib/searchPreferences";
@@ -635,6 +636,7 @@ function AppearanceSection({ colorScheme, setColorScheme }: { colorScheme: strin
     <Card p="lg"><Stack gap="md"><Text fw={700}>テーマと余白</Text><SegmentedControl aria-label="カラーテーマ" value={colorScheme} onChange={(value) => setColorScheme(value as "light" | "dark" | "auto")} data={[{ value: "light", label: "ライト" }, { value: "dark", label: "ダーク" }, { value: "auto", label: "システム" }]} /><Switch label="高密度表示" description="ページ余白とカードの間隔を狭くします" checked={dense} onChange={(event) => { setDense(event.currentTarget.checked); applyDensity(event.currentTarget.checked); }} /><Text size="xs" c="dimmed">アニメーションはOSの「視覚効果を減らす」設定に従います。</Text></Stack></Card>
     <Card p="lg"><LibrarySidebarSettings /></Card>
     <Card p="lg"><Stack gap="md"><Text fw={700}>一覧</Text><Text size="sm" c="dimmed">一覧の画面でも切り替えられます。画面ごとに変える場合は下の詳細を開いてください。</Text><Accordion variant="separated"><Accordion.Item value="view"><Accordion.Control>表紙・リストの表示</Accordion.Control><Accordion.Panel><ViewSettings /></Accordion.Panel></Accordion.Item><Accordion.Item value="paging"><Accordion.Control>読み込み方と画面ごとの指定</Accordion.Control><Accordion.Panel><PagingSettings /><Text size="xs" c="dimmed" mt="sm">関連度順は続きから順に読み込みます。日付や名前などの並び順ではページ番号も利用できます。</Text></Accordion.Panel></Accordion.Item></Accordion><Box><Text size="sm" fw={650} mb="sm">1回に表示する件数</Text><SegmentedControl aria-label="1ページの件数" value={String(pageSize)} onChange={(value) => setPageSize(Number(value))} data={PAGE_SIZE_OPTIONS.map((size) => ({ value: String(size), label: `${size}件` }))} /></Box></Stack></Card>
+    <ShelfV2Settings />
     <Card p="lg"><Text fw={700} mb="sm">キーボードショートカット</Text><Stack gap="xs"><Shortcut keys="Ctrl K" label="ライブラリ検索・画面移動" /><Shortcut keys="F5" label="入力や処理を保って画面を更新" /><Shortcut keys="Ctrl L" label="ライブラリを開く" /><Shortcut keys="Ctrl Shift S" label="保存画面を開く" /><Shortcut keys="Ctrl S" label="エディタで下書き保存" /></Stack></Card>
   </Stack>;
 }
