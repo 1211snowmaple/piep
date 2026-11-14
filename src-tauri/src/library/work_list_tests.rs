@@ -425,7 +425,10 @@ fn every_page_reads_through_an_index_instead_of_sorting_the_whole_shelf() {
                         .unwrap();
                     let plan = plan.join(" / ");
                     assert!(
-                        plan.contains("USING INDEX work_list_") && !plan.contains("TEMP B-TREE"),
+                        plan.contains("USING INDEX work_list_")
+                            && !plan.contains("TEMP B-TREE")
+                            // 続きのページは索引の途中から読む。頭からなめると後ろのページほど遅い。
+                            && (!after || plan.contains("SEARCH ")),
                         "{sort:?} {descending} {after}: {plan}"
                     );
                 }

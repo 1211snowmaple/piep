@@ -76,6 +76,13 @@ impl WorkSort {
         }
     }
 
+    fn is_plain_column(self) -> bool {
+        !matches!(
+            self,
+            Self::Published | Self::Updated | Self::Title | Self::Author
+        )
+    }
+
     fn is_text(self) -> bool {
         matches!(self, Self::Title | Self::Author)
     }
@@ -289,11 +296,15 @@ impl PageSql {
             }
             values.push(Box::new(after.work.as_bytes().to_vec()));
             let operator = if query.descending { "<" } else { ">" };
-            filters.push(format!(
-                "({key},work_id){operator}(?{},?{})",
-                values.len() - 1,
-                values.len()
-            ));
+            let (value, work) = (values.len() - 1, values.len());
+            // 列そのものの鍵は、組の比較で索引の途中から読める（同じ値が数万件あっても速い）。
+            // 式や照合規則つきの鍵は、組の比較だと SQLite が索引を頭からなめるので、
+            // 鍵の範囲で索引を絞ってから、同じ値の中を作品で絞る。
+            filters.push(if query.sort.is_plain_column() {
+                format!("({key},work_id){operator}(?{value},?{work})")
+            } else {
+                format!("{key}{operator}=?{value} AND ({key}{operator}?{value} OR work_id{operator}?{work})")
+            });
         }
         values.push(Box::new(limit as i64 + 1));
         let value_column = key.trim_end_matches(" COLLATE NOCASE");
