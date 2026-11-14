@@ -7897,6 +7897,34 @@ fn changing_the_index_format_requeues_the_whole_library() {
 }
 
 #[test]
+fn title_sort_ignores_spaces_before_the_source_title() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    // 取得元の題そのままに先頭の空白が付いている作品。空白で比べると「あ」より前に来る。
+    for (source_id, title) in [
+        ("spaced-1", "さくら"),
+        ("spaced-2", " なのはな"),
+        ("spaced-3", "あおぞら"),
+    ] {
+        insert_download(&db, &storage, source_id, title, "作者", &["題"], "本文");
+    }
+
+    let mut sorted = v2_params(None, 2, None);
+    sorted.sort_by = Some("title".to_string());
+    sorted.sort_order = Some("asc".to_string());
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let page = db.search_downloads_v2(&sorted).unwrap();
+        seen.extend(page.items.iter().map(|item| item.title.clone()));
+        sorted.cursor = page.next_cursor;
+        if sorted.cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen, vec!["あおぞら", "さくら", "なのはな"]);
+}
+
+#[test]
 fn sorted_search_orders_matches_by_column_and_pages_without_gaps() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();

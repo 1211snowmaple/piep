@@ -64,10 +64,12 @@ button.work-card-hit:active { color: var(--piep-active-text); }
 button.work-card-series:active, button.work-card-title:active, button.work-card-author:active > span:last-child { color: var(--piep-active-text); }
 .work-card button.work-tag:active { background: var(--piep-active); color: var(--piep-active-text); }
 
-/* 事実は左、操作は右。足りない事実は見えない 2 段目へ折り返して、字の途中で切らない。 */
+/* 事実は左、操作は右。事実は操作の高さ（40px）の中で 2 段まで折り返す。
+   1 段だと、スマホ幅では日付の横に 5 桁の文字数が入らず、たいていの小説で文字数が消えていた。
+   段の数が変わっても行の高さは 40px のままなので、カードの高さは動かない。3 段目は字の途中で切らずに隠す。 */
 .work-card-bottom { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 40px; margin-top: 4px; color: var(--piep-muted); font-size: var(--fs-tiny); }
-.work-card-facts { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: 31px 10px; min-width: 0; height: 22px; overflow: hidden; }
-.work-card-facts .work-meta { flex: none; line-height: 22px; font-variant-numeric: tabular-nums; }
+.work-card-facts { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; align-content: flex-start; gap: 0 10px; min-width: 0; max-height: 40px; overflow: hidden; }
+.work-card-facts .work-meta { flex: none; line-height: 20px; font-variant-numeric: tabular-nums; }
 .work-meta--strong { color: var(--piep-active-text); font-weight: 700; }
 .work-meta svg { width: 13px; height: 13px; }
 .work-version { flex: none; display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 999px; background: var(--piep-active); color: var(--piep-active-text); font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -242,7 +244,7 @@ button.card-action:active { background: var(--piep-tag-bg); color: var(--piep-te
 
 /* ---- 設定 ---- */
 .settings-page { display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 760px; margin-inline: auto; }
-.settings-page .settings-card, .settings-page .pair-card { margin: 0; }
+.settings-page .settings-card{ margin: 0; }
 .settings-title { margin: 0; color: var(--piep-text); font-size: clamp(22px, 2.2vw, 28px); font-weight: 680; line-height: 1.25; }
 .settings-group { margin: 14px 0 -2px; color: var(--piep-muted); font-size: var(--fs-small); font-weight: 700; }
 .settings-page > .settings-group:first-of-type { margin-top: 2px; }

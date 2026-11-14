@@ -5,7 +5,6 @@ import { followContentLink } from "./contentLinks";
 import { useAppNavigation } from "./appHistory";
 import { useReaderSelection } from "./readerSelection";
 import { readerMetadataForVersion, readerVersions } from "./readerVersion";
-import { ALargeSmall, ChevronLeft, TableOfContents, X } from "lucide-react";
 import { Icons } from "./icons";
 import { WorkFavoriteButton } from "./FavoriteButton";
 import { ContinuousDocument, type ContinuousTarget, type LivePosition, type LoadedSection } from "./ContinuousDocument";
@@ -839,11 +838,11 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   return <div className={`reader-screen reader-theme--${readerTheme} ${pinned ? "reader-bars--pinned" : "reader-bars--auto"}`} data-bars={barsVisible ? "shown" : "hidden"} data-pager={showPager && behavior.pageButtons === "menu" ? "menu" : undefined}>
     <span className="reader-safe-top" aria-hidden="true" />
     <header className="reader-toolbar" aria-hidden={infoOpen || typeOpen} inert={infoOpen || typeOpen}>
-      <button className="reader-icon-button" onClick={onBack} aria-label={backLabel}><ChevronLeft aria-hidden="true" /></button>
+      <button className="reader-icon-button" onClick={onBack} aria-label={backLabel}><Icons.navigateUp aria-hidden="true" /></button>
       <span className="reader-toolbar-title">{selectedVersion !== null ? `第${selectedVersion}版 · ${work.title}` : work.title}</span>
     </header>
     <div className="reader-toasts" aria-hidden={infoOpen || typeOpen} inert={infoOpen || typeOpen}>
-      {saveMessage && !infoOpen && <div className="reader-notice" role="status"><span>{saveMessage}</span><button type="button" onClick={() => setSaveMessage(null)} aria-label="閉じる"><X aria-hidden="true" /></button></div>}
+      {saveMessage && !infoOpen && <div className="reader-notice" role="status"><span>{saveMessage}</span><button type="button" onClick={() => setSaveMessage(null)} aria-label="閉じる"><Icons.cancel aria-hidden="true" /></button></div>}
       {remoteOffer && <div className="reader-notice reader-sync-offer" role="status"><span>{remoteOffer.guide ? "別の版を" : "別の端末で"} {remoteOffer.page + 1} ページまで読んでいます</span><button onClick={acceptRemote}>そこへ移動</button><button onClick={dismissRemote}>閉じる</button></div>}
     </div>
     <div className="reader-body" ref={bodyRef} aria-hidden={infoOpen || typeOpen} inert={infoOpen || typeOpen}>
@@ -873,8 +872,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
         <div className="reader-progress-row">
           <span className="reader-progress-label">{percentLabel}{statusLabel && <small>{statusLabel}</small>}</span>
           <div className="reader-actions">
-            {outline.length > 0 && <button type="button" className="reader-icon-button" onClick={() => { setInfoTab("outline"); setInfoOpen(true); }} aria-label="目次" title="目次"><TableOfContents aria-hidden="true" /></button>}
-            <button ref={typeTriggerRef} type="button" className="reader-icon-button" onClick={() => setTypeOpen(true)} aria-label="文字とページ送りの設定" title="表示"><ALargeSmall aria-hidden="true" /></button>
+            {outline.length > 0 && <button type="button" className="reader-icon-button" onClick={() => { setInfoTab("outline"); setInfoOpen(true); }} aria-label="目次" title="目次"><Icons.tableOfContents aria-hidden="true" /></button>}
+            <button ref={typeTriggerRef} type="button" className="reader-icon-button" onClick={() => setTypeOpen(true)} aria-label="文字とページ送りの設定" title="表示"><Icons.textSettings aria-hidden="true" /></button>
             <button ref={infoTriggerRef} type="button" className="reader-icon-button" onClick={() => { setInfoTab("info"); setInfoOpen(true); }} aria-label="作品情報" title="作品情報"><Icons.workInfo aria-hidden="true" /></button>
             <WorkFavoriteButton work={sidebarWork} className="reader-icon-button" readOnly={offline} />
           </div>
@@ -893,7 +892,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
             <button type="button" role="tab" aria-selected={typeTab === "type"} onClick={() => setTypeTab("type")}>文字と色</button>
             <button type="button" role="tab" aria-selected={typeTab === "turn"} onClick={() => setTypeTab("turn")}>ページ送り</button>
           </div>
-          <button type="button" className="reader-icon-button" onClick={() => setTypeOpen(false)} aria-label="閉じる"><X aria-hidden="true" /></button>
+          <button type="button" className="reader-icon-button" onClick={() => setTypeOpen(false)} aria-label="閉じる"><Icons.cancel aria-hidden="true" /></button>
         </header>
         <div className="reader-sheet-body">{typeTab === "type" ? <ReaderTypeControls value={type} onChange={changeType} /> : <ReaderBehaviorControls value={behavior} onChange={changeBehavior} />}</div>
       </aside>

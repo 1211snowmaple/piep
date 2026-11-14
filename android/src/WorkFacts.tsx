@@ -1,5 +1,4 @@
-import type { LucideIcon } from "lucide-react";
-import { BookOpen } from "lucide-react";
+import type { LucideIcon } from "@shared/icons";
 import { Icons } from "./icons";
 import type { PcWork } from "./pcApi";
 import { longDate } from "./workText";
@@ -22,7 +21,7 @@ export function workFacts(work: PcWork, pageCount?: number): WorkFact[] {
   if (published) facts.push({ key: "published", icon: Icons.publishedDate, text: `公開 ${published}` });
   if (work.textLength > 0) facts.push({ key: "length", icon: Icons.textLength, text: `${work.textLength.toLocaleString("ja-JP")}字` });
   if (work.assetCount > 0) facts.push({ key: "assets", icon: Icons.assets, text: `画像 ${work.assetCount.toLocaleString("ja-JP")}枚` });
-  if (pageCount && pageCount > 1) facts.push({ key: "pages", icon: BookOpen, text: `${pageCount}ページ` });
+  if (pageCount && pageCount > 1) facts.push({ key: "pages", icon: Icons.read, text: `${pageCount}ページ` });
   if (work.currentVersion > 1) facts.push({ key: "version", icon: Icons.versionHistory, text: `第${work.currentVersion}版` });
   return facts;
 }

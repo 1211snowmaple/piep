@@ -1,6 +1,6 @@
+import { Icons } from "./icons";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { BookOpen, Check, ExternalLink, Funnel, Search, UserRound } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useAppNavigation, type EntityPageState, type EntityTab } from "./appHistory";
 import { ProviderMark } from "./ProviderMark";
@@ -31,7 +31,7 @@ function LiveSearch({ value, onCommit, label, children }: { value: string; onCom
     return () => window.clearTimeout(timer);
   }, [input, value]);
   return <form className="entity-search" role="search" onSubmit={(event) => { event.preventDefault(); onCommit(input.trim()); event.currentTarget.querySelector("input")?.blur(); }}>
-    <label className="entity-search-field"><Search aria-hidden="true" /><input type="search" aria-label={label} placeholder={label} value={input} onChange={(event) => setInput(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={(event) => { composing.current = false; setInput(event.currentTarget.value); }} /></label>
+    <label className="entity-search-field"><Icons.search aria-hidden="true" /><input type="search" aria-label={label} placeholder={label} value={input} onChange={(event) => setInput(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={(event) => { composing.current = false; setInput(event.currentTarget.value); }} /></label>
     {children}
   </form>;
 }
@@ -64,9 +64,9 @@ function Hero({ page, detail }: { page: EntityPageState; detail: PcEntityDetail 
   return <header className="entity-hero" data-kind={page.kind} data-banner={banner && !bannerFailed ? "true" : undefined}>
     {banner && !bannerFailed && <div className="entity-banner"><SmoothImage src={banner} alt="" onFailed={() => setBannerFailed(true)} /></div>}
     <div className="entity-hero-main">
-      <span className="entity-art" aria-hidden="true">{isPerson ? <UserRound /> : <BookOpen />}{cover && !coverFailed && <SmoothImage src={cover} alt="" onFailed={() => setCoverFailed(true)} />}</span>
+      <span className="entity-art" aria-hidden="true">{isPerson ? <Icons.person /> : <Icons.series />}{cover && !coverFailed && <SmoothImage src={cover} alt="" onFailed={() => setCoverFailed(true)} />}</span>
       <div className="entity-hero-text">
-        <div className="entity-labels"><ProviderMark source={page.source} />{detail?.isConcluded != null && <span className={detail.isConcluded ? "entity-badge entity-badge--done" : "entity-badge"}>{detail.isConcluded ? <><Check aria-hidden="true" />完結</> : "連載中"}</span>}</div>
+        <div className="entity-labels"><ProviderMark source={page.source} />{detail?.isConcluded != null && <span className={detail.isConcluded ? "entity-badge entity-badge--done" : "entity-badge"}>{detail.isConcluded ? <><Icons.confirm aria-hidden="true" />完結</> : "連載中"}</span>}</div>
         <h1>{detail?.displayName ?? page.displayName}</h1>
         {workCount != null && <p className="entity-stats">
           {differs ? <span>手元 <strong>{workCount.toLocaleString("ja-JP")}</strong> 話 / 取得元 <strong>{published!.toLocaleString("ja-JP")}</strong> 話</span> : <span><strong>{workCount.toLocaleString("ja-JP")}</strong> {isPerson ? "作品" : "話"}</span>}
@@ -75,7 +75,7 @@ function Hero({ page, detail }: { page: EntityPageState; detail: PcEntityDetail 
       </div>
     </div>
     {description && <div className="entity-description"><p ref={descriptionRef} data-expanded={expanded || undefined}>{description}</p>{(clamped || expanded) && <button type="button" className="entity-more" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>{expanded ? "たたむ" : "すべて表示"}</button>}</div>}
-    {(detail?.links.length ?? 0) > 0 && <div className="entity-links">{detail!.links.map((link) => <button key={link} type="button" onClick={() => void openUrl(link)}><ExternalLink aria-hidden="true" />{hostName(link)}</button>)}</div>}
+    {(detail?.links.length ?? 0) > 0 && <div className="entity-links">{detail!.links.map((link) => <button key={link} type="button" onClick={() => void openUrl(link)}><Icons.externalLink aria-hidden="true" />{hostName(link)}</button>)}</div>}
   </header>;
 }
 
@@ -183,7 +183,7 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
 
       {page.tab === "works" && <section className="entity-section">
         <LiveSearch value={page.query} label={isPerson ? "この作者の作品を検索" : "このシリーズの作品を検索"} onCommit={(query) => update({ query, listPage: 1 })}>
-          <button type="button" className="filter-button" data-active={filterCount > 0 || undefined} aria-haspopup="dialog" aria-label={filterCount ? `絞り込み（${filterCount} 個の条件）` : "絞り込み"} onClick={() => setFilterOpen(true)}><Funnel aria-hidden="true" />{filterCount > 0 && <small aria-hidden="true">{filterCount}</small>}</button>
+          <button type="button" className="filter-button" data-active={filterCount > 0 || undefined} aria-haspopup="dialog" aria-label={filterCount ? `絞り込み（${filterCount} 個の条件）` : "絞り込み"} onClick={() => setFilterOpen(true)}><Icons.filter aria-hidden="true" />{filterCount > 0 && <small aria-hidden="true">{filterCount}</small>}</button>
           <ChoiceMenu<PcWorkSort> current={sentSort} label={workLabel} groups={workGroups} onSelect={(sort) => {
             if (sort === "standard") setRelevance(true);
             else { setRelevance(false); setWorkSort(sort as EntityWorkSort); saveEntityWorkSort(page.kind, sort as EntityWorkSort); }
