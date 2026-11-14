@@ -6,7 +6,7 @@
 
 use piep_lib::database::tantivy_index;
 use piep_lib::database::Database;
-use piep_lib::library::Library;
+use piep_lib::library::{EntityKind, Library};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -62,6 +62,11 @@ pub fn run(old_db: &Path, work: &Path, new_root: &Path, modulus: i64) -> Result<
     let old_storage = work.join("old-index");
     std::fs::create_dir_all(&old_storage)?;
     let old = Database::open(old_db, &work.join("old-storage"))?;
+    let new = Library::open(new_root)?;
+    // 文書の違い（題の末尾の空白・説明の前後の空白・前の版のシリーズ）が順位の違いの
+    // 原因かを確かめるときは、旧棚の側にその三つだけ新しい棚の値を入れて作る。
+    let align = std::env::var_os("PIEP_ALIGN_DOCUMENTS").is_some();
+    let mut aligned = 0usize;
     let t = Instant::now();
     let mut queries: Vec<String> = Vec::new();
     let mut reordered_tags = 0usize;
@@ -89,6 +94,25 @@ pub fn run(old_db: &Path, work: &Path, new_root: &Path, modulus: i64) -> Result<
             if sorted != doc.tags {
                 reordered_tags += 1;
                 doc.tags = sorted;
+            }
+            if align {
+                let (_, source, key) = &downloads[index];
+                if let Some(current) = new
+                    .entity_by_key(EntityKind::Work, source, key)?
+                    .and_then(|work| new.search_document(work).transpose())
+                    .transpose()?
+                {
+                    let series = current.series_titles.join(" ");
+                    if doc.title != current.title
+                        || doc.excerpt != current.excerpt
+                        || doc.series_title != series
+                    {
+                        aligned += 1;
+                        doc.title = current.title;
+                        doc.excerpt = current.excerpt;
+                        doc.series_title = series;
+                    }
+                }
             }
             if (*id) % modulus == 0 {
                 let tags: Vec<&str> = doc.tags.split_whitespace().collect();
@@ -135,7 +159,6 @@ pub fn run(old_db: &Path, work: &Path, new_root: &Path, modulus: i64) -> Result<
     let old_build_seconds = t.elapsed().as_secs_f64();
 
     // 新しい棚の索引を同期する（初回は全部作る）。
-    let new = Library::open(new_root)?;
     let t = Instant::now();
     let report = new.sync_search_index(&mut |_, _| {})?;
     let new_build_seconds = t.elapsed().as_secs_f64();
@@ -253,6 +276,7 @@ pub fn run(old_db: &Path, work: &Path, new_root: &Path, modulus: i64) -> Result<
         "downloads": downloads.len(),
         "queries": queries.len(),
         "old_documents_with_reordered_tags": reordered_tags,
+        "old_documents_aligned_to_new": aligned,
         "hits_total": hits_total,
         "old_build_seconds": old_build_seconds,
         "new_build_seconds": new_build_seconds,
