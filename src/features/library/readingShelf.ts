@@ -1,3 +1,5 @@
+import { SHELF_WORK_ID } from "@/services/libraryV2Api";
+
 /**
  * Which works have been opened and left part-read.
  *
@@ -48,7 +50,20 @@ export interface ReadingPosition {
   mode?: "horizontal" | "vertical";
 }
 
-function keyFor(workId: number, version: number | null): string {
+/**
+ * 読書位置を憶える作品。旧棚は番号、新しい棚（試験中）は UUID。新しい棚の作品は、
+ * 読みかけの棚（旧棚の作品を並べる）には数えない。
+ */
+export type ReadingWorkKey = number | string;
+
+function validKey(workId: ReadingWorkKey): boolean {
+  // 新しい棚の鍵は小文字にそろえたものだけ。大文字と小文字で同じ作品の位置が二つに割れない。
+  return typeof workId === "number"
+    ? Number.isSafeInteger(workId) && workId > 0
+    : SHELF_WORK_ID.test(workId) && workId === workId.toLowerCase();
+}
+
+function keyFor(workId: ReadingWorkKey, version: number | null): string {
   return `${POSITION_PREFIX}${workId}.${version ?? "current"}`;
 }
 
@@ -95,8 +110,8 @@ function announcePositionChange(): void {
  * Loads a reader position. A session-only value from the previous schema is
  * migrated once so an in-progress read is not lost during the upgrade.
  */
-export function readReadingPosition(workId: number, version: number | null): ReadingPosition | null {
-  if (!Number.isSafeInteger(workId) || workId <= 0) return null;
+export function readReadingPosition(workId: ReadingWorkKey, version: number | null): ReadingPosition | null {
+  if (!validKey(workId)) return null;
   const key = keyFor(workId, version);
   const store = storage();
   try {
@@ -113,8 +128,8 @@ export function readReadingPosition(workId: number, version: number | null): Rea
 }
 
 /** Writes the single schema consumed by both the reader and the shelf. */
-export function writeReadingPosition(workId: number, version: number | null, position: ReadingPosition): void {
-  if (!Number.isSafeInteger(workId) || workId <= 0) return;
+export function writeReadingPosition(workId: ReadingWorkKey, version: number | null, position: ReadingPosition): void {
+  if (!validKey(workId)) return;
   const normalized = normalizePosition(position.page, position.top, position.anchor, position.mode);
   const store = storage();
   if (!normalized || !store) return;
@@ -148,8 +163,11 @@ export function readingWorkIds(): number[] {
   for (let index = 0; index < store.length; index += 1) {
     const key = store.key(index);
     if (!key || !key.startsWith(POSITION_PREFIX)) continue;
-    // piep.reader-position.{id}.{version}
-    const id = Number.parseInt(key.slice(POSITION_PREFIX.length).split(".")[0] ?? "", 10);
+    // piep.reader-position.{id}.{version}。数字だけの鍵が旧棚の作品。新しい棚の UUID を
+    // `parseInt` すると頭の数字だけが読まれ、別の作品の番号になる。
+    const segment = key.slice(POSITION_PREFIX.length).split(".")[0] ?? "";
+    if (!/^\d+$/.test(segment)) continue;
+    const id = Number(segment);
     if (!Number.isSafeInteger(id) || id <= 0) continue;
     // A position of 0 is the top of the work, which is not "part-read".
     const position = parsePosition(store.getItem(key));
@@ -166,9 +184,9 @@ export function readingWorkIds(): number[] {
  * 位置を消す口が「作品を消したとき」しか無かったので、最後まで読んだ本も
  * 棚に残り続けていた。棚は読みかけを並べる場所であって、履歴ではない。
  */
-export function clearReadingPosition(workId: number, version: number | null): void {
+export function clearReadingPosition(workId: ReadingWorkKey, version: number | null): void {
   const store = storage();
-  if (!store || !Number.isSafeInteger(workId) || workId <= 0) return;
+  if (!store || !validKey(workId)) return;
   const key = keyFor(workId, version);
   try {
     const wasPartRead = isPartRead(parsePosition(store.getItem(key)));

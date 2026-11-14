@@ -10,6 +10,8 @@
 //! 画像（表紙・本文の画像）は `piep-library` の URI で、ファイルの識別子（中身の SHA-256）
 //! から返す。画面は `convertFileSrc(識別子, "piep-library")` で URL にする。
 
+use crate::database::models::{ReaderOutlineEntry, ReaderSearchHit};
+use crate::database::queries::{reader_outline, search_reader_pages};
 use crate::library::{Fingerprint, Library, LibraryId, ResourceScope, WorkCard, WorkListQuery};
 use crate::library_search::{parse_query, SearchDecoration, SearchMatch, SearchPage, TextSearch};
 use crate::library_view::{MediaView, RenderedDocument, VersionView};
@@ -60,7 +62,7 @@ pub struct LibraryV2 {
 
 type CachedDocument = (LibraryId, ResourceScope, Arc<RenderedDocument>);
 
-/// ページに分けた本文を覚えておく数。作品の画面は一度に一作品で、版を見比べても数冊。
+/// ページに分けた本文を覚えておく数。作品の画面と読む画面は一度に一作品で、版を見比べても数冊。
 const DOCUMENT_CACHE: usize = 4;
 
 impl Default for LibraryV2 {
@@ -395,7 +397,7 @@ fn scope_of(card: &WorkCard, snapshot: Option<LibraryId>) -> ResourceScope {
     }
 }
 
-/// 本文の一ページ。
+/// 本文の一ページ。旧棚の読む画面の一ページ（`ReaderContentPage`）と同じ形。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentPageView {
@@ -404,6 +406,10 @@ pub struct ContentPageView {
     pub page_count: usize,
     /// 画像は `data-local-path` にファイルの識別子（添付は `識別子/印`）を持つ。
     pub html: String,
+    /// 本文全体の平文の字数。
+    pub total_plain_text_chars: usize,
+    /// pixiv の原稿のページが何ページ目（0 から）から始まるか。
+    pub source_page_starts: Vec<usize>,
 }
 
 /// 本文の一ページの HTML。`snapshot` を省くと今読む本文。
@@ -426,7 +432,47 @@ pub async fn library_v2_content(
             page,
             page_count,
             html: document.pages.get(page).cloned().unwrap_or_default(),
+            total_plain_text_chars: document.text_chars,
+            source_page_starts: document.source_page_starts.clone(),
         })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 本文全体の見出し（読む画面の目次）。`snapshot` を省くと今読む本文。
+#[tauri::command]
+pub async fn library_v2_outline(
+    state: State<'_, Arc<LibraryV2>>,
+    work: LibraryId,
+    snapshot: Option<LibraryId>,
+) -> Result<Vec<ReaderOutlineEntry>, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        let card = library.work_card(work).map_err(|e| e.to_string())?;
+        let document = state.document(&library, work, scope_of(&card, snapshot), &card.provider)?;
+        Ok(reader_outline(&document.pages))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 本文内検索（読む画面）。旧棚と同じ畳み方で、ページごとの一致を返す。
+#[tauri::command]
+pub async fn library_v2_search_content(
+    state: State<'_, Arc<LibraryV2>>,
+    work: LibraryId,
+    snapshot: Option<LibraryId>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<ReaderSearchHit>, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        let card = library.work_card(work).map_err(|e| e.to_string())?;
+        let document = state.document(&library, work, scope_of(&card, snapshot), &card.provider)?;
+        Ok(search_reader_pages(&document.pages, &query, limit.unwrap_or(50)))
     })
     .await
     .map_err(|e| e.to_string())?

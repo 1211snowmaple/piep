@@ -96,11 +96,14 @@ describe("ShelfWorkPage", () => {
     expect(screen.getByAltText("挿絵")).toHaveAttribute("src", `http://piep-library.localhost/${IMAGE}`);
     // 読むだけ。変える操作は押せない。
     expect(screen.getByRole("button", { name: "お気に入り（新しい棚では変えられません）" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "読む" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "2" }));
     expect(await screen.findByText("2ページ本文")).toBeInTheDocument();
     expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, null, 1);
+
+    // 読む画面へは、新しい棚の ID のまま進む。
+    fireEvent.click(screen.getByRole("button", { name: "読む" }));
+    await waitFor(() => expect(window.location.hash).toBe(`#/reader/${WORK}`));
   });
 
   it("compares a version with the one before it and shows that version's body", async () => {

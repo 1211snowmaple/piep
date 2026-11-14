@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import type { ScoreReason, SearchHighlight } from "@/types/library";
+import type { ReaderOutlineEntry, ReaderSearchHit, ScoreReason, SearchHighlight } from "@/types/library";
 
 /**
  * 新しい棚（読み取り専用の写し）の命令。`src-tauri/src/commands/library_v2.rs` と対になる。
@@ -7,6 +7,9 @@ import type { ScoreReason, SearchHighlight } from "@/types/library";
  * 作品は新しい棚の ID（UUID の文字列）で指し、画像はファイルの識別子（中身の SHA-256 の
  * 16 進）で指す。旧棚の番号やパスへの読み替えはしない。
  */
+
+/** 新しい棚の作品の ID（UUID）。旧棚の作品は番号なので、画面の ID の形で見分ける。 */
+export const SHELF_WORK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type LibraryV2Status =
   | { state: "starting" }
@@ -179,6 +182,10 @@ export interface ShelfContentPage {
   page: number;
   pageCount: number;
   html: string;
+  /** 本文全体の平文の字数。 */
+  totalPlainTextChars: number;
+  /** pixiv の原稿のページが何ページ目（0 から）から始まるか。 */
+  sourcePageStarts: number[];
 }
 
 /** 作品の画像・添付の一件。 */
@@ -199,6 +206,16 @@ export function libraryV2Work(work: string): Promise<ShelfWork> {
 /** `snapshot` を省くと今読む本文（有効な編集があればそれ）。`page` は 0 から。 */
 export function libraryV2Content(work: string, snapshot: string | null, page: number): Promise<ShelfContentPage> {
   return invoke<ShelfContentPage>("library_v2_content", { work, snapshot, page });
+}
+
+/** 本文全体の見出し（読む画面の目次）。 */
+export function libraryV2Outline(work: string, snapshot: string | null): Promise<ReaderOutlineEntry[]> {
+  return invoke<ReaderOutlineEntry[]>("library_v2_outline", { work, snapshot });
+}
+
+/** 本文内検索（読む画面）。 */
+export function libraryV2SearchContent(work: string, snapshot: string | null, query: string, limit = 50): Promise<ReaderSearchHit[]> {
+  return invoke<ReaderSearchHit[]>("library_v2_search_content", { work, snapshot, query, limit });
 }
 
 export function libraryV2Media(work: string, snapshot: string | null): Promise<ShelfMedia[]> {

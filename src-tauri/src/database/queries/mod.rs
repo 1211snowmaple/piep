@@ -36,6 +36,7 @@ pub use original_images::{ReducedImageReplacement, ReducedPixivImage};
 mod assist_inputs;
 /// 作品コレクションは `Database` の非公開内部へ触れるため、子モジュールに置く。
 mod reader;
+pub(crate) use reader::{reader_outline, search_reader_pages};
 mod work_inspection;
 pub(crate) use work_inspection::revision_metadata;
 pub use work_inspection::{RevisionMetadata, RevisionSnapshot, WorkAcquisitionDetails};

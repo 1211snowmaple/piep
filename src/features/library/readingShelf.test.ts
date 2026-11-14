@@ -39,6 +39,19 @@ describe("reading shelf membership", () => {
     expect(readingWorkIds()).toEqual([9]);
   });
 
+  it("keeps positions of new-shelf works under their id without putting them on the shelf", () => {
+    // 新しい棚（試験中）の作品は UUID で憶える。頭が数字の UUID を `parseInt` すると、
+    // 旧棚の別の作品の番号（ここでは 3）として棚に載っていた。
+    const shelfWork = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
+    writeReadingPosition(shelfWork, null, { page: 2, top: 40 });
+    expect(readReadingPosition(shelfWork, null)).toEqual({ page: 2, top: 40 });
+    expect(readingWorkIds()).toEqual([]);
+    // 大文字の ID では憶えない。同じ作品の位置が二つに割れる。
+    writeReadingPosition(shelfWork.toUpperCase(), null, { page: 3, top: 0 });
+    expect(readReadingPosition(shelfWork.toUpperCase(), null)).toBeNull();
+    expect(readReadingPosition(shelfWork, null)).toEqual({ page: 2, top: 40 });
+  });
+
   it("reads legacy numeric values and ignores corrupt entries", () => {
     window.localStorage.setItem("piep.reader-position.11.current", "\"340\"");
     window.localStorage.setItem("piep.reader-position.12.current", "not-a-number");

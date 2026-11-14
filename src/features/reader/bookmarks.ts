@@ -65,7 +65,7 @@ function writeStore(store: Store) {
  * しおりが刺さっていた。ページの割れ方も行数も違うので、着く場所は
  * 挟んだ場所と無関係になる。読んでいる位置の記録は最初から版ごとだった。
  */
-function bucketKey(workId: number, version: number | null): string {
+function bucketKey(workId: number | string, version: number | null): string {
   return version === null ? String(workId) : `${workId}.${version}`;
 }
 
@@ -74,7 +74,7 @@ function bucketKey(workId: number, version: number | null): string {
  * per-device reading aid, and keeping them here means adding one costs nothing
  * and works the same in the browser preview.
  */
-export function useBookmarks(workId: number, version: number | null = null) {
+export function useBookmarks(workId: number | string, version: number | null = null) {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const key = bucketKey(workId, version);
 

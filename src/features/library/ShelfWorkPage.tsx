@@ -235,7 +235,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
                 </Group>
                 <Group gap="md" wrap="wrap" justify="flex-end" className="work-hero__actions">
                   <Group gap={6} wrap="nowrap" role="group" aria-label="中身へ進む">
-                    <Tooltip label="新しい棚の作品は、まだ読む画面で開けません。本文のタブで読めます。"><Button className="work-hero__action work-hero__read" leftSection={<Icons.read size={IconSize.action} />} disabled>読む</Button></Tooltip>
+                    <Button className="work-hero__action work-hero__read" leftSection={<Icons.read size={IconSize.action} />} onClick={() => navigate(`/reader/${workId}`)}>読む</Button>
                   </Group>
                   <Group gap={6} wrap="nowrap" role="group" aria-label="手元の印">
                     <Tooltip label={`お気に入り（${READ_ONLY}）`}><ActionIcon className="work-hero__action" size={38} variant="default" style={work.favorite ? { "--ai-color": "var(--flag-favorite)", "--ai-bg": "var(--flag-favorite-bg)" } : undefined} aria-label={`お気に入り（${READ_ONLY}）`} aria-pressed={work.favorite} disabled><Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>

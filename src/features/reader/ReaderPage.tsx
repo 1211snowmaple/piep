@@ -42,13 +42,13 @@ import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
 import { getWorkCollection, listCollectionsForWork } from "@/services/collectionApi";
-import { getAssetUrl, getDownloads, getReaderContentPage, getReaderMetadata, getReaderOutline, isTauriRuntime, searchDownloadsV2, searchReaderContent } from "@/services/dbApi";
+import { getDownloads, isTauriRuntime, searchDownloadsV2 } from "@/services/dbApi";
 import { openExternalUrl, revealPathInFileManager } from "@/services/openerApi";
-import { getDemoReader } from "@/mocks/demoData";
+import { legacyReaderSource, shelfReaderSource, SHELF_WORK_ID, type ReaderSource } from "@/features/reader/readerSource";
 import { RecapPanel } from "@/features/assist/RecapPanel";
 import { NeighborPlaceholder, NeighborTile, formatReadingTime } from "@/features/reader/ReaderNextUp";
 import type { WorkCollection } from "@/types/collections";
-import type { DownloadEntry, ReaderMetadata, SearchV2Params, SearchV2Result } from "@/types/library";
+import type { DownloadEntry, SearchV2Params, SearchV2Result } from "@/types/library";
 
 interface ReadingContextRow {
   key: string;
@@ -271,6 +271,15 @@ const defaults: ReaderSettings = { fontSize: 18, lineHeight: 1.72, maxWidth: 680
 const EDITED_VERSION = "edit";
 
 export default function ReaderPage() {
+  const { workId } = useRouteParams("/reader/:workId");
+  // 新しい棚（試験中）の作品は UUID で来る。読む先だけを差し替え、画面は同じものを使う。
+  const shelfId = SHELF_WORK_ID.test(workId ?? "") ? workId!.toLowerCase() : null;
+  const source = useMemo(() => shelfId ? shelfReaderSource(shelfId) : legacyReaderSource(Number(workId)), [shelfId, workId]);
+  return <Reader source={source} />;
+}
+
+/** 読む画面。本文・目次・本文内検索・作品の頭をどこから読むかは `source` が決める。 */
+function Reader({ source }: { source: ReaderSource }) {
   const navigate = useAppNavigate();
   // A saved work reached from inside the text opens in the reader: somebody
   // following "前編はこちら" mid-chapter wants to keep reading.
@@ -279,9 +288,9 @@ export default function ReaderPage() {
   // back to it - keeping its tab and scroll position - instead of pushing a
   // fresh copy and leaving the header pointing back into the reader.
   const returnTo = useReturnTo();
-  const { workId } = useRouteParams("/reader/:workId");
   const [searchParams] = useAppSearchParams();
-  const id = Number(workId);
+  const id = source.key;
+  const validId = typeof id === "string" || Number.isFinite(id);
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
   const requestedVersion = Number(searchParams.get("version"));
@@ -319,25 +328,28 @@ export default function ReaderPage() {
   const pendingPageStartRef = useRef(false);
   const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(id, version);
   const metadataQuery = useQuery({
-    queryKey: ["reader-metadata", id],
-    queryFn: () => runtime ? getReaderMetadata(id) : Promise.resolve((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision, draftEditRevision: null } satisfies ReaderMetadata; })()),
-    enabled: Number.isFinite(id),
+    queryKey: source.head.queryKey,
+    queryFn: source.head.queryFn,
+    select: source.head.select,
+    enabled: validId,
   });
+  // 前後の作品・保存フォルダーは旧棚の作品だけ。
+  const legacyWork = metadataQuery.data?.legacy?.download;
   const contentQuery = useQuery({
     queryKey: ["reader-content-page", id, version, sourcePage - 1],
-    queryFn: () => runtime ? getReaderContentPage(id, version, sourcePage - 1) : Promise.resolve((() => { const demo = getDemoReader(id); return { page: 0, pageCount: 1, html: demo.html, plainText: demo.plainText, totalPlainTextChars: demo.plainText.length, sourcePageStarts: [0] }; })()),
-    enabled: Number.isFinite(id),
+    queryFn: () => source.page(version, sourcePage - 1),
+    enabled: validId,
     placeholderData: (previous) => previous,
   });
   const outlineQuery = useQuery({
     queryKey: ["reader-outline", id, version],
-    queryFn: () => runtime ? getReaderOutline(id, version) : Promise.resolve([]),
-    enabled: Number.isFinite(id),
+    queryFn: () => source.outline(version),
+    enabled: validId,
     staleTime: 60_000,
   });
   const readerSearchQuery = useQuery({
     queryKey: ["reader-content-search", id, version, debouncedReaderSearch],
-    queryFn: () => runtime ? searchReaderContent(id, debouncedReaderSearch, version) : Promise.resolve([]),
+    queryFn: () => source.search(debouncedReaderSearch, version),
     enabled: searchOpened && debouncedReaderSearch.trim().length > 0,
   });
   /**
@@ -350,7 +362,7 @@ export default function ReaderPage() {
    */
   const markedPagesQuery = useQuery({
     queryKey: ["reader-content-search", id, version, markedTerm],
-    queryFn: () => runtime ? searchReaderContent(id, markedTerm, version) : Promise.resolve([]),
+    queryFn: () => source.search(markedTerm, version),
     enabled: markedTerm.trim().length > 0,
     staleTime: 60_000,
   });
@@ -364,12 +376,12 @@ export default function ReaderPage() {
     // 前後移動が外したはずの作品を指したままだった。
     queryKey: ["work-collection", requestedCollectionId],
     queryFn: () => getWorkCollection(requestedCollectionId!),
-    enabled: runtime && Boolean(requestedCollectionId),
+    enabled: runtime && !source.shelf && Boolean(requestedCollectionId),
   });
   const memberCollectionsQuery = useQuery({
-    queryKey: ["reader-member-collections", metadataQuery.data?.download.source, metadataQuery.data?.download.sourceId],
+    queryKey: ["reader-member-collections", legacyWork?.source, legacyWork?.sourceId],
     queryFn: async () => {
-      const summaries = await listCollectionsForWork(metadataQuery.data!.download.source, metadataQuery.data!.download.sourceId);
+      const summaries = await listCollectionsForWork(legacyWork!.source, legacyWork!.sourceId);
       const collections: WorkCollection[] = [];
       // Avoid one unbounded Promise.all while still loading every membership;
       // otherwise the 21st collection silently disappeared from reading context.
@@ -378,7 +390,7 @@ export default function ReaderPage() {
       }
       return collections;
     },
-    enabled: runtime && Boolean(metadataQuery.data),
+    enabled: runtime && Boolean(legacyWork),
     staleTime: 30_000,
   });
   const officialSeriesQuery = useQuery({
@@ -387,19 +399,19 @@ export default function ReaderPage() {
     // this work", not "what is in this series". Without it, opening episode 1
     // of a long series cached the first 200 items and episode 250 read that
     // cache, found itself missing, and dropped the continuation row entirely.
-    queryKey: ["reader-official-series", metadataQuery.data?.download.source, metadataQuery.data?.download.seriesId, id],
-    queryFn: () => loadReaderSequence({ seriesSource: metadataQuery.data!.download.source, seriesKey: metadataQuery.data!.download.seriesId!, sortBy: "series_order", sortOrder: "asc", projection: "bulk" }, id),
-    enabled: runtime && Boolean(metadataQuery.data?.download.seriesId),
+    queryKey: ["reader-official-series", legacyWork?.source, legacyWork?.seriesId, id],
+    queryFn: () => loadReaderSequence({ seriesSource: legacyWork!.source, seriesKey: legacyWork!.seriesId!, sortBy: "series_order", sortOrder: "asc", projection: "bulk" }, legacyWork!.id),
+    enabled: runtime && Boolean(legacyWork?.seriesId),
     staleTime: 60_000,
   });
   const authorWorksQuery = useQuery({
-    queryKey: ["reader-author-sequence", metadataQuery.data?.download.source, metadataQuery.data?.download.personId ?? metadataQuery.data?.download.authorId, id],
-    queryFn: () => loadReaderSequence({ personSource: metadataQuery.data!.download.source, personKey: metadataQuery.data!.download.personId || metadataQuery.data!.download.authorId, sortBy: "source_created_at", sortOrder: "asc", projection: "bulk" }, id),
-    enabled: runtime && Boolean(metadataQuery.data?.download.personId || metadataQuery.data?.download.authorId),
+    queryKey: ["reader-author-sequence", legacyWork?.source, legacyWork?.personId ?? legacyWork?.authorId, id],
+    queryFn: () => loadReaderSequence({ personSource: legacyWork!.source, personKey: legacyWork!.personId || legacyWork!.authorId, sortBy: "source_created_at", sortOrder: "asc", projection: "bulk" }, legacyWork!.id),
+    enabled: runtime && Boolean(legacyWork?.personId || legacyWork?.authorId),
     staleTime: 60_000,
   });
   const readingContexts = useMemo<ReadingContextRow[]>(() => {
-    const work = metadataQuery.data?.download;
+    const work = legacyWork;
     if (!work) return [];
     const rows: ReadingContextRow[] = [];
     const seenCollections = new Set<string>();
@@ -447,7 +459,7 @@ export default function ReaderPage() {
       if (adjacent.previous || adjacent.next) rows.push({ key: `author:${work.source}:${work.authorId}`, label: `${work.authorName}の作品`, detail: `${total}作品の公開順`, sequential: false, currentId: work.id, ...adjacent });
     }
     return rows;
-  }, [authorWorksQuery.data, explicitCollectionQuery.data, memberCollectionsQuery.data, metadataQuery.data?.download, officialSeriesQuery.data]);
+  }, [authorWorksQuery.data, explicitCollectionQuery.data, legacyWork, memberCollectionsQuery.data, officialSeriesQuery.data]);
   // 読了の札に表紙・作者・分量を出すため、隣の作品だけ詳しく読む。並びは
   // 軽い形（題と番号だけ）で引いているので、そこには表紙が無い。
   const neighborIds = useMemo(() => [...new Set(readingContexts.flatMap((context) => [context.previous?.id, context.next?.id]).filter((value): value is number => typeof value === "number"))].sort((a, b) => a - b), [readingContexts]);
@@ -462,7 +474,7 @@ export default function ReaderPage() {
   // detail screen deliberately shows the work as its author wrote it.
   const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === sourcePage - 1;
   const currentContent = contentReady ? contentQuery.data : null;
-  const cleanHtml = useMemo(() => prepareDocumentHtml(currentContent?.html ?? "", getAssetUrl, { linkifyBareUrls: true }), [currentContent?.html]);
+  const cleanHtml = useMemo(() => prepareDocumentHtml(currentContent?.html ?? "", source.assetUrl, { linkifyBareUrls: true }), [currentContent?.html, source]);
   // 探した語には本文の中で印を入れる。ページ番号を返すだけだったころは、
   // 押しても本文の頭へ動くだけで、どこに在ったのかは自分で探し直しだった。
   const marked = useMemo(() => highlightMatches(cleanHtml, markedTerm), [cleanHtml, markedTerm]);
@@ -473,7 +485,7 @@ export default function ReaderPage() {
   const vertical = settings.writing === "vertical";
   const positionKey = `piep.reader-position.${id}.${version ?? "current"}`;
   // 残り時間の目安に使う全体の字数。編集版なら編集版の字数になる。
-  const totalChars = contentQuery.data?.totalPlainTextChars || metadataQuery.data?.download.textLength || 0;
+  const totalChars = contentQuery.data?.totalPlainTextChars || metadataQuery.data?.head.textLength || 0;
   const sequenceContextLimited = Boolean(officialSeriesQuery.data?.truncated || authorWorksQuery.data?.truncated);
 
   useEffect(() => { setVersion(normalizedRequestedVersion); }, [normalizedRequestedVersion]);
@@ -565,7 +577,7 @@ export default function ReaderPage() {
     for (const page of neighbours) {
       void queryClient.prefetchQuery({
         queryKey: ["reader-content-page", id, version, page],
-        queryFn: () => getReaderContentPage(id, version, page),
+        queryFn: () => source.page(version, page),
         staleTime: 60_000,
       });
     }
@@ -575,7 +587,7 @@ export default function ReaderPage() {
       type: "inactive",
       predicate: (query) => !keep.has(query.queryKey[3] as number),
     });
-  }, [contentQuery.data?.page, id, pageCount, queryClient, runtime, sourcePage, version]);
+  }, [contentQuery.data?.page, id, pageCount, queryClient, runtime, source, sourcePage, version]);
 
   useEffect(() => {
     const update = () => setFullscreen(Boolean(document.fullscreenElement));
@@ -838,23 +850,21 @@ export default function ReaderPage() {
 
   if (metadataQuery.isLoading || contentQuery.isLoading) return <div className="page"><LoadingState label="リーダーを準備しています" /></div>;
   if (metadataQuery.error || contentQuery.error || !metadataQuery.data || !contentQuery.data) return <div className="page"><ErrorState error={metadataQuery.error ?? contentQuery.error ?? "作品が見つかりません"} retry={() => { metadataQuery.refetch(); contentQuery.refetch(); }} /></div>;
-  const doc = metadataQuery.data;
-  const work = doc.download;
+  const work = metadataQuery.data.head;
+  const legacy = metadataQuery.data.legacy;
   const currentVersion = version ?? work.currentVersion;
   // 反映中の編集が、いま手元にある版より古い本文の上に載っているか。
-  const staleEditBase = doc.activeEditRevision && doc.activeEditRevision.baseVersion < work.currentVersion
-    ? doc.activeEditRevision.baseVersion
-    : null;
+  const staleEditBase = work.staleEditBase;
   const openSource = async () => {
-    const url = sourceUrl(work.source, work.sourceId, work.contentType, work.personId || work.authorId);
+    const url = sourceUrl(work.source, work.sourceId, work.contentType, work.authorKey);
     if (!url) return;
     if (runtime) await openExternalUrl(url); else window.open(url, "_blank", "noopener,noreferrer");
   };
   // 保存した JSON を既定のアプリで開いていたので、名前と違ってフォルダーが出なかった。
   // 作品ページと同じく、保存フォルダーで JSON を選んだ状態にする。
   const openSavedFolder = async () => {
-    if (!runtime) return;
-    try { await revealPathInFileManager(work.jsonPath); }
+    if (!runtime || !legacy) return;
+    try { await revealPathInFileManager(legacy.download.jsonPath); }
     catch (error) { notifications.show({ color: "red", title: "保存フォルダーを開けません", message: errorMessage(error) }); }
   };
   /** pixiv の原稿ページ番号を、実際に運ばれてくるページ番号へ直す。
@@ -872,7 +882,7 @@ export default function ReaderPage() {
     // 図版が紙面にしか無いときのための道。
     const original = (event.target as HTMLElement).closest<HTMLElement>("button.attachment-original");
     const originalPath = original?.dataset.localPath;
-    if (originalPath) {
+    if (originalPath && typeof id === "number") {
       event.preventDefault();
       setPdfOriginal({ downloadId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
       return;
@@ -996,19 +1006,21 @@ export default function ReaderPage() {
             <Text component="span" ref={progressTextRef} size="xs" c="dimmed" className="reader-progress-text" aria-live="off" />
           </Group>
           <Group gap="xs" wrap="nowrap">
+            {/* 新しい棚の作品は、そう名乗る。読むだけの写しで、旧棚と中身が違うことがある。 */}
+            {source.shelf && <Tooltip label="新しい棚（試験中）から読んでいます。読むだけで、ここからは何も書き換えません。"><Badge color="gray" variant="light">新しい棚（試験中）</Badge></Tooltip>}
             {/* 編集版が古い版の上に載っているときは、そう名乗る。取り込み直した
                 本文があるのに、読み手にはそれが見えないままだった。 */}
             {/* 狭い窓でも隠さない。隠していたころは、版の選択のいちばん上の
                 「編集版」だけが手がかりだった。取り込んだ版を選んで読んで
                 いるあいだは、編集版ではないので名乗らない。 */}
-            {doc.isEdited && version === null && (staleEditBase === null
+            {work.isEdited && version === null && (staleEditBase === null
               ? <Tooltip label="ローカルで編集し、反映した本文を表示しています。取り込んだ本文は版の選択から読めます。"><Badge color="blue" variant="light">編集版</Badge></Tooltip>
               : <Tooltip label={`この編集版は v${staleEditBase} の本文をもとにしています。取り込み済みの v${work.currentVersion} は表示されていません。`}>
                   <Badge color="yellow" variant="light">編集版（v{staleEditBase}基準）</Badge>
                 </Tooltip>)}
             {/* 自動保存の下書きは、反映するまでここには出ない。直したのに
                 変わらない、と思わせないよう、残っていることだけ告げる。 */}
-            {doc.draftEditRevision && <Tooltip label="編集画面に反映していない下書きがあります。読書画面には反映した本文（無ければ取り込んだ本文）が出ています。"><Badge color="yellow" variant="light">未反映の下書き</Badge></Tooltip>}
+            {work.hasDraft && <Tooltip label="編集画面に反映していない下書きがあります。読書画面には反映した本文（無ければ取り込んだ本文）が出ています。"><Badge color="yellow" variant="light">未反映の下書き</Badge></Tooltip>}
             <BookmarkControls
               bookmarks={bookmarks}
               addDisabled={!contentReady}
@@ -1023,18 +1035,20 @@ export default function ReaderPage() {
                 何が起きたのか読み手には分からなかった。 */}
             <Select
               size="xs"
-              value={doc.isEdited && version === null ? EDITED_VERSION : String(currentVersion)}
+              value={work.isEdited && version === null ? EDITED_VERSION : String(currentVersion)}
               onChange={(value) => setVersion(!value || value === EDITED_VERSION ? null : Number(value))}
               data={[
-                ...(doc.isEdited ? [{ value: EDITED_VERSION, label: "編集版" }] : []),
-                ...doc.versions.map((item) => ({ value: String(item.version), label: `v${item.version}` })),
+                ...(work.isEdited ? [{ value: EDITED_VERSION, label: "編集版" }] : []),
+                ...work.versions.map((item) => ({ value: String(item), label: `v${item}` })),
               ]}
-              w={doc.isEdited ? 108 : 84}
+              w={work.isEdited ? 108 : 84}
               aria-label="表示バージョン"
             />
             <Tooltip label="表示設定"><ActionIcon variant="subtle" color="gray" aria-label="リーダーの表示設定" onClick={settingsDrawer.open}><Icons.readerSettings size={IconSize.nav} /></ActionIcon></Tooltip>
             <Tooltip label={fullscreen ? "全画面を終了" : "全画面で読む"}><ActionIcon variant="subtle" color="gray" aria-label={fullscreen ? "全画面を終了" : "全画面表示"} onClick={() => fullscreen ? document.exitFullscreen() : document.documentElement.requestFullscreen()}>{fullscreen ? <Icons.fullscreenExit size={IconSize.nav} /> : <Icons.fullscreenEnter size={IconSize.nav} />}</ActionIcon></Tooltip>
-            <Button variant="subtle" color="gray" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>
+            {source.shelf
+              ? <Tooltip label="新しい棚の作品は、まだ編集できません"><Button variant="subtle" color="gray" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} disabled>編集</Button></Tooltip>
+              : <Button variant="subtle" color="gray" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>}
           </Group>
         </Group>
         <div ref={progressRef} className="reader-progress" role="progressbar" aria-label="読書進捗" aria-valuemin={0} aria-valuemax={100}>
@@ -1071,7 +1085,7 @@ export default function ReaderPage() {
                 <ProviderMark provider={work.source} />
                 <Group gap={2} wrap="nowrap">
                   <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.externalLink size={IconSize.inline} />} onClick={openSource}>元ページをブラウザで</Button>
-                  <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={openSavedFolder}>保存フォルダー</Button>
+                  <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime || !legacy} onClick={openSavedFolder}>保存フォルダー</Button>
                 </Group>
               </Group>
               <Title order={1} className="reader-title-page__title">{work.title}</Title>

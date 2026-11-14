@@ -76,6 +76,7 @@ import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation"
 import type { ReaderMetadata } from "@/types/library";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import { ShelfWorkPage } from "@/features/library/ShelfWorkPage";
+import { SHELF_WORK_ID } from "@/services/libraryV2Api";
 import { ContentPagination, Info, parseWorkTab } from "@/features/library/workPageParts";
 
 // React StrictMode briefly mounts, cleans up, and mounts an effect again in
@@ -95,7 +96,6 @@ function locationsFor(client: object) {
   return locations;
 }
 
-const SHELF_WORK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export default function WorkPage() {
   const { workId } = useRouteParams("/works/:workId");

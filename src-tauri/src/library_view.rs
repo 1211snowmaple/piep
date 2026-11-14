@@ -18,9 +18,14 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 /// 一冊を画面のページに分けたもの。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct RenderedDocument {
     pub pages: Vec<String>,
+    /// pixiv の原稿のページ（`[newpage]`）が、何ページ目（0 から）から始まるか。
+    /// 長い原稿のページは転送のために割るので、`[jump:n]` はこれで読み替える。
+    pub source_page_starts: Vec<usize>,
+    /// 本文全体の平文の字数。読む画面の残り時間の目安。
+    pub text_chars: usize,
 }
 
 /// 保存した版の一つ。同じ改稿の補完は最後のものだけを数える（旧棚の版と同じ数え方）。
@@ -139,13 +144,20 @@ impl Library {
             Err(crate::library::Error::ResourceUnavailable)
                 if matches!(scope, ResourceScope::Snapshot(snapshot) if self.source_body(work, snapshot)?.is_none()) =>
             {
-                return Ok(RenderedDocument { pages: Vec::new() });
+                return Ok(RenderedDocument::default());
             }
             Err(error) => return Err(error),
         };
         let html = render_html(&document, provider);
-        let (pages, _) = crate::database::queries::paginate_reader_html(&html, provider);
-        Ok(RenderedDocument { pages })
+        let (pages, source_page_starts) =
+            crate::database::queries::paginate_reader_html(&html, provider);
+        // 旧棚の読む画面と同じく、HTML ではなく本文の平文（検索に使う本文）の字数。
+        let text_chars = self.work_text(work, scope)?.chars().count();
+        Ok(RenderedDocument {
+            pages,
+            source_page_starts,
+            text_chars,
+        })
     }
 }
 

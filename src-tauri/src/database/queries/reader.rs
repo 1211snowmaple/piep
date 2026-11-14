@@ -111,6 +111,72 @@ pub(super) fn folded_match_positions(haystack: &[char], needle: &str) -> Vec<usi
     positions
 }
 
+/// 作品全体の見出しと、それが載っているページ（1 から）。旧棚と新しい棚の読む画面で共通。
+pub(crate) fn reader_outline(pages: &[String]) -> Vec<ReaderOutlineEntry> {
+    let mut entries = Vec::new();
+    for (page, html) in pages.iter().enumerate() {
+        for (index, captures) in READER_HEADING.captures_iter(html).enumerate() {
+            let title = plain_text_from_reader_html(&captures[1]);
+            let title = title.trim();
+            if title.is_empty() {
+                continue;
+            }
+            entries.push(ReaderOutlineEntry {
+                page: page + 1,
+                index,
+                title: title.to_string(),
+            });
+            // 目次が本文より長くなっては意味がない。
+            if entries.len() >= 2_000 {
+                return entries;
+            }
+        }
+    }
+    entries
+}
+
+/// 本文内検索。ページ（1 から）ごとに、一致の数と最初の一致のまわりを返す。旧棚と新しい棚で共通。
+pub(crate) fn search_reader_pages(
+    pages: &[String],
+    query: &str,
+    limit: usize,
+) -> Vec<ReaderSearchHit> {
+    let needle = fold_for_reader_search(query.trim());
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut hits = Vec::new();
+    for (page, html) in pages.iter().enumerate() {
+        let plain = plain_text_from_reader_html(html);
+        let chars = plain.chars().collect::<Vec<_>>();
+        // 1 文字が 1 文字に対応する畳み方なので、畳んだ側で見つけた位置は
+        // そのまま元の本文の文字位置になる。
+        let folded = chars.iter().map(|ch| fold_char(*ch)).collect::<Vec<_>>();
+        let positions = folded_match_positions(&folded, &needle);
+        if positions.is_empty() {
+            continue;
+        }
+        let char_index = positions[0];
+        let start = char_index.saturating_sub(42);
+        let end = (char_index + needle.chars().count() + 70).min(chars.len());
+        let snippet = format!(
+            "{}{}{}",
+            if start > 0 { "…" } else { "" },
+            chars[start..end].iter().collect::<String>(),
+            if end < chars.len() { "…" } else { "" }
+        );
+        hits.push(ReaderSearchHit {
+            page: page + 1,
+            snippet,
+            count: positions.len(),
+        });
+        if hits.len() >= limit.clamp(1, 200) {
+            break;
+        }
+    }
+    hits
+}
+
 impl Database {
     pub fn get_current_assets(
         &self,
@@ -204,26 +270,7 @@ impl Database {
         version: Option<i64>,
     ) -> Result<Vec<ReaderOutlineEntry>, String> {
         let content = self.get_cached_reader_content(download_id, version)?;
-        let mut entries = Vec::new();
-        for (page, html) in content.pages.iter().enumerate() {
-            for (index, captures) in READER_HEADING.captures_iter(html).enumerate() {
-                let title = plain_text_from_reader_html(&captures[1]);
-                let title = title.trim();
-                if title.is_empty() {
-                    continue;
-                }
-                entries.push(ReaderOutlineEntry {
-                    page: page + 1,
-                    index,
-                    title: title.to_string(),
-                });
-                // 目次が本文より長くなっては意味がない。
-                if entries.len() >= 2_000 {
-                    return Ok(entries);
-                }
-            }
-        }
-        Ok(entries)
+        Ok(reader_outline(&content.pages))
     }
 
     pub fn search_reader_content(
@@ -233,41 +280,11 @@ impl Database {
         query: &str,
         limit: usize,
     ) -> Result<Vec<ReaderSearchHit>, String> {
-        let needle = fold_for_reader_search(query.trim());
-        if needle.is_empty() {
+        if fold_for_reader_search(query.trim()).is_empty() {
             return Ok(Vec::new());
         }
         let content = self.get_cached_reader_content(download_id, version)?;
-        let mut hits = Vec::new();
-        for (page, html) in content.pages.iter().enumerate() {
-            let plain = plain_text_from_reader_html(html);
-            let chars = plain.chars().collect::<Vec<_>>();
-            // 1 文字が 1 文字に対応する畳み方なので、畳んだ側で見つけた位置は
-            // そのまま元の本文の文字位置になる。
-            let folded = chars.iter().map(|ch| fold_char(*ch)).collect::<Vec<_>>();
-            let positions = folded_match_positions(&folded, &needle);
-            if positions.is_empty() {
-                continue;
-            }
-            let char_index = positions[0];
-            let start = char_index.saturating_sub(42);
-            let end = (char_index + needle.chars().count() + 70).min(chars.len());
-            let snippet = format!(
-                "{}{}{}",
-                if start > 0 { "…" } else { "" },
-                chars[start..end].iter().collect::<String>(),
-                if end < chars.len() { "…" } else { "" }
-            );
-            hits.push(ReaderSearchHit {
-                page: page + 1,
-                snippet,
-                count: positions.len(),
-            });
-            if hits.len() >= limit.clamp(1, 200) {
-                break;
-            }
-        }
-        Ok(hits)
+        Ok(search_reader_pages(&content.pages, query, limit))
     }
 
     pub(super) fn get_cached_reader_content(

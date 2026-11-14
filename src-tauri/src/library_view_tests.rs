@@ -208,6 +208,31 @@ fn image_and_file_posts_bind_their_lists_by_position() {
 }
 
 #[test]
+fn the_reader_gets_pages_outline_search_and_length_like_the_old_shelf() {
+    use crate::database::queries::{reader_outline, search_reader_pages};
+    let dir = temp("reader");
+    let library = Library::create(&dir.0).unwrap();
+    let body = SourceBody::PixivText("[chapter:一章]雨の朝[newpage][chapter:二章]カサの話".into());
+    let saved = library.capture(capture("pixiv", body, b"art", 0)).unwrap();
+    let scope = ResourceScope::Snapshot(saved.snapshot_id);
+    let rendered = library.render_document(saved.entity_id, scope, "pixiv").unwrap();
+    // pixiv の [newpage] は原稿のページ。転送のページとの対応も旧棚と同じ形で返す。
+    assert_eq!(rendered.pages.len(), 2);
+    assert_eq!(rendered.source_page_starts, vec![0, 1]);
+    // 字数は HTML ではなく本文の平文で数える（旧棚の残り時間の目安と同じ）。
+    assert_eq!(
+        rendered.text_chars,
+        library.work_text(saved.entity_id, scope).unwrap().chars().count()
+    );
+    let outline = reader_outline(&rendered.pages);
+    let titles: Vec<_> = outline.iter().map(|entry| (entry.page, entry.title.as_str())).collect();
+    assert_eq!(titles, vec![(1, "一章"), (2, "二章")]);
+    // 本文内検索は旧棚と同じ畳み方（カタカナとひらがなを同じに見る）。
+    let hits = search_reader_pages(&rendered.pages, "かさ", 50);
+    assert_eq!(hits.iter().map(|hit| (hit.page, hit.count)).collect::<Vec<_>>(), vec![(2, 1)]);
+}
+
+#[test]
 fn a_work_whose_source_had_no_body_reads_as_an_empty_body() {
     let dir = temp("nobody");
     let library = Library::create(&dir.0).unwrap();
@@ -293,6 +318,9 @@ fn probe_a_real_shelf() {
     };
     let (mut works, mut bound, mut unbound, mut resolved, mut missing) = (0, 0, 0, 0, 0);
     let mut empty = 0;
+    // 読む画面: 目次の見出し・原稿のページの対応の崩れ・字数のずれ・本文内検索の一番遅い作品。
+    let (mut headings, mut bad_starts, mut length_drift) = (0, Vec::new(), Vec::new());
+    let mut slowest_search = (std::time::Duration::ZERO, None);
     let mut suspects = Vec::new();
     let mut failures = Vec::new();
     let mut slowest = (std::time::Duration::ZERO, None);
@@ -328,12 +356,32 @@ fn probe_a_real_shelf() {
             bound += document.bindings.len() - work_unbound;
             unbound += work_unbound;
             let timer = std::time::Instant::now();
-            let html = library
-                .render_document(card.id, scope, &card.provider)
-                .unwrap()
-                .pages
-                .join("");
+            let rendered = library.render_document(card.id, scope, &card.provider).unwrap();
             let took = timer.elapsed();
+            let html = rendered.pages.join("");
+            headings += crate::database::queries::reader_outline(&rendered.pages).len();
+            let starts = &rendered.source_page_starts;
+            let pixiv = card.provider.eq_ignore_ascii_case("pixiv");
+            if pixiv
+                && (starts.first().is_some_and(|first| *first != 0)
+                    || starts.windows(2).any(|pair| pair[0] >= pair[1])
+                    || starts.last().is_some_and(|last| *last >= rendered.pages.len()))
+            {
+                bad_starts.push(format!("{} {}", card.provider, card.external_key));
+            }
+            // 移行した字数（旧棚の字数）と、読む画面の残り時間に使う字数。
+            if rendered.text_chars as u64 != card.text_length {
+                length_drift.push(format!(
+                    "{} {} card={} reader={}",
+                    card.provider, card.external_key, card.text_length, rendered.text_chars
+                ));
+            }
+            let timer = std::time::Instant::now();
+            let _ = crate::database::queries::search_reader_pages(&rendered.pages, "の", 50);
+            let searched = timer.elapsed();
+            if searched > slowest_search.0 {
+                slowest_search = (searched, Some(format!("{} {}", card.provider, card.external_key)));
+            }
             if took > slowest.0 {
                 slowest = (took, Some(format!("{} {}", card.provider, card.external_key)));
             }
@@ -374,6 +422,17 @@ fn probe_a_real_shelf() {
         failures.len(),
         started.elapsed()
     );
+    println!(
+        "reader: headings={headings} bad_starts={} length_drift={} slowest_search={slowest_search:?}",
+        bad_starts.len(),
+        length_drift.len()
+    );
+    for line in bad_starts.iter().take(20) {
+        println!("bad_starts {line}");
+    }
+    for line in length_drift.iter().take(20) {
+        println!("length_drift {line}");
+    }
     for line in suspects.iter().take(40) {
         println!("suspect {line}");
     }
