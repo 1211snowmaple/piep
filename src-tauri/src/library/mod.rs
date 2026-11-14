@@ -43,7 +43,7 @@ pub use identity::{cover_identity, image_identity, Fingerprint, LibraryId};
 pub use job_history::{JobHistory, JobHistoryItem, JobHistoryLog};
 pub use legacy::{LegacyImportReport, LegacyImporter};
 pub use maintenance::{AssetAuditMarker, MaintenanceHistory, RepairAttemptMarker};
-pub use operations::{EditRequest, SnapshotInfo, UserState};
+pub use operations::{EditRequest, SnapshotInfo, UserState, UserStateChange};
 pub use reader::{
     ReaderBinding, ReaderBindingSet, ReaderBody, ReaderDocument, ResolvedReaderBinding,
 };
@@ -61,7 +61,10 @@ pub use searches::{SavedSearch, SavedSearchDefinition, SavedSearchUpdate};
 pub use source_state::SourceEntityState;
 pub use store::{ContentFile, FileChunk, ObjectStore, StorageStats};
 pub use suggestions::{CollectionSuggestion, SuggestedMember, SuggestionDecision, SuggestionJson};
-pub use work_list::{SortValue, WorkCard, WorkCursor, WorkListPage, WorkListQuery, WorkSort};
+pub use work_list::{
+    AcquisitionFilter, CountRange, DateField, DateRange, MediaFilter, RevisionFilter, SortValue,
+    WorkCard, WorkCursor, WorkFilter, WorkListPage, WorkListQuery, WorkSort,
+};
 
 use std::path::PathBuf;
 

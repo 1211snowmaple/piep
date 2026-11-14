@@ -9,6 +9,8 @@ use std::sync::atomic::AtomicBool;
 
 #[path = "piep-library/compare.rs"]
 mod compare;
+#[path = "piep-library/filters.rs"]
+mod filters;
 
 fn main() {
     if let Err(error) = run() {
@@ -189,7 +191,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let report=compare::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]),samples)?;
             println!("{}",serde_json::to_string_pretty(&report)?);
         },
-        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / source-state <新棚> <対象UUID> / maintenance <新棚> <作品UUID> <保存状態UUID> / saved-searches <新棚> <利用者UUID> / job-history <新棚> [前のページ末尾のジョブUUID] / job-history-items|job-history-logs <新棚> <ジョブUUID> [前のページ末尾のsequence] / job-history-payload <新棚> <ジョブUUID> <項目UUID> / resources|reader <新棚> <対象UUID> snapshot|edit <保存状態UUID> / export-resource <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] <新規出力先> / transfer-manifest <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] / verify-transfer <新棚> <転送記録JSON> <検証用の実体領域> / backup <新棚> <新規出力先> / export-original <新棚> <ファイルSHA-256> <新規ファイル> / import-legacy <旧棚> <新棚> / compare-list <旧棚の piep.db の写し> <空の作業フォルダー> <新棚> [読書を比べる作品数]".into()),
+        Some("compare-filters") if args.len()==5=>{
+            let report=filters::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]))?;
+            println!("{}",serde_json::to_string_pretty(&report)?);
+        },
+        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / source-state <新棚> <対象UUID> / maintenance <新棚> <作品UUID> <保存状態UUID> / saved-searches <新棚> <利用者UUID> / job-history <新棚> [前のページ末尾のジョブUUID] / job-history-items|job-history-logs <新棚> <ジョブUUID> [前のページ末尾のsequence] / job-history-payload <新棚> <ジョブUUID> <項目UUID> / resources|reader <新棚> <対象UUID> snapshot|edit <保存状態UUID> / export-resource <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] <新規出力先> / transfer-manifest <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] / verify-transfer <新棚> <転送記録JSON> <検証用の実体領域> / backup <新棚> <新規出力先> / export-original <新棚> <ファイルSHA-256> <新規ファイル> / import-legacy <旧棚> <新棚> / compare-list <旧棚の piep.db の写し> <空の作業フォルダー> <新棚> [読書を比べる作品数] / compare-filters <旧棚の piep.db の写し> <空の作業フォルダー> <新棚>".into()),
     }
     Ok(())
 }

@@ -24,7 +24,17 @@ pub struct SnapshotInfo {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserState {
     pub favorite: bool,
+    /// 作品の更新を見張るか。見張る作者・シリーズ（watch_targets）とは別に、作品ごとに持つ。
+    #[serde(default)]
+    pub watching: bool,
     pub generation: i64,
+}
+
+/// 利用者の状態の変更。`None` の項目は今の値のまま。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UserStateChange {
+    pub favorite: Option<bool>,
+    pub watching: Option<bool>,
 }
 
 pub struct EditRequest<'a> {
@@ -145,18 +155,20 @@ impl Library {
         )?;
         Ok(conn
             .query_row(
-                "SELECT favorite,generation FROM work_user_state WHERE work_id=?1 AND user_id=?2",
+                "SELECT favorite,watching,generation FROM work_user_state WHERE work_id=?1 AND user_id=?2",
                 params![work.as_bytes().as_slice(), user.as_bytes().as_slice()],
                 |r| {
                     Ok(UserState {
                         favorite: r.get(0)?,
-                        generation: r.get(1)?,
+                        watching: r.get(1)?,
+                        generation: r.get(2)?,
                     })
                 },
             )
             .optional()?
             .unwrap_or(UserState {
                 favorite: false,
+                watching: false,
                 generation: 0,
             }))
     }
@@ -169,16 +181,56 @@ impl Library {
         expected: i64,
         favorite: bool,
     ) -> Result<UserState> {
+        self.set_user_state(
+            request,
+            work,
+            user,
+            expected,
+            UserStateChange {
+                favorite: Some(favorite),
+                watching: None,
+            },
+        )
+    }
+
+    pub fn set_watching(
+        &self,
+        request: LibraryId,
+        work: LibraryId,
+        user: LibraryId,
+        expected: i64,
+        watching: bool,
+    ) -> Result<UserState> {
+        self.set_user_state(
+            request,
+            work,
+            user,
+            expected,
+            UserStateChange {
+                favorite: None,
+                watching: Some(watching),
+            },
+        )
+    }
+
+    /// お気に入りと更新の監視を一度に変える。世代が `expected` と違えば競合として断る。
+    pub fn set_user_state(
+        &self,
+        request: LibraryId,
+        work: LibraryId,
+        user: LibraryId,
+        expected: i64,
+        change: UserStateChange,
+    ) -> Result<UserState> {
         if expected < 0 {
             return Err(Error::Integrity("更新世代が不正です".into()));
         }
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
-        let payload =
-            serde_json::json!({ "work":work,"user":user,"expected":expected,"favorite":favorite });
+        let payload = serde_json::json!({ "work":work,"user":user,"expected":expected,"favorite":change.favorite,"watching":change.watching });
         let receipt: Option<String> = tx
             .query_row(
-                "SELECT payload_json FROM outbox WHERE request_id=?1 AND operation='favorite'",
+                "SELECT payload_json FROM outbox WHERE request_id=?1 AND operation='user_state'",
                 [request.as_bytes().as_slice()],
                 |r| r.get(0),
             )
@@ -192,14 +244,16 @@ impl Library {
             }
             return Ok(serde_json::from_value(receipt["result"].clone())?);
         }
-        let generation: i64 = tx
+        let (favorite, watching, generation): (bool, bool, i64) = tx
             .query_row(
-                "SELECT generation FROM work_user_state WHERE work_id=?1 AND user_id=?2",
+                "SELECT favorite,watching,generation FROM work_user_state WHERE work_id=?1 AND user_id=?2",
                 params![work.as_bytes().as_slice(), user.as_bytes().as_slice()],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?
-            .unwrap_or(0);
+            .unwrap_or((false, false, 0));
+        let favorite = change.favorite.unwrap_or(favorite);
+        let watching = change.watching.unwrap_or(watching);
         if generation != expected {
             return Err(Error::Integrity(format!(
                 "更新が競合しました。現在の世代は {generation} です"
@@ -208,15 +262,16 @@ impl Library {
         let next = generation
             .checked_add(1)
             .ok_or_else(|| Error::Integrity("更新世代が上限を超えました".into()))?;
-        tx.execute("INSERT INTO work_user_state VALUES(?1,?2,?3,?4) ON CONFLICT(work_id,user_id) DO UPDATE SET favorite=excluded.favorite,generation=excluded.generation",params![work.as_bytes().as_slice(),user.as_bytes().as_slice(),favorite,next])?;
+        tx.execute("INSERT INTO work_user_state(work_id,user_id,favorite,watching,generation) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(work_id,user_id) DO UPDATE SET favorite=excluded.favorite,watching=excluded.watching,generation=excluded.generation",params![work.as_bytes().as_slice(),user.as_bytes().as_slice(),favorite,watching,next])?;
         if user == self.id {
             self.refresh_work_list(&tx, work)?;
         }
         let result = UserState {
             favorite,
+            watching,
             generation: next,
         };
-        tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'favorite',?3,?4)",params![request.as_bytes().as_slice(),work.as_bytes().as_slice(),serde_json::json!({"request":payload,"result":result}).to_string(),chrono::Utc::now().timestamp_millis()])?;
+        tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'user_state',?3,?4)",params![request.as_bytes().as_slice(),work.as_bytes().as_slice(),serde_json::json!({"request":payload,"result":result}).to_string(),chrono::Utc::now().timestamp_millis()])?;
         tx.execute(
             "UPDATE library_meta SET generation=generation+1 WHERE singleton=1",
             [],

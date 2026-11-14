@@ -204,9 +204,15 @@ impl LegacyImporter {
             profiles,
             &mut report,
         )?;
-        let mut stmt = self.conn.prepare(
-            "SELECT id,source,source_id,title,author_name,favorite FROM downloads ORDER BY id",
-        )?;
+        // 作品ごとの更新の監視は、この列のない古い棚にはない。
+        let watch = if self.has_column("downloads", "watch_updates")? {
+            "watch_updates"
+        } else {
+            "0"
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id,source,source_id,title,author_name,favorite,{watch} FROM downloads ORDER BY id"
+        ))?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -214,14 +220,14 @@ impl LegacyImporter {
                 r.get::<_, String>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
-                r.get::<_, bool>(5)?,
+                (r.get::<_, bool>(5)?, r.get::<_, bool>(6)?),
             ))
         })?;
         for row in rows {
             if cancel.load(Ordering::Acquire) {
                 return Err(Error::Canceled);
             }
-            let (old_id, provider, key, title, author, favorite) = row?;
+            let (old_id, provider, key, title, author, (favorite, watching)) = row?;
             let date = if self.has_column("download_versions", "created_at")? {
                 "created_at"
             } else {
@@ -274,11 +280,20 @@ impl LegacyImporter {
                 }
             }
             if let Some(work) = work {
-                if favorite {
+                if favorite || watching {
                     let state = target.user_state(work, target.id)?;
                     if state.generation == 0 {
-                        target.set_favorite(LibraryId::now_v7(), work, target.id, 0, true)?;
-                    } else if !state.favorite {
+                        target.set_user_state(
+                            LibraryId::now_v7(),
+                            work,
+                            target.id,
+                            0,
+                            crate::library::UserStateChange {
+                                favorite: Some(favorite),
+                                watching: Some(watching),
+                            },
+                        )?;
+                    } else if (favorite && !state.favorite) || (watching && !state.watching) {
                         return Err(Error::Integrity(
                             "移行先の利用者状態が変更されています".into(),
                         ));

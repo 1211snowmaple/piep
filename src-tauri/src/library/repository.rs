@@ -1059,8 +1059,11 @@ impl Library {
                 [entity.as_bytes().as_slice()],
                 |r| r.get(0),
             )?;
+            // 旧棚の「修復」の版は、同じ版を取り直して欠けを埋めたもの。中身が違えば版は分けるが、
+            // 作者の改稿ではないことを残す（旧棚の改稿の絞り込みに数えない）。
+            let repair = legacy_kind == Some("repair");
             tx.execute(
-                "INSERT INTO source_revisions VALUES(?1,?2,?3,?4,?5)",
+                "INSERT INTO source_revisions(id,entity_id,ordinal,classification,discovered_at,repair) VALUES(?1,?2,?3,?4,?5,?6)",
                 params![
                     id.as_bytes().as_slice(),
                     entity.as_bytes().as_slice(),
@@ -1070,7 +1073,8 @@ impl Library {
                     } else {
                         "source"
                     },
-                    acquired_at
+                    acquired_at,
+                    repair
                 ],
             )?;
             id

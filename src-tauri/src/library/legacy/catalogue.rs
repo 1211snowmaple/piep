@@ -47,14 +47,20 @@ impl LegacyImporter {
         })?;
         self.each_row("update_candidates", |row| {
             let payload = row.text("payload_json")?;
-            let _: serde_json::Value = serde_json::from_str(payload)?;
+            let value: serde_json::Value = serde_json::from_str(payload)?;
+            // 保留の理由は一覧で絞るので列に出す。原本の JSON はそのまま残す。
+            let hold_kind = (row.text("status")? == "held")
+                .then(|| value.get("holdKind").and_then(serde_json::Value::as_str))
+                .flatten()
+                .filter(|kind| !kind.is_empty())
+                .map(str::to_owned);
             let prepared = target.store_bytes(payload.as_bytes())?;
             candidate_files.insert(
                 (
                     row.text("source")?.to_owned(),
                     row.text("source_id")?.to_owned(),
                 ),
-                (prepared.file.id, prepared),
+                (prepared.file.id, prepared, hold_kind),
             );
             Ok(())
         })?;
@@ -143,20 +149,21 @@ impl LegacyImporter {
                     key,
                     row.time("first_seen_at")?,
                 )?;
-                let (file_id, file) = candidate_files
+                let (file_id, file, hold_kind) = candidate_files
                     .get(&(provider.to_owned(), key.to_owned()))
                     .ok_or_else(|| Error::Integrity("候補の原本が準備されていません".into()))?;
                 Library::register_file(&tx, file)?;
                 let old = format!("{provider}:{key}");
                 let id = mapped_id(&tx, "update_candidates", &old)?;
                 tx.execute(
-                    "INSERT INTO discovery_candidates VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    "INSERT INTO discovery_candidates(id,work_id,kind,title,decision,hold_kind,payload_file_id,target_type,first_seen_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
                     params![
                         id.as_bytes().as_slice(),
                         work.as_bytes().as_slice(),
                         row.text("kind")?,
                         row.text("title")?,
                         row.text("status")?,
+                        hold_kind,
                         file_id.0.as_slice(),
                         row.optional_text("target_type")?,
                         row.time("first_seen_at")?,
@@ -257,7 +264,8 @@ INSERT INTO work_collection_members VALUES('c1','pixiv','two','二つ目','作�
 INSERT INTO update_targets VALUES(42,'author','pixiv','author1','監視中の作者',1,'2026-01-01T00:00:00+09:00','123',NULL,NULL,2,'{}','2026-01-01 00:00:00','2026-01-02 00:00:00');
 INSERT INTO watch_groups VALUES(7,'監視の束',3,'2026-01-01 00:00:00','2026-01-02 00:00:00');
 INSERT INTO watch_group_members VALUES(7,42);
-INSERT INTO update_candidates VALUES('pixiv','two','new','保留した作品','held','{\"unread\":true}','author','2026-01-01 00:00:00','2026-01-02 00:00:00');
+INSERT INTO update_candidates VALUES('pixiv','two','new','保留した作品','held','{\"unread\":true,\"holdKind\":\"incomplete\"}','author','2026-01-01 00:00:00','2026-01-02 00:00:00');
+INSERT INTO update_candidates VALUES('pixiv','three','revision','外した候補','dismissed','{\"holdKind\":\"restricted\"}','author','2026-01-01 00:00:00','2026-01-02 00:00:00');
 INSERT INTO work_links VALUES(1,'pixiv','one','pixiv','two','continues_to','manual','表示','根拠',1.0,'accepted','2026-01-01 00:00:00','2026-01-02 00:00:00');
 INSERT INTO work_links VALUES(2,'pixiv','one','pixiv','two','continues_to','content_link',NULL,'別の根拠',0.7,'rejected','2026-01-01 00:00:00','2026-01-02 00:00:00');
 INSERT INTO collection_pair_feedback VALUES('pixiv','one','pixiv','two','reject','rule1','2026-01-02 00:00:00');").unwrap();
@@ -296,7 +304,6 @@ INSERT INTO collection_pair_feedback VALUES('pixiv','one','pixiv','two','reject'
                     "watch_targets",
                     "watch_groups",
                     "watch_group_members",
-                    "discovery_candidates",
                     "work_links",
                     "collection_pair_feedback",
                 ] {
@@ -307,11 +314,22 @@ INSERT INTO collection_pair_feedback VALUES('pixiv','one','pixiv','two','reject'
                         1
                     );
                 }
+                // 旧棚の三つの状態をそのまま持ち、保留の理由は保留のときだけ列に出す。
+                let candidates: Vec<(String, Option<String>)> = conn
+                    .prepare(
+                        "SELECT decision,hold_kind FROM discovery_candidates ORDER BY decision",
+                    )
+                    .unwrap()
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                    .unwrap()
+                    .collect::<std::result::Result<_, _>>()
+                    .unwrap();
                 assert_eq!(
-                    conn.query_row("SELECT decision FROM discovery_candidates", [], |r| r
-                        .get::<_, String>(0))
-                        .unwrap(),
-                    "held"
+                    candidates,
+                    vec![
+                        ("dismissed".into(), None),
+                        ("held".into(), Some("incomplete".into()))
+                    ]
                 );
                 assert_eq!(
                     conn.query_row("SELECT status FROM work_links", [], |r| r
