@@ -7,11 +7,13 @@
 
 mod document;
 mod index;
+mod query;
 mod results;
 mod semantic;
 
 pub use document::{source_url, SearchDocument};
 pub use index::{HistoryIndexReport, SearchHit, SearchIndexReport};
+pub use query::{parse_query, work_from_url, QueryParts, SeriesRef, WorkRef};
 pub use results::{
     EntityIntent, SearchDecoration, SearchMatch, SearchMode, SearchPage, TextSearch, VersionScope,
 };

@@ -2,6 +2,7 @@
 //! 一致した箇所の抜粋・理由。どちらも旧棚の判定と抜粋の関数をそのまま使う。
 
 use super::index::Space;
+use super::query::parse_query;
 use super::semantic::SemanticEvidence;
 use crate::database::models::{ScoreReason, SearchHighlight, SearchHighlightSegment};
 use crate::database::search::{make_match_highlights, match_fields_and_score, parse_search_query};
@@ -172,8 +173,26 @@ impl Library {
     /// 過去の改稿も探すときは、作品ごとに一件にまとめる。いまの版で一致した作品はその関連度、
     /// 過去の改稿だけで一致した作品は、いちばん関連度の高い改稿の関連度に `HISTORY_WEIGHT` を
     /// 掛けたもの。
+    ///
+    /// 問い合わせの中の絞り込みの書き方（`tag:` など、`query.rs`）は先に一覧の絞り込みへ移す。
+    /// 残る語がなければ、絞り込んだ一覧をそのまま返す（関連度の順は保存日の新しい順にする）。
     pub fn search_works(&self, search: &TextSearch, query: &WorkListQuery) -> Result<SearchPage> {
-        let text = search.text.trim();
+        let parts = parse_query(&search.text);
+        let mut query = query.clone();
+        self.apply_query_parts(&parts, &mut query.filter)?;
+        let query = &mut query;
+        let text = parts.text.trim();
+        if text.is_empty() {
+            if query.sort == WorkSort::Relevance {
+                query.sort = WorkSort::Saved;
+                query.descending = true;
+            }
+            return Ok(SearchPage {
+                page: self.list_works(query)?,
+                intent: None,
+                matches: Vec::new(),
+            });
+        }
         if search.effective_mode() == SearchMode::Meaning {
             return self.search_by_meaning(text, query);
         }
@@ -209,7 +228,6 @@ impl Library {
                 matches,
             });
         };
-        let mut query = query.clone();
         // 続きのページの位置は、最初のページを保存日の順で返したときのもの。そのまま使える。
         if query.sort == WorkSort::Relevance {
             query.sort = WorkSort::Saved;
@@ -230,7 +248,7 @@ impl Library {
             }
         }
         Ok(SearchPage {
-            page: self.list_works(&query)?,
+            page: self.list_works(query)?,
             intent: Some(intent),
             matches: Vec::new(),
         })
@@ -416,7 +434,8 @@ impl Library {
         text: &str,
         matches: &[SearchMatch],
     ) -> Result<Vec<SearchDecoration>> {
-        let parsed = parse_search_query(text);
+        // 絞り込みの書き方（`tag:` など）は一致した箇所を持たない。
+        let parsed = parse_search_query(&parse_query(text).text);
         if parsed.include.is_empty() && matches.iter().all(|hit| hit.semantic.is_none()) {
             return Ok(Vec::new());
         }

@@ -292,6 +292,7 @@ pub fn run(old_db: &Path, work: &Path, new_root: &Path) -> Result<Value, Error> 
     let decorations = compare_decorations(&shelves, &new_conn)?;
     let intents = compare_intents(&shelves, &new_conn)?;
     let history = compare_history(&shelves, &new_conn, new_root)?;
+    let structured = compare_structured(&shelves, &new_conn)?;
     // 旧棚の意味検索の写しは、旧棚の索引づくり（意味検索を切って作る）が消さない場所に置く。
     let semantic_storage = work.join("old-semantic").join("downloads");
     let semantic = if work
@@ -312,6 +313,7 @@ pub fn run(old_db: &Path, work: &Path, new_root: &Path) -> Result<Value, Error> 
         "decorations": decorations,
         "intents": intents,
         "history": history,
+        "structured": structured,
         "semantic": semantic,
         "seconds": started.elapsed().as_secs_f64(),
     }))
@@ -851,6 +853,106 @@ fn compare_semantic(
     out["queries"] = json!(queries.len());
     out["top10_same"] = json!(top_same);
     out["max_score_delta"] = json!(max_delta);
+    out["old_ms_total"] = json!(old_ms);
+    out["new_ms_total"] = json!(new_ms);
+    Ok(out)
+}
+
+/// 問い合わせの中の絞り込みの書き方（`tag:` `author:` `series:` `source:` `id:`、URL）。
+/// 見本の作品から作り、一致する作品の集まりを比べる。
+fn compare_structured(shelves: &Shelves, conn: &rusqlite::Connection) -> Result<Value, Error> {
+    let works: Vec<Vec<u8>> = conn
+        .prepare("SELECT work_id FROM work_current_projection ORDER BY work_id")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let mut queries: Vec<(&str, String)> = Vec::new();
+    for (index, work) in works.iter().enumerate() {
+        if index % 6 != 0 {
+            continue;
+        }
+        let Some(doc) = shelves
+            .new
+            .search_document(LibraryId::from_slice(work).expect("ID"))?
+        else {
+            continue;
+        };
+        let quoted = |value: &str| format!("\"{}\"", value.replace('"', ""));
+        if let Some(tag) = doc.tags.first() {
+            queries.push(("tag", format!("tag:{}", quoted(tag))));
+            queries.push((
+                "not_tag",
+                format!("source:{} -tag:{}", doc.provider, quoted(tag)),
+            ));
+        }
+        queries.push(("author", format!("author:{}", quoted(&doc.author_name))));
+        if let Some(series) = doc.series_titles.first() {
+            queries.push(("series_title", format!("series:{}", quoted(series))));
+        }
+        queries.push(("id", format!("id:{}", doc.external_key)));
+        queries.push((
+            "url",
+            piep_lib::library_search::source_url(&doc.provider, &doc.external_key, &doc.author_key),
+        ));
+        if let Some(piece) = chars_at(&doc.body, doc.body.chars().count() / 2, 2) {
+            queries.push((
+                "word_and_author",
+                format!("{piece} author:{}", quoted(&doc.author_name)),
+            ));
+        }
+    }
+    let series_keys: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT DISTINCT e.provider,e.external_key FROM external_identities e
+             JOIN snapshot_series ss ON ss.series_id=e.entity_id
+             JOIN work_current_projection p ON p.snapshot_id=ss.snapshot_id
+             WHERE e.kind='series' ORDER BY 1,2",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    for (index, (provider, key)) in series_keys.iter().enumerate() {
+        if index % 4 == 0 {
+            queries.push(("series_key", format!("series:{provider}:{key}")));
+        }
+    }
+    queries.push(("source", "source:pixiv".into()));
+    queries.push(("source", "source:fanbox".into()));
+    queries.sort();
+    queries.dedup();
+    let mut notes = Notes::new();
+    let mut by_kind: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    let (mut old_ms, mut new_ms) = (0.0, 0.0);
+    for (number, (kind, query)) in queries.iter().enumerate() {
+        let t = Instant::now();
+        let (old_items, _) = shelves.old_search(SearchV2Params {
+            query: Some(query.clone()),
+            ..Default::default()
+        })?;
+        old_ms += t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        let (_, _, ids) = shelves.new_search(&TextSearch::current(query.clone()))?;
+        new_ms += t.elapsed().as_secs_f64() * 1000.0;
+        let (old_set, new_set) = (shelves.old_set(&old_items), shelves.new_set(&ids));
+        let entry = by_kind.entry(kind).or_default();
+        entry.0 += 1;
+        if old_set != new_set {
+            entry.1 += 1;
+            notes.note(
+                &format!("set_{kind}"),
+                json!({"query": number, "text": query, "old": old_set.len(), "new": new_set.len(),
+                       "only_old": old_set.difference(&new_set).take(5).collect::<Vec<_>>(),
+                       "only_new": new_set.difference(&old_set).take(5).collect::<Vec<_>>()}),
+            );
+        }
+    }
+    let mut out = notes.json();
+    out["queries"] = json!(queries.len());
+    out["by_kind"] = json!(by_kind
+        .iter()
+        .map(|(kind, (count, differ))| (
+            kind.to_string(),
+            json!({"queries": count, "differ": differ})
+        ))
+        .collect::<serde_json::Map<_, _>>());
     out["old_ms_total"] = json!(old_ms);
     out["new_ms_total"] = json!(new_ms);
     Ok(out)
