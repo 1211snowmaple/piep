@@ -8,7 +8,7 @@
 
 use super::document::{source_url, SearchDocument};
 use crate::database::tantivy_index::{self, Prepared, TantivyIndexDocument};
-use crate::library::{Error, Library, LibraryId, Result};
+use crate::library::{Error, Library, LibraryId, Result, TextMatches, WorkListPage, WorkListQuery};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -344,9 +344,8 @@ impl Library {
         Ok(())
     }
 
-    /// 問い合わせに一致する作品を、関連度の高い順に返す（同点は作品の鍵の順）。
-    /// 問い合わせの書き方は旧棚と同じ（語の AND、`-` で除外、同義語の展開）。
-    pub fn search_text(&self, query: &str) -> Result<Vec<SearchHit>> {
+    /// 問い合わせに一致する索引の文書の鍵と関連度（順は決まらない）。
+    fn matching_documents(&self, query: &str) -> Result<Vec<(i64, f32)>> {
         let storage = self.search_storage();
         let found: std::sync::Arc<Mutex<Vec<(i64, f32)>>> = Default::default();
         let sink = found.clone();
@@ -358,6 +357,24 @@ impl Library {
         })
         .map_err(Error::Integrity)?;
         let found = std::mem::take(&mut *found.lock().map_err(|_| Error::Busy)?);
+        Ok(found)
+    }
+
+    /// 本文の検索で一致した作品の一覧。絞り込み・並べ替え・続きのページは一覧と同じで、
+    /// 並べ替えには関連度（`WorkSort::Relevance`）も使える。索引は呼ぶ前に
+    /// `sync_search_index` で棚に合わせておく（保存のたびに同期する）。
+    ///
+    /// 続きのページでも問い合わせを索引に投げ直す。索引は位置を持たないので、一致の集まりを
+    /// 毎回作り、表の上で続きの位置から読む。
+    pub fn search_works(&self, text: &str, query: &WorkListQuery) -> Result<WorkListPage> {
+        let found = self.matching_documents(text)?;
+        self.list_works_matching(query, &TextMatches::new(&found))
+    }
+
+    /// 問い合わせに一致する作品を、関連度の高い順に返す（同点は作品の鍵の順）。
+    /// 問い合わせの書き方は旧棚と同じ（語の AND、`-` で除外、同義語の展開）。
+    pub fn search_text(&self, query: &str) -> Result<Vec<SearchHit>> {
+        let found = self.matching_documents(query)?;
         let conn = self.reader()?;
         // 鍵は千件ずつまとめて引く（一件ずつ引くと、一致の多い語で問い合わせより遅くなる）。
         let mut works = conn.prepare_cached(

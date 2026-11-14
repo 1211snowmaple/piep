@@ -174,6 +174,7 @@ fn key(card: &WorkCard, sort: WorkSort) -> SortValue {
         WorkSort::Size => SortValue::Number(card.logical_size as i64),
         WorkSort::Media => SortValue::Number(card.media_count as i64),
         WorkSort::Version => SortValue::Number(card.version_number as i64),
+        WorkSort::Relevance => unreachable!("関連度の順は本文の検索の試験で見る"),
     }
 }
 
@@ -424,7 +425,8 @@ fn every_page_reads_through_an_index_instead_of_sorting_the_whole_shelf() {
                         }),
                         ..WorkListQuery::default()
                     };
-                    let page = PageSql::new(&query, library.id, 60, &TagReach::default()).unwrap();
+                    let page =
+                        PageSql::new(&query, library.id, 60, &TagReach::default(), None).unwrap();
                     let plan: Vec<String> = conn
                         .prepare(&format!("EXPLAIN QUERY PLAN {}", page.page))
                         .unwrap()
@@ -1035,7 +1037,7 @@ fn a_rare_tag_collects_works_through_the_snapshot_index_and_both_ways_agree() {
             filter,
             ..WorkListQuery::default()
         };
-        let sql = PageSql::new(&query, library.id, PAGE_LIMIT, reach).unwrap();
+        let sql = PageSql::new(&query, library.id, PAGE_LIMIT, reach, None).unwrap();
         let params = || rusqlite::params_from_iter(sql.values.iter().map(|v| v.as_ref()));
         let plan: Vec<String> = conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", sql.page))

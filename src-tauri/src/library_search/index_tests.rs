@@ -131,3 +131,123 @@ fn the_index_follows_saves_tags_and_removals_and_rebuilds_when_lost() {
     assert_eq!(found(&library, "果物"), vec![grape]);
     crate::database::tantivy_index::release_runtime(&temp.0.join("derived"));
 }
+
+#[test]
+fn search_results_page_by_relevance_and_combine_with_filters_and_sorts() {
+    use crate::library::{UserStateChange, WorkFilter, WorkSort};
+    let temp = Temp(std::env::temp_dir().join(format!("piep-search-list-{}", LibraryId::now_v7())));
+    let library = Library::create(&temp.0).unwrap();
+    // 林檎の回数を変えて関連度に差をつける。偶数番はお気に入りにする。
+    let mut works = Vec::new();
+    for i in 0..12 {
+        let body = format!("{}蜜柑", "林檎の歌。".repeat(i + 1));
+        let title = format!("題{:02}", 11 - i);
+        let work = library
+            .capture(capture(&i.to_string(), &title, &body, 1_000 + i as i64))
+            .unwrap()
+            .entity_id;
+        if i % 2 == 0 {
+            library
+                .set_user_state(
+                    LibraryId::now_v7(),
+                    work,
+                    library.id,
+                    0,
+                    UserStateChange {
+                        favorite: Some(true),
+                        watching: None,
+                    },
+                )
+                .unwrap();
+        }
+        works.push(work);
+    }
+    library
+        .capture(capture("other", "別", "葡萄だけ", 9_000))
+        .unwrap();
+    library.sync_search_index(&mut |_, _| {}).unwrap();
+    let expected = found(&library, "林檎");
+    assert_eq!(expected.len(), 12);
+
+    // 関連度の順で 5 件ずつ読み、続きの位置で抜けも重なりもなくつながる。
+    let mut query = WorkListQuery {
+        sort: WorkSort::Relevance,
+        limit: 5,
+        ..Default::default()
+    };
+    let mut paged = Vec::new();
+    let mut scores = Vec::new();
+    loop {
+        let page = library.search_works("林檎", &query).unwrap();
+        if query.after.is_none() {
+            assert_eq!(page.total, Some(12));
+        }
+        paged.extend(page.items.iter().map(|card| card.id));
+        if let Some(next) = &page.next {
+            if let crate::library::SortValue::Number(bits) = next.value {
+                scores.push(f64::from_bits(bits as u64));
+            }
+        }
+        match page.next {
+            Some(next) => query.after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(paged, expected, "索引の関連度の順と同じ");
+    assert!(scores.windows(2).all(|pair| pair[0] >= pair[1]));
+
+    // 絞り込みと組み合わせる。
+    let favorites = library
+        .search_works(
+            "林檎",
+            &WorkListQuery {
+                sort: WorkSort::Relevance,
+                limit: 50,
+                filter: WorkFilter {
+                    favorite: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let want: Vec<LibraryId> = expected
+        .iter()
+        .copied()
+        .filter(|work| works.iter().position(|w| w == work).unwrap() % 2 == 0)
+        .collect();
+    assert_eq!(favorites.total, Some(6));
+    assert_eq!(
+        favorites.items.iter().map(|c| c.id).collect::<Vec<_>>(),
+        want
+    );
+
+    // ほかの鍵で並べるときは一致が絞り込みになる。題の昇順で、別の作品は入らない。
+    let by_title = library
+        .search_works(
+            "林檎",
+            &WorkListQuery {
+                sort: WorkSort::Title,
+                descending: false,
+                limit: 4,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(by_title.total, Some(12));
+    let titles: Vec<&str> = by_title.items.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(titles, ["題00", "題01", "題02", "題03"]);
+
+    // 一致がなければ空。関連度の順は本文の検索の外では使えない。
+    let none = library
+        .search_works("檸檬", &WorkListQuery::default())
+        .unwrap();
+    assert_eq!((none.total, none.items.len()), (Some(0), 0));
+    assert!(library
+        .list_works(&WorkListQuery {
+            sort: WorkSort::Relevance,
+            ..Default::default()
+        })
+        .is_err());
+    crate::database::tantivy_index::release_runtime(&temp.0.join("derived"));
+}

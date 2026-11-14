@@ -70,6 +70,10 @@ pub enum WorkSort {
     Size,
     Media,
     Version,
+    /// 本文の検索の関連度。本文の検索の一覧（`list_works_matching`）でだけ使える。
+    /// 続きの位置の値は関連度（非負の f64）のビット列で、非負の f64 はビット列の大小と
+    /// 値の大小が一致する。
+    Relevance,
 }
 
 impl WorkSort {
@@ -85,6 +89,7 @@ impl WorkSort {
             Self::Size => "logical_size",
             Self::Media => "media_count",
             Self::Version => "version_number",
+            Self::Relevance => "m.score",
         }
     }
 
@@ -105,6 +110,23 @@ impl WorkSort {
 pub enum SortValue {
     Number(i64),
     Text(String),
+}
+
+/// 本文の検索に一致した文書（`search_documents` の鍵）と関連度。棚の中核は全文索引を
+/// 持たないので、検索の側が引いた結果をここへ渡し、一覧の表の上で絞り込みと突き合わせる。
+#[derive(Clone, Debug)]
+pub struct TextMatches(String);
+
+impl TextMatches {
+    pub fn new(matches: &[(i64, f32)]) -> Self {
+        // 関連度は f32 を f64 にした値で渡す。f32 の短い表記で渡すと SQLite が別の f64 に
+        // 読み、続きの位置の「同じ関連度」が一致しなくなる。
+        let pairs: Vec<(i64, f64)> = matches
+            .iter()
+            .map(|(key, score)| (*key, f64::from(*score)))
+            .collect();
+        Self(serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".into()))
+    }
 }
 
 /// 続きのページの位置。前のページの最後の行の鍵と作品。
@@ -658,12 +680,39 @@ impl PageSql {
         owner: LibraryId,
         limit: usize,
         reach: &TagReach,
+        matches: Option<&TextMatches>,
     ) -> Result<Self> {
         let key = query.sort.expression();
+        let relevance = query.sort == WorkSort::Relevance;
         let Conditions {
             mut filters,
             mut values,
         } = query.filter.conditions(owner, reach);
+        let mut from = "work_current_projection p".to_owned();
+        match matches {
+            Some(matches) => {
+                values.push(Box::new(matches.0.clone()));
+                let set = format!(
+                    "json_each(?{}) j JOIN search_documents d ON d.doc_key=j.value->>0",
+                    values.len()
+                );
+                if relevance {
+                    // 関連度で並べるときは一致した作品から引く（関連度は一致の側にしかない）。
+                    from = format!(
+                        "work_current_projection p JOIN (SELECT d.work_id AS matched_work,j.value->>1 AS score FROM {set}) m ON m.matched_work=p.work_id"
+                    );
+                } else {
+                    // ほかの鍵で並べるときは絞り込みの一つとして扱い、並べ替えの索引を使えるようにする。
+                    filters.push(format!("p.work_id IN (SELECT d.work_id FROM {set})"));
+                }
+            }
+            None if relevance => {
+                return Err(Error::Unsupported(
+                    "関連度の順は本文の検索の一覧でだけ使えます".into(),
+                ))
+            }
+            None => {}
+        }
         let filter_values = values.len();
         let clause = |filters: &[String]| {
             if filters.is_empty() {
@@ -672,14 +721,14 @@ impl PageSql {
                 format!(" WHERE {}", filters.join(" AND "))
             }
         };
-        let count = format!(
-            "SELECT count(*) FROM work_current_projection p{}",
-            clause(&filters)
-        );
+        let count = format!("SELECT count(*) FROM {from}{}", clause(&filters));
         let direction = if query.descending { "DESC" } else { "ASC" };
         if let Some(after) = &query.after {
             match (&after.value, query.sort.is_text()) {
                 (SortValue::Text(value), true) => values.push(Box::new(value.clone())),
+                (SortValue::Number(bits), false) if relevance => {
+                    values.push(Box::new(f64::from_bits(*bits as u64)))
+                }
                 (SortValue::Number(value), false) => values.push(Box::new(*value)),
                 _ => {
                     return Err(Error::Integrity(
@@ -702,7 +751,7 @@ impl PageSql {
         values.push(Box::new(limit as i64 + 1));
         let value_column = key.trim_end_matches(" COLLATE NOCASE");
         let page = format!(
-            "SELECT {COLUMNS},{value_column} FROM work_current_projection p{} ORDER BY {key} {direction},work_id {direction} LIMIT ?{}",
+            "SELECT {COLUMNS},{value_column} FROM {from}{} ORDER BY {key} {direction},work_id {direction} LIMIT ?{}",
             clause(&filters),
             values.len()
         );
@@ -900,17 +949,29 @@ impl Library {
     /// 棚の一覧を一ページ返す。続きは `next` を `after` に渡す。
     pub fn list_works(&self, query: &WorkListQuery) -> Result<WorkListPage> {
         let conn = self.reader()?;
-        Self::list_works_from_conn(&conn, self.id, query)
+        Self::list_works_from_conn(&conn, self.id, query, None)
+    }
+
+    /// 本文の検索に一致した作品の一覧。絞り込み・並べ替え・続きのページは `list_works` と同じで、
+    /// 並べ替えに関連度（`WorkSort::Relevance`）も使える。一致は検索の側が索引から引いて渡す。
+    pub fn list_works_matching(
+        &self,
+        query: &WorkListQuery,
+        matches: &TextMatches,
+    ) -> Result<WorkListPage> {
+        let conn = self.reader()?;
+        Self::list_works_from_conn(&conn, self.id, query, Some(matches))
     }
 
     pub(super) fn list_works_from_conn(
         conn: &Connection,
         owner: LibraryId,
         query: &WorkListQuery,
+        matches: Option<&TextMatches>,
     ) -> Result<WorkListPage> {
         let limit = query.limit.clamp(1, PAGE_LIMIT);
         let reach = TagReach::measure(conn, &query.filter)?;
-        let page = PageSql::new(query, owner, limit, &reach)?;
+        let page = PageSql::new(query, owner, limit, &reach, matches)?;
         let total = if query.count {
             let count: i64 = conn.prepare_cached(&page.count)?.query_row(
                 rusqlite::params_from_iter(
@@ -944,6 +1005,8 @@ impl Library {
             let value = match value {
                 rusqlite::types::Value::Integer(n) => SortValue::Number(n),
                 rusqlite::types::Value::Text(s) => SortValue::Text(s),
+                // 関連度。非負なのでビット列の順が値の順になる。
+                rusqlite::types::Value::Real(score) => SortValue::Number(score.to_bits() as i64),
                 _ => return Err(Error::Integrity("一覧の並べ替えの鍵が不正です".into())),
             };
             let card = Self::work_card_from_conn(conn, owner, card(row)?)?;
