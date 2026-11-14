@@ -6,17 +6,18 @@ use rusqlite::{params, Connection, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
 
 /// 一覧の行の作り方の版。変えたら、書き込みで開いたときに全行を作り直す。
-pub(super) const RECIPE: i64 = 2;
+pub(super) const RECIPE: i64 = 3;
 const PAGE_LIMIT: usize = 500;
 
 /// 一作品の一覧の行。?1 作品、?2 一覧の持ち主、?3 有効な編集、?4 編集の題、?5 作り方の版。
-/// 題は旧棚と同じく、編集の題（前後の空白を除いて空でなければ）か、保存版の題。
+/// 題は旧棚と同じく、編集の題（前後の空白を除いて空でなければ）か、保存版の題。空白は改行や
+/// 全角の空白を含む Unicode の空白（旧棚の題は保存時にこれを除いていた）。
 /// 容量は保存した原本・画像・添付で、同じ中身は一度だけ数える。原本から取り出した本文は数えない。
 const ROW_SQL: &str = "SELECT c.entity_id,c.snapshot_id,?3,
  coalesce((SELECT provider FROM external_identities INDEXED BY external_identity_entity WHERE entity_id=c.entity_id AND kind='work' ORDER BY provider,external_key LIMIT 1),''),
  coalesce((SELECT external_key FROM external_identities INDEXED BY external_identity_entity WHERE entity_id=c.entity_id AND kind='work' ORDER BY provider,external_key LIMIT 1),''),
  w.content_type,
- coalesce(nullif(trim(?4),''),trim(CAST(coalesce(json_extract(s.metadata_json,'$.title'),'') AS TEXT))),
+ coalesce(nullif(trim(?4,char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)),''),trim(CAST(coalesce(json_extract(s.metadata_json,'$.title'),'') AS TEXT),char(9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288))),
  CAST(coalesce(json_extract(s.metadata_json,'$.author_name'),'') AS TEXT),
  r.discovered_at,
  CASE json_type(s.metadata_json,'$.create_date') WHEN 'integer' THEN json_extract(s.metadata_json,'$.create_date') END,

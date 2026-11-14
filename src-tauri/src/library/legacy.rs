@@ -565,7 +565,10 @@ impl LegacyImporter {
                 })
         };
         let mut states = BTreeMap::new();
+        // 旧棚の版は、その版のフォルダーの画像と添付がすべて。前の版にあって消えた画像を
+        // 引き継ぐと、旧棚の読書画面にない画像が現在の保存状態に残る。
         states.insert("attachments".into(), "known".into());
+        states.insert("media".into(), "known".into());
         if metadata
             .get("caption")
             .is_some_and(|v| v.as_str() == Some(""))
@@ -854,6 +857,72 @@ mod tests {
             assert_eq!(fs::read(&raw).unwrap(), raw_bytes);
             target.verify().unwrap();
         }
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn images_dropped_by_a_later_version_are_not_carried_into_the_current_state() {
+        let temp = std::env::temp_dir().join(format!("piep-legacy-media-{}", LibraryId::now_v7()));
+        let old = temp.join("old");
+        let db_path = old.join("downloads");
+        fs::create_dir_all(&db_path).unwrap();
+        let db = Connection::open(old.join("piep.db")).unwrap();
+        db.execute_batch("CREATE TABLE downloads(id INTEGER,source TEXT,source_id TEXT,title TEXT,author_name TEXT,favorite INTEGER); CREATE TABLE download_versions(id INTEGER,download_id INTEGER,version INTEGER,json_path TEXT,original_json_path TEXT,change_kind TEXT); CREATE TABLE assets(id INTEGER,download_id INTEGER,asset_type TEXT,filename TEXT,local_path TEXT,original_url TEXT,mime_type TEXT,file_size_bytes INTEGER);
+INSERT INTO downloads VALUES(1,'pixiv','123','title','author',0);").unwrap();
+        // 一版目は挿絵 2 枚、二版目は 1 枚。旧棚の読書画面は今の版のフォルダーの画像だけを出す。
+        let mut asset = 0;
+        for (number, text, images) in [
+            (1, "first", vec!["a.png", "b.png"]),
+            (2, "second", vec!["b.png"]),
+        ] {
+            let version = old.join(format!("downloads/pixiv/123/v{number}"));
+            fs::create_dir_all(version.join("data_assets/illustrations")).unwrap();
+            let raw = version.join("original.json");
+            fs::write(
+                &raw,
+                serde_json::to_vec(&json!({"detail":{"id":123,"title":"title"},"text":text}))
+                    .unwrap(),
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO download_versions VALUES(?1,1,?1,?2,?2,'source')",
+                params![number, raw.to_str().unwrap()],
+            )
+            .unwrap();
+            for name in images {
+                asset += 1;
+                let path = version.join("data_assets/illustrations").join(name);
+                let bytes = format!("{name} in v{number}");
+                fs::write(&path, &bytes).unwrap();
+                db.execute(
+                    "INSERT INTO assets VALUES(?1,1,'illustration',?2,?3,NULL,'image/png',?4)",
+                    params![asset, name, path.to_str().unwrap(), bytes.len() as i64],
+                )
+                .unwrap();
+            }
+        }
+        drop(db);
+        let target = Library::create(&temp.join("next")).unwrap();
+        let report = LegacyImporter::open(&old)
+            .unwrap()
+            .import(&target, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        assert_eq!(report.unresolved_records, 0, "{:?}", report.unresolved);
+        let work = target.works(10).unwrap()[0].id;
+        let card = target.work_card(work).unwrap();
+        assert_eq!((card.version_number, card.media_count), (2, 1));
+        let counts: Vec<i64> = target
+            .reader()
+            .unwrap()
+            .prepare("SELECT (SELECT count(*) FROM snapshot_media m WHERE m.snapshot_id=s.id) FROM revision_snapshots s WHERE s.entity_id=?1 ORDER BY s.sequence")
+            .unwrap()
+            .query_map([work.as_bytes().as_slice()], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(counts, vec![2, 1]);
+        target.verify().unwrap();
+        drop(target);
         fs::remove_dir_all(temp).unwrap();
     }
 }

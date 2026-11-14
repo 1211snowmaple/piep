@@ -105,7 +105,7 @@ fn shelf(library: &Library) -> Vec<LibraryId> {
         Work {
             provider: "fanbox",
             key: "4",
-            title: " c ",
+            title: "\u{3000} c\r\n",
             author: "y",
             created: Some("2022-01-01T00:00:00Z"),
             updated: Some("2025-06-01T00:00:00Z"),
@@ -242,7 +242,7 @@ fn every_sort_pages_through_the_shelf_in_the_order_of_one_full_sort_with_ties_in
             }
         }
     }
-    // 題は前後の空白を除き、空の題も並ぶ。公開日のない作品は保存日で並ぶ。
+    // 題は前後の空白（改行・全角の空白を含む）を除き、空の題も並ぶ。公開日のない作品は保存日で並ぶ。
     let first = all(&library, &WorkListQuery::default());
     let card = |id: LibraryId| first.iter().find(|c| c.id == id).unwrap();
     assert_eq!(card(ids[3]).title, "c");
