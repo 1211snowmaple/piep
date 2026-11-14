@@ -1,0 +1,13 @@
+[package]
+name = "piep-library-protocol"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+publish = false
+description = "Validated wire contracts for library resource transfers"
+
+[dependencies]
+piep-storage = { path = "../piep-storage", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde"] }

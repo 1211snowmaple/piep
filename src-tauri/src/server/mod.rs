@@ -22,6 +22,7 @@ pub mod sync_send;
 mod tests;
 pub mod tls;
 pub mod update;
+pub mod v2;
 pub mod watchdog;
 
 /// 携帯端末との契約の版。壊す変更のときだけ上げる。

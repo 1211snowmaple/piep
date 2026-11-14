@@ -1,0 +1,21 @@
+[package]
+name = "piep-storage"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+publish = false
+description = "Byte-exact content storage shared by piep desktop and Android"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.11.0"
+thiserror = "2"
+uuid = { version = "1", features = ["v7"] }
+zstd = "0.13"
+
+[target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+rand = "0.10.2"
+serde_json = "1"

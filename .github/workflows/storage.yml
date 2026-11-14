@@ -1,0 +1,56 @@
+name: Storage
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  storage-host:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install shared MSRV
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            crates/piep-storage
+            crates/piep-library-protocol
+      - run: cargo +1.98.1 test --manifest-path crates/piep-storage/Cargo.toml --locked
+      - run: cargo +1.98.1 clippy --manifest-path crates/piep-storage/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo +1.98.1 fmt --manifest-path crates/piep-storage/Cargo.toml -- --check
+      - run: cargo +1.98.1 test --manifest-path crates/piep-library-protocol/Cargo.toml --locked
+      - run: cargo +1.98.1 clippy --manifest-path crates/piep-library-protocol/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo +1.98.1 fmt --manifest-path crates/piep-library-protocol/Cargo.toml -- --check
+
+  storage-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install shared MSRV and Android targets
+        run: rustup toolchain install 1.98.1 --profile minimal --target aarch64-linux-android,x86_64-linux-android
+      - name: Configure NDK
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;30.0.16248370'
+          ndk="$ANDROID_HOME/ndk/30.0.16248370/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "$ndk" >> "$GITHUB_PATH"
+          echo "CC_aarch64_linux_android=$ndk/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CC_x86_64_linux_android=$ndk/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$ndk/llvm-ar" >> "$GITHUB_ENV"
+          echo "AR_x86_64_linux_android=$ndk/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$ndk/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$ndk/x86_64-linux-android24-clang" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            crates/piep-storage
+            crates/piep-library-protocol
+      - run: cargo +1.98.1 test --manifest-path crates/piep-storage/Cargo.toml --locked --target aarch64-linux-android --no-run
+      - run: cargo +1.98.1 test --manifest-path crates/piep-storage/Cargo.toml --locked --target x86_64-linux-android --no-run
+      - run: cargo +1.98.1 test --manifest-path crates/piep-library-protocol/Cargo.toml --locked --target aarch64-linux-android --no-run
+      - run: cargo +1.98.1 test --manifest-path crates/piep-library-protocol/Cargo.toml --locked --target x86_64-linux-android --no-run
