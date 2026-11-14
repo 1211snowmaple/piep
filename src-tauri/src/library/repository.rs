@@ -573,7 +573,7 @@ impl Library {
 
     /// オフライン入力の取り込み用。ネットワーク取得は開始記録を作ってから完了する。
     #[cfg(test)]
-    pub(super) fn capture(&self, capture: Capture) -> Result<CaptureResult> {
+    pub(crate) fn capture(&self, capture: Capture) -> Result<CaptureResult> {
         self.capture_prepared(capture, None, None)
     }
 

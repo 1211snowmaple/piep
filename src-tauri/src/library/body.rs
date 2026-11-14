@@ -213,7 +213,7 @@ impl Library {
         self.source_body_from_conn(&conn, entity, snapshot)
     }
 
-    pub(super) fn source_body_from_conn(
+    pub(crate) fn source_body_from_conn(
         &self,
         conn: &rusqlite::Connection,
         entity: LibraryId,

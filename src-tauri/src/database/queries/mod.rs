@@ -2036,6 +2036,19 @@ impl Database {
             .map_err(|e| format!("DB read pool checkout failed: {}", e))
     }
 
+    /// 全文索引に入れる文書を、索引を作り直すときと同じ手順で作る。新しい棚の検索の文書と
+    /// 突き合わせるためだけに使う（`piep-library compare-search-documents`）。
+    pub fn search_index_document_for_comparison(
+        &self,
+        download_id: i64,
+    ) -> Result<Option<super::tantivy_index::TantivyIndexDocument>, String> {
+        let conn = self.read_conn()?;
+        Ok(
+            search_index_document_locked(&conn, &self.storage_dir, download_id)?
+                .map(|document| document.tantivy),
+        )
+    }
+
     pub fn library_generation(&self) -> Result<i64, String> {
         self.generation_conn
             .lock()

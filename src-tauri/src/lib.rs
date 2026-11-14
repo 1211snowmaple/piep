@@ -9,6 +9,7 @@ pub mod epub;
 pub mod fanbox_api;
 /// 元ファイルを保持する新しいライブラリの保管・履歴モデル。
 pub mod library;
+pub mod library_search;
 mod logging;
 /// 棚の実物で取り出しを確かめる example から触れるように公開している。
 pub mod pdf;

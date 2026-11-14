@@ -294,6 +294,11 @@ impl Library {
 
     /// 編集文書の題。一覧の行を作るときに、有効な編集のある作品だけが読む。
     pub(super) fn edit_title(&self, conn: &Connection, file: &[u8]) -> Result<Option<String>> {
+        Ok(self.edit_content(conn, file)?.title)
+    }
+
+    /// 編集文書の中身。`file` は編集文書の実体のハッシュ。
+    pub(crate) fn edit_content(&self, conn: &Connection, file: &[u8]) -> Result<EditContent> {
         let file = Self::file_from_conn(
             conn,
             Fingerprint(
@@ -308,7 +313,7 @@ impl Library {
         }
         let mut bytes = Vec::new();
         self.objects.export(&file, &mut bytes)?;
-        Ok(serde_json::from_slice::<EditContent>(&bytes)?.title)
+        Ok(serde_json::from_slice::<EditContent>(&bytes)?)
     }
 
     pub(crate) fn verify_edit_documents(&self, conn: &Connection) -> Result<()> {

@@ -11,6 +11,10 @@ use std::sync::atomic::AtomicBool;
 mod compare;
 #[path = "piep-library/filters.rs"]
 mod filters;
+#[path = "piep-library/search_docs.rs"]
+mod search_docs;
+#[path = "piep-library/search_results.rs"]
+mod search_results;
 
 fn main() {
     if let Err(error) = run() {
@@ -189,6 +193,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("compare-list") if args.len()==5 || args.len()==6=>{
             let samples=args.get(5).map(|s|s.parse::<usize>()).transpose()?.unwrap_or(200);
             let report=compare::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]),samples)?;
+            println!("{}",serde_json::to_string_pretty(&report)?);
+        },
+        Some("compare-search-documents") if args.len()==5 || args.len()==6=>{
+            let modulus=args.get(5).map(|s|s.parse::<i64>()).transpose()?.unwrap_or(1);
+            let report=search_docs::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]),modulus)?;
+            println!("{}",serde_json::to_string_pretty(&report)?);
+        },
+        Some("compare-search-results") if args.len()==5 || args.len()==6=>{
+            let modulus=args.get(5).map(|s|s.parse::<i64>()).transpose()?.unwrap_or(1);
+            let report=search_results::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]),modulus)?;
             println!("{}",serde_json::to_string_pretty(&report)?);
         },
         Some("compare-filters") if args.len()==5=>{
