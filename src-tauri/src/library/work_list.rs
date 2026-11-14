@@ -4,15 +4,18 @@
 use super::{Error, Fingerprint, Library, LibraryId, Result};
 use rusqlite::{params, Connection, OptionalExtension, ToSql};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// 一覧の行の作り方の版。変えたら、書き込みで開いたときに全行を作り直す。
-pub(super) const RECIPE: i64 = 4;
+pub(super) const RECIPE: i64 = 5;
 const PAGE_LIMIT: usize = 500;
 
 /// 一作品の一覧の行。?1 作品、?2 一覧の持ち主、?3 有効な編集、?4 編集の題、?5 作り方の版。
 /// 題は旧棚と同じく、編集の題（前後の空白を除いて空でなければ）か、保存版の題。空白は改行や
 /// 全角の空白を含む Unicode の空白（旧棚の題は保存時にこれを除いていた）。
 /// 容量は保存した原本・画像・添付で、同じ中身は一度だけ数える。原本から取り出した本文は数えない。
+/// 改稿（revised）は作者の改稿を保存したか。旧棚の「修復」の版から分けた版だけなら数えない。
+/// 画像の数は画像と image/ の添付、添付の数はそれ以外の添付（旧棚と同じく MIME で分ける）。
 const ROW_SQL: &str = "SELECT c.entity_id,c.snapshot_id,?3,
  coalesce((SELECT provider FROM external_identities INDEXED BY external_identity_entity WHERE entity_id=c.entity_id AND kind='work' ORDER BY provider,external_key LIMIT 1),''),
  coalesce((SELECT external_key FROM external_identities INDEXED BY external_identity_entity WHERE entity_id=c.entity_id AND kind='work' ORDER BY provider,external_key LIMIT 1),''),
@@ -35,15 +38,21 @@ const ROW_SQL: &str = "SELECT c.entity_id,c.snapshot_id,?3,
  r.ordinal,
  coalesce((SELECT favorite FROM work_user_state WHERE work_id=c.entity_id AND user_id=?2),0),
  coalesce((SELECT watching FROM work_user_state WHERE work_id=c.entity_id AND user_id=?2),0),
+ EXISTS(SELECT 1 FROM snapshot_media WHERE snapshot_id=c.snapshot_id AND role='cover' AND rendition_id IS NOT NULL),
+ EXISTS(SELECT 1 FROM snapshot_series WHERE snapshot_id=c.snapshot_id),
+ r.ordinal>1 AND EXISTS(SELECT 1 FROM source_revisions v WHERE v.entity_id=c.entity_id AND v.ordinal>1 AND v.repair=0),
+ (SELECT count(*) FROM snapshot_media WHERE snapshot_id=c.snapshot_id)
+   +(SELECT count(*) FROM snapshot_files WHERE snapshot_id=c.snapshot_id AND role<>'raw' AND mime_type LIKE 'image/%'),
+ (SELECT count(*) FROM snapshot_files WHERE snapshot_id=c.snapshot_id AND role<>'raw' AND coalesce(mime_type,'') NOT LIKE 'image/%'),
  ?5
 FROM entity_current c
 JOIN library_items li ON li.work_id=c.entity_id
 JOIN works w ON w.id=c.entity_id
 JOIN revision_snapshots s ON s.id=c.snapshot_id
 JOIN source_revisions r ON r.id=s.revision_id";
-const COLUMNS: &str = "work_id,snapshot_id,edit_id,provider,external_key,content_type,title,author_name,saved_at,published_at,updated_at,text_length,logical_size,media_count,version_number,favorite,watching,recipe";
+const COLUMNS: &str = "work_id,snapshot_id,edit_id,provider,external_key,content_type,title,author_name,saved_at,published_at,updated_at,text_length,logical_size,media_count,version_number,favorite,watching,has_cover,in_series,revised,image_count,file_count,recipe";
 /// ページの問い合わせで、`COLUMNS` の後ろに付ける並べ替えの鍵の列の位置。
-const VALUE_COLUMN: usize = 18;
+const VALUE_COLUMN: usize = 23;
 
 /// 並べ替えの鍵。旧棚の並べ替えと同じ意味を持たせ、同じ値の中は作品の登録順で並べる。
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -264,6 +273,10 @@ pub struct WorkCard {
     pub version_number: u64,
     pub favorite: bool,
     pub watching: bool,
+    /// 作者の改稿を保存したか。
+    pub revised: bool,
+    pub image_count: u64,
+    pub file_count: u64,
     pub excerpt: Option<String>,
     pub tags: Vec<String>,
     pub cover: Option<Fingerprint>,
@@ -298,8 +311,8 @@ type Row = (
     i64,
     Option<i64>,
     Option<i64>,
-    [i64; 4],
-    [bool; 2],
+    [i64; 6],
+    [bool; 3],
 );
 
 /// `COLUMNS` の順に読む。作り方の版（最後の列）は読まない。
@@ -316,8 +329,16 @@ fn read_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         r.get(8)?,
         r.get(9)?,
         r.get(10)?,
-        [r.get(11)?, r.get(12)?, r.get(13)?, r.get(14)?],
-        [r.get(15)?, r.get(16)?],
+        [
+            r.get(11)?,
+            r.get(12)?,
+            r.get(13)?,
+            r.get(14)?,
+            r.get(20)?,
+            r.get(21)?,
+        ],
+        // 表紙とシリーズの有無（17・18）は絞り込みのための列で、カードは表紙とシリーズの値を持つ。
+        [r.get(15)?, r.get(16)?, r.get(19)?],
     ))
 }
 
@@ -335,7 +356,7 @@ fn card(row: Row) -> Result<WorkCard> {
         published_at,
         updated_at,
         numbers,
-        [favorite, watching],
+        [favorite, watching, revised],
     ) = row;
     Ok(WorkCard {
         id: id(work)?,
@@ -355,6 +376,9 @@ fn card(row: Row) -> Result<WorkCard> {
         version_number: size(numbers[3])?,
         favorite,
         watching,
+        revised,
+        image_count: size(numbers[4])?,
+        file_count: size(numbers[5])?,
         excerpt: None,
         tags: Vec::new(),
         cover: None,
@@ -421,30 +445,86 @@ fn names(values: &[String]) -> Vec<String> {
     names
 }
 
+/// タグごとに、付いている保存版の数。少ないタグは作品を保存版の索引から集め、多いタグは一覧を
+/// 順に読みながら作品ごとに確かめる。全棚（2.8 万作品）の件数と最初のページで、459 作品のタグは
+/// 索引から集めると 0.2ms、順に読むと 13ms。2.3 万作品のタグは逆に、索引から集めて並べ直すと
+/// 50ms、順に読むと 13ms だった。SQLite は部分の問い合わせが返す数を知らないので、こちらで数えて選ぶ。
+#[derive(Default)]
+pub(super) struct TagReach {
+    snapshots: BTreeMap<String, i64>,
+    shelf: i64,
+}
+
+impl TagReach {
+    fn measure(conn: &Connection, filter: &WorkFilter) -> Result<Self> {
+        let tags = names(&filter.tags);
+        if tags.is_empty() {
+            return Ok(Self::default());
+        }
+        let set = serde_json::to_string(&tags).map_err(|e| Error::Integrity(e.to_string()))?;
+        let mut statement = conn.prepare_cached(
+            "SELECT t.name,count(*) FROM tags t JOIN snapshot_tags st ON st.tag_id=t.id
+             WHERE t.name IN (SELECT value FROM json_each(?1)) GROUP BY t.name",
+        )?;
+        let snapshots = statement
+            .query_map([set], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let shelf = conn
+            .prepare_cached("SELECT count(*) FROM work_current_projection")?
+            .query_row([], |r| r.get(0))?;
+        Ok(Self { snapshots, shelf })
+    }
+
+    /// 棚の 10 分の 1 より少なければ索引から集める。索引から集めるのは当てはまる数に比例し、
+    /// 順に読むのは棚の大きさに比例する。全棚の 4,060 作品のタグ（7 分の 1）は、多いタグと
+    /// 重ねたときに順に読むほうが速かった（13ms と 24ms）。数えていなければ（`default`）順に読む。
+    fn narrow(&self, tags: &[String]) -> bool {
+        let reach: i64 = tags
+            .iter()
+            .map(|t| self.snapshots.get(t).copied().unwrap_or(0))
+            .sum();
+        reach.saturating_mul(10) < self.shelf
+    }
+}
+
 /// いまの保存版か利用者がこのタグ（JSON の配列 `set` のどれか）を付けた作品。
-fn tagged(set: &str, owner: &str) -> String {
-    format!(
-        "(p.snapshot_id IN (SELECT st.snapshot_id FROM tags t JOIN snapshot_tags st ON st.tag_id=t.id WHERE t.name IN (SELECT value FROM json_each({set})))
-          OR p.work_id IN (SELECT wt.work_id FROM user_tags u JOIN work_user_tags wt ON wt.user_id=u.user_id AND wt.tag_id=u.id WHERE u.user_id={owner} AND u.name IN (SELECT value FROM json_each({set}))))"
-    )
+///
+/// `narrow` なら、タグの付いた保存版を集めて一覧の保存版の索引で引く。そうでなければ、タグの
+/// ID を先に引いておき、一覧を読みながら作品ごとに主キー（保存版・タグ）を引いて確かめる。
+/// 集めた保存版を作品ごとに照らす形は、2.3 万件の集まりを毎回作るので件数とページで 25ms かかった。
+fn tagged(set: &str, owner: &str, narrow: bool) -> String {
+    if narrow {
+        format!(
+            "(p.snapshot_id IN (SELECT st.snapshot_id FROM tags t JOIN snapshot_tags st ON st.tag_id=t.id WHERE t.name IN (SELECT value FROM json_each({set})))
+              OR p.work_id IN (SELECT wt.work_id FROM user_tags u JOIN work_user_tags wt ON wt.user_id=u.user_id AND wt.tag_id=u.id WHERE u.user_id={owner} AND u.name IN (SELECT value FROM json_each({set}))))"
+        )
+    } else {
+        format!(
+            "(EXISTS(SELECT 1 FROM snapshot_tags st WHERE st.snapshot_id=p.snapshot_id AND st.tag_id IN (SELECT id FROM tags WHERE name IN (SELECT value FROM json_each({set}))))
+              OR EXISTS(SELECT 1 FROM work_user_tags wt WHERE wt.work_id=p.work_id AND wt.user_id={owner} AND wt.tag_id IN (SELECT id FROM user_tags WHERE user_id={owner} AND name IN (SELECT value FROM json_each({set})))))"
+        )
+    }
 }
 
 /// いまの名前か、保存したどれかの版で名乗った名前（JSON の配列 `set` のどれか）の作者の作品。
+/// 名前は大文字小文字まで同じものだけ。大文字小文字を区別しない項は作者の並べ替えの索引で
+/// 候補を集めるためで、区別する項で正確に絞る（両方を索引で引けると、SQLite は二つの集まりを
+/// 合わせる形を選べる。全棚で 7ms が 0.9ms）。
 fn authored(set: &str) -> String {
     format!(
-        "(p.author_name IN (SELECT value FROM json_each({set}))
+        "((p.author_name COLLATE NOCASE IN (SELECT value FROM json_each({set})) AND p.author_name IN (SELECT value FROM json_each({set})))
           OR p.snapshot_id IN (SELECT snapshot_id FROM snapshot_people WHERE person_id IN (SELECT person_id FROM snapshot_people WHERE display_name IN (SELECT value FROM json_each({set})))))"
     )
 }
 
-const HAS_IMAGES: &str = "(EXISTS(SELECT 1 FROM snapshot_media WHERE snapshot_id=p.snapshot_id) OR EXISTS(SELECT 1 FROM snapshot_files WHERE snapshot_id=p.snapshot_id AND role<>'raw' AND mime_type LIKE 'image/%'))";
-const HAS_FILES: &str = "EXISTS(SELECT 1 FROM snapshot_files WHERE snapshot_id=p.snapshot_id AND role<>'raw' AND coalesce(mime_type,'') NOT LIKE 'image/%')";
-const PENDING_REVISION: &str = "EXISTS(SELECT 1 FROM discovery_candidates c WHERE c.work_id=p.work_id AND c.kind='revision' AND c.decision='pending')";
-/// 作者の改稿を保存した作品。修復で分けた版だけなら数えない（旧棚と同じ）。
-const SAVED_REVISIONS: &str = "(p.version_number>1 AND EXISTS(SELECT 1 FROM source_revisions r WHERE r.entity_id=p.work_id AND r.ordinal>1 AND r.repair=0))";
+/// 候補は件数が少ないので、当てはまる作品を一度集めてから一覧と突き合わせる。作品ごとに
+/// 候補を引く形だと、SQLite が判断の索引を選んで全作品ぶん候補をなめていた（全棚で 178ms）。
+fn candidates(condition: &str) -> String {
+    format!("p.work_id IN (SELECT work_id FROM discovery_candidates WHERE {condition})")
+}
 
 impl WorkFilter {
-    fn conditions(&self, owner: LibraryId) -> Conditions {
+    fn conditions(&self, owner: LibraryId, reach: &TagReach) -> Conditions {
         let mut c = Conditions {
             filters: Vec::new(),
             values: Vec::new(),
@@ -457,14 +537,10 @@ impl WorkFilter {
             let value = c.bind(content_type.clone());
             c.filters.push(format!("p.content_type={value}"));
         }
-        if let Some(favorite) = self.favorite {
-            let value = c.bind(favorite);
-            c.filters.push(format!("p.favorite={value}"));
-        }
-        if let Some(watching) = self.watching {
-            let value = c.bind(watching);
-            c.filters.push(format!("p.watching={value}"));
-        }
+        // 旗は値を SQL に直接書く。部分索引（少ない側だけの索引）は、値が埋め込まれているときに
+        // しか使えない。
+        c.flag(self.favorite, "p.favorite=1");
+        c.flag(self.watching, "p.watching=1");
         if let Some(works) = &self.works {
             let ids: Vec<String> = works.iter().map(|id| id.simple().to_string()).collect();
             let value = c.bind_names(&ids);
@@ -473,47 +549,38 @@ impl WorkFilter {
             ));
         }
         c.flag(self.edited, "p.edit_id IS NOT NULL");
-        c.flag(
-            self.has_cover,
-            "EXISTS(SELECT 1 FROM snapshot_media WHERE snapshot_id=p.snapshot_id AND role='cover' AND rendition_id IS NOT NULL)",
-        );
-        c.flag(
-            self.in_series,
-            "EXISTS(SELECT 1 FROM snapshot_series WHERE snapshot_id=p.snapshot_id)",
-        );
+        // 少ない側（表紙なし）に部分索引がある。
+        c.flag(self.has_cover.map(|b| !b), "p.has_cover=0");
+        c.flag(self.in_series, "p.in_series=1");
         match self.media {
             Some(MediaFilter::Any) => c.filters.push("p.media_count>0".into()),
             Some(MediaFilter::None) => c.filters.push("p.media_count=0".into()),
-            Some(MediaFilter::Images) => c.filters.push(HAS_IMAGES.into()),
-            Some(MediaFilter::Files) => c.filters.push(HAS_FILES.into()),
+            Some(MediaFilter::Images) => c.filters.push("p.image_count>0".into()),
+            Some(MediaFilter::Files) => c.filters.push("p.file_count>0".into()),
             Some(MediaFilter::ImagesAndFiles) => {
-                c.filters.push(HAS_IMAGES.into());
-                c.filters.push(HAS_FILES.into());
+                c.filters.push("p.image_count>0".into());
+                c.filters.push("p.file_count>0".into());
             }
             None => {}
         }
+        let pending = candidates("kind='revision' AND decision='pending'");
         match self.revision {
-            Some(RevisionFilter::Revised) => c
-                .filters
-                .push(format!("({SAVED_REVISIONS} OR {PENDING_REVISION})")),
-            Some(RevisionFilter::PendingRevision) => c.filters.push(PENDING_REVISION.into()),
-            Some(RevisionFilter::SavedRevisions) => c.filters.push(SAVED_REVISIONS.into()),
-            Some(RevisionFilter::FirstVersion) => c.filters.push(format!("NOT {SAVED_REVISIONS}")),
+            Some(RevisionFilter::Revised) => c.filters.push(format!("(p.revised=1 OR {pending})")),
+            Some(RevisionFilter::PendingRevision) => c.filters.push(pending),
+            Some(RevisionFilter::SavedRevisions) => c.filters.push("p.revised=1".into()),
+            Some(RevisionFilter::FirstVersion) => c.filters.push("p.revised=0".into()),
             None => {}
         }
         if let Some(acquisition) = self.acquisition {
-            let candidate = "SELECT 1 FROM discovery_candidates c WHERE c.work_id=p.work_id AND";
             let filter = match acquisition {
                 AcquisitionFilter::Complete => {
-                    format!("NOT EXISTS({candidate} c.decision IN ('held','dismissed'))")
+                    format!("NOT {}", candidates("decision IN ('held','dismissed')"))
                 }
-                AcquisitionFilter::Attention => format!("EXISTS({candidate} c.decision='held')"),
-                AcquisitionFilter::Dismissed => {
-                    format!("EXISTS({candidate} c.decision='dismissed')")
-                }
+                AcquisitionFilter::Attention => candidates("decision='held'"),
+                AcquisitionFilter::Dismissed => candidates("decision='dismissed'"),
                 kind => {
                     let value = c.bind(kind.hold_kind().unwrap_or_default());
-                    format!("EXISTS({candidate} c.decision='held' AND c.hold_kind={value})")
+                    candidates(&format!("decision='held' AND hold_kind={value}"))
                 }
             };
             c.filters.push(filter);
@@ -542,11 +609,12 @@ impl WorkFilter {
             let owner = c.bind(owner.as_bytes().to_vec());
             if self.any_tag {
                 let set = c.bind_names(&tags);
-                c.filters.push(tagged(&set, &owner));
+                c.filters.push(tagged(&set, &owner, reach.narrow(&tags)));
             } else {
                 for tag in tags {
+                    let narrow = reach.narrow(std::slice::from_ref(&tag));
                     let set = c.bind_names(&[tag]);
-                    c.filters.push(tagged(&set, &owner));
+                    c.filters.push(tagged(&set, &owner, narrow));
                 }
             }
         }
@@ -554,7 +622,9 @@ impl WorkFilter {
         if !excluded.is_empty() {
             let owner = c.bind(owner.as_bytes().to_vec());
             let set = c.bind_names(&excluded);
-            c.filters.push(format!("NOT {}", tagged(&set, &owner)));
+            // 除くタグは残る作品を数えるので、集めても速くならない。作品ごとに確かめる。
+            c.filters
+                .push(format!("NOT {}", tagged(&set, &owner, false)));
         }
         let authors = names(&self.authors);
         if !authors.is_empty() {
@@ -583,12 +653,17 @@ impl WorkFilter {
 }
 
 impl PageSql {
-    pub(super) fn new(query: &WorkListQuery, owner: LibraryId, limit: usize) -> Result<Self> {
+    pub(super) fn new(
+        query: &WorkListQuery,
+        owner: LibraryId,
+        limit: usize,
+        reach: &TagReach,
+    ) -> Result<Self> {
         let key = query.sort.expression();
         let Conditions {
             mut filters,
             mut values,
-        } = query.filter.conditions(owner);
+        } = query.filter.conditions(owner, reach);
         let filter_values = values.len();
         let clause = |filters: &[String]| {
             if filters.is_empty() {
@@ -709,6 +784,14 @@ impl Library {
             self.rebuild_work_list(&tx)?;
             tx.commit()?;
         }
+        // 絞り込みは「少ない側の部分索引から引いて並べ直す」か「並べ替えの索引を順に読む」かを、
+        // 統計の件数で選ぶ。統計がないと、お気に入りが 0 件でも全作品を読む。読む量を区切った
+        // 概算で足り、変わりが少なければ何もしない。
+        conn.execute_batch(if stale {
+            "PRAGMA analysis_limit=1000; ANALYZE;"
+        } else {
+            "PRAGMA analysis_limit=1000; PRAGMA optimize=0x10002;"
+        })?;
         Ok(())
     }
 
@@ -826,7 +909,8 @@ impl Library {
         query: &WorkListQuery,
     ) -> Result<WorkListPage> {
         let limit = query.limit.clamp(1, PAGE_LIMIT);
-        let page = PageSql::new(query, owner, limit)?;
+        let reach = TagReach::measure(conn, &query.filter)?;
+        let page = PageSql::new(query, owner, limit, &reach)?;
         let total = if query.count {
             let count: i64 = conn.prepare_cached(&page.count)?.query_row(
                 rusqlite::params_from_iter(

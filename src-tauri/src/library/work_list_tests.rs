@@ -424,7 +424,7 @@ fn every_page_reads_through_an_index_instead_of_sorting_the_whole_shelf() {
                         }),
                         ..WorkListQuery::default()
                     };
-                    let page = PageSql::new(&query, library.id, 60).unwrap();
+                    let page = PageSql::new(&query, library.id, 60, &TagReach::default()).unwrap();
                     let plan: Vec<String> = conn
                         .prepare(&format!("EXPLAIN QUERY PLAN {}", page.page))
                         .unwrap()
@@ -1021,4 +1021,81 @@ fn every_filter_selects_the_works_with_that_property_and_pages_through_them() {
     // 修復で分けた版も版の番号には数える（旧棚の版の表示と同じ）。
     assert_eq!(library.work_card(ids["g"]).unwrap().version_number, 2);
     library.verify().unwrap();
+}
+
+/// 少ないタグは保存版の索引から作品を集め、多いタグは一覧を順に読む。どちらでも同じ作品が返る。
+#[test]
+fn a_rare_tag_collects_works_through_the_snapshot_index_and_both_ways_agree() {
+    let temp = Temp::new();
+    let library = Library::create(&temp.0).unwrap();
+    filter_shelf(&library);
+    let conn = library.reader().unwrap();
+    let run = |filter: WorkFilter, reach: &TagReach| -> (Vec<Vec<u8>>, i64, String) {
+        let query = WorkListQuery {
+            filter,
+            ..WorkListQuery::default()
+        };
+        let sql = PageSql::new(&query, library.id, PAGE_LIMIT, reach).unwrap();
+        let params = || rusqlite::params_from_iter(sql.values.iter().map(|v| v.as_ref()));
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", sql.page))
+            .unwrap()
+            .query_map(params(), |r| r.get(3))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let works = conn
+            .prepare(&sql.page)
+            .unwrap()
+            .query_map(params(), |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let count = conn
+            .query_row(
+                &sql.count,
+                rusqlite::params_from_iter(
+                    sql.values[..sql.filter_values].iter().map(|v| v.as_ref()),
+                ),
+                |r| r.get(0),
+            )
+            .unwrap();
+        (works, count, plan.join(" / "))
+    };
+    // 棚が大きいと見なせば、どのタグも少ない側になる。
+    let narrow = TagReach {
+        snapshots: BTreeMap::new(),
+        shelf: 1_000_000,
+    };
+    for (tags, any_tag) in [
+        (vec!["R"], false),
+        (vec!["R", "S"], false),
+        (vec!["R", "S"], true),
+        (vec!["ない"], false),
+    ] {
+        let filter = WorkFilter {
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            any_tag,
+            ..WorkFilter::default()
+        };
+        let (wide_works, wide_count, wide_plan) = run(filter.clone(), &TagReach::default());
+        let (narrow_works, narrow_count, narrow_plan) = run(filter, &narrow);
+        assert_eq!(narrow_works, wide_works, "{tags:?} {any_tag}");
+        assert_eq!(narrow_count, wide_count, "{tags:?} {any_tag}");
+        assert!(!wide_plan.contains("work_list_snapshot"), "{wide_plan}");
+        assert!(narrow_plan.contains("work_list_snapshot"), "{narrow_plan}");
+    }
+    // 保存版に付いた数で選ぶ（前の版も数える）。R は 7 作品の棚で 3 版（10 倍で棚を超える）なので順に読む。
+    let measured = TagReach::measure(
+        &conn,
+        &WorkFilter {
+            tags: vec!["R".into()],
+            ..WorkFilter::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(measured.shelf, 7);
+    assert_eq!(measured.snapshots.get("R"), Some(&3));
+    assert!(!measured.narrow(&["R".into()]));
+    assert!(measured.narrow(&["ない".into()]));
 }
