@@ -63,3 +63,13 @@ fn image_kinds_come_from_the_bytes() {
     assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
     assert_eq!(sniff(b"<html>"), None);
 }
+
+#[test]
+fn the_default_place_is_next_to_the_app_folder_not_inside_it() {
+    let app = Path::new("C:/Users/u/AppData/Roaming/io.github.example.piep");
+    assert_eq!(
+        default_dir(app),
+        Path::new("C:/Users/u/AppData/Roaming/io.github.example.piep.library-v2")
+    );
+    assert!(!default_dir(app).starts_with(app));
+}

@@ -2,7 +2,7 @@
 //!
 //! 旧棚が正本のあいだ、新しい棚は旧棚から移行して作った写しで、アプリは読むだけにする。
 //! 書き込みの命令は置かない（二重書き込みをしない）。棚は `PIEP_LIBRARY_V2_DIR` か、
-//! アプリのフォルダーの `library-v2` にあれば開き、なければ何もしない（画面には何も出さない）。
+//! アプリのフォルダーの隣の `….library-v2` にあれば開き、なければ何もしない（画面には何も出さない）。
 //!
 //! 開くのと索引の同期は起動の門（旧棚の準備）と別のスレッドで進める。全棚では索引を
 //! 初めて作るのに数分かかるので、旧棚の画面を待たせない。
@@ -139,12 +139,22 @@ impl LibraryV2 {
     }
 }
 
-/// 棚の場所。環境変数があればそれ、なければアプリのフォルダーの `library-v2`。
+/// 棚の場所。環境変数があればそれ、なければアプリのフォルダーの隣の `<アプリのフォルダー名>.library-v2`。
+///
+/// アプリのフォルダーの中には置かない。移行器は旧棚の中への移行を断り（旧棚の全件照合が
+/// 新しい棚のファイルを知らないファイルとして数える）、旧棚の書庫やバックアップにも入ってしまう。
 pub fn library_dir(app_data: &Path) -> PathBuf {
     std::env::var_os(DIR_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| app_data.join(DEFAULT_DIR))
+        .unwrap_or_else(|| default_dir(app_data))
+}
+
+fn default_dir(app_data: &Path) -> PathBuf {
+    let mut name = app_data.file_name().unwrap_or_default().to_os_string();
+    name.push(".");
+    name.push(DEFAULT_DIR);
+    app_data.with_file_name(name)
 }
 
 /// 起動のときに呼ぶ。別のスレッドで開く。
@@ -206,6 +216,8 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// 新しい棚の状態（ない・開いている・索引の同期中・使える・失敗）。使えるときは移行の
+/// 未解決の記録も返す。
 #[tauri::command]
 pub fn library_v2_status(state: State<'_, Arc<LibraryV2>>) -> LibraryV2Status {
     state.status()

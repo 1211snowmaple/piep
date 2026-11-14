@@ -211,6 +211,38 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let report=search_features::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]))?;
             println!("{}",serde_json::to_string_pretty(&report)?);
         },
+        Some("semantic-sync") if args.len()==4=>{
+            // 意味検索の索引を同期する。旧棚の保存フォルダー（その親に search/semantic-v2 と models）
+            // から、同じ文のベクトルを引き継ぐ。
+            let previous=Path::new(&args[3]);
+            piep_lib::database::semantic_index::set_model_cache_dir(previous);
+            let library=Library::open(Path::new(&args[2]))?;
+            let started=std::time::Instant::now();
+            let mut last=std::time::Instant::now();
+            let report=library.sync_semantic_index(Some(previous),&||false,&mut |done,total|{
+                if last.elapsed().as_secs()>=30 { eprintln!("{done}/{total}"); last=std::time::Instant::now(); }
+            })?;
+            println!("{}",serde_json::to_string_pretty(&serde_json::json!({
+                "seconds":started.elapsed().as_secs_f64(),"report":format!("{report:?}"),
+                "state":format!("{:?}",library.semantic_index_state()?),
+            }))?);
+        },
+        Some("app-open") if args.len()==3=>{
+            // アプリと同じ手順で新しい棚を開き、索引を同期して、一覧と検索を一度ずつ引く。
+            let state=piep_lib::commands::library_v2::LibraryV2::default();
+            let started=std::time::Instant::now();
+            state.open(Path::new(&args[2]));
+            let opened=started.elapsed().as_secs_f64();
+            let status=state.status();
+            let library=state.library()?;
+            let t=std::time::Instant::now();
+            let list=library.search_works(&piep_lib::library_search::TextSearch::current(""),&piep_lib::library::WorkListQuery::default())?;
+            let list_ms=t.elapsed().as_secs_f64()*1000.0;
+            println!("{}",serde_json::to_string_pretty(&serde_json::json!({
+                "status":status,"open_and_sync_seconds":opened,
+                "list_total":list.page.total,"list_items":list.page.items.len(),"list_ms":list_ms,
+            }))?);
+        },
         Some("compare-filters") if args.len()==5=>{
             let report=filters::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]))?;
             println!("{}",serde_json::to_string_pretty(&report)?);
