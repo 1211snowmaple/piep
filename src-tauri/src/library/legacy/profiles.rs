@@ -1036,18 +1036,16 @@ INSERT INTO series VALUES(8,'pixiv','series','Series title',1,NULL,NULL,1,3);").
                     cover,
                     crate::library::Fingerprint::of(format!("added later {key}").as_bytes()).0
                 );
-                for (name, status) in [("cover_later.jpg", "imported")] {
-                    assert_eq!(
-                        conn.query_row(
-                            "SELECT status FROM migration_records WHERE source_table='__filesystem__' AND source_key=?1",
-                            [format!("series/pixiv/{key}/v1/assets/{name}")],
-                            |r| r.get::<_, String>(0),
-                        )
-                        .unwrap(),
-                        status,
-                        "{key} {name}"
-                    );
-                }
+                assert_eq!(
+                    conn.query_row(
+                        "SELECT status FROM migration_records WHERE source_table='__filesystem__' AND source_key=?1",
+                        [format!("series/pixiv/{key}/v1/assets/cover_later.jpg")],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                    "imported",
+                    "{key}"
+                );
             }
         }
         library.verify().unwrap();
