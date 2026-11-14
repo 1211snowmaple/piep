@@ -10,8 +10,8 @@
 use crate::database::models::AssetEntry;
 use crate::database::parser::{escape_html, parse_fanbox_value_to_html, parse_pixiv_value_to_html};
 use crate::library::{
-    BodyAssetReference, EditContent, Library, LibraryId, ReaderBody, ReaderDocument,
-    ResourceInfo, ResourceReference, ResourceScope, Result,
+    BodyAssetReference, EditContent, Library, LibraryId, ReaderBody, ReaderDocument, ResourceInfo,
+    ResourceReference, ResourceScope, Result,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -141,8 +141,7 @@ impl Library {
         let document = match self.reader_document(work, scope) {
             Ok(document) => document,
             // 取得元の応答に本文が無い作品（公開範囲の外の投稿など）。旧棚と同じく空の本文にする。
-            Err(crate::library::Error::ResourceUnavailable)
-                if matches!(scope, ResourceScope::Snapshot(snapshot) if self.source_body(work, snapshot)?.is_none()) =>
+            Err(crate::library::Error::ResourceUnavailable) if matches!(scope, ResourceScope::Snapshot(snapshot) if self.source_body(work, snapshot)?.is_none()) =>
             {
                 return Ok(RenderedDocument::default());
             }
@@ -281,7 +280,9 @@ fn bound_assets(document: &ReaderDocument) -> (Vec<AssetEntry>, Marks) {
                 None,
                 "illustration",
             ),
-            BodyAssetReference::ArticleImage { key } => (format!("{key}.img"), None, "illustration"),
+            BodyAssetReference::ArticleImage { key } => {
+                (format!("{key}.img"), None, "illustration")
+            }
             BodyAssetReference::ArticleFile { key } => {
                 if resource.file.is_none() {
                     continue;
@@ -337,7 +338,9 @@ fn edit_html(content: &EditContent, document: &ReaderDocument, provider: &str) -
         .iter()
         .flat_map(|manifest| manifest.resources.iter())
         .filter_map(|info| match (&info.reference, &info.file) {
-            (ResourceReference::Media { slot }, Some(file)) => Some((slot.clone(), file.id.to_string())),
+            (ResourceReference::Media { slot }, Some(file)) => {
+                Some((slot.clone(), file.id.to_string()))
+            }
             _ => None,
         })
         .collect();

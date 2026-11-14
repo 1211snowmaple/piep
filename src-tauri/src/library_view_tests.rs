@@ -24,7 +24,9 @@ fn capture(provider: &str, body: SourceBody, image: &[u8], text_length: i64) -> 
         external_key: "one".into(),
         kind: EntityKind::Work,
         route: "test".into(),
-        raw: serde_json::to_vec(&json!({"from": "source"})).unwrap().into(),
+        raw: serde_json::to_vec(&json!({"from": "source"}))
+            .unwrap()
+            .into(),
         metadata: BTreeMap::from([
             ("title".into(), json!("題")),
             ("text_length".into(), json!(text_length)),
@@ -67,7 +69,9 @@ fn pixiv_images_are_resolved_through_the_new_shelf_bindings() {
     let body = SourceBody::PixivText(
         "一[uploadedimage:123]二[pixivimage:9-2]三[uploadedimage:404]".into(),
     );
-    let saved = library.capture(capture("pixiv", body, b"picture", 3)).unwrap();
+    let saved = library
+        .capture(capture("pixiv", body, b"picture", 3))
+        .unwrap();
     let picture = ResourceReference::Media {
         slot: "picture".into(),
     };
@@ -99,13 +103,24 @@ fn pixiv_images_are_resolved_through_the_new_shelf_bindings() {
         )
         .unwrap();
     let rendered = library
-        .render_document(saved.entity_id, ResourceScope::Snapshot(saved.snapshot_id), "pixiv")
+        .render_document(
+            saved.entity_id,
+            ResourceScope::Snapshot(saved.snapshot_id),
+            "pixiv",
+        )
         .unwrap();
     let html = rendered.pages.join("");
     let file = Fingerprint::of(b"picture").to_string();
-    assert_eq!(html.matches(&format!(r#"data-local-path="{file}""#)).count(), 2, "{html}");
+    assert_eq!(
+        html.matches(&format!(r#"data-local-path="{file}""#))
+            .count(),
+        2,
+        "{html}"
+    );
     // 取得できなかった画像は、旧棚と同じ印のまま。
-    assert!(html.contains(r#"data-image-reference="[uploadedimage:404]" data-image-missing="true""#));
+    assert!(
+        html.contains(r#"data-image-reference="[uploadedimage:404]" data-image-missing="true""#)
+    );
     // 保存名（saved-name.png）や旧棚のパスは出さない。
     assert!(!html.contains("saved-name"));
 }
@@ -144,16 +159,29 @@ fn article_images_and_files_point_at_their_files() {
         )
         .unwrap();
     let html = library
-        .render_document(saved.entity_id, ResourceScope::Snapshot(saved.snapshot_id), "fanbox")
+        .render_document(
+            saved.entity_id,
+            ResourceScope::Snapshot(saved.snapshot_id),
+            "fanbox",
+        )
         .unwrap()
         .pages
         .join("");
     let image = Fingerprint::of(b"art").to_string();
     let file = Fingerprint::of(b"file").to_string();
-    assert!(html.contains(&format!(r#"data-local-path="{image}""#)), "{html}");
+    assert!(
+        html.contains(&format!(r#"data-local-path="{image}""#)),
+        "{html}"
+    );
     // 添付は印で照合する。置き場の 16 進が「f1」を含んでも画像には当たらない。
-    assert!(html.contains(&format!(r#"data-local-path="{file}/piep-file-z0z""#)), "{html}");
-    assert!(!html.contains(&format!(r#"data-local-path="{image}/"#)), "{html}");
+    assert!(
+        html.contains(&format!(r#"data-local-path="{file}/piep-file-z0z""#)),
+        "{html}"
+    );
+    assert!(
+        !html.contains(&format!(r#"data-local-path="{image}/"#)),
+        "{html}"
+    );
 }
 
 #[test]
@@ -176,7 +204,10 @@ fn image_and_file_posts_bind_their_lists_by_position() {
             saved.entity_id,
             saved.snapshot_id,
             vec![
-                bind(BodyAssetReference::ArticleImageAt { index: 0 }, picture.clone()),
+                bind(
+                    BodyAssetReference::ArticleImageAt { index: 0 },
+                    picture.clone(),
+                ),
                 ReaderBinding {
                     reference: BodyAssetReference::ArticleImageAt { index: 1 },
                     resource: None,
@@ -195,15 +226,27 @@ fn image_and_file_posts_bind_their_lists_by_position() {
         )
         .unwrap();
     let html = library
-        .render_document(saved.entity_id, ResourceScope::Snapshot(saved.snapshot_id), "fanbox")
+        .render_document(
+            saved.entity_id,
+            ResourceScope::Snapshot(saved.snapshot_id),
+            "fanbox",
+        )
         .unwrap()
         .pages
         .join("");
     let image = Fingerprint::of(b"art").to_string();
     let file = Fingerprint::of(b"file").to_string();
-    assert_eq!(html.matches(&format!(r#"data-local-path="{image}""#)).count(), 1, "{html}");
+    assert_eq!(
+        html.matches(&format!(r#"data-local-path="{image}""#))
+            .count(),
+        1,
+        "{html}"
+    );
     assert_eq!(html.matches("data-image-missing").count(), 1, "{html}");
-    assert!(html.contains(&format!(r#"data-local-path="{file}/piep-file-z"#)), "{html}");
+    assert!(
+        html.contains(&format!(r#"data-local-path="{file}/piep-file-z"#)),
+        "{html}"
+    );
     assert!(html.contains("lost.psd(見つかりません)"), "{html}");
 }
 
@@ -215,21 +258,35 @@ fn the_reader_gets_pages_outline_search_and_length_like_the_old_shelf() {
     let body = SourceBody::PixivText("[chapter:一章]雨の朝[newpage][chapter:二章]カサの話".into());
     let saved = library.capture(capture("pixiv", body, b"art", 0)).unwrap();
     let scope = ResourceScope::Snapshot(saved.snapshot_id);
-    let rendered = library.render_document(saved.entity_id, scope, "pixiv").unwrap();
+    let rendered = library
+        .render_document(saved.entity_id, scope, "pixiv")
+        .unwrap();
     // pixiv の [newpage] は原稿のページ。転送のページとの対応も旧棚と同じ形で返す。
     assert_eq!(rendered.pages.len(), 2);
     assert_eq!(rendered.source_page_starts, vec![0, 1]);
     // 字数は HTML ではなく本文の平文で数える（旧棚の残り時間の目安と同じ）。
     assert_eq!(
         rendered.text_chars,
-        library.work_text(saved.entity_id, scope).unwrap().chars().count()
+        library
+            .work_text(saved.entity_id, scope)
+            .unwrap()
+            .chars()
+            .count()
     );
     let outline = reader_outline(&rendered.pages);
-    let titles: Vec<_> = outline.iter().map(|entry| (entry.page, entry.title.as_str())).collect();
+    let titles: Vec<_> = outline
+        .iter()
+        .map(|entry| (entry.page, entry.title.as_str()))
+        .collect();
     assert_eq!(titles, vec![(1, "一章"), (2, "二章")]);
     // 本文内検索は旧棚と同じ畳み方（カタカナとひらがなを同じに見る）。
     let hits = search_reader_pages(&rendered.pages, "かさ", 50);
-    assert_eq!(hits.iter().map(|hit| (hit.page, hit.count)).collect::<Vec<_>>(), vec![(2, 1)]);
+    assert_eq!(
+        hits.iter()
+            .map(|hit| (hit.page, hit.count))
+            .collect::<Vec<_>>(),
+        vec![(2, 1)]
+    );
 }
 
 #[test]
@@ -240,7 +297,11 @@ fn a_work_whose_source_had_no_body_reads_as_an_empty_body() {
     without.body = None;
     let saved = library.capture(without).unwrap();
     let rendered = library
-        .render_document(saved.entity_id, ResourceScope::Snapshot(saved.snapshot_id), "fanbox")
+        .render_document(
+            saved.entity_id,
+            ResourceScope::Snapshot(saved.snapshot_id),
+            "fanbox",
+        )
         .unwrap();
     assert!(rendered.pages.is_empty());
 }
@@ -250,10 +311,20 @@ fn versions_media_text_and_the_source_response_of_a_work() {
     let dir = temp("versions");
     let library = Library::create(&dir.0).unwrap();
     let first = library
-        .capture(capture("local", SourceBody::PlainText("一行目".into()), b"a", 3))
+        .capture(capture(
+            "local",
+            SourceBody::PlainText("一行目".into()),
+            b"a",
+            3,
+        ))
         .unwrap();
     let second = library
-        .capture(capture("local", SourceBody::PlainText("二行目\n三行目".into()), b"b", 7))
+        .capture(capture(
+            "local",
+            SourceBody::PlainText("二行目\n三行目".into()),
+            b"b",
+            7,
+        ))
         .unwrap();
     assert_eq!(first.entity_id, second.entity_id);
     let work = first.entity_id;
@@ -279,8 +350,16 @@ fn versions_media_text_and_the_source_response_of_a_work() {
             .map(|m| (m.kind, m.name.as_deref(), m.file.clone()))
             .collect::<Vec<_>>(),
         vec![
-            ("media", Some("saved-name.png"), Some(Fingerprint::of(b"b").to_string())),
-            ("file", Some("notes.txt"), Some(Fingerprint::of(b"file").to_string())),
+            (
+                "media",
+                Some("saved-name.png"),
+                Some(Fingerprint::of(b"b").to_string())
+            ),
+            (
+                "file",
+                Some("notes.txt"),
+                Some(Fingerprint::of(b"file").to_string())
+            ),
         ]
     );
 
@@ -297,7 +376,10 @@ fn versions_media_text_and_the_source_response_of_a_work() {
         .join("");
     assert!(html.contains("二行目<br />\n三行目"), "{html}");
     assert_eq!(
-        library.work_original(work, second.snapshot_id).unwrap().as_deref(),
+        library
+            .work_original(work, second.snapshot_id)
+            .unwrap()
+            .as_deref(),
         Some(r#"{"from":"source"}"#)
     );
 }
@@ -332,7 +414,9 @@ fn probe_a_real_shelf() {
     loop {
         let page = library.list_works(&query).unwrap();
         for card in &page.items {
-            if !only.is_empty() && !only.contains(&format!("{}:{}", card.provider, card.external_key)) {
+            if !only.is_empty()
+                && !only.contains(&format!("{}:{}", card.provider, card.external_key))
+            {
                 continue;
             }
             works += 1;
@@ -343,7 +427,8 @@ fn probe_a_real_shelf() {
                     // 本文の無い作品は空の本文として組めればよい。
                     match library.render_document(card.id, scope, &card.provider) {
                         Ok(rendered) if rendered.pages.is_empty() => empty += 1,
-                        _ => failures.push(format!("{} {}: {error}", card.provider, card.external_key)),
+                        _ => failures
+                            .push(format!("{} {}: {error}", card.provider, card.external_key)),
                     }
                     continue;
                 }
@@ -356,7 +441,9 @@ fn probe_a_real_shelf() {
             bound += document.bindings.len() - work_unbound;
             unbound += work_unbound;
             let timer = std::time::Instant::now();
-            let rendered = library.render_document(card.id, scope, &card.provider).unwrap();
+            let rendered = library
+                .render_document(card.id, scope, &card.provider)
+                .unwrap();
             let took = timer.elapsed();
             let html = rendered.pages.join("");
             headings += crate::database::queries::reader_outline(&rendered.pages).len();
@@ -365,7 +452,9 @@ fn probe_a_real_shelf() {
             if pixiv
                 && (starts.first().is_some_and(|first| *first != 0)
                     || starts.windows(2).any(|pair| pair[0] >= pair[1])
-                    || starts.last().is_some_and(|last| *last >= rendered.pages.len()))
+                    || starts
+                        .last()
+                        .is_some_and(|last| *last >= rendered.pages.len()))
             {
                 bad_starts.push(format!("{} {}", card.provider, card.external_key));
             }
@@ -380,14 +469,20 @@ fn probe_a_real_shelf() {
             let _ = crate::database::queries::search_reader_pages(&rendered.pages, "の", 50);
             let searched = timer.elapsed();
             if searched > slowest_search.0 {
-                slowest_search = (searched, Some(format!("{} {}", card.provider, card.external_key)));
+                slowest_search = (
+                    searched,
+                    Some(format!("{} {}", card.provider, card.external_key)),
+                );
             }
             if took > slowest.0 {
-                slowest = (took, Some(format!("{} {}", card.provider, card.external_key)));
+                slowest = (
+                    took,
+                    Some(format!("{} {}", card.provider, card.external_key)),
+                );
             }
             let work_resolved = html.matches("data-local-path=").count();
-            let work_missing =
-                html.matches("data-image-missing").count() + html.matches("missing-file-placeholder").count();
+            let work_missing = html.matches("data-image-missing").count()
+                + html.matches("missing-file-placeholder").count();
             resolved += work_resolved;
             missing += work_missing;
             if !only.is_empty() {
@@ -395,7 +490,11 @@ fn probe_a_real_shelf() {
                     "{}:{} bindings={:?}",
                     card.provider,
                     card.external_key,
-                    document.bindings.iter().map(|b| (&b.reference, b.resource.is_some())).collect::<Vec<_>>()
+                    document
+                        .bindings
+                        .iter()
+                        .map(|b| (&b.reference, b.resource.is_some()))
+                        .collect::<Vec<_>>()
                 );
                 for (index, _) in html.match_indices("data-image-missing") {
                     let from = html[..index].rfind('<').unwrap_or(0);

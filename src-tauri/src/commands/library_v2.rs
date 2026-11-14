@@ -472,7 +472,11 @@ pub async fn library_v2_search_content(
         let library = state.library()?;
         let card = library.work_card(work).map_err(|e| e.to_string())?;
         let document = state.document(&library, work, scope_of(&card, snapshot), &card.provider)?;
-        Ok(search_reader_pages(&document.pages, &query, limit.unwrap_or(50)))
+        Ok(search_reader_pages(
+            &document.pages,
+            &query,
+            limit.unwrap_or(50),
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -527,7 +531,12 @@ pub async fn library_v2_original(
         let library = state.library()?;
         let snapshot = match snapshot {
             Some(snapshot) => snapshot,
-            None => library.work_card(work).map_err(|e| e.to_string())?.snapshot_id,
+            None => {
+                library
+                    .work_card(work)
+                    .map_err(|e| e.to_string())?
+                    .snapshot_id
+            }
         };
         library
             .work_original(work, snapshot)
