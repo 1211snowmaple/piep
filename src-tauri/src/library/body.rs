@@ -106,14 +106,23 @@ impl SourceBody {
                 if let Some(text) = body.get("text").and_then(Value::as_str) {
                     return text.into();
                 }
+                // 旧棚の文字数と同じく、段落と見出しの空でない文を空行でつなぐ。
+                // 数え方が変わると、文字数での並べ替えと絞り込みの結果が棚の切り替えで変わる。
                 body.get("blocks")
                     .and_then(Value::as_array)
                     .map(|blocks| {
                         blocks
                             .iter()
+                            .filter(|b| {
+                                matches!(
+                                    b.get("type").and_then(Value::as_str),
+                                    Some("p" | "header")
+                                )
+                            })
                             .filter_map(|b| b.get("text").and_then(Value::as_str))
+                            .filter(|text| !text.trim().is_empty())
                             .collect::<Vec<_>>()
-                            .join("\n")
+                            .join("\n\n")
                     })
                     .unwrap_or_default()
             }
@@ -230,7 +239,7 @@ impl Library {
     }
 
     pub(crate) fn verify_source_bodies(&self, conn: &rusqlite::Connection) -> Result<()> {
-        let mut stmt=conn.prepare("SELECT body_file_id,body_format,body_semantic_hash,body_semantic_rule FROM revision_snapshots WHERE published=1 AND body_file_id IS NOT NULL")?;
+        let mut stmt=conn.prepare("SELECT s.body_file_id,s.body_format,s.body_semantic_hash,s.body_semantic_rule,t.text_length FROM revision_snapshots s LEFT JOIN body_text_stats t ON t.file_id=s.body_file_id WHERE s.published=1 AND s.body_file_id IS NOT NULL")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             if row.get::<_, i64>(3)? != 1 {
@@ -251,6 +260,13 @@ impl Library {
             )?;
             if body.semantic_fingerprint()?.0.as_slice() != expected {
                 return Err(Error::Integrity("本文が比較用の指紋と一致しません".into()));
+            }
+            if let Some(length) = row.get::<_, Option<i64>>(4)? {
+                if body.text_content().chars().count() as i64 != length {
+                    return Err(Error::Integrity(
+                        "本文の文字数の記録が本文と一致しません".into(),
+                    ));
+                }
             }
         }
         Ok(())

@@ -529,6 +529,13 @@ impl LegacyImporter {
             if let Some(date) = detail.get("publishedDatetime").and_then(Value::as_str) {
                 metadata.insert("create_date".into(), json!(date));
             }
+            // 一覧の更新日とカードの抜粋。比較の対象ではないので、変わっても改稿にしない。
+            if let Some(date) = detail.get("updatedDatetime").and_then(Value::as_str) {
+                metadata.insert("update_date".into(), json!(date));
+            }
+            if let Some(excerpt) = detail.get("excerpt").and_then(Value::as_str) {
+                metadata.insert("excerpt".into(), json!(excerpt));
+            }
         }
         if let Some(tags) = detail.get("tags").and_then(Value::as_array) {
             let mut names: Vec<_> = tags

@@ -292,6 +292,25 @@ impl Library {
         Ok(())
     }
 
+    /// 編集文書の題。一覧の行を作るときに、有効な編集のある作品だけが読む。
+    pub(super) fn edit_title(&self, conn: &Connection, file: &[u8]) -> Result<Option<String>> {
+        let file = Self::file_from_conn(
+            conn,
+            Fingerprint(
+                file.try_into()
+                    .map_err(|_| Error::Integrity("編集のハッシュが不正です".into()))?,
+            ),
+        )?;
+        if file.length > MAX_EDIT_BYTES {
+            return Err(Error::Integrity(
+                "編集文書が読み込み上限を超えています".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        self.objects.export(&file, &mut bytes)?;
+        Ok(serde_json::from_slice::<EditContent>(&bytes)?.title)
+    }
+
     pub(crate) fn verify_edit_documents(&self, conn: &Connection) -> Result<()> {
         let mut stmt =
             conn.prepare("SELECT id,content_file_id FROM edit_revisions WHERE sealed=1")?;

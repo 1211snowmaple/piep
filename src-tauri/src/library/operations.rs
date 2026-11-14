@@ -209,6 +209,9 @@ impl Library {
             .checked_add(1)
             .ok_or_else(|| Error::Integrity("更新世代が上限を超えました".into()))?;
         tx.execute("INSERT INTO work_user_state VALUES(?1,?2,?3,?4) ON CONFLICT(work_id,user_id) DO UPDATE SET favorite=excluded.favorite,generation=excluded.generation",params![work.as_bytes().as_slice(),user.as_bytes().as_slice(),favorite,next])?;
+        if user == self.id {
+            self.refresh_work_list(&tx, work)?;
+        }
         let result = UserState {
             favorite,
             generation: next,
@@ -293,6 +296,9 @@ impl Library {
         tx.execute("INSERT INTO edit_documents(work_id,user_id,generation) VALUES(?1,?2,0) ON CONFLICT(work_id,user_id) DO NOTHING",params![work.as_bytes().as_slice(),user.as_bytes().as_slice()])?;
         let column = if activate { "active_id" } else { "draft_id" };
         tx.execute(&format!("UPDATE edit_documents SET {column}=?3,generation=generation+1 WHERE work_id=?1 AND user_id=?2"),params![work.as_bytes().as_slice(),user.as_bytes().as_slice(),edit.as_bytes().as_slice()])?;
+        if activate && user == self.id {
+            self.refresh_work_list(&tx, work)?;
+        }
         tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'edit',?3,?4)",params![request_id.as_bytes().as_slice(),work.as_bytes().as_slice(),serde_json::json!({"edit":edit,"request":payload}).to_string(),chrono::Utc::now().timestamp_millis()])?;
         tx.execute(
             "UPDATE library_meta SET generation=generation+1 WHERE singleton=1",

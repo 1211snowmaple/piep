@@ -9,7 +9,9 @@ impl LegacyImporter {
         target: &Library,
         cancel: &AtomicBool,
     ) -> Result<()> {
-        if !self.has_column("downloads", "last_deep_checked_at")? {
+        let deep = self.has_column("downloads", "last_deep_checked_at")?;
+        let updated = self.has_column("downloads", "source_updated_at")?;
+        if !deep && !updated {
             return Ok(());
         }
         let mut conn = target.conn.lock().map_err(|_| Error::Busy)?;
@@ -17,8 +19,11 @@ impl LegacyImporter {
         self.each_row("downloads",|row| {
             if cancel.load(Ordering::Acquire) { return Err(Error::Canceled) }
             let work=self.work_from_old(&tx,row.integer("id")?)?;
-            let date=row.optional_time("last_deep_checked_at")?;
-            tx.execute("INSERT INTO source_entity_state(entity_id,last_deep_checked_at) VALUES(?1,?2) ON CONFLICT(entity_id) DO UPDATE SET last_deep_checked_at=excluded.last_deep_checked_at",params![work.as_bytes().as_slice(),date])?;
+            let date=if deep { row.optional_time("last_deep_checked_at")? } else { None };
+            // 取得元の更新日は、原本に載らず更新確認の一覧だけが知らせる取得元がある。
+            let source_updated=if updated { row.optional_time("source_updated_at")? } else { None };
+            tx.execute("INSERT INTO source_entity_state(entity_id,last_deep_checked_at,source_updated_at) VALUES(?1,?2,?3) ON CONFLICT(entity_id) DO UPDATE SET last_deep_checked_at=excluded.last_deep_checked_at,source_updated_at=excluded.source_updated_at",params![work.as_bytes().as_slice(),date,source_updated])?;
+            target.refresh_work_list(&tx, work)?;
             mark_row(&tx,"download_source_state",&row.integer("id")?.to_string(),work)
         })?;
         tx.commit()?;

@@ -27,6 +27,7 @@ mod source_state;
 mod store;
 mod suggestions;
 mod transfer;
+mod work_list;
 
 pub use piep_library_protocol as protocol;
 
@@ -60,6 +61,7 @@ pub use searches::{SavedSearch, SavedSearchDefinition, SavedSearchUpdate};
 pub use source_state::SourceEntityState;
 pub use store::{ContentFile, FileChunk, ObjectStore, StorageStats};
 pub use suggestions::{CollectionSuggestion, SuggestedMember, SuggestionDecision, SuggestionJson};
+pub use work_list::{SortValue, WorkCard, WorkCursor, WorkListPage, WorkListQuery, WorkSort};
 
 use std::path::PathBuf;
 

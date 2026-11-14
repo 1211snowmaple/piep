@@ -153,6 +153,9 @@ impl LegacyImporter {
                         "作品 {old_work} に複数の {status} 編集があります"
                     )));
                 }
+                if status == "active" {
+                    target.refresh_work_list(&tx, work)?;
+                }
             }
             mark_row(&tx, "work_edit_revisions", &old.to_string(), edit.id)?;
         }

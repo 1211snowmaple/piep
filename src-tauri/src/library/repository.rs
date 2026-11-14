@@ -306,14 +306,16 @@ impl Library {
             fs::rename(pending, root.join("library.json"))?;
             super::store::sync_directory(root)?;
         }
-        Ok(Self {
+        let library = Self {
             root: root.canonicalize()?,
             id,
             objects,
             conn: Mutex::new(conn),
             readers: Mutex::new(Vec::new()),
             _process_lock: lock,
-        })
+        };
+        library.ensure_work_list()?;
+        Ok(library)
     }
 
     pub fn open(root: &Path) -> Result<Self> {
@@ -342,14 +344,16 @@ impl Library {
         regular_directory(&root.join("objects"))?;
         regular_directory(&root.join("objects").join("v1"))?;
         let objects = Self::open_objects(root)?;
-        Ok(Self {
+        let library = Self {
             root: root.canonicalize()?,
             id: marker.library_id,
             objects,
             conn: Mutex::new(conn),
             readers: Mutex::new(Vec::new()),
             _process_lock: lock,
-        })
+        };
+        library.ensure_work_list()?;
+        Ok(library)
     }
 
     fn open_objects(root: &Path) -> Result<ObjectStore> {
@@ -606,12 +610,14 @@ impl Library {
                 }
             }
         }
-        if let Some(value) = capture.metadata.get_mut("create_date") {
-            if let Some(date) = value
-                .as_str()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            {
-                *value = serde_json::json!(date.timestamp_millis());
+        for field in ["create_date", "update_date"] {
+            if let Some(value) = capture.metadata.get_mut(field) {
+                if let Some(date) = value
+                    .as_str()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                {
+                    *value = serde_json::json!(date.timestamp_millis());
+                }
             }
         }
         if capture.external_key.is_empty()
@@ -1284,34 +1290,14 @@ impl Library {
                 )?;
             }
             tx.execute("INSERT INTO library_items(work_id,added_at,generation) VALUES(?1,?2,1) ON CONFLICT(work_id) DO NOTHING",params![entity.as_bytes().as_slice(),acquired_at])?;
-            let title = merged.get("title").and_then(Value::as_str).unwrap_or("");
-            let author = merged
-                .get("author_name")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            // 現在状態の原本・本文・画像・添付を数える。同じ元ファイルの複数参照は一つ。
-            // 過去の観測原本と過去状態は、履歴の容量へ集計する。
-            let logical_size: i64 = tx.query_row("SELECT coalesce(sum(f.original_size),0) FROM content_files f JOIN (
-                SELECT body_file_id AS file_id FROM revision_snapshots WHERE id=?1
-                UNION SELECT file_id FROM snapshot_files WHERE snapshot_id=?1
-                UNION SELECT r.file_id FROM snapshot_media m JOIN media_renditions r ON r.id=m.rendition_id WHERE m.snapshot_id=?1
-                UNION SELECT o.raw_file_id FROM snapshot_observations so JOIN acquisition_observations o ON o.id=so.observation_id WHERE so.snapshot_id=?1 AND o.result_snapshot_id=?1
-                ) selected ON selected.file_id=f.id",[snapshot.as_bytes().as_slice()],|r|r.get(0))?;
-            let previous_length: Option<i64> = tx
-                .query_row(
-                    "SELECT text_length FROM work_current_projection WHERE work_id=?1",
-                    [entity.as_bytes().as_slice()],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let text_length = body.map_or(
-                merged
-                    .get("text_length")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(previous_length.unwrap_or(0) as u64),
-                |b| b.text_length,
-            );
-            tx.execute("INSERT INTO work_current_projection(work_id,snapshot_id,title,author_name,text_length,logical_size,published_at,recipe) VALUES(?1,?2,?3,?4,?5,?6,?7,1) ON CONFLICT(work_id) DO UPDATE SET snapshot_id=excluded.snapshot_id,title=excluded.title,author_name=excluded.author_name,text_length=excluded.text_length,logical_size=excluded.logical_size,published_at=excluded.published_at,recipe=excluded.recipe",params![entity.as_bytes().as_slice(),snapshot.as_bytes().as_slice(),title,author,sql_size(text_length)?,logical_size,merged.get("create_date").and_then(Value::as_i64)])?;
+            // 本文の文字数は本文ファイルだけで決まる。引き継いだ本文は前に数えた値を使う。
+            if let Some(body) = body {
+                tx.execute(
+                    "INSERT OR IGNORE INTO body_text_stats(file_id,text_length) VALUES(?1,?2)",
+                    params![body.file.id.0.as_slice(), sql_size(body.text_length)?],
+                )?;
+            }
+            self.refresh_work_list(&tx, entity)?;
         }
         let result = CaptureResult {
             entity_id: entity,
@@ -1569,6 +1555,7 @@ impl Library {
         let conn = self.reader()?;
         self.verify_edit_documents(&conn)?;
         self.verify_source_bodies(&conn)?;
+        self.verify_work_list(&conn)?;
         self.verify_reading_positions(&conn)?;
         self.verify_acquisitions(&conn)?;
         super::source_state::verify_source_state(&conn)?;
@@ -2208,7 +2195,8 @@ mod tests {
     }
 
     #[test]
-    fn current_logical_size_counts_raw_body_and_attachments_and_media_once_per_file() {
+    fn current_logical_size_counts_raw_attachments_and_media_once_per_file_without_the_derived_body(
+    ) {
         let temp = Temp::new();
         let library = Library::create(&temp.0).unwrap();
         let mut input = capture("題名");
@@ -2232,8 +2220,7 @@ mod tests {
         library.capture(input).unwrap();
         assert_eq!(
             library.works(1).unwrap()[0].logical_size,
-            (b"raw provenance".len() + "本文".len() + b"shared picture".len() + b"attachment".len())
-                as u64
+            (b"raw provenance".len() + b"shared picture".len() + b"attachment".len()) as u64
         );
     }
 
