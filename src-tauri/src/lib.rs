@@ -225,6 +225,22 @@ pub fn run() -> tauri::Result<()> {
         .plugin(tauri_plugin_process::init())
         .manage(commands::startup::StartupGate::default())
         .manage(commands::startup::WindowSchemeFile::default())
+        .manage(Arc::new(commands::library_v2::LibraryV2::default()))
+        // 新しい棚の画像（評価文書 4.1 の 2）。開いていなければ 503。
+        .register_asynchronous_uri_scheme_protocol(
+            commands::library_v2::URI_SCHEME,
+            |context, request, responder| {
+                let state = Arc::clone(
+                    &context
+                        .app_handle()
+                        .state::<Arc<commands::library_v2::LibraryV2>>(),
+                );
+                let path = request.uri().path().to_owned();
+                tauri::async_runtime::spawn_blocking(move || {
+                    responder.respond(commands::library_v2::respond(&state, &path));
+                });
+            },
+        )
         .setup(|app| {
             let app_data = app
                 .path()
@@ -257,6 +273,12 @@ pub fn run() -> tauri::Result<()> {
                 .background_color(commands::startup::window_background(&app_data))
                 .build()?;
 
+            // 新しい棚（あれば）は旧棚の準備と別に開く。画面は旧棚の準備だけを待つ。
+            commands::library_v2::open_in_background(
+                Arc::clone(&app.state::<Arc<commands::library_v2::LibraryV2>>()),
+                &app_data,
+            );
+
             // ここから先は棚の規模に比例して時間がかかる。`setup` はメインスレッド
             // なので、ここで待つと窓が固まり、Windows が「応答なし」を付ける。
             let handle = app.handle().clone();
@@ -283,6 +305,11 @@ pub fn run() -> tauri::Result<()> {
             // 起動 (commands::startup)
             commands::startup::startup_wait_for_library,
             commands::startup::startup_remember_color_scheme,
+            // 新しい棚の読み取り (commands::library_v2)
+            commands::library_v2::library_v2_status,
+            commands::library_v2::library_v2_search,
+            commands::library_v2::library_v2_decorations,
+            commands::library_v2::library_v2_work_card,
             // サーバーモード (commands::server)
             commands::server::server_status,
             commands::server::server_embedded_start,
