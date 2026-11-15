@@ -59,47 +59,47 @@ impl LegacyImporter {
         let reject = || {
             Error::Integrity("移行後に利用者の変更が保存されています。移行先は新しい空のライブラリにしてください".into())
         };
+        // 移行が書いた利用者の状態は、要求 ID を migration_requests に残してある。それ以外の
+        // 変更があれば、移行先が使われ始めたものとして断る。
         let mut stmt = conn.prepare(
-            "SELECT entity_id,operation,payload_json FROM outbox WHERE operation<>'capture'",
+            "SELECT o.request_id,o.entity_id,o.operation,o.payload_json,EXISTS(SELECT 1 FROM migration_requests r WHERE r.source_table='user_state' AND r.request_id=o.request_id) FROM outbox o WHERE o.operation<>'capture'",
         )?;
         let mut rows = stmt.query([])?;
+        let mut adopt = Vec::new();
         while let Some(row) = rows.next()? {
-            let operation: String = row.get(1)?;
+            let operation: String = row.get(2)?;
             if operation != "user_state" {
                 return Err(reject());
             }
-            let work: Vec<u8> = row.get(0)?;
+            if row.get::<_, bool>(4)? {
+                continue;
+            }
+            // 要求 ID を残す前の移行：旧棚の印を空の状態から一回で写した形だけを認め、
+            // 以後は記録で見分けられるように残す。
+            let work: Vec<u8> = row.get(1)?;
             let work_id = LibraryId::from_slice(&work).map_err(|_| reject())?;
-            let (provider,key):(String,String)=conn.query_row("SELECT provider,external_key FROM external_identities WHERE entity_id=?1 AND kind='work'",[work.as_slice()],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            // 移行が書いた利用者の状態は、旧棚のお気に入りと監視をそのまま写した一回だけ。
-            let watch = if self.has_column("downloads", "watch_updates")? {
-                "watch_updates"
-            } else {
-                "0"
-            };
-            let old: Option<(bool, bool)> = self
-                .conn
-                .query_row(
-                    &format!(
-                        "SELECT favorite,{watch} FROM downloads WHERE source=?1 AND source_id=?2"
-                    ),
-                    params![provider, key],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            let Some((favorite, watching)) = old.filter(|(f, w)| *f || *w) else {
-                return Err(reject());
-            };
-            let payload: String = row.get(2)?;
+            let payload: String = row.get(3)?;
             let payload: serde_json::Value = serde_json::from_str(&payload)?;
+            let favorite = payload["request"]["favorite"]
+                .as_bool()
+                .ok_or_else(reject)?;
+            let watching = payload["request"]["watching"]
+                .as_bool()
+                .ok_or_else(reject)?;
             let expected = serde_json::json!({"request":{"work":work_id,"user":target.id,"expected":0,"favorite":favorite,"watching":watching},"result":{"favorite":favorite,"watching":watching,"generation":1}});
-            if payload != expected {
+            if payload != expected || !(favorite || watching) {
                 return Err(reject());
             }
-            let state:Option<(bool,bool,i64)>=conn.query_row("SELECT favorite,watching,generation FROM work_user_state WHERE work_id=?1 AND user_id=?2",params![work.as_slice(),target.id.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-            if state != Some((favorite, watching, 1)) {
-                return Err(reject());
-            }
+            let request: Vec<u8> = row.get(0)?;
+            adopt.push((format!("{work_id}:0"), request));
+        }
+        drop(rows);
+        drop(stmt);
+        for (key, request) in adopt {
+            conn.execute(
+                "INSERT OR IGNORE INTO migration_requests VALUES('user_state',?1,?2)",
+                params![key, request],
+            )?;
         }
         Ok(())
     }

@@ -47,6 +47,8 @@ pub struct LegacyImportReport {
     pub rebuildable_tables: BTreeMap<String, usize>,
     /// 段階ごとにかかった時間。走った順。
     pub stages: Vec<StageTime>,
+    /// 前回の移行から行が変わっていた旧表（追いつきのとき）。
+    pub changed_tables: Vec<String>,
     #[serde(skip)]
     lap: Option<Instant>,
 }
@@ -280,24 +282,24 @@ impl LegacyImporter {
                 }
             }
             if let Some(work) = work {
-                if favorite || watching {
-                    let state = target.user_state(work, target.id)?;
-                    if state.generation == 0 {
-                        target.set_user_state(
-                            LibraryId::now_v7(),
-                            work,
-                            target.id,
-                            0,
-                            crate::library::UserStateChange {
-                                favorite: Some(favorite),
-                                watching: Some(watching),
-                            },
-                        )?;
-                    } else if (favorite && !state.favorite) || (watching && !state.watching) {
-                        return Err(Error::Integrity(
-                            "移行先の利用者状態が変更されています".into(),
-                        ));
-                    }
+                // 旧棚の今のお気に入りと監視に合わせる。追いつきでは外した印もそのまま写す。
+                let state = target.user_state(work, target.id)?;
+                if state.favorite != favorite || state.watching != watching {
+                    let request = migration_request(
+                        target,
+                        "user_state",
+                        &format!("{work}:{}", state.generation),
+                    )?;
+                    target.set_user_state(
+                        request,
+                        work,
+                        target.id,
+                        state.generation,
+                        crate::library::UserStateChange {
+                            favorite: Some(favorite),
+                            watching: Some(watching),
+                        },
+                    )?;
                 }
                 report.works += 1;
             } else {
@@ -477,22 +479,7 @@ impl LegacyImporter {
             acquired_at,
         } = version;
         let migration_key = format!("{work_id}:{version_id}:{number}");
-        let request_id = {
-            let conn = target.conn.lock().map_err(|_| Error::Busy)?;
-            let request:Option<Vec<u8>>=conn.query_row("SELECT request_id FROM migration_requests WHERE source_table='download_versions' AND source_key=?1",[&migration_key],|r|r.get(0)).optional()?;
-            match request {
-                Some(id) => LibraryId::from_slice(&id)
-                    .map_err(|_| Error::Integrity("移行要求 ID が不正です".into()))?,
-                None => {
-                    let id = LibraryId::now_v7();
-                    conn.execute(
-                        "INSERT INTO migration_requests VALUES('download_versions',?1,?2)",
-                        params![migration_key, id.as_bytes().as_slice()],
-                    )?;
-                    id
-                }
-            }
-        };
+        let request_id = migration_request(target, "download_versions", &migration_key)?;
         let path = self.managed_path(json_path)?;
         let mut raw = Vec::new();
         File::open(&path)?
@@ -787,20 +774,62 @@ impl LegacyImporter {
                 let tx = conn.transaction()?;
                 Library::register_file(&tx, &prepared)?;
                 let old:Option<Vec<u8>>=tx.query_row("SELECT evidence_file_id FROM migration_records WHERE source_table=?1 AND source_key='__all_rows__'",[&table],|r|r.get(0)).optional()?;
-                if old.is_some_and(|old| old != file.id.0) {
-                    return Err(Error::Integrity(format!(
-                        "旧棚の {table} が前回の移行から変更されています"
-                    )));
+                // 追いつき（旧棚を使い続けたあとの再移行）では、変わった表の原記録を今の行に
+                // 差し替える。前の原記録は棚に残る（消す操作はまだない）。各領域の正規化が、
+                // 今の行との差を取り込む。
+                let changed = old.is_some_and(|old| old != file.id.0);
+                if changed {
+                    report.changed_tables.push(table.clone());
                 }
+                // 空になった表も、前に移した行を片付けるために正規化をもう一度通す。
+                let status = if (count == 0 && !changed)
+                    || matches!(table.as_str(), "downloads" | "download_versions")
+                    || APPLICATION_SETTING_TABLES.contains(&table.as_str())
+                {
+                    "imported"
+                } else {
+                    "unresolved"
+                };
                 // 最初の原記録と未完了の印を同時に確定する。正規化開始前に落ちても完成に見せない。
                 tx.execute("INSERT INTO migration_records(source_table,source_key,status) VALUES('__normalization__','migration','unresolved') ON CONFLICT(source_table,source_key) DO UPDATE SET status='unresolved'",[])?;
-                tx.execute("INSERT OR IGNORE INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES(?1,'__all_rows__',?2,?3)",params![table,file.id.0.as_slice(),if count==0 || matches!(table.as_str(),"downloads"|"download_versions") || APPLICATION_SETTING_TABLES.contains(&table.as_str()) { "imported" } else { "unresolved" }])?;
+                if changed {
+                    // 取り込みが済んでいた表も未完了に戻し、各領域の正規化に今の行から取り込み
+                    // 直させる（済めば imported に戻る）。取り込み直せない領域は未解決として残る。
+                    tx.execute("UPDATE migration_records SET evidence_file_id=?2,status=?3 WHERE source_table=?1 AND source_key='__all_rows__'",params![table,file.id.0.as_slice(),status])?;
+                } else {
+                    tx.execute("INSERT OR IGNORE INTO migration_records(source_table,source_key,evidence_file_id,status) VALUES(?1,'__all_rows__',?2,?3)",params![table,file.id.0.as_slice(),status])?;
+                }
                 tx.commit()?;
             }
             fs::remove_file(path)?;
             report.preserved_tables.insert(table.clone(), count);
         }
         Ok(())
+    }
+}
+
+/// 移行が書く一つの変更の要求 ID。同じ鍵では前回と同じ ID を返すので、途中で止まった移行を
+/// 再開しても二重に書かない。移行先の利用者の変更と見分ける印にもなる。
+fn migration_request(target: &Library, table: &str, key: &str) -> Result<LibraryId> {
+    let conn = target.conn.lock().map_err(|_| Error::Busy)?;
+    let request: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT request_id FROM migration_requests WHERE source_table=?1 AND source_key=?2",
+            params![table, key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match request {
+        Some(id) => LibraryId::from_slice(&id)
+            .map_err(|_| Error::Integrity("移行要求 ID が不正です".into())),
+        None => {
+            let id = LibraryId::now_v7();
+            conn.execute(
+                "INSERT INTO migration_requests VALUES(?1,?2,?3)",
+                params![table, key, id.as_bytes().as_slice()],
+            )?;
+            Ok(id)
+        }
     }
 }
 

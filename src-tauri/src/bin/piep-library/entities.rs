@@ -242,11 +242,7 @@ fn same_collections(
     old: Vec<WorkCollectionSummary>,
     new: Vec<CollectionSummary>,
 ) {
-    report.count(if kind == "person" {
-        "person_collection_lists"
-    } else {
-        "series_collection_lists"
-    });
+    report.count(labelled(kind, "collection_lists"));
     let old_ids: Vec<Key> = old.iter().map(|c| (String::new(), c.id.clone())).collect();
     let new_ids: Vec<Key> = new
         .iter()
@@ -259,16 +255,8 @@ fn same_collections(
         .collect();
     sequences(
         report,
-        if kind == "person" {
-            "person_collections"
-        } else {
-            "series_collections"
-        },
-        if kind == "person" {
-            "person_collection_order"
-        } else {
-            "series_collection_order"
-        },
+        labelled(kind, "collections"),
+        labelled(kind, "collection_order"),
         kind,
         key,
         &old_ids,
@@ -430,6 +418,190 @@ fn same_collections(
             false,
         );
     }
+}
+
+/// 作者・シリーズ・全体（`all`）ごとの数え名。
+fn labelled(kind: &str, what: &str) -> &'static str {
+    Box::leak(format!("{kind}_{what}").into_boxed_str())
+}
+
+/// ライブラリの「コレクション」タブの一覧と、コレクションの画面の中身（評価文書 6.23）。
+fn collections(
+    report: &mut Report,
+    old: &Database,
+    new: &Library,
+    ms: &mut Vec<f64>,
+) -> Result<(), Error> {
+    let key: Key = (String::new(), String::from("all"));
+    let old_list = old.list_work_collections()?;
+    let timer = Instant::now();
+    let new_list = new.list_collections()?;
+    ms.push(timer.elapsed().as_secs_f64() * 1000.0);
+    same_collections(report, "all", &key, old_list.clone(), new_list);
+    for summary in &old_list {
+        report.count("collection_details");
+        let at = (String::from("collection"), summary.id.clone());
+        let Some(target) = new.collection_by_legacy_id(&summary.id)? else {
+            report.differ("collection_detail_missing", "all", &at, Value::Null);
+            continue;
+        };
+        let old_detail = old.get_work_collection(&summary.id)?;
+        let timer = Instant::now();
+        let new_detail = new.collection_detail(target)?;
+        ms.push(timer.elapsed().as_secs_f64() * 1000.0);
+        let old_keys: Vec<Key> = old_detail
+            .members
+            .iter()
+            .map(|m| (m.source.clone(), m.source_id.clone()))
+            .collect();
+        let new_keys: Vec<Key> = new_detail
+            .members
+            .iter()
+            .map(|m| (m.provider.clone(), m.external_key.clone()))
+            .collect();
+        sequences(
+            report,
+            "collection_member_keys",
+            "collection_member_order",
+            "all",
+            &at,
+            &old_keys,
+            &new_keys,
+        );
+        let by_key: BTreeMap<Key, &piep_lib::library_collections::CollectionMember> = new_detail
+            .members
+            .iter()
+            .map(|m| ((m.provider.clone(), m.external_key.clone()), m))
+            .collect();
+        for member in &old_detail.members {
+            let member_key = (member.source.clone(), member.source_id.clone());
+            let Some(new_member) = by_key.get(&member_key) else {
+                continue;
+            };
+            report.count("collection_member_rows");
+            let at = (
+                format!("{}:{}", summary.id, member.source),
+                member.source_id.clone(),
+            );
+            report.same(
+                "member_missing",
+                "all",
+                &at,
+                member.missing,
+                new_member.missing,
+                true,
+            );
+            report.same(
+                "member_work",
+                "all",
+                &at,
+                member.work.is_some(),
+                new_member.work.is_some(),
+                true,
+            );
+            report.same(
+                "member_title",
+                "all",
+                &at,
+                member.title.trim(),
+                new_member.title.trim(),
+                false,
+            );
+            report.same(
+                "member_author",
+                "all",
+                &at,
+                member.author_name.trim(),
+                new_member.author_name.trim(),
+                false,
+            );
+            report.same(
+                "member_text_length",
+                "all",
+                &at,
+                member.text_length.max(0) as u64,
+                new_member.text_length,
+                true,
+            );
+            report.same(
+                "member_cover",
+                "all",
+                &at,
+                member.cover_path.is_some(),
+                new_member.cover.is_some(),
+                true,
+            );
+            report.same(
+                "member_role",
+                "all",
+                &at,
+                member.member_role.as_str(),
+                new_member.role.as_str(),
+                true,
+            );
+            report.same(
+                "member_added_by",
+                "all",
+                &at,
+                member.added_by.as_str(),
+                new_member.added_by.as_str(),
+                true,
+            );
+            report.same(
+                "member_pinned",
+                "all",
+                &at,
+                member.pinned,
+                new_member.pinned,
+                true,
+            );
+            report.same(
+                "member_note",
+                "all",
+                &at,
+                blank(member.note.as_deref()),
+                blank(new_member.note.as_deref()),
+                false,
+            );
+            let old_editions: Vec<Key> = member
+                .editions
+                .iter()
+                .map(|e| (e.source.clone(), e.source_id.clone()))
+                .collect();
+            let new_editions: Vec<Key> = new_member
+                .editions
+                .iter()
+                .map(|e| (e.provider.clone(), e.external_key.clone()))
+                .collect();
+            report.same(
+                "member_editions",
+                "all",
+                &at,
+                old_editions,
+                new_editions,
+                false,
+            );
+            if let (Some(old_work), Some(new_work)) = (&member.work, &new_member.work) {
+                report.same(
+                    "member_work_title",
+                    "all",
+                    &at,
+                    old_work.title.trim(),
+                    new_work.title.trim(),
+                    false,
+                );
+                report.same(
+                    "member_work_text_length",
+                    "all",
+                    &at,
+                    old_work.text_length.max(0) as u64,
+                    new_work.text_length,
+                    true,
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// ライブラリのタブの一覧の一つの組み合わせ。
@@ -1244,6 +1416,8 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
 
     let mut list_ms = Vec::new();
     lists(&mut report, &old, old_db, &new, &mut list_ms)?;
+    let mut collection_ms = Vec::new();
+    collections(&mut report, &old, &new, &mut collection_ms)?;
 
     let percentile = |values: &mut Vec<f64>, q: f64| {
         values.sort_by(|a, b| a.total_cmp(b));
@@ -1258,6 +1432,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
         "head_ms": {"p50": percentile(&mut head_ms, 0.5), "p99": percentile(&mut head_ms, 0.99)},
         "person_series_ms": {"p50": percentile(&mut series_ms, 0.5), "p99": percentile(&mut series_ms, 0.99)},
         "list_page_ms": {"p50": percentile(&mut list_ms, 0.5), "p99": percentile(&mut list_ms, 0.99)},
+        "collection_ms": {"p50": percentile(&mut collection_ms, 0.5), "p99": percentile(&mut collection_ms, 0.99)},
         "seconds": started.elapsed().as_secs_f64(),
     }))
 }

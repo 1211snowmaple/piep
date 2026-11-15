@@ -77,6 +77,8 @@ export interface ShelfListQuery {
   descending: boolean;
   limit: number;
   after: ShelfCursor | null;
+  /** ページ番号で開くときに読み飛ばす件数（`after` とは一緒に使わない）。 */
+  offset?: number;
   filter: ShelfFilter;
   count: boolean;
 }
@@ -158,8 +160,14 @@ export function libraryV2Status(): Promise<LibraryV2Status> {
 }
 
 /** `legacyWorks` を渡すと、旧棚の番号でその作品だけに絞る（読みかけの棚。読書位置の鍵が旧棚の番号なので）。 */
-export function libraryV2Search(search: ShelfTextSearch, query: ShelfListQuery, legacyWorks: number[] | null = null): Promise<ShelfSearchView> {
-  return invoke<ShelfSearchView>("library_v2_search", { search, query, legacyWorks });
+/** 取得元の作者・シリーズの指名。 */
+export interface ShelfEntityKey {
+  provider: string | null;
+  key: string;
+}
+
+export function libraryV2Search(search: ShelfTextSearch, query: ShelfListQuery, legacyWorks: number[] | null = null, person: ShelfEntityKey | null = null): Promise<ShelfSearchView> {
+  return invoke<ShelfSearchView>("library_v2_search", { search, query, legacyWorks, person });
 }
 
 export function libraryV2Decorations(text: string, matches: ShelfMatch[]): Promise<ShelfDecoration[]> {
@@ -432,7 +440,7 @@ export function libraryV2Entities(
     query?: string | null;
     filter: ShelfFilter;
     legacyWorks?: number[] | null;
-    series?: { provider: string; key: string } | null;
+    series?: ShelfEntityKey | null;
     scope?: ShelfEntityListScope | null;
     sort?: ShelfSeriesSort | null;
     order?: "asc" | "desc" | null;
@@ -488,6 +496,43 @@ export interface ShelfCollectionSummary {
 /** 作者・シリーズの作品を一つでも含むコレクション。最後に変えた順。 */
 export function libraryV2EntityCollections(kind: "person" | "series", entity: string): Promise<ShelfCollectionSummary[]> {
   return invoke<ShelfCollectionSummary[]>("library_v2_entity_collections", { kind, entity });
+}
+
+/** コレクションの一回（旧棚の `WorkCollectionMember`）。 */
+export interface ShelfCollectionMember {
+  provider: string;
+  external_key: string;
+  /** 棚にある作品。棚に無い回（未保存）は null。 */
+  work: ShelfCard | null;
+  title: string;
+  author_name: string;
+  /** 表紙のファイルの識別子。 */
+  cover: string | null;
+  text_length: number;
+  position: number;
+  role: string;
+  added_by: string;
+  pinned: boolean;
+  note: string | null;
+  missing: boolean;
+  created_at: number;
+  updated_at: number;
+  /** 同じ作品の別版。本文の長い順。 */
+  editions: ShelfCard[];
+}
+
+export interface ShelfCollection extends ShelfCollectionSummary {
+  members: ShelfCollectionMember[];
+}
+
+/** ライブラリの「コレクション」タブの一覧（更新の新しい順）。 */
+export function libraryV2Collections(): Promise<ShelfCollectionSummary[]> {
+  return invoke<ShelfCollectionSummary[]>("library_v2_collections");
+}
+
+/** コレクションの画面。`id` は旧棚の ID（移したもの）か新しい棚の ID。 */
+export function libraryV2Collection(id: string): Promise<ShelfCollection> {
+  return invoke<ShelfCollection>("library_v2_collection", { id });
 }
 
 /** 作者・シリーズの今の版を作った取得元の応答（画面の「保存データ」）。 */

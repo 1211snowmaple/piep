@@ -353,13 +353,15 @@ fn narrow_to_legacy_works(
 }
 
 /// 一覧・本文の検索。語がなければ一覧（`tag:` などの書き方だけでもよい）で、索引の同期中でも読める。
-/// `legacy_works` を渡すと、旧棚の番号でその作品だけに絞る（読みかけの棚）。
+/// `legacy_works` を渡すと、旧棚の番号でその作品だけに絞る（読みかけの棚）。`person` は取得元の
+/// 作者の指名（ライブラリの絞り込みの `personSource`・`personKey`）。
 #[tauri::command]
 pub async fn library_v2_search(
     state: State<'_, Arc<LibraryV2>>,
     search: TextSearch,
     mut query: WorkListQuery,
     legacy_works: Option<Vec<i64>>,
+    person: Option<SeriesKey>,
 ) -> Result<SearchView, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
@@ -370,6 +372,21 @@ pub async fn library_v2_search(
             state.searchable()?
         };
         narrow_to_legacy_works(&state, &library, &mut query.filter, legacy_works)?;
+        if let Some(person) = person {
+            let provider = person
+                .provider
+                .ok_or_else(|| "作者の指名には取得元が要ります".to_owned())?;
+            match library
+                .entity_by_key(crate::library::EntityKind::Person, &provider, &person.key)
+                .map_err(|e| e.to_string())?
+            {
+                Some(id) if query.filter.person.is_none_or(|current| current == id) => {
+                    query.filter.person = Some(id)
+                }
+                // 棚にない作者・画面の作者と別の作者の作品はない。
+                _ => query.filter.works = Some(Vec::new()),
+            }
+        }
         let page = library
             .search_works(&search, &query)
             .map_err(|e| e.to_string())?;
@@ -808,10 +825,11 @@ pub async fn library_v2_entity_original(
     .map_err(|e| e.to_string())?
 }
 
-/// 取得元のシリーズの指名（ライブラリの絞り込みの `seriesSource`・`seriesKey`）。
+/// 取得元のシリーズの指名（ライブラリの絞り込みの `seriesSource`・`seriesKey`）。取得元の
+/// ない指名は、検索語の `series:キー` と同じく、どの取得元のキーか題に当たるシリーズを指す。
 #[derive(serde::Deserialize)]
 pub struct SeriesKey {
-    pub provider: String,
+    pub provider: Option<String>,
     pub key: String,
 }
 
@@ -849,18 +867,21 @@ pub async fn library_v2_entities(
         let library = state.library()?;
         narrow_to_legacy_works(&state, &library, &mut filter, legacy_works)?;
         if let Some(series) = series {
-            match library
-                .entity_by_key(
-                    crate::library::EntityKind::Series,
-                    &series.provider,
-                    &series.key,
-                )
-                .map_err(|e| e.to_string())?
-            {
-                Some(id) => filter.series = Some(id),
-                // 棚にないシリーズの作品はない。
-                None => filter.works = Some(Vec::new()),
-            }
+            // 検索語の `series:` と同じ関数で引く。見つからなければ作品はなく、一つに決まらな
+            // ければ、どれかに入っている作品に絞る。
+            let parts = crate::library_search::QueryParts {
+                series: vec![match series.provider {
+                    Some(provider) => crate::library_search::SeriesRef::Key {
+                        provider,
+                        key: series.key,
+                    },
+                    None => crate::library_search::SeriesRef::KeyOrTitle(series.key),
+                }],
+                ..Default::default()
+            };
+            library
+                .apply_query_parts(&parts, &mut filter)
+                .map_err(|e| e.to_string())?;
         }
         let scope = scope.unwrap_or_default();
         let generation = library.catalogue_generation().map_err(|e| e.to_string())?;
@@ -909,6 +930,90 @@ pub async fn library_v2_entity_collections(
             .library()?
             .entity_collections(kind, entity)
             .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// ライブラリの「コレクション」タブの一覧（更新の新しい順。並べ替えと絞り込みは画面が持つ）。
+#[tauri::command]
+pub async fn library_v2_collections(
+    state: State<'_, Arc<LibraryV2>>,
+) -> Result<Vec<CollectionSummary>, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        state
+            .library()?
+            .list_collections()
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// コレクションの画面の中身。回の作品は一覧と同じ形（表紙の識別子と旧棚の番号つき）。
+#[derive(Serialize)]
+pub struct CollectionView {
+    #[serde(flatten)]
+    pub summary: CollectionSummary,
+    pub members: Vec<CollectionMemberView>,
+}
+
+#[derive(Serialize)]
+pub struct CollectionMemberView {
+    #[serde(flatten)]
+    pub member: crate::library_collections::CollectionMember,
+    pub work: Option<CardView>,
+    pub editions: Vec<CardView>,
+}
+
+/// コレクションの画面。`id` は旧棚の ID（移したもの）か新しい棚の ID。
+#[tauri::command]
+pub async fn library_v2_collection(
+    state: State<'_, Arc<LibraryV2>>,
+    id: String,
+) -> Result<CollectionView, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        let target = match library
+            .collection_by_legacy_id(&id)
+            .map_err(|e| e.to_string())?
+        {
+            Some(found) => found,
+            None => id
+                .parse::<LibraryId>()
+                .map_err(|_| "コレクションが見つかりません".to_string())?,
+        };
+        let detail = library
+            .collection_detail(target)
+            .map_err(|error| match error {
+                crate::library::Error::ResourceUnavailable => {
+                    "コレクションが見つかりません".to_string()
+                }
+                other => other.to_string(),
+            })?;
+        let mut members = Vec::with_capacity(detail.members.len());
+        for mut member in detail.members {
+            let work = member
+                .work
+                .take()
+                .map(|card| state.card_view(&library, &card))
+                .transpose()?;
+            let editions = std::mem::take(&mut member.editions)
+                .iter()
+                .map(|card| state.card_view(&library, card))
+                .collect::<Result<Vec<_>, _>>()?;
+            members.push(CollectionMemberView {
+                member,
+                work,
+                editions,
+            });
+        }
+        Ok(CollectionView {
+            summary: detail.summary,
+            members,
+        })
     })
     .await
     .map_err(|e| e.to_string())?

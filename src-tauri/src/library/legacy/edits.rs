@@ -12,12 +12,16 @@ use std::collections::BTreeMap;
 
 struct PreparedEdit {
     row: LegacyRow,
-    id: LibraryId,
+    /// 前の移行で作った編集。追いつきで中身が同じなら作り直さない。
+    previous: Option<LibraryId>,
     content: PreparedFile,
     document: EditContent,
     blocks: Vec<(i64, EditBlock)>,
     media: BTreeMap<i64, PreparedMedia>,
 }
+
+/// 作品の編集の指し先（有効・下書き）。
+type Pointers = (Option<Vec<u8>>, Option<Vec<u8>>);
 
 struct PreparedMedia {
     file: PreparedFile,
@@ -33,6 +37,28 @@ impl LegacyImporter {
                 return Ok(());
             }
         }
+        // 追いつき：前に移した編集とブロックの ID を引き継ぐ。ブロックの ID が同じなら、
+        // 中身の変わらない編集は同じ文書になり、作り直さずに済む。
+        let (revision_ids, block_ids) = {
+            let conn = target.conn.lock().map_err(|_| Error::Busy)?;
+            let load = |table: &str| -> Result<BTreeMap<String, LibraryId>> {
+                let mut stmt = conn.prepare("SELECT source_key,target_id FROM migration_records WHERE source_table=?1 AND target_id IS NOT NULL")?;
+                let rows = stmt.query_map([table], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                })?;
+                let mut map = BTreeMap::new();
+                for row in rows {
+                    let (key, id) = row?;
+                    map.insert(
+                        key,
+                        LibraryId::from_slice(&id)
+                            .map_err(|_| Error::Integrity("移行対応表の ID が不正です".into()))?,
+                    );
+                }
+                Ok(map)
+            };
+            (load("work_edit_revisions")?, load("work_edit_blocks")?)
+        };
         // 元画像の走査や圧縮の間は、新 DB の書き込みトランザクションを持たない。
         let mut edits = Vec::new();
         let mut block_count = 0;
@@ -42,7 +68,7 @@ impl LegacyImporter {
             if !matches!(row.text("status")?, "active" | "draft" | "archived") {
                 return Err(Error::Integrity(format!("編集 {old} の状態が不明です")));
             }
-            let id = LibraryId::now_v7();
+            let previous = revision_ids.get(&old.to_string()).copied();
             let mut blocks = Vec::new();
             let mut media = BTreeMap::new();
             self.each_row_matching("work_edit_blocks", "edit_revision_id", old, |block| {
@@ -65,8 +91,9 @@ impl LegacyImporter {
                 }
                 let attrs = block.optional_text("attrs_json")?
                     .map(serde_json::from_str).transpose()?.unwrap_or(Value::Null);
-                blocks.push((block.integer("id")?, EditBlock {
-                    id: LibraryId::now_v7(), ordinal: block.integer("block_order")?,
+                let old_block = block.integer("id")?;
+                blocks.push((old_block, EditBlock {
+                    id: block_ids.get(&old_block.to_string()).copied().unwrap_or_else(LibraryId::now_v7), ordinal: block.integer("block_order")?,
                     kind: block.text("block_type")?.into(), text: block.optional_text("text")?.map(str::to_owned),
                     attrs, media_slot: asset.map(|id|format!("legacy-asset:{id}")),
                 }));
@@ -79,7 +106,7 @@ impl LegacyImporter {
                 media:media.iter().map(|(old,m)|EditMedia {slot:format!("legacy-asset:{old}"),file:m.file.file.id,original_name:m.name.clone(),mime_type:m.mime.clone()}).collect(),
                 provenance:Some(json!({"legacy":row.0}))};
             let content = target.store_bytes(&document.encode()?)?;
-            edits.push(PreparedEdit { row, id, content, document, blocks, media });
+            edits.push(PreparedEdit { row, previous, content, document, blocks, media });
             Ok(())
         })?;
         let total_blocks = self.each_row("work_edit_blocks", |_| Ok(()))?;
@@ -93,6 +120,24 @@ impl LegacyImporter {
         if marked(&tx, "work_edit_revisions")? && marked(&tx, "work_edit_blocks")? {
             return Ok(());
         }
+        // 作品ごとの今の指し先。旧棚の今の状態に合わせ、変わった作品だけ世代を進める。
+        let mut current: BTreeMap<LibraryId, Pointers> = BTreeMap::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT work_id,active_id,draft_id FROM edit_documents WHERE user_id=?1",
+            )?;
+            let rows = stmt.query_map([target.id.as_bytes().as_slice()], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get(1)?, r.get(2)?))
+            })?;
+            for row in rows {
+                let (work, active, draft) = row?;
+                let work = LibraryId::from_slice(&work)
+                    .map_err(|_| Error::Integrity("編集の作品 ID が不正です".into()))?;
+                current.insert(work, (active, draft));
+            }
+        }
+        let mut wanted: BTreeMap<LibraryId, Pointers> =
+            current.keys().map(|work| (*work, (None, None))).collect();
         for edit in edits {
             let old = edit.row.integer("id")?;
             let old_work = edit.row.integer("download_id")?;
@@ -120,20 +165,38 @@ impl LegacyImporter {
             }
             let base = LibraryId::from_slice(&base)
                 .map_err(|_| Error::Integrity("編集基準の識別子が不正です".into()))?;
-            Library::insert_edit(
-                &tx,
-                EditHeader {
-                    id: edit.id,
-                    work,
-                    base,
-                    parent: None,
-                    created_at: edit.row.time("created_at")?,
-                },
-                &edit.document,
-                &edit.content,
-            )?;
+            let stored: Option<Vec<u8>> = match edit.previous {
+                Some(previous) => tx
+                    .query_row(
+                        "SELECT content_file_id FROM edit_revisions WHERE id=?1 AND work_id=?2",
+                        params![previous.as_bytes().as_slice(), work.as_bytes().as_slice()],
+                        |r| r.get(0),
+                    )
+                    .optional()?,
+                None => None,
+            };
+            let id = match (edit.previous, stored) {
+                (Some(previous), Some(file)) if file == edit.content.file.id.0 => previous,
+                (previous, stored) => {
+                    // 旧棚で書き換えた編集は、前の編集を親にした新しい編集として残す。
+                    let id = LibraryId::now_v7();
+                    Library::insert_edit(
+                        &tx,
+                        EditHeader {
+                            id,
+                            work,
+                            base,
+                            parent: previous.filter(|_| stored.is_some()),
+                            created_at: edit.row.time("created_at")?,
+                        },
+                        &edit.document,
+                        &edit.content,
+                    )?;
+                    id
+                }
+            };
             for (old, media) in &edit.media {
-                mark_row(&tx, "edit_asset_placements", &old.to_string(), edit.id)?;
+                mark_row(&tx, "edit_asset_placements", &old.to_string(), id)?;
                 tx.execute("UPDATE migration_records SET evidence_file_id=?2 WHERE source_table='edit_asset_placements' AND source_key=?1",params![old.to_string(),media.file.file.id.0.as_slice()])?;
             }
             for (old, block) in edit.blocks {
@@ -141,23 +204,31 @@ impl LegacyImporter {
             }
             let status = edit.row.text("status")?;
             if status != "archived" {
-                tx.execute("INSERT INTO edit_documents(work_id,user_id,generation) VALUES(?1,?2,0) ON CONFLICT(work_id,user_id) DO NOTHING",params![work.as_bytes().as_slice(),target.id.as_bytes().as_slice()])?;
-                let column = if status == "active" {
-                    "active_id"
+                let slot = wanted.entry(work).or_default();
+                let place = if status == "active" {
+                    &mut slot.0
                 } else {
-                    "draft_id"
+                    &mut slot.1
                 };
-                let changed=tx.execute(&format!("UPDATE edit_documents SET {column}=?3,generation=generation+1 WHERE work_id=?1 AND user_id=?2 AND {column} IS NULL"),params![work.as_bytes().as_slice(),target.id.as_bytes().as_slice(),edit.id.as_bytes().as_slice()])?;
-                if changed != 1 {
+                if place.is_some() {
                     return Err(Error::Integrity(format!(
                         "作品 {old_work} に複数の {status} 編集があります"
                     )));
                 }
-                if status == "active" {
-                    target.refresh_work_list(&tx, work)?;
-                }
+                *place = Some(id.as_bytes().to_vec());
             }
-            mark_row(&tx, "work_edit_revisions", &old.to_string(), edit.id)?;
+            mark_row(&tx, "work_edit_revisions", &old.to_string(), id)?;
+        }
+        for (work, (active, draft)) in wanted {
+            let before = current.get(&work).cloned().unwrap_or_default();
+            if before == (active.clone(), draft.clone()) {
+                continue;
+            }
+            tx.execute("INSERT INTO edit_documents(work_id,user_id,generation) VALUES(?1,?2,0) ON CONFLICT(work_id,user_id) DO NOTHING",params![work.as_bytes().as_slice(),target.id.as_bytes().as_slice()])?;
+            tx.execute("UPDATE edit_documents SET active_id=?3,draft_id=?4,generation=generation+1 WHERE work_id=?1 AND user_id=?2",params![work.as_bytes().as_slice(),target.id.as_bytes().as_slice(),active,draft])?;
+            if before.0 != active {
+                target.refresh_work_list(&tx, work)?;
+            }
         }
         mark_table(&tx, "work_edit_revisions")?;
         mark_table(&tx, "work_edit_blocks")?;
@@ -307,6 +378,61 @@ INSERT INTO work_edit_blocks VALUES(12,7,9,'image',NULL,99,NULL);"#).unwrap();
     }
 
     #[test]
+    fn catching_up_keeps_unchanged_edits_and_adds_rewritten_ones_as_children() {
+        let fixture = Fixture::new();
+        let destination = fixture.0.join("new");
+        let (library, report) = fixture.import(&destination);
+        assert!(report.unresolved.is_empty(), "{:?}", report.unresolved);
+        let work = library.works(10).unwrap().remove(0).id;
+        let first = library.edit_state(work, library.id).unwrap();
+        let again = || {
+            let report = LegacyImporter::open(&fixture.0.join("old"))
+                .unwrap()
+                .import(&library, &AtomicBool::new(false), |_| {})
+                .unwrap();
+            assert!(report.unresolved.is_empty(), "{:?}", report.unresolved);
+        };
+        let revisions = || -> i64 {
+            library
+                .conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT count(*) FROM edit_revisions", [], |r| r.get(0))
+                .unwrap()
+        };
+        // 旧棚で編集を書き換えると、前の編集を親にした新しい編集が有効になる。
+        fixture.change("UPDATE work_edit_blocks SET text='直した段落' WHERE id=11; UPDATE work_edit_revisions SET updated_at='2026-03-01 00:00:00';");
+        again();
+        let second = library.edit_state(work, library.id).unwrap();
+        assert_ne!(second.active, first.active);
+        assert_eq!(second.generation, first.generation + 1);
+        assert_eq!(revisions(), 2);
+        let parent: Option<Vec<u8>> = library
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT parent_id FROM edit_revisions WHERE id=?1",
+                [second.active.unwrap().as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, first.active.map(|id| id.as_bytes().to_vec()));
+        // 旧棚が変わらなければ、作り直さない。
+        fixture.change("UPDATE work_edit_revisions SET status=status;");
+        again();
+        assert_eq!(library.edit_state(work, library.id).unwrap(), second);
+        assert_eq!(revisions(), 2);
+        // 旧棚で外した編集は、新しい棚でも有効でなくなる。
+        fixture.change("UPDATE work_edit_revisions SET status='archived';");
+        again();
+        let third = library.edit_state(work, library.id).unwrap();
+        assert!(third.active.is_none());
+        assert_eq!(third.generation, second.generation + 1);
+        library.verify().unwrap();
+    }
+
+    #[test]
     fn optional_title_and_draft_and_archived_states_are_preserved() {
         let fixture = Fixture::new();
         fixture.change("UPDATE work_edit_revisions SET title=NULL; INSERT INTO work_edit_revisions VALUES(8,1,1,'draft',NULL,NULL,'2026-01-01 00:00:00','2026-01-02 00:00:00'); INSERT INTO work_edit_revisions VALUES(9,1,1,'archived','過去の編集',NULL,'2026-01-01 00:00:00','2026-01-02 00:00:00');");
@@ -315,7 +441,8 @@ INSERT INTO work_edit_blocks VALUES(12,7,9,'image',NULL,99,NULL);"#).unwrap();
         let work = library.works(1).unwrap().remove(0);
         let state = library.edit_state(work.id, library.id).unwrap();
         assert!(state.active.is_some() && state.draft.is_some());
-        assert_eq!(state.generation, 2);
+        // 有効と下書きは一度に指すので、世代は一つ進む。
+        assert_eq!(state.generation, 1);
         let active = library.edit(work.id, state.active.unwrap()).unwrap();
         assert_eq!(active.content.title, None);
         let conn = library.conn.lock().unwrap();

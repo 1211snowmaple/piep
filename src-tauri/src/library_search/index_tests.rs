@@ -48,6 +48,21 @@ fn found(library: &Library, query: &str) -> Vec<LibraryId> {
 }
 
 #[test]
+fn a_word_does_not_match_across_the_border_of_two_tags_through_their_readings() {
+    let temp = Temp(std::env::temp_dir().join(format!("piep-search-tags-{}", LibraryId::now_v7())));
+    let library = Library::create(&temp.0).unwrap();
+    let mut tagged = capture("1", "一", "本文", 1_000);
+    tagged.metadata.insert("tags".into(), json!(["雨", "雪"]));
+    let work = library.capture(tagged).unwrap().entity_id;
+    library.sync_search_index(&mut |_, _| {}).unwrap();
+    // 一つのタグの読みには当たる。
+    assert_eq!(found(&library, "あめ"), vec![work]);
+    assert_eq!(found(&library, "ゆき"), vec![work]);
+    // 二つのタグの読みをつないだ「あめゆき」の境目の「めゆ」には当たらない。
+    assert_eq!(found(&library, "めゆ"), Vec::<LibraryId>::new());
+}
+
+#[test]
 fn the_index_follows_saves_tags_and_removals_and_rebuilds_when_lost() {
     let temp =
         Temp(std::env::temp_dir().join(format!("piep-search-index-{}", LibraryId::now_v7())));

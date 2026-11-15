@@ -53,6 +53,8 @@ import { CollectionCoverModal } from "./CollectionCoverModal";
 import { CollectionRenameModal } from "./CollectionRenameModal";
 import { CollectionMemberList } from "./CollectionMemberList";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
+import { Locked } from "@/components/Locked";
+import { SHELF_READ_ONLY, shelfCollection, useShelfMode } from "@/features/library/shelfV2";
 
 function workKey(work: { source: string; sourceId: string }): WorkKey {
   return { source: work.source, sourceId: work.sourceId };
@@ -93,10 +95,15 @@ export default function CollectionPage() {
   const queryClient = useQueryClient();
   const [formOpened, form] = useDisclosure(false);
   const [renameAssist, setRenameAssist] = useState(false);
+  // 新しい棚（試験中・読むだけ）から出すか。ライブラリと同じ好みと条件で決める。新しい棚の答えは
+  // 鍵を分けて持つ（旧棚の変更で読み直す鍵の下に置かない）。
+  const { shelfMode, deciding } = useShelfMode(runtime);
   const collectionQuery = useQuery({
-    queryKey: ["work-collection", collectionId],
-    queryFn: () => runtime ? getWorkCollection(collectionId!) : Promise.resolve(getDemoCollection(collectionId!)),
-    enabled: Boolean(collectionId),
+    queryKey: shelfMode ? ["library-v2-collection", collectionId] : ["work-collection", collectionId],
+    queryFn: () => shelfMode
+      ? shelfCollection(collectionId!)
+      : runtime ? getWorkCollection(collectionId!) : Promise.resolve(getDemoCollection(collectionId!)),
+    enabled: Boolean(collectionId) && !deciding,
   });
   const invalidate = () => invalidateCollectionViews(queryClient);
   const saveMutation = useMutation({
@@ -110,13 +117,14 @@ export default function CollectionPage() {
   }, [collectionId, navigate]);
 
   if (!collectionId) return null;
-  if (collectionQuery.isLoading) return <div className="page"><LoadingState label="コレクションを開いています" /></div>;
+  if (deciding || collectionQuery.isLoading) return <div className="page"><LoadingState label="コレクションを開いています" /></div>;
   if (collectionQuery.error || !collectionQuery.data) return <div className="page"><ErrorState error={collectionQuery.error ?? "コレクションが見つかりません"} retry={() => collectionQuery.refetch()} /></div>;
   return (
     <>
       <CollectionDetail
         collection={collectionQuery.data}
         readOnly={!runtime}
+        shelf={shelfMode}
         onEdit={(assist = false) => { setRenameAssist(assist); form.open(); }}
         onChanged={(value) => {
           queryClient.setQueryData(["work-collection", collectionId], value);
@@ -145,7 +153,10 @@ type MemberAction =
   | { type: "add"; works: DownloadEntry[] }
   | { type: "sort"; mode: "published" | "episode" };
 
-function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collection: WorkCollection; readOnly: boolean; onEdit: (assist?: boolean) => void; onChanged: (collection: WorkCollection) => void }) {
+function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, onEdit, onChanged }: { collection: WorkCollection; readOnly: boolean; shelf?: boolean; onEdit: (assist?: boolean) => void; onChanged: (collection: WorkCollection) => void }) {
+  // 新しい棚では読むだけ。書き換える操作は同じ場所に押せない形で置き、理由を添える。
+  const readOnly = previewOnly || shelf;
+  const locked = shelf ? SHELF_READ_ONLY : null;
   const { engine: splitEngine } = useAssist("collection_split");
   const { engine: namingEngine } = useAssist("collection_naming");
   const navigate = useAppNavigate();
@@ -410,7 +421,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
       label: "名前を考えてもらう",
       description: "題名とタグを見て名前と説明を提案します",
       enabled: !readOnly && Boolean(namingEngine),
-      unavailableReason: readOnly ? "このコレクションは編集できません" : "設定で「コレクションの命名」を有効にすると使えます",
+      unavailableReason: shelf ? SHELF_READ_ONLY : readOnly ? "このコレクションは編集できません" : "設定で「コレクションの命名」を有効にすると使えます",
       onSelect: () => onEdit(true),
     },
     {
@@ -418,7 +429,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
       label: "分け方を考えてもらう",
       description: "内容のまとまりから分割案を作ります",
       enabled: !readOnly && collection.availableCount >= 4 && Boolean(splitEngine),
-      unavailableReason: collection.availableCount < 4 ? "4作品以上で利用できます" : "設定で「コレクションの分割案」を有効にすると使えます",
+      unavailableReason: shelf ? SHELF_READ_ONLY : collection.availableCount < 4 ? "4作品以上で利用できます" : "設定で「コレクションの分割案」を有効にすると使えます",
       onSelect: splitModal.open,
     },
   ];
@@ -431,7 +442,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
   return (
     <div className="page">
       <Stack gap="lg">
-        {readOnly && (
+        {previewOnly && (
           <Alert color="gray">
             プレビューは閲覧専用です。コレクションの変更と書き出しはデスクトップアプリで利用できます。
           </Alert>
@@ -440,7 +451,9 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
           <Group wrap="nowrap" align="center" gap="md">
             <div className="collection-hero__cover">
               <CollectionCover collection={collection} variant="detail" />
-              <Button variant="subtle" size="compact-xs" color="gray" disabled={readOnly} onClick={coverModal.open}>表紙を変える</Button>
+              <Locked reason={locked} label="表紙を変える">
+                <Button variant="subtle" size="compact-xs" color="gray" disabled={readOnly} onClick={coverModal.open}>表紙を変える</Button>
+              </Locked>
             </div>
             <Stack gap={6} flex={1} miw={0}>
               <Text className="page-header__eyebrow">コレクション</Text>
@@ -450,22 +463,37 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
                 <Badge variant="light" color={ordered ? "piep" : "gray"}>{ordered ? "順序付き" : "順序なし"}</Badge>
                 <Text size="sm" c="dimmed">{formatNumber(collection.memberCount)}作品 · {formatNumber(collection.totalTextLength)}字</Text>
                 {missingCount > 0 && <Badge color="orange" variant="light">収録できない {formatNumber(missingCount)}作品</Badge>}
+                {shelf && <Tooltip label="新しい棚（試験中）から読んでいます。読むだけで、ここからは何も書き換えません。"><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}
               </Group>
               {/* 主操作の「作品を追加」は右端。「合う作品を探す」はその隣に置く。
                   どちらも束へ作品を入れる操作で、違うのは**誰が探すか**だけである。 */}
               <Group gap="xs" mt={4} wrap="wrap" justify="flex-end">
-                <Button variant="default" disabled={readOnly} onClick={() => onEdit(false)}>名前を付け直す</Button>
-                <Button variant="default" leftSection={<Icons.epub size={IconSize.action} />} loading={epubMutation.isPending} disabled={readOnly || exportableCount <= 0} onClick={startEpubExport}>一冊のEPUB</Button>
+                <Locked reason={locked} label="名前を付け直す">
+                  <Button variant="default" disabled={readOnly} onClick={() => onEdit(false)}>名前を付け直す</Button>
+                </Locked>
+                <Locked reason={locked} label="一冊のEPUB">
+                  <Button variant="default" leftSection={<Icons.epub size={IconSize.action} />} loading={epubMutation.isPending} disabled={readOnly || exportableCount <= 0} onClick={startEpubExport}>一冊のEPUB</Button>
+                </Locked>
                 {!headerHosted && <AssistLauncher items={assistItems} />}
-                <Button
-                  variant="default"
-                  leftSection={<Icons.collectionSuggest size={IconSize.action} />}
-                  disabled={readOnly || collection.availableCount === 0}
-                  onClick={additionsModal.open}
-                >
-                  合う作品を探す
-                </Button>
-                <Button leftSection={<Icons.add size={IconSize.action} />} disabled={readOnly} onClick={addModal.open}>作品を追加</Button>
+                <Locked reason={locked} label="合う作品を探す">
+                  <Button
+                    variant="default"
+                    leftSection={<Icons.collectionSuggest size={IconSize.action} />}
+                    disabled={readOnly || collection.availableCount === 0}
+                    onClick={additionsModal.open}
+                  >
+                    合う作品を探す
+                  </Button>
+                </Locked>
+                <Locked reason={locked} label="作品を追加">
+                  <Button leftSection={<Icons.add size={IconSize.action} />} disabled={readOnly} onClick={addModal.open}>作品を追加</Button>
+                </Locked>
+                {/* その他の操作は全部書き換えなので、新しい棚では開かない。 */}
+                {locked ? (
+                  <Locked reason={locked} label="このコレクションのその他の操作">
+                    <ActionIcon variant="default" size="lg"><Icons.more size={IconSize.nav} /></ActionIcon>
+                  </Locked>
+                ) : (
                 <Menu position="bottom-end">
                   <Menu.Target>
                     <ActionIcon variant="default" size="lg" aria-label="このコレクションのその他の操作"><Icons.more size={IconSize.nav} /></ActionIcon>
@@ -498,6 +526,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
                     <Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} disabled={readOnly} onClick={deleteCollection}>コレクションを削除</Menu.Item>
                   </Menu.Dropdown>
                 </Menu>
+                )}
               </Group>
             </Stack>
           </Group>
@@ -509,7 +538,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
               <Icons.collection size={IconSize.hero} />
               <Text fw={700}>まだ作品が入っていません</Text>
               <Text size="sm" c="dimmed" ta="center">作品を追加すると、ここから順番に読み進めたり、一冊のEPUBにしたりできます。</Text>
-              <Button disabled={readOnly} onClick={addModal.open}>作品を追加</Button>
+              <Locked reason={locked} label="作品を追加"><Button disabled={readOnly} onClick={addModal.open}>作品を追加</Button></Locked>
             </Stack>
           </Paper>
         ) : (
@@ -557,6 +586,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
               onDropAt={dropAt}
               onRemove={(member) => mutation.mutate({ type: "remove", keys: [workKey(member)] })}
               page={memberWindow}
+              locked={locked}
             />
 
             {/* 番号で見るときだけ出す。「自動」のときは一覧が自分で続きを出す。 */}

@@ -904,11 +904,11 @@ export default function LibraryPage() {
   // explicitly sorted works can use a bounded direct page; everything else
   // drops a stale page parameter rather than silently ignoring it.
   // 一覧を新しい棚から出す（試験中・読むだけ）。好みが入っていて、棚が一覧を出せる状態の
-  // ときだけ。新しい棚の一覧は続きの位置で読み進めるだけで、ページ番号は持たない。
+  // ときだけ。ページ番号は旧棚と同じく何件目からかで開く。
   const [shelfV2Preferred] = useShelfV2Preference();
   const shelfV2Status = useLibraryV2Status(runtime && shelfV2Preferred);
   const shelfMode = runtime && shelfV2Preferred && shelfListable(shelfV2Status.data);
-  const numberedPageEnabled = pagingMode === "pages" && (tab !== "works" || (sortBy !== "relevance" && !shelfMode));
+  const numberedPageEnabled = pagingMode === "pages" && (tab !== "works" || sortBy !== "relevance");
   const {
     page: pageParam,
     maxPage: maxDirectPage,
@@ -1909,7 +1909,7 @@ export default function LibraryPage() {
                 endMessage={worksAtCacheLimit
                   ? sortBy === "relevance"
                     ? `メモリ使用量を抑えるため${formatNumber(listedItems.length)}件で停止しました。検索条件を絞ると続きへ到達できます。`
-                    : `メモリ使用量を抑えるため${formatNumber(listedItems.length)}件で停止しました。${shelfMode ? "検索条件を絞ると続きへ到達できます。" : "「ページ番号」に切り替えると続きへ移動できます。"}`
+                    : `メモリ使用量を抑えるため${formatNumber(listedItems.length)}件で停止しました。「ページ番号」に切り替えると続きへ移動できます。`
                   : undefined}
                 pages={{
                   current: pageParam,
@@ -1917,11 +1917,9 @@ export default function LibraryPage() {
                   onGoTo: setPage,
                   maxDirectPage,
                   limitNotice: pageLimitNotice,
-                  unavailableReason: shelfMode
-                    ? "新しい棚の一覧はページ番号で移動できません。"
-                    : sortBy === "relevance"
-                      ? "関連度順はページ番号で移動できません。並び順を選ぶとページ番号が使えます。"
-                      : null,
+                  unavailableReason: sortBy === "relevance"
+                    ? "関連度順はページ番号で移動できません。並び順を選ぶとページ番号が使えます。"
+                    : null,
                 }}
               />
             </>

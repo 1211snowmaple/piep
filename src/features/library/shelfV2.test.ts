@@ -107,12 +107,24 @@ describe("shelfRequest", () => {
   });
 
   it("refuses conditions the new shelf cannot answer instead of dropping them", () => {
-    expect(() => shelfRequest({ offset: 60, personKey: "8" })).toThrow(ShelfUnsupportedError);
+    expect(() => shelfRequest({ personKey: "8" })).toThrow(ShelfUnsupportedError);
     try {
-      shelfRequest({ offset: 60, personKey: "8" });
+      shelfRequest({ personKey: "8" });
     } catch (error) {
-      expect((error as ShelfUnsupportedError).conditions).toEqual(["ページ番号", "作者の指名"]);
+      expect((error as ShelfUnsupportedError).conditions).toEqual(["取得元のない作者の指名"]);
     }
+  });
+
+  it("opens a numbered page by skipping rows and counts it again", () => {
+    const cursor = encodeShelfCursor({ value: 5, work: card.id });
+    const { query } = shelfRequest({ offset: 120, cursor });
+    expect(query).toMatchObject({ offset: 120, after: null, count: true });
+    expect(shelfRequest({}).query.offset).toBe(0);
+  });
+
+  it("names an author by the provider's key for the shelf to look up", () => {
+    expect(shelfRequest({ personSource: "pixiv", personKey: "8" }).person).toEqual({ provider: "pixiv", key: "8" });
+    expect(shelfRequest({}).person).toBeNull();
   });
 
   it("orders a series by its own order and narrows an author or a series by the shelf's id", () => {
@@ -200,11 +212,12 @@ describe("searchShelfEntities", () => {
     expect(facet.latestDownloadedAt).toBe("2026-01-02T00:00:00.000Z");
   });
 
-  it("names a series by its provider, and refuses a series named without one", async () => {
-    tauri.invoke.mockResolvedValueOnce({ items: [], total: 0 });
+  it("names a series by its provider, or by its key alone like the search syntax", async () => {
+    tauri.invoke.mockResolvedValue({ items: [], total: 0 });
     await searchShelfEntities("series", null, 60, 0, { seriesSource: "pixiv", seriesKey: "s1" }, "work_count", null, null);
     expect(tauri.invoke.mock.lastCall?.[1]).toMatchObject({ series: { provider: "pixiv", key: "s1" }, scope: null });
-    await expect(searchShelfEntities("series", null, 60, 0, { seriesKey: "s1" }, "work_count", null, null)).rejects.toBeInstanceOf(ShelfUnsupportedError);
+    await searchShelfEntities("series", null, 60, 0, { seriesKey: "s1" }, "work_count", null, null);
+    expect(tauri.invoke.mock.lastCall?.[1]).toMatchObject({ series: { provider: null, key: "s1" } });
   });
 });
 

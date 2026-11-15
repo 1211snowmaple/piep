@@ -15459,6 +15459,7 @@ fn search_index_document_locked(
             author_name: doc.author_name,
             author_id: author_id.clone(),
             tags: doc.tags,
+            tag_list: Vec::new(),
             series_title: doc.series_title,
             excerpt: doc.excerpt,
             body: doc.body,

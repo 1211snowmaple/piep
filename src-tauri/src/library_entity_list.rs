@@ -104,7 +104,7 @@ pub struct CollectionTile {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct CollectionSummary {
     pub id: LibraryId,
-    /// 旧棚から移したコレクションの、旧棚での ID。コレクションの画面はまだ旧棚で開く。
+    /// 旧棚から移したコレクションの、旧棚での ID。画面の URL はこの ID（旧棚と同じ場所に開く）。
     pub legacy_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
@@ -128,7 +128,7 @@ pub struct CollectionSummary {
 }
 
 const ENTITY_PAGE_LIMIT: usize = 200;
-const COLLECTION_TILES: i64 = 4;
+pub(crate) const COLLECTION_TILES: i64 = 4;
 
 /// 集計の一行。並べ替えと絞り込みに要るものだけ。画像と見本の題はページの分だけ後で引く。
 struct Aggregate {
@@ -471,30 +471,45 @@ impl Library {
             }
         };
         let conn = self.reader()?;
-        let mut legacy: HashMap<Vec<u8>, String> = HashMap::new();
-        for row in conn
+        let condition = format!(
+            "EXISTS(SELECT 1 FROM collection_members m JOIN work_current_projection p ON p.work_id=m.work_id
+                    WHERE m.collection_id=c.id AND p.snapshot_id IN ({relation}))"
+        );
+        collection_summaries(&conn, &condition, &[entity.as_bytes().to_vec()])
+    }
+}
+
+/// コレクションの要約を、条件（`c` が `collections`）に当てはまるものだけ、旧棚と同じく更新の新しい順で。
+/// 値は `?1` から順に束縛する。
+pub(crate) fn collection_summaries(
+    conn: &rusqlite::Connection,
+    condition: &str,
+    values: &[Vec<u8>],
+) -> Result<Vec<CollectionSummary>> {
+    let mut legacy: HashMap<Vec<u8>, String> = HashMap::new();
+    for row in conn
             .prepare_cached("SELECT target_id,source_key FROM migration_records WHERE source_table='work_collections' AND status='imported' AND target_id IS NOT NULL")?
             .query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)))?
         {
             let (target, key) = row?;
             legacy.insert(target, key);
         }
-        type Row = (
-            Vec<u8>,
-            String,
-            Option<String>,
-            String,
-            bool,
-            i64,
-            Option<i64>,
-            i64,
-            Option<Vec<u8>>,
-            Option<Vec<u8>>,
-            i64,
-            i64,
-            i64,
-        );
-        let mut statement = conn.prepare_cached(&format!(
+    type Row = (
+        Vec<u8>,
+        String,
+        Option<String>,
+        String,
+        bool,
+        i64,
+        Option<i64>,
+        i64,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
+        i64,
+        i64,
+        i64,
+    );
+    let mut statement = conn.prepare_cached(&format!(
             "SELECT c.id,c.title,c.description,c.appearance_json,c.ordered,c.generation,c.updated_at,e.created_at,
                     (SELECT r.file_id FROM work_current_projection cp JOIN snapshot_media m ON m.snapshot_id=cp.snapshot_id
                        JOIN media_renditions r ON r.id=m.rendition_id
@@ -504,52 +519,51 @@ impl Library {
                     (SELECT count(*) FROM collection_members m JOIN work_current_projection p ON p.work_id=m.work_id WHERE m.collection_id=c.id),
                     (SELECT coalesce(sum(p.text_length),0) FROM collection_members m JOIN work_current_projection p ON p.work_id=m.work_id WHERE m.collection_id=c.id)
              FROM collections c JOIN entities e ON e.id=c.id AND e.deleted_at IS NULL
-             WHERE EXISTS(SELECT 1 FROM collection_members m JOIN work_current_projection p ON p.work_id=m.work_id
-                          WHERE m.collection_id=c.id AND p.snapshot_id IN ({relation}))"
+             WHERE {condition}"
         ))?;
-        let rows: Vec<Row> = statement
-            .query_map([entity.as_bytes().as_slice()], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                    r.get(9)?,
-                    r.get(10)?,
-                    r.get(11)?,
-                    r.get(12)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        drop(statement);
-        let mut collections = Vec::with_capacity(rows.len());
-        for row in rows {
-            let (
-                collection,
-                name,
-                description,
-                appearance,
-                ordered,
-                revision,
-                updated,
-                created,
-                cover,
-                cover_image,
-                members,
-                available,
-                length,
-            ) = row;
-            let appearance: BTreeMap<String, serde_json::Value> =
-                serde_json::from_str(&appearance).unwrap_or_default();
-            let look = |key: &str, default: &str| {
-                text(appearance.get(key)).unwrap_or_else(|| default.to_owned())
-            };
-            let tiles = conn
+    let rows: Vec<Row> = statement
+        .query_map(params_from_iter(values.iter()), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+                r.get(10)?,
+                r.get(11)?,
+                r.get(12)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(statement);
+    let mut collections = Vec::with_capacity(rows.len());
+    for row in rows {
+        let (
+            collection,
+            name,
+            description,
+            appearance,
+            ordered,
+            revision,
+            updated,
+            created,
+            cover,
+            cover_image,
+            members,
+            available,
+            length,
+        ) = row;
+        let appearance: BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(&appearance).unwrap_or_default();
+        let look = |key: &str, default: &str| {
+            text(appearance.get(key)).unwrap_or_else(|| default.to_owned())
+        };
+        let tiles = conn
                 .prepare_cached(
                     "SELECT x.provider,x.external_key,coalesce(p.title,m.title_at_add),coalesce(p.author_name,m.author_at_add),
                             (SELECT r.file_id FROM snapshot_media sm JOIN media_renditions r ON r.id=sm.rendition_id
@@ -580,35 +594,34 @@ impl Library {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            collections.push(CollectionSummary {
-                legacy_id: legacy.get(&collection).cloned(),
-                id: id(collection)?,
-                name,
-                description,
-                ordered,
-                cover: fingerprint(cover)?,
-                cover_image: fingerprint(cover_image)?,
-                cover_mode: look("cover_mode", "mosaic"),
-                name_source: look("name_source", "manual"),
-                track: look("track", "manual"),
-                tiles,
-                revision,
-                member_count: members as u64,
-                available_count: available as u64,
-                total_text_length: length as u64,
-                created_at: created,
-                updated_at: updated.unwrap_or(created),
-            });
-        }
-        collections.sort_by(|left, right| {
-            right
-                .updated_at
-                .cmp(&left.updated_at)
-                .then_with(|| nocase(&left.name, &right.name))
-                .then_with(|| left.id.as_bytes().cmp(right.id.as_bytes()))
+        collections.push(CollectionSummary {
+            legacy_id: legacy.get(&collection).cloned(),
+            id: id(collection)?,
+            name,
+            description,
+            ordered,
+            cover: fingerprint(cover)?,
+            cover_image: fingerprint(cover_image)?,
+            cover_mode: look("cover_mode", "mosaic"),
+            name_source: look("name_source", "manual"),
+            track: look("track", "manual"),
+            tiles,
+            revision,
+            member_count: members as u64,
+            available_count: available as u64,
+            total_text_length: length as u64,
+            created_at: created,
+            updated_at: updated.unwrap_or(created),
         });
-        Ok(collections)
     }
+    collections.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| nocase(&left.name, &right.name))
+            .then_with(|| left.id.as_bytes().cmp(right.id.as_bytes()))
+    });
+    Ok(collections)
 }
 
 #[cfg(test)]

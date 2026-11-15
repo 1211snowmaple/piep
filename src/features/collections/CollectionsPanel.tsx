@@ -25,6 +25,8 @@ import { invalidateCollectionViews, workCollectionsQueryOptions } from "./collec
 import { CollectionCard } from "./CollectionCard";
 import { CollectionFormModal } from "./CollectionFormModal";
 import { CollectionSweepModal } from "./CollectionSweepModal";
+import { Locked } from "@/components/Locked";
+import { SHELF_READ_ONLY, useShelfMode } from "@/features/library/shelfV2";
 
 /** The collection list as it appears inside the library, beside 作品 /
  *  作者・クリエイター / シリーズ. The detail screen stays on its own route. */
@@ -59,7 +61,10 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
   const [searchParams, setSearchParams] = useAppSearchParams();
   const [formOpened, form] = useDisclosure(false);
   const generatedSeed = useRef<number | null>(null);
-  const collectionsQuery = useQuery(workCollectionsQueryOptions());
+  // 新しい棚（試験中）では一覧を新しい棚から読み、作る・探す操作は押せない形で残す。
+  const { shelfMode, deciding } = useShelfMode(runtime);
+  const locked = shelfMode ? SHELF_READ_ONLY : null;
+  const collectionsQuery = useQuery({ ...workCollectionsQueryOptions(shelfMode), enabled: !deciding });
   const invalidate = () => {
     invalidateCollectionViews(queryClient);
     queryClient.invalidateQueries({ queryKey: ["collection-suggestions"] });
@@ -78,13 +83,13 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
   // 作品詳細の「関連作品からひな型を作る」からは ?suggest=<id> で来る。
   useEffect(() => {
     const seed = Number(searchParams.get("suggest"));
-    if (!runtime || !Number.isSafeInteger(seed) || seed <= 0 || generatedSeed.current === seed) return;
+    if (!runtime || shelfMode || deciding || !Number.isSafeInteger(seed) || seed <= 0 || generatedSeed.current === seed) return;
     generatedSeed.current = seed;
     suggestionMutation.mutate(seed);
     const next = new URLSearchParams(searchParams);
     next.delete("suggest");
     setSearchParams(next, { replace: true });
-  }, [runtime, searchParams, setSearchParams, suggestionMutation]);
+  }, [runtime, shelfMode, deciding, searchParams, setSearchParams, suggestionMutation]);
 
   // 上のツールバーはこのタブでも出したままにする（タブを移るたびに画面が
    // 飛ばないため）。出ている以上、検索も並べ替えもここに効かせる。
@@ -121,6 +126,7 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
   const pendingSuggestions = useQuery({
     queryKey: ["collection-suggestions", "pending"],
     queryFn: () => (runtime ? listCollectionSuggestions("pending") : Promise.resolve(demoSuggestions)),
+    enabled: !shelfMode && !deciding,
   });
   const pendingCount = pendingSuggestions.data?.length ?? 0;
   return (
@@ -135,6 +141,7 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
           <Text size="sm" c="dimmed">{formatNumber(collections.length)}件</Text>
         </Group>
         <Group gap="xs" wrap="nowrap">
+          <Locked reason={locked} label="まとまりを探す">
           <Button
             variant="subtle"
             leftSection={<Icons.search size={IconSize.action} />}
@@ -145,14 +152,17 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
           >
             まとまりを探す
           </Button>
-          <Button leftSection={<Icons.add size={IconSize.action} />} disabled={!runtime} onClick={form.open}>新しいコレクション</Button>
+          </Locked>
+          <Locked reason={locked} label="新しいコレクション">
+            <Button leftSection={<Icons.add size={IconSize.action} />} disabled={!runtime} onClick={form.open}>新しいコレクション</Button>
+          </Locked>
         </Group>
       </Group>
       {!runtime && <Alert color="gray">プレビューではコレクションの変更は保存されません。</Alert>}
       {suggestionMutation.isPending && <Alert icon={<Icons.collectionSuggest size={IconSize.action} />}>本文とキャプションのリンクを前後どちらにもたどり、シリーズ・作者・題名・内容の近さも手がかりにして調べています。</Alert>}
       {collectionsQuery.isLoading ? <LoadingState label="コレクションを読み込んでいます" /> : collectionsQuery.error ? <ErrorState error={collectionsQuery.error} retry={() => collectionsQuery.refetch()} /> : collections.length === 0 ? (normalizedQuery
         ? <Paper withBorder p="xl"><Stack align="center"><Icons.search size={IconSize.hero} /><Text fw={700}>一致するコレクションがありません</Text><Text size="sm" c="dimmed" ta="center">「{query.trim()}」に当てはまるものは見つかりませんでした。</Text></Stack></Paper>
-        : <Paper withBorder p="xl"><Stack align="center"><Icons.collection size={IconSize.hero} /><Text fw={700}>まだコレクションはありません</Text><Text size="sm" c="dimmed" ta="center">前後編、非公式の連載、pixivとFANBOXに分かれた作品などをまとめられます。</Text><Button onClick={form.open} disabled={!runtime}>最初のコレクションを作成</Button></Stack></Paper>) : <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>{visibleCollections.map((collection) => <CollectionCard key={collection.id} collection={collection} />)}</SimpleGrid>}
+        : <Paper withBorder p="xl"><Stack align="center"><Icons.collection size={IconSize.hero} /><Text fw={700}>まだコレクションはありません</Text><Text size="sm" c="dimmed" ta="center">前後編、非公式の連載、pixivとFANBOXに分かれた作品などをまとめられます。</Text><Locked reason={locked} label="最初のコレクションを作成"><Button onClick={form.open} disabled={!runtime}>最初のコレクションを作成</Button></Locked></Stack></Paper>) : <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>{visibleCollections.map((collection) => <CollectionCard key={collection.id} collection={collection} />)}</SimpleGrid>}
       {/* 番号で見るときだけ出す。「自動」のときは全件がそのまま並んでいる。 */}
       {numberedPages && collections.length > pageSize && (
         <ListPager
@@ -169,7 +179,7 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
       <CollectionFormModal opened={formOpened} onClose={form.close} onSave={(input) => saveMutation.mutate(input)} />
       {/* 候補は一箇所にまとめる。1作から広げたものと棚の走査で出たものを
           別の場所に置くと、同じ束が二度出てくるように見える。 */}
-      <CollectionSweepModal opened={sweepOpened} onClose={sweepModal.close} />
+      {!shelfMode && !deciding && <CollectionSweepModal opened={sweepOpened} onClose={sweepModal.close} />}
     </Stack>
   );
 }

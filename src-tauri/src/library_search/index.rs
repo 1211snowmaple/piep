@@ -336,7 +336,8 @@ impl Library {
 
     /// 索引の形式と世代を確かめ、合わなければ空から作り直す準備をする。作り直すなら `true`。
     fn prepare_space(&self, space: Space, storage: &Path) -> Result<bool> {
-        let format = tantivy_index::index_format_version();
+        // 旧棚と同じ形式に、新しい棚だけの作り方（タグごとの読み）の版を足す。
+        let format = format!("{}+tag-readings-1", tantivy_index::index_format_version());
         let marker_path = storage.join("search-index").join(MARKER);
         let state = space.state_table();
         let recorded: Option<(String, Vec<u8>)> = self
@@ -349,7 +350,7 @@ impl Library {
             .optional()?;
         let marker = std::fs::read(&marker_path).ok();
         if let Some((recorded_format, generation)) = &recorded {
-            if recorded_format == format && marker.as_deref() == Some(generation.as_slice()) {
+            if *recorded_format == format && marker.as_deref() == Some(generation.as_slice()) {
                 return Ok(false);
             }
         }
@@ -582,6 +583,7 @@ fn index_document(key: i64, doc: &SearchDocument) -> TantivyIndexDocument {
         author_name: doc.author_name.clone(),
         author_id: doc.author_key.clone(),
         tags: doc.tags.join(" "),
+        tag_list: doc.tags.clone(),
         series_title: doc.series_titles.join(" "),
         excerpt: doc.excerpt.clone(),
         body: doc.body.clone(),

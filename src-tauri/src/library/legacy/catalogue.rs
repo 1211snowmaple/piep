@@ -68,7 +68,11 @@ impl LegacyImporter {
         let tx = conn.transaction()?;
 
         if !marked(&tx, "work_collections")? {
+            // 追いつきでは今の行で上書きし、旧棚で消したものは消した印を付ける。新しい棚は
+            // 利用者が書き換えないので、移した行はいつでも旧棚の今の行から作り直してよい。
+            let mut present = std::collections::BTreeSet::new();
             self.each_row("work_collections",|row|{
+                present.insert(row.text("id")?.to_owned());
                 let key=row.text("id")?;
                 let id=mapped_id(&tx,"work_collections",key)?;
                 let created=row.time("created_at")?;
@@ -76,13 +80,26 @@ impl LegacyImporter {
                 let cover_work=row.optional_integer("cover_download_id")?.map(|old|self.work_from_old(&tx,old)).transpose()?;
                 let cover_file=if let Some((id,file,_))=covers.get(key) {Library::register_file(&tx,file)?;Some(id.0.to_vec())} else {None};
                 let appearance=json!({"cover_mode":row.optional_text("cover_mode")?,"name_source":row.optional_text("name_source")?,"track":row.optional_text("track")?});
-                tx.execute("INSERT INTO entities(id,kind,created_at) VALUES(?1,'collection',?2)",params![id.as_bytes().as_slice(),created])?;
-                tx.execute("INSERT INTO collections(id,title,description,appearance_json,cover_work_id,cover_file_id,ordered,generation,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![id.as_bytes().as_slice(),row.text("name")?,row.optional_text("description")?,appearance.to_string(),cover_work.map(|id|id.as_bytes().to_vec()),cover_file,ordered,row.integer("revision")?,row.optional_time("updated_at")?.unwrap_or(created)])?;
+                tx.execute("INSERT INTO entities(id,kind,created_at) VALUES(?1,'collection',?2) ON CONFLICT(id) DO UPDATE SET deleted_at=NULL",params![id.as_bytes().as_slice(),created])?;
+                tx.execute("INSERT INTO collections(id,title,description,appearance_json,cover_work_id,cover_file_id,ordered,generation,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET title=excluded.title,description=excluded.description,appearance_json=excluded.appearance_json,cover_work_id=excluded.cover_work_id,cover_file_id=excluded.cover_file_id,ordered=excluded.ordered,generation=excluded.generation,updated_at=excluded.updated_at",params![id.as_bytes().as_slice(),row.text("name")?,row.optional_text("description")?,appearance.to_string(),cover_work.map(|id|id.as_bytes().to_vec()),cover_file,ordered,row.integer("revision")?,row.optional_time("updated_at")?.unwrap_or(created)])?;
                 mark_row(&tx,"work_collections",key,id)
+            })?;
+            remove_absent(&tx, "work_collections", &present, |tx, id| {
+                tx.execute(
+                    "UPDATE entities SET deleted_at=?2 WHERE id=?1 AND deleted_at IS NULL",
+                    params![id, chrono::Utc::now().timestamp_millis()],
+                )?;
+                tx.execute(
+                    "DELETE FROM collection_members WHERE collection_id=?1",
+                    [id],
+                )?;
+                Ok(())
             })?;
             mark_table(&tx, "work_collections")?;
         }
         if !marked(&tx, "work_collection_members")? {
+            // 回は並びごと今の行で置き直す。
+            tx.execute("DELETE FROM collection_members WHERE collection_id IN (SELECT target_id FROM migration_records WHERE source_table='work_collections' AND target_id IS NOT NULL)", [])?;
             self.each_row("work_collection_members",|row|{
                 let old=row.text("collection_id")?;
                 let collection=mapped_id(&tx,"work_collections",old)?;
@@ -93,23 +110,44 @@ impl LegacyImporter {
             mark_table(&tx, "work_collection_members")?;
         }
         if !marked(&tx, "update_targets")? {
+            // 監視の対象は上書きする。旧棚で外した対象は先に消す（作者・シリーズごとに一つ）。
+            let mut present = std::collections::BTreeSet::new();
+            self.each_row("update_targets", |row| {
+                present.insert(row.integer("id")?.to_string());
+                Ok(())
+            })?;
+            remove_absent(&tx, "update_targets", &present, |tx, id| {
+                tx.execute("DELETE FROM watch_group_members WHERE target_id=?1", [id])?;
+                tx.execute("DELETE FROM watch_targets WHERE id=?1", [id])?;
+                Ok(())
+            })?;
             self.each_row("update_targets",|row|{
                 let kind=match row.text("target_type")? {"author"|"creator"=>EntityKind::Person,"series"=>EntityKind::Series,"work"=>EntityKind::Work,_=>return Err(Error::Unsupported("旧監視対象の種類に対応していません".into()))};
                 let created=row.time("created_at")?;
                 let entity=Library::relation_entity(&tx,row.text("source")?,kind,row.text("source_key")?,created)?;
                 let old=row.integer("id")?.to_string();let id=mapped_id(&tx,"update_targets",&old)?;
                 let options=row.optional_text("metadata_json")?.unwrap_or("{}");let _:serde_json::Value=serde_json::from_str(options)?;
-                tx.execute("INSERT INTO watch_targets(id,entity_id,display_name,enabled,last_checked_at,last_seen_external_key,last_seen_source_updated_at,last_hit_at,consecutive_errors,options_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![id.as_bytes().as_slice(),entity.as_bytes().as_slice(),row.text("display_name")?,row.boolean("enabled")?,row.optional_time("last_checked_at")?,row.optional_text("last_seen_source_id")?,row.optional_time("last_seen_source_updated_at")?,row.optional_time("last_hit_at")?,row.optional_integer("consecutive_errors")?.unwrap_or(0),options,created,row.time("updated_at")?])?;
+                tx.execute("INSERT INTO watch_targets(id,entity_id,display_name,enabled,last_checked_at,last_seen_external_key,last_seen_source_updated_at,last_hit_at,consecutive_errors,options_json,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(id) DO UPDATE SET entity_id=excluded.entity_id,display_name=excluded.display_name,enabled=excluded.enabled,last_checked_at=excluded.last_checked_at,last_seen_external_key=excluded.last_seen_external_key,last_seen_source_updated_at=excluded.last_seen_source_updated_at,last_hit_at=excluded.last_hit_at,consecutive_errors=excluded.consecutive_errors,options_json=excluded.options_json,updated_at=excluded.updated_at",params![id.as_bytes().as_slice(),entity.as_bytes().as_slice(),row.text("display_name")?,row.boolean("enabled")?,row.optional_time("last_checked_at")?,row.optional_text("last_seen_source_id")?,row.optional_time("last_seen_source_updated_at")?,row.optional_time("last_hit_at")?,row.optional_integer("consecutive_errors")?.unwrap_or(0),options,created,row.time("updated_at")?])?;
                 mark_row(&tx,"update_targets",&old,id)
             })?;
             mark_table(&tx, "update_targets")?;
         }
         if !marked(&tx, "watch_groups")? {
+            let mut present = std::collections::BTreeSet::new();
+            self.each_row("watch_groups", |row| {
+                present.insert(row.integer("id")?.to_string());
+                Ok(())
+            })?;
+            remove_absent(&tx, "watch_groups", &present, |tx, id| {
+                tx.execute("DELETE FROM watch_group_members WHERE group_id=?1", [id])?;
+                tx.execute("DELETE FROM watch_groups WHERE id=?1", [id])?;
+                Ok(())
+            })?;
             self.each_row("watch_groups", |row| {
                 let old = row.integer("id")?.to_string();
                 let id = mapped_id(&tx, "watch_groups", &old)?;
                 tx.execute(
-                    "INSERT INTO watch_groups VALUES(?1,?2,?3,?4,?5)",
+                    "INSERT INTO watch_groups VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET name=excluded.name,sort_order=excluded.sort_order,updated_at=excluded.updated_at",
                     params![
                         id.as_bytes().as_slice(),
                         row.text("name")?,
@@ -123,6 +161,7 @@ impl LegacyImporter {
             mark_table(&tx, "watch_groups")?;
         }
         if !marked(&tx, "watch_group_members")? {
+            tx.execute("DELETE FROM watch_group_members", [])?;
             self.each_row("watch_group_members", |row| {
                 let group = mapped_id(&tx, "watch_groups", &row.integer("group_id")?.to_string())?;
                 let target = mapped_id(
@@ -139,6 +178,19 @@ impl LegacyImporter {
             mark_table(&tx, "watch_group_members")?;
         }
         if !marked(&tx, "update_candidates")? {
+            let mut present = std::collections::BTreeSet::new();
+            self.each_row("update_candidates", |row| {
+                present.insert(format!(
+                    "{}:{}",
+                    row.text("source")?,
+                    row.text("source_id")?
+                ));
+                Ok(())
+            })?;
+            remove_absent(&tx, "update_candidates", &present, |tx, id| {
+                tx.execute("DELETE FROM discovery_candidates WHERE id=?1", [id])?;
+                Ok(())
+            })?;
             self.each_row("update_candidates", |row| {
                 let provider = row.text("source")?;
                 let key = row.text("source_id")?;
@@ -156,7 +208,7 @@ impl LegacyImporter {
                 let old = format!("{provider}:{key}");
                 let id = mapped_id(&tx, "update_candidates", &old)?;
                 tx.execute(
-                    "INSERT INTO discovery_candidates(id,work_id,kind,title,decision,hold_kind,payload_file_id,target_type,first_seen_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    "INSERT INTO discovery_candidates(id,work_id,kind,title,decision,hold_kind,payload_file_id,target_type,first_seen_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET work_id=excluded.work_id,kind=excluded.kind,title=excluded.title,decision=excluded.decision,hold_kind=excluded.hold_kind,payload_file_id=excluded.payload_file_id,target_type=excluded.target_type,updated_at=excluded.updated_at",
                     params![
                         id.as_bytes().as_slice(),
                         work.as_bytes().as_slice(),
@@ -185,7 +237,7 @@ impl LegacyImporter {
                 tx.execute("INSERT INTO work_links VALUES(?1,?2,?3,?4,'observed',?5,?6) ON CONFLICT(id) DO NOTHING",params![id.as_bytes().as_slice(),from.as_bytes().as_slice(),to.as_bytes().as_slice(),relation,created,row.time("updated_at")?])?;
                 let old=row.integer("id")?.to_string();let evidence=mapped_id(&tx,"work_link_evidence",&old)?;
                 let confidence=row.0.get("confidence").and_then(serde_json::Value::as_f64).ok_or_else(||Error::Integrity("関係の確度が不正です".into()))?;
-                tx.execute("INSERT INTO link_evidence VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![evidence.as_bytes().as_slice(),id.as_bytes().as_slice(),row.text("evidence_type")?,row.text("status")?,row.optional_text("anchor_text")?,row.optional_text("context_text")?,confidence,created])?;
+                tx.execute("INSERT INTO link_evidence VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET link_id=excluded.link_id,kind=excluded.kind,decision=excluded.decision,anchor_text=excluded.anchor_text,context_text=excluded.context_text,confidence=excluded.confidence",params![evidence.as_bytes().as_slice(),id.as_bytes().as_slice(),row.text("evidence_type")?,row.text("status")?,row.optional_text("anchor_text")?,row.optional_text("context_text")?,confidence,created])?;
                 tx.execute("UPDATE work_links SET status=CASE WHEN EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='accepted') AND NOT EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='rejected') THEN 'accepted' WHEN EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='rejected') AND NOT EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='accepted') THEN 'rejected' ELSE 'observed' END WHERE id=?1",[id.as_bytes().as_slice()])?;
                 mark_row(&tx,"work_links",&old,id)?;mark_row(&tx,"work_link_evidence",&old,evidence)
             })?;
@@ -212,7 +264,7 @@ impl LegacyImporter {
                     std::mem::swap(&mut left, &mut right);
                 }
                 tx.execute(
-                    "INSERT INTO collection_pair_feedback VALUES(?1,?2,?3,?4,?5)",
+                    "INSERT INTO collection_pair_feedback VALUES(?1,?2,?3,?4,?5) ON CONFLICT(left_work_id,right_work_id) DO UPDATE SET decision=excluded.decision,rule_version=excluded.rule_version,updated_at=excluded.updated_at",
                     params![
                         left.as_bytes().as_slice(),
                         right.as_bytes().as_slice(),
@@ -237,6 +289,33 @@ impl LegacyImporter {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// 追いつき：前に移した行のうち、旧棚の今の行に無いものを片付ける。`remove` は移行先の ID
+/// （バイト列）を受け取り、その行から作ったものを消す。対応の記録も消す。
+fn remove_absent(
+    tx: &Transaction<'_>,
+    table: &str,
+    present: &std::collections::BTreeSet<String>,
+    remove: impl Fn(&Transaction<'_>, &[u8]) -> Result<()>,
+) -> Result<()> {
+    let gone: Vec<(String, Option<Vec<u8>>)> = tx
+        .prepare("SELECT source_key,target_id FROM migration_records WHERE source_table=?1 AND source_key<>'__all_rows__'")?
+        .query_map([table], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|(key, _)| !present.contains(key))
+        .collect();
+    for (key, target) in gone {
+        if let Some(target) = target {
+            remove(tx, &target)?;
+        }
+        tx.execute(
+            "DELETE FROM migration_records WHERE source_table=?1 AND source_key=?2",
+            params![table, key],
+        )?;
+    }
+    Ok(())
 }
 
 /// 移行の原記録の一行の文字の列（`{"sqlite_text_bytes":[…]}`）を文字にする。
@@ -420,6 +499,98 @@ INSERT INTO collection_pair_feedback VALUES('pixiv','one','pixiv','two','reject'
             assert_eq!(library.collections().unwrap()[0].generation, 4);
             library.verify().unwrap();
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn catching_up_rewrites_the_catalogue_from_the_current_old_rows() {
+        let root =
+            std::env::temp_dir().join(format!("piep-catalogue-catchup-{}", LibraryId::now_v7()));
+        let old = root.join("old");
+        source(&old, false);
+        let library = Library::create(&root.join("new")).unwrap();
+        let import = || {
+            let report = LegacyImporter::open(&old)
+                .unwrap()
+                .import(&library, &AtomicBool::new(false), |_| {})
+                .unwrap();
+            assert!(report.unresolved.is_empty(), "{:?}", report.unresolved);
+            report
+        };
+        import();
+        let count = |sql: &str| -> i64 {
+            library
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(sql, [], |r| r.get(0))
+                .unwrap()
+        };
+        // 旧棚で名前を変え、作品を外し、コレクションを足し、監視をやめ、候補を見直す。
+        rusqlite::Connection::open(old.join("piep.db"))
+            .unwrap()
+            .execute_batch(
+                "UPDATE work_collections SET name='付け直した名前',revision=5 WHERE id='c1';
+DELETE FROM work_collection_members WHERE source_id='one';
+INSERT INTO work_collections VALUES('c2','後から','','unordered',NULL,1,'2026-02-01 00:00:00','2026-02-01 00:00:00','mosaic',NULL,'manual','manual');
+INSERT INTO work_collection_members VALUES('c2','pixiv','one','一つ目','作者',0,'main','manual',0,NULL,'2026-02-01 00:00:00','2026-02-01 00:00:00');
+DELETE FROM watch_group_members; DELETE FROM update_targets;
+UPDATE watch_groups SET name='名前を変えた束';
+UPDATE update_candidates SET status='dismissed' WHERE source_id='two';
+DELETE FROM update_candidates WHERE source_id='three';
+UPDATE collection_pair_feedback SET decision='accept';",
+            )
+            .unwrap();
+        let report = import();
+        assert!(report
+            .changed_tables
+            .contains(&"work_collections".to_owned()));
+        let live = "SELECT count(*) FROM collections c JOIN entities e ON e.id=c.id WHERE e.deleted_at IS NULL";
+        assert_eq!(count(live), 2);
+        assert_eq!(
+            count("SELECT count(*) FROM collections c JOIN migration_records r ON r.target_id=c.id WHERE r.source_table='work_collections' AND r.source_key='c1' AND c.title='付け直した名前' AND c.generation=5"),
+            1
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM collection_members m JOIN migration_records r ON r.target_id=m.collection_id WHERE r.source_table='work_collections' AND r.source_key='c1'"),
+            1
+        );
+        assert_eq!(count("SELECT count(*) FROM watch_targets"), 0);
+        assert_eq!(count("SELECT count(*) FROM watch_group_members"), 0);
+        assert_eq!(
+            count("SELECT count(*) FROM watch_groups WHERE name='名前を変えた束'"),
+            1
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM discovery_candidates WHERE decision='dismissed'"),
+            1
+        );
+        assert_eq!(count("SELECT count(*) FROM discovery_candidates"), 1);
+        assert_eq!(
+            count("SELECT count(*) FROM collection_pair_feedback WHERE decision='accept'"),
+            1
+        );
+        // 旧棚で消したコレクションは一覧から消え、旧い ID でも開けない。
+        rusqlite::Connection::open(old.join("piep.db"))
+            .unwrap()
+            .execute_batch(
+                "DELETE FROM work_collection_members WHERE collection_id='c1'; DELETE FROM work_collections WHERE id='c1';",
+            )
+            .unwrap();
+        import();
+        assert_eq!(count(live), 1);
+        assert_eq!(
+            count("SELECT count(*) FROM migration_records WHERE source_table='work_collections' AND source_key='c1'"),
+            0
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM migration_records WHERE source_key='__all_rows__' AND status<>'imported'"),
+            0
+        );
+        // 何も変わらなければ、もう一度移しても何も変えない。
+        assert!(import().changed_tables.is_empty());
+        library.verify().unwrap();
+        drop(library);
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -221,7 +221,7 @@ fn narrow(works: &mut Option<Vec<LibraryId>>, only: Vec<LibraryId>) {
 
 impl Library {
     /// 読み取った絞り込みを一覧の絞り込みへ足す。どれも「かつ」でつなぐ。
-    pub(super) fn apply_query_parts(
+    pub(crate) fn apply_query_parts(
         &self,
         parts: &QueryParts,
         filter: &mut WorkFilter,

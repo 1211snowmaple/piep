@@ -80,6 +80,10 @@ pub struct TantivyIndexDocument {
     pub author_name: String,
     pub author_id: String,
     pub tags: String,
+    /// タグを一つずつ。空でなければ、読みの欄をタグごとの値にする（新しい棚）。つないだ
+    /// `tags` の読みは隣のタグとの境目をまたぐ 2〜3 文字にも当たる。空なら旧棚と同じく
+    /// `tags` から作る（旧棚の索引は作り直さない）。
+    pub tag_list: Vec<String>,
     pub series_title: String,
     pub excerpt: String,
     pub body: String,
@@ -1796,15 +1800,29 @@ fn tantivy_document(fields: &TantivyFields, doc: &TantivyIndexDocument) -> Tanti
         fields.author_id_reading_romaji,
         &doc.author_id,
     );
-    add_search_text(
-        &mut tantivy_doc,
-        fields.tags_exact,
-        fields.tags_lower,
-        fields.tags_ngram,
-        fields.tags_reading_kana,
-        fields.tags_reading_romaji,
-        &doc.tags,
-    );
+    if doc.tag_list.is_empty() {
+        add_search_text(
+            &mut tantivy_doc,
+            fields.tags_exact,
+            fields.tags_lower,
+            fields.tags_ngram,
+            fields.tags_reading_kana,
+            fields.tags_reading_romaji,
+            &doc.tags,
+        );
+    } else {
+        // 読みはタグごとの値にする。一つの値の中でだけ字が続くので、隣のタグとの境目を
+        // またいで当たらない。ほかの欄はつないだ値のまま（旧棚と同じ）。
+        let joined = index_text(&doc.tags);
+        tantivy_doc.add_text(fields.tags_exact, &doc.tags);
+        tantivy_doc.add_text(fields.tags_lower, joined.normalized);
+        tantivy_doc.add_text(fields.tags_ngram, joined.surface);
+        for tag in &doc.tag_list {
+            let indexed = index_text(tag);
+            tantivy_doc.add_text(fields.tags_reading_kana, indexed.reading_kana);
+            tantivy_doc.add_text(fields.tags_reading_romaji, indexed.reading_romaji);
+        }
+    }
     add_search_text(
         &mut tantivy_doc,
         fields.series_title_exact,
@@ -2314,6 +2332,7 @@ mod optimize_stale_writer_tests {
             author_name: "作者".to_string(),
             author_id: "1".to_string(),
             tags: String::new(),
+            tag_list: Vec::new(),
             series_title: String::new(),
             excerpt: String::new(),
             body: "本文".to_string(),

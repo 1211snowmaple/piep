@@ -8544,6 +8544,7 @@ fn lexical_snapshots_scale_with_fixed_memory_batches() {
                 author_name: format!("author {:03}", index % 400),
                 author_id: format!("author-{:03}", index % 400),
                 tags: format!("tag{}", index % 30),
+                tag_list: Vec::new(),
                 series_title: String::new(),
                 excerpt: "snapshotterm benchmark".to_string(),
                 body: "snapshotterm bounded disk ranking".to_string(),

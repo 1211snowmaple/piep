@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 /// 一覧の行の作り方の版。変えたら、書き込みで開いたときに全行を作り直す。
 pub(super) const RECIPE: i64 = 5;
 const PAGE_LIMIT: usize = 500;
+/// ページ番号で読み飛ばせる件数。旧棚の一覧が直接開ける 251 ページ（60 件ずつ）より広い。
+const OFFSET_LIMIT: usize = 100_000;
 
 /// 一作品の一覧の行。?1 作品、?2 一覧の持ち主、?3 有効な編集、?4 編集の題、?5 作り方の版。
 /// 題は旧棚と同じく、編集の題（前後の空白を除いて空でなければ）か、保存版の題。空白は改行や
@@ -148,6 +150,8 @@ pub struct WorkListQuery {
     pub descending: bool,
     pub limit: usize,
     pub after: Option<WorkCursor>,
+    /// ページ番号で開くときの読み飛ばす件数（`after` とは一緒に使えない）。
+    pub offset: usize,
     pub filter: WorkFilter,
     /// 件数を数えるか。続きのページでは数え直さない。
     pub count: bool,
@@ -160,6 +164,7 @@ impl Default for WorkListQuery {
             descending: true,
             limit: 60,
             after: None,
+            offset: 0,
             filter: WorkFilter::default(),
             count: true,
         }
@@ -782,11 +787,23 @@ impl PageSql {
                 format!("{key}{operator}=?{value} AND ({key}{operator}?{value} OR work_id{operator}?{work})")
             });
         }
+        if query.offset > 0 && query.after.is_some() {
+            return Err(Error::Unsupported(
+                "ページ番号と続きの位置は一緒に使えません".into(),
+            ));
+        }
+        if query.offset > OFFSET_LIMIT {
+            return Err(Error::Unsupported(format!(
+                "ページ番号で読み飛ばせるのは {OFFSET_LIMIT} 件までです"
+            )));
+        }
         values.push(Box::new(limit as i64 + 1));
+        values.push(Box::new(query.offset as i64));
         let value_column = key.trim_end_matches(" COLLATE NOCASE");
         let page = format!(
-            "SELECT {COLUMNS},{value_column} FROM {from}{} ORDER BY {key} {direction},work_id {direction} LIMIT ?{}",
+            "SELECT {COLUMNS},{value_column} FROM {from}{} ORDER BY {key} {direction},work_id {direction} LIMIT ?{} OFFSET ?{}",
             clause(&filters),
+            values.len() - 1,
             values.len()
         );
         Ok(Self {
@@ -971,6 +988,21 @@ impl Library {
     pub fn work_card(&self, work: LibraryId) -> Result<WorkCard> {
         let conn = self.reader()?;
         Self::card_of(&conn, self.id, work.as_bytes())
+    }
+
+    /// 一覧の一件の形で、いくつかの作品をまとめて引く。棚に今の版の無い作品は `None`。
+    pub fn work_cards(&self, works: &[LibraryId]) -> Result<Vec<Option<WorkCard>>> {
+        let conn = self.reader()?;
+        works
+            .iter()
+            .map(
+                |work| match Self::card_of(&conn, self.id, work.as_bytes()) {
+                    Ok(card) => Ok(Some(card)),
+                    Err(Error::ResourceUnavailable) => Ok(None),
+                    Err(error) => Err(error),
+                },
+            )
+            .collect()
     }
 
     fn card_of(conn: &Connection, owner: LibraryId, work: &[u8]) -> Result<WorkCard> {

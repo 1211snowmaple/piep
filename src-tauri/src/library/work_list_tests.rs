@@ -244,6 +244,25 @@ fn every_sort_pages_through_the_shelf_in_the_order_of_one_full_sort_with_ties_in
                     full.iter().map(|c| c.id).collect::<Vec<_>>(),
                     "{sort:?} {descending} {limit}"
                 );
+                // ページ番号で開いたページは、同じ並びのその位置から始まる。
+                for offset in (0..full.len()).step_by(limit) {
+                    let page = library
+                        .list_works(&WorkListQuery {
+                            limit,
+                            offset,
+                            ..query.clone()
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        page.items.iter().map(|c| c.id).collect::<Vec<_>>(),
+                        full[offset..(offset + limit).min(full.len())]
+                            .iter()
+                            .map(|c| c.id)
+                            .collect::<Vec<_>>(),
+                        "{sort:?} {descending} {limit} {offset}"
+                    );
+                    assert_eq!(page.total, Some(full.len() as u64));
+                }
             }
         }
     }

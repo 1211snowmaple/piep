@@ -2,6 +2,7 @@ import type { QueryClient } from "@tanstack/react-query";
 import { demoCollections } from "@/mocks/demoData";
 import { listWorkCollections } from "@/services/collectionApi";
 import { isTauriRuntime } from "@/services/dbApi";
+import { shelfCollections } from "@/features/library/shelfV2";
 import type { WorkCollectionSummary } from "@/types/collections";
 
 /**
@@ -14,13 +15,17 @@ import type { WorkCollectionSummary } from "@/types/collections";
  * プレビューではデモを返す。空のままにすると、カードの崩れがデスクトップ版
  * でしか見つからない。
  */
-export function workCollectionsQueryOptions() {
+export function workCollectionsQueryOptions(shelf = false) {
+  // 新しい棚の一覧は鍵を分ける（旧棚の変更で消す鍵 ["work-collections"] の下に置くと、
+  // 旧棚を書き換えるたびに読み直す。逆に旧棚の一覧が新しい棚の答えで埋まることもない）。
   return {
-    queryKey: ["work-collections"] as const,
+    queryKey: shelf ? ["library-v2-collections"] as const : ["work-collections"] as const,
     queryFn: (): Promise<WorkCollectionSummary[]> =>
-      isTauriRuntime()
-        ? listWorkCollections()
-        : Promise.resolve(demoCollections as WorkCollectionSummary[]),
+      shelf
+        ? shelfCollections()
+        : isTauriRuntime()
+          ? listWorkCollections()
+          : Promise.resolve(demoCollections as WorkCollectionSummary[]),
   };
 }
 
