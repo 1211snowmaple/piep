@@ -5,6 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 impl LegacyImporter {
     pub(super) fn validate_migration_target(&self, target: &Library) -> Result<()> {
+        if target.switched_at()?.is_some() {
+            return Err(Error::Integrity(
+                "正本に切り替えた棚へは、旧棚から移しません".into(),
+            ));
+        }
         let conn = target.conn.lock().map_err(|_| Error::Busy)?;
         // 再開時は、各表の原記録のハッシュを preserve_tables で照合する。
         let resuming:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM migration_records WHERE source_key='__all_rows__' AND evidence_file_id IS NOT NULL)",[],|r|r.get(0))?;

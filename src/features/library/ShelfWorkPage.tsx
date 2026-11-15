@@ -23,7 +23,8 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { modals } from "@mantine/modals";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { notifications } from "@mantine/notifications";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { ActionBar } from "@/components/ActionBar";
 import { AppLink, useAppNavigate, useAppSearchParams, useReturnTo } from "@/app/router";
@@ -36,7 +37,7 @@ import { Note } from "@/components/Note";
 import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { Icons, IconSize } from "@/lib/icons";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
-import { contentTypeLabel, formatBytes, formatDate, formatNumber } from "@/lib/format";
+import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
 import { isTauriRuntime } from "@/services/dbApi";
@@ -47,6 +48,7 @@ import {
   libraryV2Media,
   libraryV2Original,
   libraryV2VersionText,
+  libraryV2SetUserState,
   libraryV2Work,
   shelfBodyUrl,
   shelfFileUrl,
@@ -54,7 +56,7 @@ import {
   type ShelfMedia,
   type ShelfVersion,
 } from "@/services/libraryV2Api";
-import { shelfEntry } from "@/features/library/shelfV2";
+import { invalidateShelf, shelfEntry, useShelfWritable } from "@/features/library/shelfV2";
 import { ContentPagination, Info, parseWorkTab } from "@/features/library/workPageParts";
 
 const READ_ONLY = "新しい棚では変えられません";
@@ -99,6 +101,19 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
     enabled: runtime,
   });
   const work = workQuery.data;
+  const queryClient = useQueryClient();
+  // 正本に切り替えた棚だけ書ける。切り替える前は旧棚から移した写しなので押せない。
+  const writable = useShelfWritable(runtime);
+  const favoriteLabel = !writable ? `お気に入り（${READ_ONLY}）` : work?.favorite ? "お気に入りを解除" : "お気に入りに追加";
+  const toggleFavorite = async () => {
+    if (!work) return;
+    try {
+      await libraryV2SetUserState(workId, { favorite: !work.favorite });
+      await invalidateShelf(queryClient);
+    } catch (error) {
+      notifications.show({ color: "red", title: "お気に入りを変更できません", message: errorMessage(error) });
+    }
+  };
   const versions = useMemo(() => [...(work?.versions ?? [])].sort((left, right) => right.version - left.version), [work?.versions]);
   const contentQuery = useQuery({
     queryKey: ["library-v2-content", workId, contentSnapshot, contentPage - 1],
@@ -247,7 +262,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
                     <Button className="work-hero__action work-hero__read" leftSection={<Icons.read size={IconSize.action} />} onClick={() => navigate(`/reader/${workId}`)}>読む</Button>
                   </Group>
                   <Group gap={6} wrap="nowrap" role="group" aria-label="手元の印">
-                    <Tooltip label={`お気に入り（${READ_ONLY}）`}><ActionIcon className="work-hero__action" size={38} variant="default" style={work.favorite ? { "--ai-color": "var(--flag-favorite)", "--ai-bg": "var(--flag-favorite-bg)" } : undefined} aria-label={`お気に入り（${READ_ONLY}）`} aria-pressed={work.favorite} disabled><Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
+                    <Tooltip label={favoriteLabel}><ActionIcon className="work-hero__action" size={38} variant="default" style={work.favorite ? { "--ai-color": "var(--flag-favorite)", "--ai-bg": "var(--flag-favorite-bg)" } : undefined} aria-label={favoriteLabel} aria-pressed={work.favorite} disabled={!writable} onClick={toggleFavorite}><Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
                   </Group>
                 </Group>
               </div>

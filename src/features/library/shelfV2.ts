@@ -1,5 +1,5 @@
 import { useLocalStorage } from "@mantine/hooks";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, type QueryClient } from "@tanstack/react-query";
 import {
   libraryV2Decorations,
   libraryV2Entities,
@@ -69,6 +69,27 @@ export function shelfListable(status: LibraryV2Status | undefined): boolean {
 
 /** 画面の押せない操作に添える理由。 */
 export const SHELF_READ_ONLY = "新しい棚では変えられません";
+
+/** 棚を正本に切り替えたか。切り替えた棚だけ、画面から書き込める。 */
+export function shelfWritable(status: LibraryV2Status | undefined): boolean {
+  return status?.state === "ready" && status.switched;
+}
+
+/** 新しい棚へ書き込めるか（好み・棚の状態・切り替え）。 */
+export function useShelfWritable(runtime: boolean): boolean {
+  const [preferred] = useShelfV2Preference();
+  const status = useLibraryV2Status(runtime && preferred);
+  return runtime && preferred && shelfWritable(status.data);
+}
+
+/**
+ * 新しい棚へ書いたあと、画面が持っている問い合わせを読み直させる。印・件数・絞り込みの結果が
+ * どこに出ているかを一つずつ追わず、棚の状態のほかは全部古いことにする（今出ている画面だけが
+ * 読み直す）。
+ */
+export function invalidateShelf(queryClient: QueryClient): Promise<void> {
+  return queryClient.invalidateQueries({ predicate: (query) => query.queryKey[0] !== "library-v2-status" });
+}
 
 /**
  * この画面を新しい棚から出すか（好みと棚の状態）。`deciding` のあいだは棚の状態を聞いている

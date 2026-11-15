@@ -18,7 +18,8 @@ import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import type { DownloadEntry, ListedWork, ShelfEntry } from "@/types/library";
-import { isShelfEntry } from "@/features/library/shelfV2";
+import { invalidateShelf, isShelfEntry, useShelfWritable } from "@/features/library/shelfV2";
+import { libraryV2RemoveWork, libraryV2SetUserState } from "@/services/libraryV2Api";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 interface WorkCardProps {
@@ -441,24 +442,79 @@ function WorkActions(props: WorkActionsProps) {
 }
 
 /**
- * 新しい棚の作品の操作。新しい棚は読むだけの写しなので、書き換える操作（お気に入り・
- * 更新監視・EPUB・削除）は押せない形で同じ場所に置く（並びと幅を変えない）。読む画面は
- * まだ新しい棚につないでいない。
+ * 新しい棚の作品の操作。棚を正本に切り替えるまでは旧棚から移した写しなので、書き換える操作
+ * （お気に入り・更新監視・棚から外す）は押せない形で同じ場所に置く（並びと幅を変えない）。
+ * EPUB のキューは、まだ新しい棚につないでいない。
  */
 function ShelfWorkActions({ work }: { work: ShelfEntry }) {
   const navigate = useAppNavigate();
+  const queryClient = useQueryClient();
+  const writable = useShelfWritable(isTauriRuntime());
   const off = { "--ai-color": "var(--flag-off)" } as React.CSSProperties;
+  const change = async (next: { favorite?: boolean; watching?: boolean }, failure: string) => {
+    try {
+      await libraryV2SetUserState(work.id, next);
+      await invalidateShelf(queryClient);
+      return true;
+    } catch (error) {
+      notifications.show({ color: "red", title: failure, message: errorMessage(error) });
+      return false;
+    }
+  };
+  const toggleFavorite = () => change({ favorite: !work.favorite }, "お気に入りを変更できません");
+  const toggleWatch = async () => {
+    const next = !work.watchUpdates;
+    if (await change({ watching: next }, "更新監視を変更できません")) {
+      notifications.show({ color: next ? "piep" : "gray", message: next ? "更新監視をオンにしました" : "更新監視をオフにしました" });
+    }
+  };
+  const confirmRemove = () => modals.openConfirmModal({
+    title: "この作品を棚から外しますか？",
+    children: <Text size="sm">「{work.title}」を一覧から外します。保存した版・編集・コレクションの記録は残り、もう一度保存すると戻ります。</Text>,
+    labels: { confirm: "外す", cancel: "キャンセル" },
+    confirmProps: DANGER_CONFIRM,
+    onConfirm: async () => {
+      try {
+        await libraryV2RemoveWork(work.id);
+        await invalidateShelf(queryClient);
+        notifications.show({ color: "green", message: "作品を棚から外しました" });
+      } catch (error) {
+        notifications.show({ color: "red", title: "外せません", message: errorMessage(error) });
+      }
+    },
+  });
+  const favoriteLabel = work.favorite ? "お気に入りを解除" : "お気に入りに追加";
+  const watchLabel = work.watchUpdates ? "更新監視をオフにする" : "更新監視をオンにする";
+  const locked = (label: string) => `${label}（新しい棚では変えられません）`;
   return (
-    <Group gap={2} wrap="nowrap" justify="flex-end" className="work-card__actions" onClick={(event) => event.stopPropagation()} data-read-only>
-      <ActionIcon variant="subtle" color="gray" style={off} size="md" disabled aria-label={`${work.title}：読む（新しい棚ではまだ使えません）`}>
-        <Icons.read size={IconSize.action} />
-      </ActionIcon>
-      <ActionIcon variant="subtle" color="gray" style={off} size="md" disabled aria-label={`${work.title}：お気に入り（新しい棚では変えられません）`} aria-pressed={work.favorite}>
-        <Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} />
-      </ActionIcon>
-      <ActionIcon variant="subtle" color="gray" style={off} size="md" disabled aria-label={`${work.title}：更新監視（新しい棚では変えられません）`} aria-pressed={work.watchUpdates}>
-        <Icons.watch size={IconSize.action} />
-      </ActionIcon>
+    <Group gap={2} wrap="nowrap" justify="flex-end" className="work-card__actions" onClick={(event) => event.stopPropagation()} data-read-only={writable ? undefined : true}>
+      <Tooltip label="読む">
+        <ActionIcon variant="subtle" style={{ "--ai-color": "var(--flag-watch)" }} size="md" aria-label={`${work.title}：読む`} onClick={() => navigate(`/reader/${work.id}`)}>
+          <Icons.read size={IconSize.action} />
+        </ActionIcon>
+      </Tooltip>
+      <Tooltip label={writable ? favoriteLabel : locked("お気に入り")}>
+        {writable ? (
+          <ActionIcon variant="subtle" color={work.favorite ? "red" : "gray"} style={{ "--ai-color": work.favorite ? "var(--flag-favorite)" : "var(--flag-off)", "--ai-bg": work.favorite ? "var(--flag-favorite-bg)" : "transparent" }} size="md" aria-label={`${work.title}：${favoriteLabel}`} aria-pressed={work.favorite} onClick={toggleFavorite}>
+            <Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} />
+          </ActionIcon>
+        ) : (
+          <ActionIcon variant="subtle" color="gray" style={off} size="md" disabled aria-label={`${work.title}：${locked("お気に入り")}`} aria-pressed={work.favorite}>
+            <Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} />
+          </ActionIcon>
+        )}
+      </Tooltip>
+      <Tooltip label={writable ? watchLabel : locked("更新監視")}>
+        {writable ? (
+          <ActionIcon variant="subtle" color={work.watchUpdates ? "piep" : "gray"} style={{ "--ai-color": work.watchUpdates ? "var(--flag-watch)" : "var(--flag-off)", "--ai-bg": work.watchUpdates ? "var(--flag-watch-bg)" : "transparent" }} size="md" aria-label={`${work.title}：${watchLabel}`} aria-pressed={work.watchUpdates} onClick={toggleWatch}>
+            <Icons.watch size={IconSize.action} />
+          </ActionIcon>
+        ) : (
+          <ActionIcon variant="subtle" color="gray" style={off} size="md" disabled aria-label={`${work.title}：${locked("更新監視")}`} aria-pressed={work.watchUpdates}>
+            <Icons.watch size={IconSize.action} />
+          </ActionIcon>
+        )}
+      </Tooltip>
       <ActionIcon variant="subtle" color="gray" style={off} size="md" disabled aria-label={`${work.title}：EPUBキュー（新しい棚ではまだ使えません）`}>
         <EpubQueueGlyph queued={false} />
       </ActionIcon>
@@ -466,6 +522,8 @@ function ShelfWorkActions({ work }: { work: ShelfEntry }) {
         <Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" style={off} size="md" aria-label={`${work.title}：その他`}><Icons.more size={IconSize.nav} /></ActionIcon></Tooltip></Menu.Target>
         <Menu.Dropdown>
           <Menu.Item leftSection={<Icons.workDetail size={IconSize.menu} />} onClick={() => navigate(`/works/${work.id}`)}>詳細</Menu.Item>
+          <Menu.Divider />
+          <Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} disabled={!writable} aria-label={writable ? undefined : locked("棚から外す")} onClick={confirmRemove}>棚から外す</Menu.Item>
         </Menu.Dropdown>
       </Menu>
     </Group>

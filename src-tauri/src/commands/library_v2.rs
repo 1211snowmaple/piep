@@ -1,7 +1,8 @@
-//! 新しい棚をアプリから読み取り専用で開く（評価文書 4.1 の 2）。
+//! 新しい棚をアプリから開く（評価文書 4.1 の 2・4）。
 //!
-//! 旧棚が正本のあいだ、新しい棚は旧棚から移行して作った写しで、アプリは読むだけにする。
-//! 書き込みの命令は置かない（二重書き込みをしない）。棚は `PIEP_LIBRARY_V2_DIR` か、
+//! 旧棚が正本のあいだ、新しい棚は旧棚から移行して作った写しで、アプリは読むだけにする
+//! （二重書き込みをしない。書けば旧棚からの追いつきが続けられなくなる）。棚を正本に切り替えた
+//! あと（`library_meta.switched_at`）だけ、書き込みの命令が棚へ書く。棚は `PIEP_LIBRARY_V2_DIR` か、
 //! アプリのフォルダーの隣の `….library-v2` にあれば開き、なければ何もしない（画面には何も出さない）。
 //!
 //! 開くのと索引の同期は起動の門（旧棚の準備）と別のスレッドで進める。全棚では索引を
@@ -51,6 +52,8 @@ pub enum LibraryV2Status {
         path: PathBuf,
         /// 移行の未解決の記録。0 でなければ、切り替えに使える棚ではない。
         unresolved: Vec<String>,
+        /// 正本に切り替えた棚か。切り替えた棚だけ、アプリが書き込む。
+        switched: bool,
     },
     Failed {
         path: PathBuf,
@@ -134,6 +137,23 @@ impl LibraryV2 {
             .ok_or_else(|| "新しい棚は開いていません".to_string())
     }
 
+    /// 書き込める棚。正本に切り替えるまでは誤り（旧棚から移した写しに書かない）。
+    fn writable(&self) -> Result<Arc<Library>, String> {
+        let library = self.library()?;
+        match library.switched_at() {
+            Ok(Some(_)) => Ok(library),
+            Ok(None) => Err("新しい棚はまだ旧棚の写しなので変えられません".to_string()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// 書いたあと、覚えていた集計を捨てる（件数・印が変わる）。
+    fn forget_derived(&self) {
+        if let Ok(mut rows) = self.entity_rows.lock() {
+            rows.clear();
+        }
+    }
+
     /// 本文の検索ができる棚。索引の同期が済むまでは誤り。
     fn searchable(&self) -> Result<Arc<Library>, String> {
         match self.status() {
@@ -211,9 +231,11 @@ impl LibraryV2 {
         let unresolved = library
             .activation_problems()
             .unwrap_or_else(|error| vec![format!("未解決の記録を読めません: {error}")]);
+        let switched = matches!(library.switched_at(), Ok(Some(_)));
         self.set(LibraryV2Status::Ready {
             path: path.into(),
             unresolved,
+            switched,
         });
     }
 }
@@ -300,6 +322,72 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
 #[tauri::command]
 pub fn library_v2_status(state: State<'_, Arc<LibraryV2>>) -> LibraryV2Status {
     state.status()
+}
+
+fn parse_id(value: &str) -> Result<LibraryId, String> {
+    LibraryId::parse_str(value).map_err(|_| "識別子が不正です".to_string())
+}
+
+/// お気に入り・更新の監視を変える（正本に切り替えた棚だけ）。`request` は画面が一回の操作ごとに
+/// 作る ID で、送り直しても二度書かない。
+#[tauri::command]
+pub async fn library_v2_set_user_state(
+    state: State<'_, Arc<LibraryV2>>,
+    request: String,
+    work: String,
+    favorite: Option<bool>,
+    watching: Option<bool>,
+) -> Result<crate::library::UserState, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.writable()?;
+        let (request, work) = (parse_id(&request)?, parse_id(&work)?);
+        let current = library
+            .user_state(work, library.id)
+            .map_err(|e| e.to_string())?;
+        let result = library
+            .set_user_state(
+                request,
+                work,
+                library.id,
+                current.generation,
+                crate::library::UserStateChange { favorite, watching },
+            )
+            .map_err(|e| e.to_string())?;
+        state.forget_derived();
+        Ok(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 作品を棚から外す（正本に切り替えた棚だけ）。保存版・編集・コレクションの行は残る。
+/// 本文の検索の索引からは、続けて同期して消す。
+#[tauri::command]
+pub async fn library_v2_remove_work(
+    state: State<'_, Arc<LibraryV2>>,
+    request: String,
+    work: String,
+) -> Result<(), String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.writable()?;
+        let (request, work) = (parse_id(&request)?, parse_id(&work)?);
+        let generation = library
+            .library_item_generation(work)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "棚に載っていない作品です".to_string())?;
+        library
+            .remove_work(request, work, generation)
+            .map_err(|e| e.to_string())?;
+        state.forget_derived();
+        if let Err(error) = library.sync_search_index(&mut |_, _| {}) {
+            log::error!("外した作品を検索の索引から消せません: {error}");
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 一覧の一件と、画面が表紙を引くための識別子。

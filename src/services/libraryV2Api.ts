@@ -17,7 +17,7 @@ export type LibraryV2Status =
   | { state: "absent"; path: string }
   | { state: "opening"; path: string }
   | { state: "indexing"; path: string }
-  | { state: "ready"; path: string; unresolved: string[] }
+  | { state: "ready"; path: string; unresolved: string[]; switched: boolean }
   | { state: "failed"; path: string; message: string };
 
 export type ShelfSort =
@@ -157,6 +157,28 @@ export interface ShelfDecoration {
 
 export function libraryV2Status(): Promise<LibraryV2Status> {
   return invoke<LibraryV2Status>("library_v2_status");
+}
+
+/** 作品ごとの利用者の状態。 */
+export interface ShelfUserState {
+  favorite: boolean;
+  watching: boolean;
+  generation: number;
+}
+
+/** お気に入り・更新の監視を変える（正本に切り替えた棚だけ）。書かない項目は今のまま。 */
+export function libraryV2SetUserState(work: string, change: { favorite?: boolean; watching?: boolean }): Promise<ShelfUserState> {
+  return invoke<ShelfUserState>("library_v2_set_user_state", {
+    request: crypto.randomUUID(),
+    work,
+    favorite: change.favorite ?? null,
+    watching: change.watching ?? null,
+  });
+}
+
+/** 作品を棚から外す（正本に切り替えた棚だけ）。 */
+export function libraryV2RemoveWork(work: string): Promise<void> {
+  return invoke<void>("library_v2_remove_work", { request: crypto.randomUUID(), work });
 }
 
 /** `legacyWorks` を渡すと、旧棚の番号でその作品だけに絞る（読みかけの棚。読書位置の鍵が旧棚の番号なので）。 */

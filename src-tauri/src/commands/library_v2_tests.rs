@@ -57,6 +57,25 @@ fn an_existing_library_opens_indexes_and_serves_files_by_their_fingerprint() {
 }
 
 #[test]
+fn a_migrated_copy_is_not_written_until_the_shelf_is_switched_over() {
+    let dir = temp("switch");
+    {
+        let library = Library::create(&dir.0).unwrap();
+        // 開く前に切り替えた棚と、切り替えていない棚を一つずつ試す。
+        assert_eq!(library.switched_at().unwrap(), None);
+    }
+    let state = LibraryV2::default();
+    state.open(&dir.0);
+    let LibraryV2Status::Ready { switched, .. } = state.status() else {
+        panic!("開いて同期する: {:?}", state.status());
+    };
+    assert!(!switched);
+    assert!(state.writable().is_err());
+    state.library().unwrap().switch_over().unwrap();
+    assert!(state.writable().is_ok());
+}
+
+#[test]
 fn image_kinds_come_from_the_bytes() {
     assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
     assert_eq!(sniff(b"GIF89a"), Some("image/gif"));

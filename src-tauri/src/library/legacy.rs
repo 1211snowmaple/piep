@@ -1024,6 +1024,8 @@ mod tests {
             assert_eq!(image_bytes, b"untouched image metadata");
             assert_eq!(fs::read(&raw).unwrap(), raw_bytes);
             target.verify().unwrap();
+            // 未解決が残る棚は正本に切り替えない。
+            assert!(target.switch_over().is_err());
         }
         fs::remove_dir_all(temp).unwrap();
     }
@@ -1111,6 +1113,14 @@ INSERT INTO downloads VALUES(1,'pixiv','123','title','author',0);").unwrap();
         assert_eq!(target.snapshots(work).unwrap().len(), 2);
         assert_eq!(target.work_card(work).unwrap().version_number, 2);
         target.verify().unwrap();
+        // 正本に切り替えた棚へは、もう旧棚から移さない。
+        assert_eq!(target.switched_at().unwrap(), None);
+        let at = target.switch_over().unwrap();
+        assert_eq!(target.switch_over().unwrap(), at);
+        assert!(LegacyImporter::open(&old)
+            .unwrap()
+            .import(&target, &AtomicBool::new(false), |_| {})
+            .is_err());
         drop(target);
         fs::remove_dir_all(temp).unwrap();
     }

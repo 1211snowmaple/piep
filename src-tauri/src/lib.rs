@@ -311,6 +311,8 @@ pub fn run() -> tauri::Result<()> {
             commands::startup::startup_remember_color_scheme,
             // 新しい棚の読み取り (commands::library_v2)
             commands::library_v2::library_v2_status,
+            commands::library_v2::library_v2_set_user_state,
+            commands::library_v2::library_v2_remove_work,
             commands::library_v2::library_v2_search,
             commands::library_v2::library_v2_decorations,
             commands::library_v2::library_v2_work,
