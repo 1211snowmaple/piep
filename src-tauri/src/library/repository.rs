@@ -1283,6 +1283,12 @@ impl Library {
                         "ROLLBACK TO snapshot_publication; RELEASE snapshot_publication;",
                     )?;
                     insert_observation(old)?;
+                    // 棚から外した作品は、中身が同じでも保存し直せば棚に戻す。
+                    if capture.kind == EntityKind::Work
+                        && tx.execute("INSERT INTO library_items(work_id,added_at,generation) VALUES(?1,?2,1) ON CONFLICT(work_id) DO NOTHING",params![entity.as_bytes().as_slice(),acquired_at])? > 0
+                    {
+                        self.refresh_work_list(&tx, entity)?;
+                    }
                     let result = CaptureResult {
                         entity_id: entity,
                         snapshot_id: old,

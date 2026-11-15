@@ -147,8 +147,16 @@ impl LibraryV2 {
         }
     }
 
+    /// 正本に切り替えた棚。切り替えていなければ（開いていない・旧棚の写し）None で、保存は旧棚へ。
+    pub(crate) fn switched(&self) -> Option<Arc<Library>> {
+        self.library
+            .get()
+            .filter(|library| matches!(library.switched_at(), Ok(Some(_))))
+            .cloned()
+    }
+
     /// 書いたあと、覚えていた集計を捨てる（件数・印が変わる）。
-    fn forget_derived(&self) {
+    pub(crate) fn forget_derived(&self) {
         if let Ok(mut rows) = self.entity_rows.lock() {
             rows.clear();
         }

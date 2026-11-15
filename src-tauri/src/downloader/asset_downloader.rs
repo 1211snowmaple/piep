@@ -57,6 +57,32 @@ fn fanbox_file_filename(file: &Value) -> String {
     sanitize_filename(&format!("{name}_{key}.{ext}"))
 }
 
+/// FANBOX の添付の、今の保存名から以前の保存名（取得元の ID を付ける前の `名前.拡張子`）へ。
+/// 以前の名前で持っている版を、同じ添付を持つものとして扱うのに使う。
+pub fn fanbox_former_file_names(data: &Value) -> HashMap<String, String> {
+    let data = crate::fanbox_api::payload::post_or_self(data);
+    let Some(body) = data.get("body") else {
+        return HashMap::new();
+    };
+    body.get("fileMap")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|map| map.values())
+        .chain(
+            body.get("files")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .map(|file| {
+            let name = file.get("name").and_then(|v| v.as_str()).unwrap_or("file");
+            let url = file.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let former = format!("{name}.{}", extract_extension(url, "bin"));
+            (fanbox_file_filename(file), sanitize_filename(&former))
+        })
+        .collect()
+}
+
 /// FANBOX の画像の保存名。id は投稿内で一意なので、そのまま使える。
 fn fanbox_image_filename(image: &Value) -> String {
     let id = image.get("id").and_then(|v| v.as_str()).unwrap_or("image");

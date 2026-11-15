@@ -1,8 +1,5 @@
 use super::repository::REQUEST_REUSED;
-use super::{
-    cover_identity, image_identity, Capture, CaptureSource, CapturedAttachment, CapturedMedia,
-    EntityKind, Error, Library, LibraryId, Result, SourceBody,
-};
+use super::{Capture, CaptureSource, EntityKind, Error, Library, LibraryId, Result};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -155,6 +152,95 @@ impl LegacyImporter {
             conn,
             _source_lock: file,
         })
+    }
+
+    /// 版の画像・添付（その版に属するもの。編集画面の画像は除く）。容量が記録と違えば誤り。
+    fn version_assets(
+        &self,
+        work_id: i64,
+        json_path: &str,
+    ) -> Result<Vec<(i64, super::work_capture::StagedAsset)>> {
+        let mut out = Vec::new();
+        let mut assets=self.conn.prepare("SELECT id,asset_type,filename,local_path,original_url,mime_type,file_size_bytes FROM assets WHERE download_id=?1 ORDER BY id")?;
+        for asset in assets.query_map([work_id], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                r.get::<_, i64>(6)?,
+            ))
+        })? {
+            let (asset_id, role, name, stored, url, mime, size) = asset?;
+            // 他版の欠損を現在版の欠損と誤認しない。所属を調べてからファイルを開く。
+            if role == "editor_image" || !self.asset_in_version(work_id, &stored, json_path)? {
+                continue;
+            }
+            let asset_path = self.managed_path(&stored)?;
+            if size < 0 || fs::metadata(&asset_path)?.len() != size as u64 {
+                return Err(Error::Integrity(format!(
+                    "画像・添付 {asset_id} の容量が記録と違います"
+                )));
+            }
+            out.push((
+                asset_id,
+                super::work_capture::StagedAsset {
+                    role,
+                    name,
+                    path: asset_path,
+                    url,
+                    mime_type: mime,
+                },
+            ));
+        }
+        Ok(out)
+    }
+
+    /// 旧棚の各作品の今の版を、アプリの保存の入力の形で渡す（取得元・鍵・応答・画像と添付）。
+    /// 移した棚へ同じ入力で保存し直して、版が増えないことを確かめるのに使う。読めない作品は
+    /// `each` に誤りで渡す。
+    pub fn current_save_inputs(
+        &self,
+        mut each: impl FnMut(
+            &str,
+            &str,
+            Result<(Value, Vec<super::work_capture::StagedAsset>)>,
+        ) -> Result<()>,
+    ) -> Result<()> {
+        let mut works = self.conn.prepare(
+            "SELECT id,source,source_id,json_path FROM downloads WHERE json_path IS NOT NULL ORDER BY id",
+        )?;
+        let rows = works
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(works);
+        for (work_id, provider, key, json_path) in rows {
+            let input = (|| {
+                let path = self.managed_path(&json_path)?;
+                let mut raw = Vec::new();
+                File::open(&path)?
+                    .take(16 * 1024 * 1024 + 1)
+                    .read_to_end(&mut raw)?;
+                let data: Value = serde_json::from_slice(&raw)?;
+                let assets = self
+                    .version_assets(work_id, &json_path)?
+                    .into_iter()
+                    .map(|(_, asset)| asset)
+                    .collect();
+                Ok((data, assets))
+            })();
+            each(&provider, &key, input)?;
+        }
+        Ok(())
     }
 
     fn managed_path(&self, stored: &str) -> Result<PathBuf> {
@@ -531,175 +617,12 @@ impl LegacyImporter {
                 ));
             }
             let data: Value = serde_json::from_slice(&raw)?;
-            let detail = data.get("detail").unwrap_or(&data);
-            let mut metadata = BTreeMap::new();
-            match provider {
-                "pixiv" => {
-                    metadata.insert("content_type".into(), json!("novel"));
-                }
-                "fanbox" => {
-                    if let Some(kind) = detail.get("type").and_then(Value::as_str) {
-                        metadata.insert("content_type".into(), json!(kind));
-                    }
-                }
-                _ => (),
-            }
-            for name in [
-                "title",
-                "caption",
-                "create_date",
-                "series_id",
-                "series_title",
-                "text_length",
-            ] {
-                if let Some(value) = detail.get(name) {
-                    metadata.insert(name.to_owned(), value.clone());
-                }
-            }
-            if let Some(user) = detail.get("user") {
-                if let Some(name) = user.get("name") {
-                    metadata.insert("author_name".into(), name.clone());
-                }
-                if let Some(id) = user.get("id") {
-                    metadata.insert("author_key".into(), id.clone());
-                }
-            }
-            if provider == "fanbox" {
-                if let Some(creator) = detail.get("creatorId").and_then(Value::as_str) {
-                    metadata.insert("author_key".into(), json!(creator));
-                }
-                if let Some(date) = detail.get("publishedDatetime").and_then(Value::as_str) {
-                    metadata.insert("create_date".into(), json!(date));
-                }
-                // 一覧の更新日とカードの抜粋。比較の対象ではないので、変わっても改稿にしない。
-                if let Some(date) = detail.get("updatedDatetime").and_then(Value::as_str) {
-                    metadata.insert("update_date".into(), json!(date));
-                }
-                if let Some(excerpt) = detail.get("excerpt").and_then(Value::as_str) {
-                    metadata.insert("excerpt".into(), json!(excerpt));
-                }
-            }
-            if let Some(tags) = detail.get("tags").and_then(Value::as_array) {
-                let mut names: Vec<_> = tags
-                    .iter()
-                    .filter_map(|t| t.as_str().or_else(|| t.get("name").and_then(Value::as_str)))
-                    .map(str::to_owned)
-                    .collect();
-                names.sort();
-                names.dedup();
-                metadata.insert("tags".into(), json!(names));
-            }
-            let body = if provider == "fanbox" {
-                data.get("body")
-                    .filter(|body| !body.is_null())
-                    .cloned()
-                    .map(SourceBody::FanboxBody)
-            } else {
-                data.get("text")
-                    .or_else(|| detail.get("text"))
-                    .and_then(Value::as_str)
-                    .map(|text| {
-                        if provider == "pixiv" {
-                            SourceBody::PixivText(text.into())
-                        } else {
-                            SourceBody::PlainText(text.into())
-                        }
-                    })
-            };
-            let mut states = BTreeMap::new();
-            // 旧棚の版は、その版のフォルダーの画像と添付がすべて。前の版にあって消えた画像を
-            // 引き継ぐと、旧棚の読書画面にない画像が現在の保存状態に残る。
-            states.insert("attachments".into(), "known".into());
-            states.insert("media".into(), "known".into());
-            if metadata
-                .get("caption")
-                .is_some_and(|v| v.as_str() == Some(""))
-                && metadata
-                    .get("tags")
-                    .is_some_and(|v| v.as_array().is_some_and(Vec::is_empty))
-            {
-                states.insert("caption".into(), "unknown".into());
-                states.insert("tags".into(), "unknown".into());
-            }
-            let mut media = Vec::new();
-            let mut attachments = Vec::new();
-            let mut included_assets = Vec::new();
-            let mut assets=self.conn.prepare("SELECT id,asset_type,filename,local_path,original_url,mime_type,file_size_bytes FROM assets WHERE download_id=?1 ORDER BY id")?;
-            for asset in assets.query_map([work_id], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, Option<String>>(4)?,
-                    r.get::<_, Option<String>>(5)?,
-                    r.get::<_, i64>(6)?,
-                ))
-            })? {
-                let (asset_id, role, name, stored, url, mime, size) = asset?;
-                // 他版の欠損を現在版の欠損と誤認しない。所属を調べてからファイルを開く。
-                if role == "editor_image" || !self.asset_in_version(work_id, &stored, json_path)? {
-                    continue;
-                }
-                let asset_path = self.managed_path(&stored)?;
-                if size < 0 || fs::metadata(&asset_path)?.len() != size as u64 {
-                    return Err(Error::Integrity(format!(
-                        "画像・添付 {asset_id} の容量が記録と違います"
-                    )));
-                }
-                if role == "cover" || role == "illustration" {
-                    let crate::library::ResourceReference::Media { slot } =
-                        reader::asset_reference(&role, &name)?
-                    else {
-                        unreachable!()
-                    };
-                    let media_key = if role == "cover" {
-                        url.as_deref()
-                            .or_else(|| data.get("cover_url").and_then(Value::as_str))
-                            .or_else(|| detail.get("cover_url").and_then(Value::as_str))
-                            .or_else(|| data.get("coverImageUrl").and_then(Value::as_str))
-                            .map(|url| cover_identity(provider, url))
-                    } else {
-                        url.as_deref().map(|url| image_identity(provider, url))
-                    };
-                    let quality = if url.as_deref().is_some_and(|u| u.contains("/c/")) {
-                        "thumbnail"
-                    } else if url.as_deref().is_some_and(|u| u.contains("-original/")) {
-                        "original"
-                    } else {
-                        "unknown"
-                    };
-                    included_assets.push((asset_id, slot.clone()));
-                    media.push(CapturedMedia {
-                        slot,
-                        role: if role == "cover" {
-                            "cover"
-                        } else {
-                            "illustration"
-                        }
-                        .into(),
-                        source_key: media_key,
-                        source_url: url,
-                        quality: quality.into(),
-                        original_name: name,
-                        mime_type: mime.unwrap_or_else(|| "application/octet-stream".into()),
-                        bytes: Some(CaptureSource::File(asset_path)),
-                    });
-                } else {
-                    let crate::library::ResourceReference::File { slot } =
-                        reader::asset_reference(&role, &name)?
-                    else {
-                        unreachable!()
-                    };
-                    included_assets.push((asset_id, slot.clone()));
-                    attachments.push(CapturedAttachment {
-                        slot,
-                        original_name: name,
-                        mime_type: mime,
-                        bytes: CaptureSource::File(asset_path),
-                    });
-                }
-            }
+            let fields = super::work_capture::work_fields(provider, &data);
+            let (asset_ids, staged): (Vec<i64>, Vec<_>) =
+                self.version_assets(work_id, json_path)?.into_iter().unzip();
+            let (media, attachments, slots) =
+                super::work_capture::staged_assets(provider, &data, staged)?;
+            let included_assets: Vec<(i64, String)> = asset_ids.into_iter().zip(slots).collect();
             let result = target.capture_with_legacy_classification(
                 Capture {
                     acquired_at,
@@ -709,9 +632,9 @@ impl LegacyImporter {
                     kind: EntityKind::Work,
                     route: "legacy-import".into(),
                     raw: CaptureSource::File(path.clone()),
-                    metadata,
-                    field_states: states,
-                    body,
+                    metadata: fields.metadata,
+                    field_states: fields.field_states,
+                    body: fields.body,
                     media,
                     attachments,
                 },

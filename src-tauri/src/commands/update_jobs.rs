@@ -503,14 +503,40 @@ fn format_thousands(value: i64) -> String {
 /// 文言を決める。改稿だと思って取りに行ったのに中身が同じだった場合
 /// （配信元が更新時刻だけ動かした場合）も、そうと分かるようにする。
 fn describe_candidate_save(
-    updated: &DownloadEntry,
+    saved: &super::downloader::SavedWork,
     previous_title: Option<&str>,
     previous_length: Option<i64>,
     previous_version: Option<i64>,
 ) -> ItemOutcome {
+    let updated = match saved {
+        super::downloader::SavedWork::Legacy(updated) => updated,
+        super::downloader::SavedWork::Shelf(shelf) => {
+            let reference = SavedRef::Shelf(shelf.work);
+            return match previous_length {
+                Some(before) if shelf.revised => ItemOutcome::Saved(
+                    reference,
+                    format!(
+                        "改稿を保存: {}（{}, v{}）",
+                        shelf.title,
+                        describe_source_change(
+                            previous_title.unwrap_or(&shelf.title),
+                            &shelf.title,
+                            before,
+                            shelf.text_length
+                        ),
+                        shelf.version
+                    ),
+                ),
+                Some(_) if !shelf.created => {
+                    ItemOutcome::Skipped(format!("中身は変わっていません: {}", shelf.title))
+                }
+                _ => ItemOutcome::Saved(reference, format!("新作を保存: {}", shelf.title)),
+            };
+        }
+    };
     match (previous_length, previous_version) {
         (Some(before), Some(version)) if updated.current_version > version => ItemOutcome::Saved(
-            updated.id,
+            SavedRef::Legacy(updated.id),
             format!(
                 "改稿を保存: {}（{}, v{}）",
                 updated.title,
@@ -526,7 +552,10 @@ fn describe_candidate_save(
         (Some(_), Some(_)) => {
             ItemOutcome::Skipped(format!("中身は変わっていません: {}", updated.title))
         }
-        _ => ItemOutcome::Saved(updated.id, format!("新作を保存: {}", updated.title)),
+        _ => ItemOutcome::Saved(
+            SavedRef::Legacy(updated.id),
+            format!("新作を保存: {}", updated.title),
+        ),
     }
 }
 
@@ -2217,11 +2246,11 @@ async fn run_update_job(
                     .db
                     .append_update_job_log(&job_id, "success", &message)?;
             }
-            Ok(ItemOutcome::Saved(download_id, message)) => {
-                saved_download_ids.push(download_id);
+            Ok(ItemOutcome::Saved(saved, message)) => {
+                saved_download_ids.extend(saved.legacy());
                 state
                     .db
-                    .complete_update_job_item(item.id, "saved", None, Some(download_id))?;
+                    .complete_update_job_item(item.id, "saved", None, saved.legacy())?;
                 // 保存できた候補は、もう「決めていないもの」ではない。
                 if let (Some(source), Some(source_id)) =
                     (item.source.as_deref(), item.source_id.as_deref())
@@ -2238,15 +2267,13 @@ async fn run_update_job(
                 // 保存したものを続けて追いたい、という設定のときだけ監視に載せる。
                 // 失敗しても保存そのものは済んでいるので、警告に留める。
                 if watch_saved {
-                    if let Err(error) = state.db.set_watch_updates(download_id, true) {
-                        log::warn!("更新監視を有効にできません ({download_id}): {error}");
-                    }
+                    watch_saved_work(&app, &state, saved);
                 }
             }
-            Ok(ItemOutcome::PartialSaved(download_id, message)) => {
+            Ok(ItemOutcome::PartialSaved(saved, message)) => {
                 // The novel body is usable, but the candidate must remain
                 // discoverable because its referenced illustrations are absent.
-                saved_download_ids.push(download_id);
+                saved_download_ids.extend(saved.legacy());
                 let reason = format!("[一部保存] {message}");
                 let known = is_known_hold(&state, &item, &reason)?;
                 if item.item_type != "target" {
@@ -2258,7 +2285,7 @@ async fn run_update_job(
                     &item,
                     known,
                     &reason,
-                    Some(download_id),
+                    saved.legacy(),
                     &reason,
                 )?;
             }
@@ -2675,10 +2702,97 @@ async fn refresh_profiles_for_saved_downloads(
     }
 }
 
+/// 保存した作品の指し先。旧棚の番号か、正本に切り替えた棚の作品。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavedRef {
+    Legacy(i64),
+    Shelf(crate::library::LibraryId),
+}
+
+impl SavedRef {
+    fn of(saved: &super::downloader::SavedWork) -> Self {
+        match saved {
+            super::downloader::SavedWork::Legacy(entry) => SavedRef::Legacy(entry.id),
+            super::downloader::SavedWork::Shelf(saved) => SavedRef::Shelf(saved.work),
+        }
+    }
+
+    /// 旧棚の番号（ジョブの記録・横顔の取り直しは旧棚の番号で持つ）。
+    fn legacy(self) -> Option<i64> {
+        match self {
+            SavedRef::Legacy(id) => Some(id),
+            SavedRef::Shelf(_) => None,
+        }
+    }
+}
+
+/// 切り替えた棚の作品の一覧の一件（棚から外した作品は無いものとする）。棚を切り替えていなければ None。
+fn shelf_card(
+    app: &tauri::AppHandle,
+    source: &str,
+    key: &str,
+) -> Option<Result<Option<crate::library::WorkCard>, String>> {
+    let library = app
+        .try_state::<Arc<super::library_v2::LibraryV2>>()?
+        .switched()?;
+    Some((|| {
+        let Some(work) = library
+            .work_by_key(source, key)
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
+        if library
+            .library_item_generation(work)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        library.work_card(work).map(Some).map_err(|e| e.to_string())
+    })())
+}
+
+/// 保存した作品を更新の監視に載せる。
+fn watch_saved_work(app: &tauri::AppHandle, state: &AppState, saved: SavedRef) {
+    let result = match saved {
+        SavedRef::Legacy(id) => state.db.set_watch_updates(id, true),
+        SavedRef::Shelf(work) => (|| {
+            let library = app
+                .try_state::<Arc<super::library_v2::LibraryV2>>()
+                .and_then(|shelf| {
+                    let library = shelf.switched()?;
+                    shelf.forget_derived();
+                    Some(library)
+                })
+                .ok_or("新しい棚に書けません")?;
+            let current = library
+                .user_state(work, library.id)
+                .map_err(|e| e.to_string())?;
+            library
+                .set_user_state(
+                    crate::library::LibraryId::now_v7(),
+                    work,
+                    library.id,
+                    current.generation,
+                    crate::library::UserStateChange {
+                        favorite: None,
+                        watching: Some(true),
+                    },
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })(),
+    };
+    if let Err(error) = result {
+        log::warn!("更新監視を有効にできません ({saved:?}): {error}");
+    }
+}
+
 enum ItemOutcome {
     Done(String),
-    Saved(i64, String),
-    PartialSaved(i64, String),
+    Saved(SavedRef, String),
+    PartialSaved(SavedRef, String),
     Skipped(String),
     LocalSkipped(String),
     AuthRequired(String),
@@ -3104,6 +3218,22 @@ fn remember_fanbox_deep_check(state: &Arc<AppState>, download_id: i64) {
     }
 }
 
+/// 保存済みの作品を取り直して切り替えた棚へ保存した結果を、一文にする。
+fn describe_work_update(dl: &DownloadEntry, saved: &super::downloader::SavedWork) -> ItemOutcome {
+    match saved {
+        super::downloader::SavedWork::Shelf(shelf) if shelf.revised => ItemOutcome::Saved(
+            SavedRef::Shelf(shelf.work),
+            format!(
+                "更新を保存: {}（{}, v{}）",
+                shelf.title,
+                describe_source_change(&dl.title, &shelf.title, dl.text_length, shelf.text_length),
+                shelf.version
+            ),
+        ),
+        _ => ItemOutcome::Skipped(format!("最新: {}", saved.title())),
+    }
+}
+
 async fn process_work_item(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
@@ -3222,6 +3352,12 @@ async fn process_work_item(
             None,
         )
         .await?;
+        let updated = match updated {
+            super::downloader::SavedWork::Legacy(updated) => updated,
+            shelf @ super::downloader::SavedWork::Shelf(_) => {
+                return Ok(describe_work_update(&dl, &shelf));
+            }
+        };
         // 本文まで取り直した直後なので、この版が手元にあると言い切れる。
         if let Some(listed) = listed_update.as_deref() {
             if let Err(error) = state.db.set_download_source_updated_at(updated.id, listed) {
@@ -3230,7 +3366,7 @@ async fn process_work_item(
         }
         if updated.current_version > dl.current_version {
             Ok(ItemOutcome::Saved(
-                updated.id,
+                SavedRef::Legacy(updated.id),
                 format!(
                     "更新を保存: {}（{}, v{}）",
                     updated.title,
@@ -3350,10 +3486,16 @@ async fn process_work_item(
             Some(user_agent),
         )
         .await?;
+        let updated = match updated {
+            super::downloader::SavedWork::Legacy(updated) => updated,
+            shelf @ super::downloader::SavedWork::Shelf(_) => {
+                return Ok(describe_work_update(&dl, &shelf));
+            }
+        };
         remember_fanbox_deep_check(state, updated.id);
         if updated.current_version > dl.current_version {
             Ok(ItemOutcome::Saved(
-                updated.id,
+                SavedRef::Legacy(updated.id),
                 format!(
                     "更新を保存: {}（{}, v{}）",
                     updated.title,
@@ -3892,6 +4034,28 @@ async fn process_candidate_item(
     let source = item.source.as_deref().unwrap_or("");
     let source_id = item.source_id.as_deref().unwrap_or("");
     let kind = payload.get("kind").and_then(|v| v.as_str());
+    // 切り替えた棚では、手元にあるかどうか・監視しているかを棚で見る。
+    if let Some(card) = shelf_card(app, source, source_id) {
+        let card = card?;
+        let refetch = kind == Some("revision")
+            || (kind == Some("save")
+                && (card.as_ref().is_some_and(|card| card.watching)
+                    || state.db.has_incomplete_save_candidate(source, source_id)?));
+        if card.is_some() && !refetch {
+            return Ok(ItemOutcome::Skipped(format!(
+                "保存済みのためスキップ: {}",
+                item.title
+            )));
+        }
+        let previous = card.map(|card| {
+            (
+                card.title,
+                card.text_length as i64,
+                card.version_number as i64,
+            )
+        });
+        return save_candidate(app, state, item, credentials, &payload, previous).await;
+    }
     let existing = state.db.get_download_by_source(source, source_id)?;
     // 改稿の候補は「すでに手元にある作品」が対象なので、保存済みでも取りに行く。
     // 中身が本当に変わっていなければ download_and_save 側が版を上げずに終わる。
@@ -3923,9 +4087,30 @@ async fn process_candidate_item(
             item.title
         )));
     }
-    let previous_title = existing.as_ref().map(|download| download.title.clone());
-    let previous_length = existing.as_ref().map(|download| download.text_length);
-    let previous_version = existing.as_ref().map(|download| download.current_version);
+    let previous = existing.as_ref().map(|download| {
+        (
+            download.title.clone(),
+            download.text_length,
+            download.current_version,
+        )
+    });
+    save_candidate(app, state, item, credentials, &payload, previous).await
+}
+
+/// 候補を取りに行って保存する。`previous` は手元にあった版（題・字数・版の番号）。
+async fn save_candidate(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    item: &UpdateJobItem,
+    credentials: &UpdateCredentials,
+    payload: &Value,
+    previous: Option<(String, i64, i64)>,
+) -> Result<ItemOutcome, String> {
+    let source = item.source.as_deref().unwrap_or("");
+    let source_id = item.source_id.as_deref().unwrap_or("");
+    let previous_title = previous.as_ref().map(|(title, _, _)| title.clone());
+    let previous_length = previous.as_ref().map(|(_, length, _)| *length);
+    let previous_version = previous.as_ref().map(|(_, _, version)| *version);
 
     if source == "pixiv" {
         let Some(token) = pixiv_token(credentials) else {
@@ -3938,10 +4123,10 @@ async fn process_candidate_item(
         let title =
             string_at(&value, &[&["detail", "title"], &["title"]]).unwrap_or(item.title.clone());
         let author_name = string_at(&value, &[&["detail", "user", "name"], &["user", "name"]])
-            .or_else(|| string_at(&payload, &[&["originalData", "user", "name"]]))
+            .or_else(|| string_at(payload, &[&["originalData", "user", "name"]]))
             .unwrap_or_else(|| "unknown".to_string());
         let author_id = string_at(&value, &[&["detail", "user", "id"], &["user", "id"]])
-            .or_else(|| string_at(&payload, &[&["originalData", "user", "id"]]))
+            .or_else(|| string_at(payload, &[&["originalData", "user", "id"]]))
             .unwrap_or_else(|| "0".to_string());
         let source_created_at = string_at(
             &value,
@@ -3970,16 +4155,21 @@ async fn process_candidate_item(
             None,
         )
         .await?;
-        let missing = crate::database::queries::saved_pixiv_missing_references(
-            &value,
-            &state.db.get_current_assets(&updated)?,
-        );
-        // この版を利用者が編集して、もう埋めてあるかもしれない。
-        let missing = state.db.references_left_by_active_edit(
-            updated.id,
-            updated.current_version,
-            missing,
-        )?;
+        let missing = match &updated {
+            super::downloader::SavedWork::Legacy(updated) => {
+                let missing = crate::database::queries::saved_pixiv_missing_references(
+                    &value,
+                    &state.db.get_current_assets(updated)?,
+                );
+                // この版を利用者が編集して、もう埋めてあるかもしれない。
+                state.db.references_left_by_active_edit(
+                    updated.id,
+                    updated.current_version,
+                    missing,
+                )?
+            }
+            super::downloader::SavedWork::Shelf(saved) => saved.missing_references.clone(),
+        };
         // A gate that still hides the details must not settle as complete:
         // clearing the candidate here would lose the work from the audit,
         // because an unchanged body creates no new version to inspect.
@@ -3999,7 +4189,7 @@ async fn process_candidate_item(
                 ));
             }
             return Ok(ItemOutcome::PartialSaved(
-                updated.id,
+                SavedRef::of(&updated),
                 format!(
                     "本文は保存しましたが、{}。候補を残して再試行できます",
                     losses.join("。")
@@ -4045,7 +4235,7 @@ async fn process_candidate_item(
         }
         let title = string_at(&value, &[&["title"]]).unwrap_or(item.title.clone());
         let author_name = string_at(&value, &[&["user", "name"]])
-            .or_else(|| string_at(&payload, &[&["originalData", "user", "name"]]))
+            .or_else(|| string_at(payload, &[&["originalData", "user", "name"]]))
             .unwrap_or_else(|| "unknown".to_string());
         let author_id = string_at(
             &value,
@@ -4053,7 +4243,7 @@ async fn process_candidate_item(
         )
         .or_else(|| {
             string_at(
-                &payload,
+                payload,
                 &[
                     &["originalData", "creatorId"],
                     &["originalData", "creator_id"],

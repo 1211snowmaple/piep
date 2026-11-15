@@ -19,6 +19,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once, OnceLock, Weak};
 use tauri::Manager;
 
+#[path = "downloader_shelf.rs"]
+mod shelf;
+pub use shelf::ShelfSaved;
+
 type WorkSaveMutex = tokio::sync::Mutex<()>;
 static WORK_SAVE_LOCKS: OnceLock<Mutex<HashMap<String, Weak<WorkSaveMutex>>>> = OnceLock::new();
 
@@ -2205,7 +2209,31 @@ async fn sync_download_entities(
     }
 }
 
-/// 取り寄せた中身をライブラリへ入れる。版の判断もここで行う。
+/// 保存した作品。旧棚の行か、正本に切り替えた棚の作品。
+#[derive(Clone, Debug)]
+pub enum SavedWork {
+    Legacy(Box<DownloadEntry>),
+    Shelf(ShelfSaved),
+}
+
+impl SavedWork {
+    pub fn title(&self) -> &str {
+        match self {
+            SavedWork::Legacy(entry) => &entry.title,
+            SavedWork::Shelf(saved) => &saved.title,
+        }
+    }
+
+    pub fn text_length(&self) -> i64 {
+        match self {
+            SavedWork::Legacy(entry) => entry.text_length,
+            SavedWork::Shelf(saved) => saved.text_length,
+        }
+    }
+}
+
+/// 取り寄せた中身をライブラリへ入れる。版の判断もここで行う。正本に切り替えた棚があれば
+/// そちらへ（題名・作者などの引数は使わず、棚が応答から読む）、なければ旧棚へ。
 ///
 /// IPC には出さない。**題名・作者・タグをどう読むかは取得元の作法であって
 /// 画面の都合ではない**ので、材料を画面から受け取る形にはしない。保存ジョブと
@@ -2225,8 +2253,8 @@ pub async fn download_and_save(
     source_created_at: Option<String>,
     cookie: Option<String>,
     user_agent: Option<String>,
-) -> Result<DownloadEntry, String> {
-    let mut data = if source == "fanbox" {
+) -> Result<SavedWork, String> {
+    let data = if source == "fanbox" {
         crate::fanbox_api::payload::into_post(data).ok_or_else(|| {
             "FANBOX投稿データの形式を解釈できませんでした（応答形式が変わった可能性があります）"
                 .to_string()
@@ -2234,6 +2262,56 @@ pub async fn download_and_save(
     } else {
         data
     };
+    let shelf = app
+        .try_state::<Arc<crate::commands::library_v2::LibraryV2>>()
+        .map(|state| Arc::clone(&state));
+    if let Some((shelf, library)) = shelf.and_then(|shelf| {
+        let library = shelf.switched()?;
+        Some((shelf, library))
+    }) {
+        return shelf::save_to_shelf(
+            &app, shelf, library, data, source, source_id, cookie, user_agent,
+        )
+        .await
+        .map(SavedWork::Shelf);
+    }
+    save_to_legacy(
+        app,
+        data,
+        source,
+        source_id,
+        title,
+        author_name,
+        author_id,
+        content_type,
+        tags,
+        excerpt,
+        source_created_at,
+        cookie,
+        user_agent,
+    )
+    .await
+    .map(|entry| SavedWork::Legacy(Box::new(entry)))
+}
+
+/// 旧棚へ保存する（切り替える前の保存）。FANBOX の応答は投稿の形にしてから渡す。
+#[allow(clippy::too_many_arguments)]
+async fn save_to_legacy(
+    app: tauri::AppHandle,
+    data: serde_json::Value,
+    source: String,
+    source_id: String,
+    title: String,
+    author_name: String,
+    author_id: String,
+    content_type: String,
+    tags: Option<Vec<String>>,
+    excerpt: Option<String>,
+    source_created_at: Option<String>,
+    cookie: Option<String>,
+    user_agent: Option<String>,
+) -> Result<DownloadEntry, String> {
+    let mut data = data;
     let state = app.state::<Arc<AppState>>();
     let storage = state.db.storage_dir().to_path_buf();
     // 同じ作品を二重に保存させないのはこちらの錠。関数の最後まで持ち続ける。

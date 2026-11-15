@@ -16,24 +16,7 @@ struct Asset {
     paths: Vec<PathBuf>,
     url: Option<String>,
 }
-pub(super) fn asset_reference(role: &str, name: &str) -> Result<ResourceReference> {
-    Ok(if role == "cover" || role == "illustration" {
-        let slot = if role == "cover" {
-            "cover".into()
-        } else {
-            Path::new(name)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .ok_or_else(|| Error::Integrity("画像名が不正です".into()))?
-                .to_owned()
-        };
-        ResourceReference::Media { slot }
-    } else {
-        ResourceReference::File {
-            slot: format!("file:{name}"),
-        }
-    })
-}
+pub(super) use crate::library::work_capture::asset_reference;
 fn ordinary(path: &Path) -> PathBuf {
     #[cfg(windows)]
     if let Some(path) = path.to_str() {

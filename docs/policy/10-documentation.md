@@ -176,7 +176,7 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 
 | | 残り |
 |---|---:|
-| Rust の `///` `//!` | <!--stat:comments.rust.english-->704<!--/stat--> 行 |
+| Rust の `///` `//!` | <!--stat:comments.rust.english-->705<!--/stat--> 行 |
 | TS の JSDoc | <!--stat:comments.ts.english-->458<!--/stat--> 行 |
 
 この数は日本語の文字を含まない説明コメントの行数で、目安である（URL だけの行や
@@ -210,7 +210,7 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 |---|---:|
 | コマンド | <!--stat:commands.total-->233<!--/stat--> |
 | `///` があるもの | <!--stat:commands.documented-->233<!--/stat--> |
-| 節の前書き（`//!`）があるモジュール | <!--stat:modules.documented-->14<!--/stat--> / <!--stat:modules.total-->15<!--/stat--> |
+| 節の前書き（`//!`）があるモジュール | <!--stat:modules.documented-->15<!--/stat--> / <!--stat:modules.total-->16<!--/stat--> |
 
 **全部埋まっている。** ラチェット検査（[品質](09-quality.md#境界のドリフト検査)）は
 この数字を守るので、`///` の無いコマンドを足すと CI が落ちる。数を戻すのではなく、
