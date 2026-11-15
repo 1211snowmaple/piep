@@ -98,7 +98,9 @@ impl EditContent {
                 .media_slot
                 .as_deref()
                 .is_some_and(|s| !slots.contains(s))
-                || (block.kind == "image" && block.media_slot.is_none())
+                || (block.kind == "image"
+                    && block.media_slot.is_none()
+                    && block.attrs.get("missing") != Some(&Value::Bool(true)))
             {
                 return Err(Error::Integrity("編集画像の参照先がありません".into()));
             }

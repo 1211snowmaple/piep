@@ -13977,7 +13977,7 @@ fn insert_work_blocks_locked(
     Ok(())
 }
 
-fn normalize_block_inputs(blocks: &[WorkBlockInput]) -> Vec<WorkBlockInput> {
+pub(crate) fn normalize_block_inputs(blocks: &[WorkBlockInput]) -> Vec<WorkBlockInput> {
     let mut normalized = Vec::new();
     for block in blocks {
         let block_type = match block.block_type.as_str() {
@@ -14239,7 +14239,7 @@ fn token_attribute(token: &str, name: &str) -> Option<String> {
         })
 }
 
-fn html_to_editor_blocks(html: &str, assets: &[AssetEntry]) -> Vec<WorkBlock> {
+pub(crate) fn html_to_editor_blocks(html: &str, assets: &[AssetEntry]) -> Vec<WorkBlock> {
     if html.trim().is_empty() {
         return plain_text_to_editor_blocks("");
     }

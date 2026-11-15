@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import type { ReaderOutlineEntry, ReaderSearchHit, ScoreReason, SearchHighlight } from "@/types/library";
+import type { ReaderOutlineEntry, ReaderSearchHit, ScoreReason, SearchHighlight, WorkBlock, WorkBlockInput } from "@/types/library";
 import type { PdfPageImage } from "@/services/dbApi";
 
 /**
@@ -582,6 +582,67 @@ export function libraryV2Collections(): Promise<ShelfCollectionSummary[]> {
 /** コレクションの画面。`id` は旧棚の ID（移したもの）か新しい棚の ID。 */
 export function libraryV2Collection(id: string): Promise<ShelfCollection> {
   return invoke<ShelfCollection>("library_v2_collection", { id });
+}
+
+/** 編集画面の画像。`id` は画面の中だけの番号、`file` はファイルの識別子。 */
+export interface ShelfEditorMedia {
+  id: number;
+  file: string;
+  name: string;
+  mimeType: string | null;
+}
+
+/** 編集の版の一つ（下書きか反映中）。 */
+export interface ShelfEditorRevision {
+  id: string;
+  baseVersion: number;
+  /** 付け直した題。付け直していなければ null。 */
+  title: string | null;
+  createdAt: number;
+}
+
+/** 編集画面を開くときの中身（下書き、反映中の版、今の版の本文の順）。 */
+export interface ShelfEditorView {
+  base: string;
+  baseVersion: number;
+  generation: number;
+  active: ShelfEditorRevision | null;
+  draft: ShelfEditorRevision | null;
+  sourceTitle: string;
+  blocks: WorkBlock[];
+  media: ShelfEditorMedia[];
+}
+
+export interface ShelfEditState {
+  active: string | null;
+  draft: string | null;
+  generation: number;
+}
+
+export function libraryV2Editor(work: string): Promise<ShelfEditorView> {
+  return invoke<ShelfEditorView>("library_v2_editor", { work });
+}
+
+/** 段を下書きに保存する（`publish` なら続けて反映する）。正本に切り替えた棚だけ。 */
+export function libraryV2SaveEditor(work: string, save: {
+  base: string;
+  expected: number;
+  title: string | null;
+  blocks: WorkBlockInput[];
+  media: ShelfEditorMedia[];
+  publish: boolean;
+}): Promise<ShelfEditState> {
+  return invoke<ShelfEditState>("library_v2_save_editor", { request: crypto.randomUUID(), work, save });
+}
+
+/** 下書きを捨てる・反映をやめる。正本に切り替えた棚だけ。 */
+export function libraryV2EditPointer(work: string, expected: number, change: "discard" | "unpublish"): Promise<ShelfEditState> {
+  return invoke<ShelfEditState>("library_v2_edit_pointer", { request: crypto.randomUUID(), work, expected, change });
+}
+
+/** 編集に使う画像を棚へ取り込む。`id` は 0 で返る（画面が番号を付ける）。 */
+export function libraryV2ImportEditImage(path: string): Promise<ShelfEditorMedia> {
+  return invoke<ShelfEditorMedia>("library_v2_import_edit_image", { path });
 }
 
 /** 画面が作品を指す鍵（取得元と取得元の ID）。棚に無い回も指せる。 */

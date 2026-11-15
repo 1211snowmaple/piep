@@ -277,7 +277,7 @@ fn local_path(info: &ResourceInfo, key: Option<&str>) -> Option<String> {
 /// そこで新しい棚の対応が結んだ項目の ID を、16 進に現れない文字（`z`）で囲んだ印に
 /// 置き換え、その印で照合させる。
 #[derive(Default)]
-struct Marks {
+pub(crate) struct Marks {
     /// `blocks` の `fileId` と `fileMap` の鍵 → 印。
     file_keys: BTreeMap<String, String>,
     /// `images` の何番目 → 印。
@@ -344,7 +344,7 @@ impl Marks {
 }
 
 /// 新しい棚の対応から、旧棚の変換が探す名前の仮の添付を作る。本文に付ける印も返す。
-fn bound_assets(document: &ReaderDocument) -> (Vec<AssetEntry>, Marks) {
+pub(crate) fn bound_assets(document: &ReaderDocument) -> (Vec<AssetEntry>, Marks) {
     let mut assets = Vec::new();
     let mut marks = Marks::default();
     for binding in &document.bindings {

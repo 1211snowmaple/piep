@@ -15,6 +15,7 @@ pub mod library_entity;
 pub mod library_entity_list;
 pub mod library_search;
 pub mod library_view;
+pub mod library_work_edit;
 mod logging;
 /// 棚の実物で取り出しを確かめる example から触れるように公開している。
 pub mod pdf;
@@ -315,6 +316,10 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_set_user_state,
             commands::library_v2::library_v2_remove_work,
             commands::library_v2::library_v2_edit_collection,
+            commands::library_v2::library_v2_editor,
+            commands::library_v2::library_v2_save_editor,
+            commands::library_v2::library_v2_edit_pointer,
+            commands::library_v2::library_v2_import_edit_image,
             commands::library_v2::library_v2_reading_position,
             commands::library_v2::library_v2_set_reading_position,
             commands::library_v2::library_v2_adopt_device_positions,

@@ -44,7 +44,7 @@ pub use identity::{cover_identity, image_identity, Fingerprint, LibraryId};
 pub use job_history::{JobHistory, JobHistoryItem, JobHistoryLog};
 pub use legacy::{LegacyImportReport, LegacyImporter};
 pub use maintenance::{AssetAuditMarker, MaintenanceHistory, RepairAttemptMarker};
-pub use operations::{EditRequest, SnapshotInfo, UserState, UserStateChange};
+pub use operations::{EditPointerChange, EditRequest, SnapshotInfo, UserState, UserStateChange};
 pub use reader::{
     ReaderBinding, ReaderBindingSet, ReaderBody, ReaderDocument, ResolvedReaderBinding,
 };

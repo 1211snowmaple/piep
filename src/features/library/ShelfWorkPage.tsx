@@ -45,6 +45,8 @@ import { openExternalUrl } from "@/services/openerApi";
 import {
   isShelfPdf,
   libraryV2Content,
+  libraryV2EditPointer,
+  libraryV2Editor,
   libraryV2Media,
   libraryV2Original,
   libraryV2VersionText,
@@ -58,6 +60,7 @@ import {
 } from "@/services/libraryV2Api";
 import { invalidateShelf, shelfEntry, useShelfWritable } from "@/features/library/shelfV2";
 import { ContentPagination, Info, parseWorkTab } from "@/features/library/workPageParts";
+import { ActionRow } from "@/components/ActionRow";
 
 const READ_ONLY = "新しい棚では変えられません";
 
@@ -66,7 +69,8 @@ function versionDate(version: ShelfVersion): string {
 }
 
 /**
- * 新しい棚（試験中）の作品の画面。正本に切り替えた棚ではお気に入りを書く。編集・削除などの変更はまだ置かない。
+ * 新しい棚（試験中）の作品の画面。正本に切り替えた棚では、お気に入りと編集（編集画面へ進む・取り込んだ
+ * 本文に戻す）を書く。
  *
  * 旧棚の作品の画面と同じ並び（頭・概要・本文・画像と添付・履歴・保存データ）にして、
  * 切り替えても見る場所が変わらないようにする。本文は新しい棚の「本文の中の指定 → 画像」の
@@ -105,6 +109,22 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   // 正本に切り替えた棚だけ書ける。切り替える前は旧棚から移した写しなので押せない。
   const writable = useShelfWritable(runtime);
   const favoriteLabel = !writable ? `お気に入り（${READ_ONLY}）` : work?.favorite ? "お気に入りを解除" : "お気に入りに追加";
+  const editLabel = writable ? "編集" : `編集（${READ_ONLY}）`;
+  // 反映中の編集を下ろす（版は残る）。今の世代は編集画面と同じ問い合わせで引く。
+  const [reverting, setReverting] = useState(false);
+  const revertEdit = async () => {
+    setReverting(true);
+    try {
+      const view = await libraryV2Editor(workId);
+      await libraryV2EditPointer(workId, view.generation, "unpublish");
+      await invalidateShelf(queryClient);
+      notifications.show({ color: "green", message: "取り込んだ本文に戻しました" });
+    } catch (error) {
+      notifications.show({ color: "red", title: "本文を戻せません", message: errorMessage(error) });
+    } finally {
+      setReverting(false);
+    }
+  };
   const toggleFavorite = async () => {
     if (!work) return;
     try {
@@ -260,6 +280,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
                 <Group gap="md" wrap="wrap" justify="flex-end" className="work-hero__actions">
                   <Group gap={6} wrap="nowrap" role="group" aria-label="中身へ進む">
                     <Button className="work-hero__action work-hero__read" leftSection={<Icons.read size={IconSize.action} />} onClick={() => navigate(`/reader/${workId}`)}>読む</Button>
+                    <Tooltip label={editLabel}><ActionIcon className="work-hero__action" variant="default" size={38} aria-label={editLabel} disabled={!writable} onClick={() => navigate(`/editor/${workId}`)}><Icons.edit size={IconSize.action} /></ActionIcon></Tooltip>
                   </Group>
                   <Group gap={6} wrap="nowrap" role="group" aria-label="手元の印">
                     <Tooltip label={favoriteLabel}><ActionIcon className="work-hero__action" size={38} variant="default" style={work.favorite ? { "--ai-color": "var(--flag-favorite)", "--ai-bg": "var(--flag-favorite-bg)" } : undefined} aria-label={favoriteLabel} aria-pressed={work.favorite} disabled={!writable} onClick={toggleFavorite}><Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
@@ -285,9 +306,12 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
               <Card p="lg" h="100%"><Title order={3} mb="md">作品情報</Title><Text size="xs" c="dimmed" fw={700} mb="sm">取得元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.author_name} icon={<Icons.person size={IconSize.action} />} /><Info label="公開日" value={formatDate(entry.sourceCreatedAt, true)} icon={<Icons.publishedDate size={IconSize.action} />} />{entry.sourceUpdatedAt && entry.sourceUpdatedAt !== entry.sourceCreatedAt && <Info label="最終更新" value={formatDate(entry.sourceUpdatedAt, true)} icon={<Icons.updates size={IconSize.action} />} />}</SimpleGrid><Divider my="lg" /><Text size="xs" c="dimmed" fw={700} mb="sm">手元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label={edited ? "取得元の文字数" : "文字数"} value={`${formatNumber(work.text_length)}字`} icon={<Icons.read size={IconSize.action} />} /><Info label="容量" value={formatBytes(work.logical_size)} icon={<Icons.openFolder size={IconSize.action} />} /><Info label="バージョン" value={`v${current?.version ?? work.version_number}`} icon={<Icons.versionHistory size={IconSize.action} />} /><Info label="保存日" value={formatDate(entry.downloadedAt, true)} icon={<Icons.epubAdd size={IconSize.action} />} /></SimpleGrid></Card>
             </Grid.Col>
             <Grid.Col span={{ base: 12, md: 4 }}>
-              <Note title="新しい棚（試験中）">{writable
-                ? "正本に切り替えた棚です。お気に入りはここで変えられます。編集とコレクションは、まだ変えられません。"
-                : "旧棚から移行した時点の写しを、読むだけで開いています。お気に入り・更新監視・編集・削除・コレクションは、旧棚の作品の画面で変えてください。"}</Note>
+              <Stack gap="lg">
+                {writable && edited && <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は編集版です</Text></Box><Badge color="gray" variant="light">反映中</Badge></Group><Text size="xs" c="dimmed" mb="sm">取り込んだ本文はそのまま残っています。戻しても、編集した版は残ります。</Text><ActionRow><Button variant="default" size="xs" leftSection={<Icons.undo size={IconSize.menu} />} loading={reverting} onClick={() => modals.openConfirmModal({ title: "取り込んだ本文に戻しますか？", children: <Text size="sm">リーダーとEPUBは取り込んだままの本文を使うようになります。編集した版は残ります。</Text>, labels: { confirm: "元に戻す", cancel: "キャンセル" }, onConfirm: () => { void revertEdit(); } })}>取り込んだ本文に戻す</Button></ActionRow></Card>}
+                <Note title="新しい棚（試験中）">{writable
+                  ? "正本に切り替えた棚です。お気に入りと編集はここで変えられます。"
+                  : "旧棚から移行した時点の写しを、読むだけで開いています。お気に入り・更新監視・編集・削除・コレクションは、旧棚の作品の画面で変えてください。"}</Note>
+              </Stack>
             </Grid.Col>
           </Grid>
         </Tabs.Panel>

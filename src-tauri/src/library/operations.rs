@@ -37,6 +37,18 @@ pub struct UserStateChange {
     pub watching: Option<bool>,
 }
 
+/// 編集の指し先の変更（下書きと反映中の版）。版そのものは消さない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditPointerChange {
+    /// 下書きを反映する（反映中の版を下書きに替え、下書きを空にする）。
+    Publish,
+    /// 下書きを捨てる。
+    Discard,
+    /// 反映をやめ、取り込んだ本文へ戻す。
+    Unpublish,
+}
+
 pub struct EditRequest<'a> {
     pub request_id: LibraryId,
     pub work: LibraryId,
@@ -47,6 +59,9 @@ pub struct EditRequest<'a> {
     pub content: &'a EditContent,
     pub activate: bool,
 }
+
+/// 編集の指し先の行（反映中・下書き・世代）。
+type Pointers = (Option<Vec<u8>>, Option<Vec<u8>>, i64);
 
 fn id(bytes: Vec<u8>) -> Result<LibraryId> {
     LibraryId::from_slice(&bytes).map_err(|_| Error::Integrity("識別子の長さが不正です".into()))
@@ -351,6 +366,89 @@ impl Library {
         tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'remove_work',?3,?4)",params![request.as_bytes().as_slice(),work.as_bytes().as_slice(),serde_json::json!({"request":payload,"result":shelf}).to_string(),chrono::Utc::now().timestamp_millis()])?;
         tx.commit()?;
         Ok(shelf)
+    }
+
+    /// 編集の指し先を変える（反映・下書きを捨てる・反映をやめる）。変わらなければ書かない。
+    /// `expected` は今の世代。送り直しは同じ `request` で一度きり。
+    pub fn change_edit_pointers(
+        &self,
+        request: LibraryId,
+        work: LibraryId,
+        user: LibraryId,
+        expected: i64,
+        change: EditPointerChange,
+    ) -> Result<super::EditState> {
+        let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let tx = conn.transaction()?;
+        let payload =
+            serde_json::json!({"work":work,"user":user,"expected":expected,"change":change});
+        let receipt: Option<String> = tx
+            .query_row(
+                "SELECT payload_json FROM outbox WHERE request_id=?1 AND operation='edit_pointer'",
+                [request.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(receipt) = receipt {
+            let receipt: serde_json::Value = serde_json::from_str(&receipt)?;
+            if receipt["request"] != payload {
+                return Err(Error::Integrity(super::repository::REQUEST_REUSED.into()));
+            }
+            return Ok(serde_json::from_value(receipt["state"].clone())?);
+        }
+        let key = (work.as_bytes().to_vec(), user.as_bytes().to_vec());
+        let row: Option<Pointers> = tx
+            .query_row(
+                "SELECT active_id,draft_id,generation FROM edit_documents WHERE work_id=?1 AND user_id=?2",
+                params![key.0, key.1],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let (active, draft, generation) = row.unwrap_or((None, None, 0));
+        if generation != expected {
+            return Err(Error::Integrity("編集中に別の変更が保存されました".into()));
+        }
+        let (next_active, next_draft) = match change {
+            EditPointerChange::Publish => match &draft {
+                Some(draft) => (Some(draft.clone()), None),
+                None => return Err(Error::Integrity("反映する下書きがありません".into())),
+            },
+            EditPointerChange::Discard => (active.clone(), None),
+            EditPointerChange::Unpublish => (None, draft.clone()),
+        };
+        let to_id = |value: &Option<Vec<u8>>| {
+            value
+                .as_deref()
+                .map(LibraryId::from_slice)
+                .transpose()
+                .map_err(|_| Error::Integrity("編集の識別子が不正です".into()))
+        };
+        if (next_active.as_ref(), next_draft.as_ref()) == (active.as_ref(), draft.as_ref()) {
+            return Ok(super::EditState {
+                active: to_id(&active)?,
+                draft: to_id(&draft)?,
+                generation,
+            });
+        }
+        tx.execute(
+            "UPDATE edit_documents SET active_id=?3,draft_id=?4,generation=generation+1 WHERE work_id=?1 AND user_id=?2",
+            params![key.0, key.1, next_active, next_draft],
+        )?;
+        if next_active != active && user == self.id {
+            self.refresh_work_list(&tx, work)?;
+        }
+        let state = super::EditState {
+            active: to_id(&next_active)?,
+            draft: to_id(&next_draft)?,
+            generation: generation + 1,
+        };
+        tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'edit_pointer',?3,?4)",params![request.as_bytes().as_slice(),work.as_bytes().as_slice(),serde_json::json!({"state":state,"request":payload}).to_string(),chrono::Utc::now().timestamp_millis()])?;
+        tx.execute(
+            "UPDATE library_meta SET generation=generation+1 WHERE singleton=1",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(state)
     }
 
     /// 編集は固定した snapshot に対して保存する。別作品の基準は FK が拒否する。

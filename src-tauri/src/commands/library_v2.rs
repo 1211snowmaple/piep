@@ -1435,6 +1435,127 @@ pub async fn library_v2_edit_collection(
     .map_err(|e| e.to_string())?
 }
 
+/// 作品の編集画面を開く（下書き、反映中の版、今の版の本文の順）。読むだけなので切り替える前も開ける。
+#[tauri::command]
+pub async fn library_v2_editor(
+    state: State<'_, Arc<LibraryV2>>,
+    work: String,
+) -> Result<crate::library_work_edit::EditorView, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        library
+            .editor_view(parse_id(&work)?)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 編集した後の後始末。一覧の集計を捨て、本文の検索の索引を追いつかせる。
+fn after_edit(state: &LibraryV2, library: &Library) {
+    state.forget_derived();
+    if let Err(error) = library.sync_search_index(&mut |_, _| {}) {
+        log::error!("編集を検索の索引へ反映できません: {error}");
+    }
+}
+
+/// 編集画面の段を下書きに保存する（`publish` なら続けて反映する。正本に切り替えた棚だけ）。
+#[tauri::command]
+pub async fn library_v2_save_editor(
+    state: State<'_, Arc<LibraryV2>>,
+    request: String,
+    work: String,
+    save: crate::library_work_edit::EditorSave,
+) -> Result<crate::library::EditState, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.writable()?;
+        let publish = save.publish;
+        let result = library
+            .save_editor(parse_id(&request)?, parse_id(&work)?, save)
+            .map_err(|e| e.to_string())?;
+        if publish {
+            after_edit(&state, &library);
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 編集の指し先を変える（下書きを捨てる・反映をやめる。正本に切り替えた棚だけ）。
+#[tauri::command]
+pub async fn library_v2_edit_pointer(
+    state: State<'_, Arc<LibraryV2>>,
+    request: String,
+    work: String,
+    expected: i64,
+    change: crate::library::EditPointerChange,
+) -> Result<crate::library::EditState, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.writable()?;
+        let changed = library
+            .change_edit_pointers(
+                parse_id(&request)?,
+                parse_id(&work)?,
+                library.id,
+                expected,
+                change,
+            )
+            .map_err(|e| e.to_string())?;
+        if change != crate::library::EditPointerChange::Discard {
+            after_edit(&state, &library);
+        }
+        Ok(changed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 編集に使う画像を棚へ取り込む（正本に切り替えた棚だけ）。`id` は 0 で返し、画面が番号を付ける。
+#[tauri::command]
+pub async fn library_v2_import_edit_image(
+    state: State<'_, Arc<LibraryV2>>,
+    path: String,
+) -> Result<crate::library_work_edit::EditorMedia, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.writable()?;
+        let path = std::path::PathBuf::from(path);
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image")
+            .to_string();
+        let mime = match path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("png") => Some("image/png"),
+            Some("jpg" | "jpeg") => Some("image/jpeg"),
+            Some("webp") => Some("image/webp"),
+            Some("gif") => Some("image/gif"),
+            Some("avif") => Some("image/avif"),
+            _ => return Err("画像（png・jpg・webp・gif・avif）を選んでください".to_string()),
+        };
+        let file = library
+            .store_original(&crate::library::CaptureSource::File(path))
+            .map_err(|e| e.to_string())?;
+        Ok(crate::library_work_edit::EditorMedia {
+            id: 0,
+            file: file.id.to_string(),
+            name,
+            mime_type: mime.map(str::to_owned),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg(test)]
 #[path = "library_v2_tests.rs"]
 mod tests;
