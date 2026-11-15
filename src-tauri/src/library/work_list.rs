@@ -70,6 +70,9 @@ pub enum WorkSort {
     Size,
     Media,
     Version,
+    /// シリーズの中の順（作品が属するシリーズの位置のうち最も小さいもの、位置のない作品は後ろ）、
+    /// 同じ位置は公開日の順。旧棚のシリーズ順と同じ鍵で、シリーズの画面の既定の並び。
+    SeriesOrder,
     /// 本文の検索の関連度。本文の検索の一覧（`list_works_matching`）でだけ使える。
     /// 続きの位置の値は関連度（非負の f64）のビット列で、非負の f64 はビット列の大小と
     /// 値の大小が一致する。
@@ -89,6 +92,8 @@ impl WorkSort {
             Self::Size => "logical_size",
             Self::Media => "media_count",
             Self::Version => "version_number",
+            // 位置と日付を桁をそろえた文字列にして、一つの鍵で続きのページを引けるようにする。
+            Self::SeriesOrder => "printf('%020d|%020d',coalesce((SELECT min(position) FROM snapshot_series WHERE snapshot_id=p.snapshot_id),9223372036854775807),coalesce(published_at,saved_at))",
             Self::Relevance => "m.score",
         }
     }
@@ -96,12 +101,12 @@ impl WorkSort {
     fn is_plain_column(self) -> bool {
         !matches!(
             self,
-            Self::Published | Self::Updated | Self::Title | Self::Author
+            Self::Published | Self::Updated | Self::Title | Self::Author | Self::SeriesOrder
         )
     }
 
     fn is_text(self) -> bool {
-        matches!(self, Self::Title | Self::Author)
+        matches!(self, Self::Title | Self::Author | Self::SeriesOrder)
     }
 }
 

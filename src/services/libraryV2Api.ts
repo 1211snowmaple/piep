@@ -22,7 +22,7 @@ export type LibraryV2Status =
 
 export type ShelfSort =
   | "saved" | "published" | "updated" | "title" | "author"
-  | "length" | "size" | "media" | "version" | "relevance";
+  | "length" | "size" | "media" | "version" | "series_order" | "relevance";
 
 export type ShelfSortValue = number | string;
 
@@ -66,6 +66,10 @@ export interface ShelfFilter {
   authors?: string[];
   excluded_authors?: string[];
   works?: string[] | null;
+  /** 作者の棚の ID。役を問わず、その作者が載っている作品。 */
+  person?: string | null;
+  /** シリーズの棚の ID。 */
+  series?: string | null;
 }
 
 export interface ShelfListQuery {
@@ -291,4 +295,96 @@ export function shelfFileUrl(fingerprint: string | null | undefined): string | n
 export function shelfBodyUrl(localPath: string | null | undefined): string | null {
   const fingerprint = localPath?.split("/", 1)[0] ?? "";
   return /^[0-9a-f]{64}$/.test(fingerprint) ? shelfFileUrl(fingerprint) : null;
+}
+
+/** 作者・シリーズの画面の頭（`EntityHead`）。画像はファイルの識別子。 */
+export interface ShelfEntityHead {
+  id: string;
+  kind: "person" | "series";
+  provider: string;
+  external_key: string;
+  /** 作者の名前、またはシリーズの題。 */
+  name: string;
+  description: string | null;
+  links: string[];
+  icon: string | null;
+  banner: string | null;
+  cover: string | null;
+  is_concluded: boolean | null;
+  published_content_count: number | null;
+  work_count: number;
+  /** 今の版。作品にだけ名前の載った作者・シリーズは版を持たない。 */
+  snapshot: string | null;
+  version_number: number | null;
+  /** ミリ秒。 */
+  last_checked_at: number | null;
+  last_fetched_at: number | null;
+  /** 古い順。 */
+  versions: ShelfVersion[];
+}
+
+export interface ShelfTagCount {
+  name: string;
+  count: number;
+}
+
+/** 作者のシリーズの一件（`SeriesFacet`）。日時はミリ秒。 */
+export interface ShelfSeriesFacet {
+  id: string;
+  provider: string;
+  external_key: string;
+  name: string;
+  work_count: number;
+  cover: string | null;
+  description: string | null;
+  is_concluded: boolean | null;
+  sample_title: string | null;
+  latest_saved_at: number;
+  latest_published_at: number;
+  latest_updated_at: number;
+  total_text_length: number;
+  total_size: number;
+  total_media: number;
+  total_revisions: number;
+}
+
+export interface ShelfSeriesFacetPage {
+  items: ShelfSeriesFacet[];
+  /** 続きの位置（`offset` に渡す）。 */
+  next: number | null;
+  total: number;
+}
+
+export type ShelfSeriesSort =
+  | "work_count" | "downloaded_at" | "source_created_at" | "source_updated_at" | "name"
+  | "text_length" | "file_size_bytes" | "asset_count" | "current_version";
+
+/** 取得元の ID から作者・シリーズの頭を引く。棚に無ければ null。 */
+export function libraryV2Entity(kind: "person" | "series", provider: string, key: string): Promise<ShelfEntityHead | null> {
+  return invoke<ShelfEntityHead | null>("library_v2_entity", { kind, provider, key });
+}
+
+/** 作者・シリーズの作品に付いたタグ。多い順。 */
+export function libraryV2EntityTags(kind: "person" | "series", entity: string, limit = 200): Promise<ShelfTagCount[]> {
+  return invoke<ShelfTagCount[]>("library_v2_entity_tags", { kind, entity, limit });
+}
+
+/** 作者の作品が属するシリーズの一ページ。`order` を省くと鍵ごとの既定の向き。 */
+export function libraryV2PersonSeries(
+  person: string,
+  options: { query?: string | null; sort?: ShelfSeriesSort | null; order?: "asc" | "desc" | null; offset?: number | null; limit: number },
+): Promise<ShelfSeriesFacetPage> {
+  return invoke<ShelfSeriesFacetPage>("library_v2_person_series", {
+    person,
+    query: options.query ?? null,
+    sort: options.sort ?? null,
+    order: options.order ?? null,
+    offset: options.offset ?? null,
+    limit: options.limit,
+  });
+}
+
+/** 作者・シリーズの今の版を作った取得元の応答（画面の「保存データ」）。 */
+export function libraryV2EntityOriginal(entity: string, snapshot: string): Promise<string | null> {
+  return invoke<string | null>("library_v2_entity_original", { entity, snapshot });
 }

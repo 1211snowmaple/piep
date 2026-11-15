@@ -106,12 +106,21 @@ describe("shelfRequest", () => {
   });
 
   it("refuses conditions the new shelf cannot answer instead of dropping them", () => {
-    expect(() => shelfRequest({ offset: 60, sortBy: "series_order" })).toThrow(ShelfUnsupportedError);
+    expect(() => shelfRequest({ offset: 60, personKey: "8" })).toThrow(ShelfUnsupportedError);
     try {
-      shelfRequest({ offset: 60, sortBy: "series_order" });
+      shelfRequest({ offset: 60, personKey: "8" });
     } catch (error) {
-      expect((error as ShelfUnsupportedError).conditions).toEqual(["ページ番号", "シリーズ順"]);
+      expect((error as ShelfUnsupportedError).conditions).toEqual(["ページ番号", "作者の指名"]);
     }
+  });
+
+  it("orders a series by its own order and narrows an author or a series by the shelf's id", () => {
+    expect(shelfRequest({ sortBy: "series_order", sortOrder: "asc" }).query).toMatchObject({ sort: "series_order", descending: false });
+    const person = shelfRequest({ text: "雨" }, { person: "p-1" });
+    expect(person.query.filter).toMatchObject({ person: "p-1", series: null });
+    // 棚の ID で絞るときは、検索語に書き方を足さない。
+    expect(person.search.text).toBe("雨");
+    expect(shelfRequest({}, { series: "s-1" }).query.filter).toMatchObject({ person: null, series: "s-1" });
   });
 
   it("passes the reading shelf as the old shelf's numbers, which reading positions are kept under", () => {

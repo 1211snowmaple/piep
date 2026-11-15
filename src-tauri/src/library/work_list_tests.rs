@@ -175,6 +175,7 @@ fn key(card: &WorkCard, sort: WorkSort) -> SortValue {
         WorkSort::Media => SortValue::Number(card.media_count as i64),
         WorkSort::Version => SortValue::Number(card.version_number as i64),
         WorkSort::Relevance => unreachable!("関連度の順は本文の検索の試験で見る"),
+        WorkSort::SeriesOrder => unreachable!("シリーズの順は library_entity の試験で見る"),
     }
 }
 

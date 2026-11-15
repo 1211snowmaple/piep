@@ -310,6 +310,8 @@ export interface FacetCount {
 }
 
 export interface EntityFacet {
+  /** 新しい棚（試験中）から引いたもの。画像の欄はパスでなくファイルの識別子。 */
+  shelf?: "v2";
   source: string;
   sourceKey: string;
   displayName: string;

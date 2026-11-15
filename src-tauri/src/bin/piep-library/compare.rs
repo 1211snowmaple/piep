@@ -81,7 +81,11 @@ fn new_key(sort: WorkSort, c: &WorkCard) -> Value {
         WorkSort::Size => c.logical_size.into(),
         WorkSort::Media => c.media_count.into(),
         WorkSort::Version => c.version_number.into(),
-        WorkSort::Relevance => unreachable!("一覧の比較は関連度の順を使わない"),
+        WorkSort::Relevance | WorkSort::SeriesOrder => {
+            unreachable!(
+                "一覧の比較は関連度・シリーズの順を使わない（シリーズの順は compare-entities）"
+            )
+        }
     }
 }
 

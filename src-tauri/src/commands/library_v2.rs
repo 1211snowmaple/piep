@@ -15,6 +15,7 @@ use crate::database::queries::{reader_outline, search_reader_pages};
 use crate::library::{
     Fingerprint, Library, LibraryId, NeighborKind, ResourceScope, WorkCard, WorkListQuery,
 };
+use crate::library_entity::{EntityHead, SeriesFacetPage, SeriesSort, TagCount};
 use crate::library_search::{parse_query, SearchDecoration, SearchMatch, SearchPage, TextSearch};
 use crate::library_view::{MediaView, RenderedDocument, VersionView};
 use serde::Serialize;
@@ -681,6 +682,104 @@ pub async fn library_v2_original(
         };
         library
             .work_original(work, snapshot)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn entity_kind(kind: &str) -> Result<crate::library::EntityKind, String> {
+    match kind {
+        "person" => Ok(crate::library::EntityKind::Person),
+        "series" => Ok(crate::library::EntityKind::Series),
+        _ => Err("作者かシリーズを指定してください".into()),
+    }
+}
+
+/// 作者・シリーズの画面の頭（取得元の ID から）。棚に無ければ None。
+#[tauri::command]
+pub async fn library_v2_entity(
+    state: State<'_, Arc<LibraryV2>>,
+    kind: String,
+    provider: String,
+    key: String,
+) -> Result<Option<EntityHead>, String> {
+    let state = Arc::clone(&state);
+    let kind = entity_kind(&kind)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        state
+            .library()?
+            .entity_head(kind, &provider, &key)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 作者・シリーズの作品に付いた取得元のタグと数。
+#[tauri::command]
+pub async fn library_v2_entity_tags(
+    state: State<'_, Arc<LibraryV2>>,
+    kind: String,
+    entity: LibraryId,
+    limit: usize,
+) -> Result<Vec<TagCount>, String> {
+    let state = Arc::clone(&state);
+    let kind = entity_kind(&kind)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        state
+            .library()?
+            .entity_tags(kind, entity, limit)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 作者の作品が属するシリーズの一ページ。`order` は `asc`・`desc`（省くと鍵ごとの既定）。
+#[tauri::command]
+pub async fn library_v2_person_series(
+    state: State<'_, Arc<LibraryV2>>,
+    person: LibraryId,
+    query: Option<String>,
+    sort: Option<SeriesSort>,
+    order: Option<String>,
+    offset: Option<usize>,
+    limit: usize,
+) -> Result<SeriesFacetPage, String> {
+    let state = Arc::clone(&state);
+    let sort = sort.unwrap_or(SeriesSort::SourceCreatedAt);
+    let ascending = match order.as_deref() {
+        Some("asc") => true,
+        Some("desc") => false,
+        _ => sort.ascending_by_default(),
+    };
+    let query = query.unwrap_or_default().trim().to_owned();
+    if query.chars().count() > 200 {
+        return Err("絞り込みの語は 200 文字までです".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        state
+            .library()?
+            .person_series(person, &query, sort, ascending, offset.unwrap_or(0), limit)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 作者・シリーズの今の版を作った取得元の応答（画面の「保存データ」の欄）。なければ None。
+#[tauri::command]
+pub async fn library_v2_entity_original(
+    state: State<'_, Arc<LibraryV2>>,
+    entity: LibraryId,
+    snapshot: LibraryId,
+) -> Result<Option<String>, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        state
+            .library()?
+            .entity_profile(entity, snapshot)
             .map_err(|e| e.to_string())
     })
     .await

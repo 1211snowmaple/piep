@@ -6,6 +6,7 @@ import { useAppNavigate } from "@/app/router";
 import { getProvider, ProviderMark } from "@/lib/providers";
 import { formatDate, formatNumber } from "@/lib/format";
 import { getAssetUrl } from "@/services/dbApi";
+import { shelfFileUrl } from "@/services/libraryV2Api";
 import type { EntityFacet } from "@/types/library";
 
 /**
@@ -43,7 +44,9 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
   // 表紙は凝っているので、一覧に並ぶのは読めない切れ端ばかりになっていた。
   // 詳細画面は最初から icon だけを見ており、同じ作者が画面によって
   // 別の顔になっていた。シリーズの枠は表紙を出す場所なので今までどおり。
-  const icon = getAssetUrl(kind === "person" ? entity.iconPath : entity.iconPath ?? entity.coverPath);
+  // 新しい棚の画像はファイルの識別子。旧棚のパスとは URL への直し方が違う。
+  const asset = (path: string | null | undefined) => entity.shelf === "v2" ? shelfFileUrl(path) : getAssetUrl(path);
+  const icon = asset(kind === "person" ? entity.iconPath : entity.iconPath ?? entity.coverPath);
   // 保存元が画像を持ちうるのに、この人は置いていない。「まだ無い」ではなく
   // 「置いていない」なので、保存元と同じく一枚の絵で示す。
   //
@@ -53,7 +56,7 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
   // シリーズの banner は cover_path そのもの - 左の表紙枠に出ているのと
   // 同じ一枚である。同じ絵を一枚のカードに二度置いても、意味は増えない。
   // 人物の banner はアバターとは別のプロフィール背景なので、そちらは残す。
-  const banner = kind === "person" ? getAssetUrl(entity.bannerPath) : null;
+  const banner = kind === "person" ? asset(entity.bannerPath) : null;
   const open = () => navigate(`/${route}/${encodeURIComponent(entity.source)}/${encodeURIComponent(entity.sourceKey)}`);
   // Selection mode is modal, as it is on works: the whole card picks instead of
   // following the link, so a press can never do the thing you did not mean.

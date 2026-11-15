@@ -10,6 +10,8 @@ export interface ActionBarItem {
   primary?: boolean;
   loading?: boolean;
   disabled?: boolean;
+  /** ツールチップと読み上げの文言。押せない理由を足すときに使い、ボタンの文字（幅）は変えない。 */
+  hint?: string;
 }
 
 /**
@@ -28,13 +30,13 @@ export function ActionBar({ items, label }: { items: ActionBarItem[]; label: str
   return (
     <Group gap={6} wrap="nowrap" className="action-bar" role="group" aria-label={label}>
       {items.map((item) => (
-        <Tooltip key={item.key} label={item.label}>
+        <Tooltip key={item.key} label={item.hint ?? item.label}>
           {item.primary ? (
             <Button
               className="action-bar__item"
               loading={item.loading}
               disabled={item.disabled}
-              aria-label={item.label}
+              aria-label={item.hint ?? item.label}
               leftSection={<item.icon size={IconSize.menu} />}
               onClick={item.onClick}
             >
@@ -47,7 +49,7 @@ export function ActionBar({ items, label }: { items: ActionBarItem[]; label: str
               size={38}
               loading={item.loading}
               disabled={item.disabled}
-              aria-label={item.label}
+              aria-label={item.hint ?? item.label}
               onClick={item.onClick}
             >
               <item.icon size={IconSize.action} />
