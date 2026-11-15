@@ -36,7 +36,7 @@ export function ShelfV2Settings() {
       </Group>
       <Text size="sm" c="dimmed" mt={4} mb="md">
         {switched
-          ? "正本に切り替えた棚です。お気に入り・更新監視・読書位置・棚から外すは、この棚に書きます。"
+          ? "正本に切り替えた棚です。お気に入り・更新監視・読書位置・棚から外す・コレクションの編集は、この棚に書きます。"
           : "移行した時点の写しで、その後に保存した作品は入っていません。読むだけで、ここからは何も書き換えません。"}
       </Text>
       <Switch
@@ -44,7 +44,7 @@ export function ShelfV2Settings() {
         onChange={(event) => setEnabled(event.currentTarget.checked)}
         label="ライブラリの作品の一覧を新しい棚から出す"
         description={switched
-          ? "作品の画面と読む画面も新しい棚で開きます。編集・複数選択・コレクションの変更は、まだ使えません。検索語での検索は、検索の準備が済んでから使えます。"
+          ? "作品の画面と読む画面も新しい棚で開きます。作品の編集・複数選択・コレクションの表紙とEPUBは、まだ使えません。検索語での検索は、検索の準備が済んでから使えます。"
           : "作品の画面と読む画面は読むだけで開けます。お気に入りなどの変更・編集・複数選択は、まだ使えません。検索語での検索は、検索の準備が済んでから使えます。"}
       />
       {data.state === "failed" && <Text size="sm" c="red" mt="sm">{data.message}</Text>}

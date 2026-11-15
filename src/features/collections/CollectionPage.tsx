@@ -45,8 +45,8 @@ import { getDemoCollection } from "@/mocks/demoData";
 import { openSingleDialog } from "@/services/dialogApi";
 import { exportCollectionEpub } from "@/services/epubApi";
 import { readExportSettings, toCompressOptions } from "@/features/epub/exportSettings";
-import type { WorkCollection, WorkCollectionMember, WorkKey } from "@/types/collections";
-import type { DownloadEntry } from "@/types/library";
+import type { WorkCollection, WorkCollectionInput, WorkCollectionMember, WorkKey } from "@/types/collections";
+import type { ListedWork } from "@/types/library";
 import { CollectionAddWorksModal } from "./CollectionAddWorksModal";
 import { CollectionAdditionsModal } from "./CollectionAdditionsModal";
 import { CollectionCoverModal } from "./CollectionCoverModal";
@@ -54,7 +54,16 @@ import { CollectionRenameModal } from "./CollectionRenameModal";
 import { CollectionMemberList } from "./CollectionMemberList";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import { Locked } from "@/components/Locked";
-import { SHELF_READ_ONLY, shelfCollection, useShelfMode } from "@/features/library/shelfV2";
+import type { ShelfCollectionChange } from "@/services/libraryV2Api";
+import {
+  SHELF_NOT_YET,
+  SHELF_READ_ONLY,
+  editShelfCollection,
+  invalidateShelf,
+  shelfCollection,
+  useShelfMode,
+  useShelfWritable,
+} from "@/features/library/shelfV2";
 
 function workKey(work: { source: string; sourceId: string }): WorkKey {
   return { source: work.source, sourceId: work.sourceId };
@@ -95,19 +104,30 @@ export default function CollectionPage() {
   const queryClient = useQueryClient();
   const [formOpened, form] = useDisclosure(false);
   const [renameAssist, setRenameAssist] = useState(false);
-  // 新しい棚（試験中・読むだけ）から出すか。ライブラリと同じ好みと条件で決める。新しい棚の答えは
-  // 鍵を分けて持つ（旧棚の変更で読み直す鍵の下に置かない）。
+  // 新しい棚から出すか。ライブラリと同じ好みと条件で決める。新しい棚の答えは鍵を分けて持つ
+  // （旧棚の変更で読み直す鍵の下に置かない）。書き込むのは正本に切り替えた棚だけ。
   const { shelfMode, deciding } = useShelfMode(runtime);
+  const writable = useShelfWritable(runtime);
+  const queryKey = shelfMode ? ["library-v2-collection", collectionId] : ["work-collection", collectionId];
   const collectionQuery = useQuery({
-    queryKey: shelfMode ? ["library-v2-collection", collectionId] : ["work-collection", collectionId],
+    queryKey,
     queryFn: () => shelfMode
       ? shelfCollection(collectionId!)
       : runtime ? getWorkCollection(collectionId!) : Promise.resolve(getDemoCollection(collectionId!)),
     enabled: Boolean(collectionId) && !deciding,
   });
-  const invalidate = () => invalidateCollectionViews(queryClient);
+  const invalidate = () => (shelfMode ? invalidateShelf(queryClient) : invalidateCollectionViews(queryClient));
   const saveMutation = useMutation({
-    mutationFn: upsertWorkCollection,
+    // 新しい棚では名前・説明・並び方を一回の編集で書く（表紙は変えない）。
+    mutationFn: (input: WorkCollectionInput) => shelfMode
+      ? editShelfCollection(input.id ?? collectionId!, {
+          kind: "describe",
+          title: input.name,
+          description: input.description ?? null,
+          ordered: input.collectionKind === "ordered",
+          name_source: input.nameSource ?? null,
+        })
+      : upsertWorkCollection(input),
     onSuccess: () => { invalidate(); form.close(); notifications.show({ color: "green", message: "コレクションを保存しました" }); },
     onError: (error) => notifications.show({ color: "red", title: "コレクションを保存できません", message: errorMessage(error) }),
   });
@@ -125,11 +145,13 @@ export default function CollectionPage() {
         collection={collectionQuery.data}
         readOnly={!runtime}
         shelf={shelfMode}
+        writable={writable}
         onEdit={(assist = false) => { setRenameAssist(assist); form.open(); }}
         onChanged={(value) => {
-          queryClient.setQueryData(["work-collection", collectionId], value);
+          queryClient.setQueryData(queryKey, value);
           // 返却値が詳細の確定データなので、同じ詳細を直後に再取得しない。
           // 一覧と所属だけを同期する。
+          if (shelfMode) { void invalidateShelf(queryClient, queryKey); return; }
           queryClient.invalidateQueries({ queryKey: ["work-collections"] });
           queryClient.invalidateQueries({ queryKey: ["collections-for-work"] });
           queryClient.invalidateQueries({ queryKey: ["collections-for-person"] });
@@ -150,13 +172,30 @@ export default function CollectionPage() {
 type MemberAction =
   | { type: "remove"; keys: WorkKey[] }
   | { type: "reorder"; keys: WorkKey[] }
-  | { type: "add"; works: DownloadEntry[] }
+  | { type: "add"; works: ListedWork[] }
   | { type: "sort"; mode: "published" | "episode" };
 
-function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, onEdit, onChanged }: { collection: WorkCollection; readOnly: boolean; shelf?: boolean; onEdit: (assist?: boolean) => void; onChanged: (collection: WorkCollection) => void }) {
-  // 新しい棚では読むだけ。書き換える操作は同じ場所に押せない形で置き、理由を添える。
-  const readOnly = previewOnly || shelf;
-  const locked = shelf ? SHELF_READ_ONLY : null;
+/** 新しい棚の編集の一回を、旧棚の作品の鍵のまま組む。 */
+function shelfChange(action: MemberAction): ShelfCollectionChange {
+  if (action.type === "remove") return { kind: "remove", works: action.keys };
+  if (action.type === "reorder") return { kind: "reorder", works: action.keys };
+  if (action.type === "sort") return { kind: "sort", by: action.mode };
+  return { kind: "add", works: action.works.map(workKey) };
+}
+
+function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, writable = false, onEdit, onChanged }: { collection: WorkCollection; readOnly: boolean; shelf?: boolean; writable?: boolean; onEdit: (assist?: boolean) => void; onChanged: (collection: WorkCollection) => void }) {
+  // 新しい棚は、正本に切り替えるまで読むだけ。書き換える操作は同じ場所に押せない形で置き、
+  // 理由を添える。切り替えた棚でも、表紙・EPUB・探す・AI・複数選択はまだつないでいない。
+  const onShelf = shelf && writable;
+  const readOnly = previewOnly || (shelf && !writable);
+  const locked = shelf && !writable ? SHELF_READ_ONLY : null;
+  const pending = shelf ? (writable ? SHELF_NOT_YET : SHELF_READ_ONLY) : null;
+  const pendingOff = previewOnly || shelf;
+  const editOnShelf = async (change: ShelfCollectionChange): Promise<WorkCollection> => {
+    const value = await editShelfCollection(collection.id, change);
+    if (!value) throw new Error("コレクションが見つかりません");
+    return value;
+  };
   const { engine: splitEngine } = useAssist("collection_split");
   const { engine: namingEngine } = useAssist("collection_naming");
   const navigate = useAppNavigate();
@@ -209,6 +248,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, on
     // 確定させるため、遅れて届いた古い応答が画面と保存済みの並びを上書きしうる。
     scope: { id: `work-collection:${collection.id}` },
     mutationFn: async (action: MemberAction) => {
+      if (onShelf) return editOnShelf(shelfChange(action));
       if (action.type === "remove") return removeWorkCollectionMembers(collection.id, action.keys);
       if (action.type === "reorder") return reorderWorkCollectionMembers(collection.id, action.keys);
       if (action.type === "sort") return sortWorkCollectionMembers(collection.id, action.mode);
@@ -266,7 +306,9 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, on
    * 順序付きへ戻せば元の並びがそのまま効く。
    */
   const kindMutation = useMutation({
-    mutationFn: (collectionKind: "ordered" | "unordered") => upsertWorkCollection({
+    mutationFn: (collectionKind: "ordered" | "unordered") => onShelf
+      ? editOnShelf({ kind: "describe", title: collection.name, description: collection.description, ordered: collectionKind === "ordered", name_source: null })
+      : upsertWorkCollection({
       id: collection.id,
       name: collection.name,
       description: collection.description,
@@ -388,7 +430,19 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, on
     // this collection in their 所属 menus. The deleted collection's own entry is
     // removed rather than invalidated: refetching it would only ask for a row
     // that is gone.
-    onConfirm: async () => { try { await deleteWorkCollection(collection.id); queryClient.removeQueries({ queryKey: ["work-collection", collection.id] }); invalidateCollectionViews(queryClient); navigate("/library?tab=collections"); } catch (error) { notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) }); } },
+    onConfirm: async () => {
+      try {
+        if (onShelf) {
+          await editShelfCollection(collection.id, { kind: "delete" });
+          queryClient.removeQueries({ queryKey: ["library-v2-collection", collection.id] });
+          void invalidateShelf(queryClient);
+        } else {
+          await deleteWorkCollection(collection.id);
+          queryClient.removeQueries({ queryKey: ["work-collection", collection.id] });
+          invalidateCollectionViews(queryClient);
+        }
+        navigate("/library?tab=collections");
+      } catch (error) { notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) }); } },
   });
 
   // 選んで外すのは、この画面で唯一**確認を出さない**まとめ操作だった。
@@ -420,16 +474,16 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, on
       id: "collection_naming",
       label: "名前を考えてもらう",
       description: "題名とタグを見て名前と説明を提案します",
-      enabled: !readOnly && Boolean(namingEngine),
-      unavailableReason: shelf ? SHELF_READ_ONLY : readOnly ? "このコレクションは編集できません" : "設定で「コレクションの命名」を有効にすると使えます",
+      enabled: !pendingOff && Boolean(namingEngine),
+      unavailableReason: pending ? pending : readOnly ? "このコレクションは編集できません" : "設定で「コレクションの命名」を有効にすると使えます",
       onSelect: () => onEdit(true),
     },
     {
       id: "collection_split",
       label: "分け方を考えてもらう",
       description: "内容のまとまりから分割案を作ります",
-      enabled: !readOnly && collection.availableCount >= 4 && Boolean(splitEngine),
-      unavailableReason: shelf ? SHELF_READ_ONLY : collection.availableCount < 4 ? "4作品以上で利用できます" : "設定で「コレクションの分割案」を有効にすると使えます",
+      enabled: !pendingOff && collection.availableCount >= 4 && Boolean(splitEngine),
+      unavailableReason: pending ? pending : collection.availableCount < 4 ? "4作品以上で利用できます" : "設定で「コレクションの分割案」を有効にすると使えます",
       onSelect: splitModal.open,
     },
   ];
@@ -451,8 +505,8 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, on
           <Group wrap="nowrap" align="center" gap="md">
             <div className="collection-hero__cover">
               <CollectionCover collection={collection} variant="detail" />
-              <Locked reason={locked} label="表紙を変える">
-                <Button variant="subtle" size="compact-xs" color="gray" disabled={readOnly} onClick={coverModal.open}>表紙を変える</Button>
+              <Locked reason={pending} label="表紙を変える">
+                <Button variant="subtle" size="compact-xs" color="gray" disabled={pendingOff} onClick={coverModal.open}>表紙を変える</Button>
               </Locked>
             </div>
             <Stack gap={6} flex={1} miw={0}>
@@ -463,7 +517,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, on
                 <Badge variant="light" color={ordered ? "piep" : "gray"}>{ordered ? "順序付き" : "順序なし"}</Badge>
                 <Text size="sm" c="dimmed">{formatNumber(collection.memberCount)}作品 · {formatNumber(collection.totalTextLength)}字</Text>
                 {missingCount > 0 && <Badge color="orange" variant="light">収録できない {formatNumber(missingCount)}作品</Badge>}
-                {shelf && <Tooltip label="新しい棚（試験中）から読んでいます。読むだけで、ここからは何も書き換えません。"><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}
+                {shelf && <Tooltip label={writable ? "新しい棚から読み書きしています。表紙・EPUB・AIの手伝いはまだ旧棚だけです。" : "新しい棚（試験中）から読んでいます。正本に切り替えるまで、ここからは何も書き換えません。"}><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}
               </Group>
               {/* 主操作の「作品を追加」は右端。「合う作品を探す」はその隣に置く。
                   どちらも束へ作品を入れる操作で、違うのは**誰が探すか**だけである。 */}
@@ -471,15 +525,15 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, on
                 <Locked reason={locked} label="名前を付け直す">
                   <Button variant="default" disabled={readOnly} onClick={() => onEdit(false)}>名前を付け直す</Button>
                 </Locked>
-                <Locked reason={locked} label="一冊のEPUB">
-                  <Button variant="default" leftSection={<Icons.epub size={IconSize.action} />} loading={epubMutation.isPending} disabled={readOnly || exportableCount <= 0} onClick={startEpubExport}>一冊のEPUB</Button>
+                <Locked reason={pending} label="一冊のEPUB">
+                  <Button variant="default" leftSection={<Icons.epub size={IconSize.action} />} loading={epubMutation.isPending} disabled={pendingOff || exportableCount <= 0} onClick={startEpubExport}>一冊のEPUB</Button>
                 </Locked>
                 {!headerHosted && <AssistLauncher items={assistItems} />}
-                <Locked reason={locked} label="合う作品を探す">
+                <Locked reason={pending} label="合う作品を探す">
                   <Button
                     variant="default"
                     leftSection={<Icons.collectionSuggest size={IconSize.action} />}
-                    disabled={readOnly || collection.availableCount === 0}
+                    disabled={pendingOff || collection.availableCount === 0}
                     onClick={additionsModal.open}
                   >
                     合う作品を探す
@@ -488,7 +542,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, on
                 <Locked reason={locked} label="作品を追加">
                   <Button leftSection={<Icons.add size={IconSize.action} />} disabled={readOnly} onClick={addModal.open}>作品を追加</Button>
                 </Locked>
-                {/* その他の操作は全部書き換えなので、新しい棚では開かない。 */}
+                {/* その他の操作は全部書き換えなので、切り替える前の新しい棚では開かない。 */}
                 {locked ? (
                   <Locked reason={locked} label="このコレクションのその他の操作">
                     <ActionIcon variant="default" size="lg"><Icons.more size={IconSize.nav} /></ActionIcon>
@@ -519,7 +573,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, on
                     <Menu.Item leftSection={<Icons.sort size={IconSize.menu} />} disabled={readOnly || !ordered || collection.members.length < 2} onClick={() => sortBy("published")}>投稿日順に整列</Menu.Item>
                     <Menu.Item leftSection={<Icons.sort size={IconSize.menu} />} disabled={readOnly || !ordered || collection.members.length < 2} onClick={() => sortBy("episode")}>題名の連番順に整列</Menu.Item>
                     <Menu.Divider />
-                    <Menu.Item leftSection={<Icons.select size={IconSize.menu} />} disabled={readOnly || collection.availableCount === 0} onClick={() => { setSelectionMode(true); setSelected([]); }}>複数選択して外す</Menu.Item>
+                    <Menu.Item leftSection={<Icons.select size={IconSize.menu} />} disabled={pendingOff || collection.availableCount === 0} aria-label={pending ? `複数選択して外す（${pending}）` : undefined} onClick={() => { setSelectionMode(true); setSelected([]); }}>複数選択して外す</Menu.Item>
                     <Menu.Divider />
                     {/* 削除は最下部に大きく置いていた。押す機会より、押して
                         しまう機会のほうが多い場所だった。 */}
@@ -617,23 +671,24 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, on
         onClose={addModal.close}
         collection={collection}
         busy={mutation.isPending}
+        shelf={shelf}
         onAdd={(works) => mutation.mutate({ type: "add", works })}
       />}
-      {!readOnly && <CollectionAdditionsModal
+      {!pendingOff && <CollectionAdditionsModal
         opened={additionsOpened}
         onClose={additionsModal.close}
         collection={collection}
         busy={mutation.isPending}
         onAdd={(downloadIds) => addFromSuggestions.mutate(downloadIds)}
       />}
-      {!readOnly && <CollectionCoverModal
+      {!pendingOff && <CollectionCoverModal
         opened={coverOpened}
         onClose={coverModal.close}
         collection={collection}
         busy={coverMutation.isPending}
         onSave={(input) => coverMutation.mutate(input)}
       />}
-      {!readOnly && <CollectionSplitAssist
+      {!pendingOff && <CollectionSplitAssist
         opened={splitOpened}
         onClose={splitModal.close}
         collection={collection}

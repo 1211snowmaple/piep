@@ -31,6 +31,8 @@ interface WorkCardProps {
   selectionMode?: boolean;
   /** Receives the work id so lists can pass one stable handler for every card. */
   onSelect?: (id: number, selected: boolean) => void;
+  /** 一枚ごとの選択の受け口。新しい棚の作品（番号を持たない）も選べる。あれば `onSelect` より先。 */
+  onToggleSelect?: (selected: boolean) => void;
   onToggleFavorite?: (id: number, favorite: boolean) => void;
   onToggleWatch?: (id: number, watch: boolean) => void;
   compact?: boolean;
@@ -251,6 +253,7 @@ export const WorkCard = memo(function WorkCard({
   selected,
   selectionMode = false,
   onSelect,
+  onToggleSelect,
   onToggleFavorite,
   onToggleWatch,
   compact = false,
@@ -274,8 +277,9 @@ export const WorkCard = memo(function WorkCard({
     ?? (pendingRevisions.data ?? []).some((entry) => entry.downloadId === legacyId));
   const excerpt = work.excerpt ? summaryText(work.excerpt) : "";
   const select = useCallback((next: boolean) => {
-    if (legacyId !== null) onSelect?.(legacyId, next);
-  }, [legacyId, onSelect]);
+    if (onToggleSelect) onToggleSelect(next);
+    else if (legacyId !== null) onSelect?.(legacyId, next);
+  }, [legacyId, onSelect, onToggleSelect]);
   const open = useCallback(() => {
     if (selectionMode) select(!selected);
     else navigate(`/works/${work.id}`);

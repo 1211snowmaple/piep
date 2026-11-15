@@ -9,6 +9,7 @@ pub mod epub;
 pub mod fanbox_api;
 /// 元ファイルを保持する新しいライブラリの保管・履歴モデル。
 pub mod library;
+pub mod library_collection_edit;
 pub mod library_collections;
 pub mod library_entity;
 pub mod library_entity_list;
@@ -313,6 +314,7 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_status,
             commands::library_v2::library_v2_set_user_state,
             commands::library_v2::library_v2_remove_work,
+            commands::library_v2::library_v2_edit_collection,
             commands::library_v2::library_v2_reading_position,
             commands::library_v2::library_v2_set_reading_position,
             commands::library_v2::library_v2_adopt_device_positions,

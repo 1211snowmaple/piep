@@ -584,6 +584,31 @@ export function libraryV2Collection(id: string): Promise<ShelfCollection> {
   return invoke<ShelfCollection>("library_v2_collection", { id });
 }
 
+/** 画面が作品を指す鍵（取得元と取得元の ID）。棚に無い回も指せる。 */
+export interface ShelfWorkKey {
+  source: string;
+  sourceId: string;
+}
+
+/** コレクションの一回の編集（`CollectionChangeInput`）。None の項目は今のまま。 */
+export type ShelfCollectionChange =
+  | { kind: "create"; title: string; description: string | null; ordered: boolean; works: ShelfWorkKey[] }
+  | { kind: "describe"; title: string; description: string | null; ordered: boolean; name_source: string | null }
+  | { kind: "look"; cover_work: ShelfWorkKey | null; cover_mode: string | null }
+  | { kind: "add"; works: ShelfWorkKey[] }
+  | { kind: "remove"; works: ShelfWorkKey[] }
+  | { kind: "reorder"; works: ShelfWorkKey[] }
+  | { kind: "sort"; by: "published" | "episode" }
+  | { kind: "delete" };
+
+/**
+ * コレクションを一回編集する（正本に切り替えた棚だけ）。作るときは `id` に新しい ID を渡す。
+ * 編集した後の中身を返す（消したときは null）。送り直しは同じ `request` で一度きりになる。
+ */
+export function libraryV2EditCollection(id: string, change: ShelfCollectionChange): Promise<ShelfCollection | null> {
+  return invoke<ShelfCollection | null>("library_v2_edit_collection", { request: crypto.randomUUID(), id, change });
+}
+
 /** 作者・シリーズの今の版を作った取得元の応答（画面の「保存データ」）。 */
 export function libraryV2EntityOriginal(entity: string, snapshot: string): Promise<string | null> {
   return invoke<string | null>("library_v2_entity_original", { entity, snapshot });

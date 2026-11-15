@@ -14,8 +14,8 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
 }));
 
 vi.mock("@/components/WorkCard", () => ({
-  WorkCard: ({ work, selected, onSelect }: { work: DownloadEntry; selected?: boolean; onSelect?: (id: number, selected: boolean) => void }) => (
-    <button type="button" aria-label={work.title} aria-pressed={selected} onClick={() => onSelect?.(work.id, !selected)}>{work.title}</button>
+  WorkCard: ({ work, selected, onToggleSelect }: { work: DownloadEntry; selected?: boolean; onToggleSelect?: (selected: boolean) => void }) => (
+    <button type="button" aria-label={work.title} aria-pressed={selected} onClick={() => onToggleSelect?.(!selected)}>{work.title}</button>
   ),
 }));
 

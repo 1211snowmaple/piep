@@ -8,6 +8,8 @@ import {
   libraryV2Decorations,
   libraryV2Entities,
   libraryV2Collection,
+  libraryV2EditCollection,
+  type ShelfCollectionChange,
   libraryV2Collections,
   libraryV2EntityCollections,
   type ShelfCollection,
@@ -74,6 +76,9 @@ export function shelfListable(status: LibraryV2Status | undefined): boolean {
 /** 画面の押せない操作に添える理由。 */
 export const SHELF_READ_ONLY = "新しい棚では変えられません";
 
+/** 切り替えた棚でも、まだ新しい棚につないでいない操作の理由。 */
+export const SHELF_NOT_YET = "新しい棚ではまだ使えません";
+
 /** 棚を正本に切り替えたか。切り替えた棚だけ、画面から書き込める。 */
 export function shelfWritable(status: LibraryV2Status | undefined): boolean {
   return status?.state === "ready" && status.switched;
@@ -91,8 +96,11 @@ export function useShelfWritable(runtime: boolean): boolean {
  * どこに出ているかを一つずつ追わず、棚の状態のほかは全部古いことにする（今出ている画面だけが
  * 読み直す）。
  */
-export function invalidateShelf(queryClient: QueryClient): Promise<void> {
-  return queryClient.invalidateQueries({ predicate: (query) => query.queryKey[0] !== "library-v2-status" });
+export function invalidateShelf(queryClient: QueryClient, keep?: readonly unknown[]): Promise<void> {
+  return queryClient.invalidateQueries({
+    predicate: (query) => query.queryKey[0] !== "library-v2-status"
+      && !(keep && keep.length === query.queryKey.length && keep.every((part, index) => part === query.queryKey[index])),
+  });
 }
 
 /**
@@ -546,7 +554,19 @@ export async function shelfCollections(): Promise<WorkCollectionSummary[]> {
  * 新しい棚の ID で開く）。`downloadId` は旧棚の番号（選んで外す操作は新しい棚には無い）。
  */
 export async function shelfCollection(id: string): Promise<WorkCollection> {
-  const item: ShelfCollection = await libraryV2Collection(id);
+  return shelfCollectionView(await libraryV2Collection(id));
+}
+
+/**
+ * 新しい棚のコレクションを一回編集する（正本に切り替えた棚だけ）。編集した後の中身を返す
+ * （消したときは null）。
+ */
+export async function editShelfCollection(id: string, change: ShelfCollectionChange): Promise<WorkCollection | null> {
+  const item = await libraryV2EditCollection(id, change);
+  return item ? shelfCollectionView(item) : null;
+}
+
+function shelfCollectionView(item: ShelfCollection): WorkCollection {
   const summary = shelfCollectionSummary(item);
   return {
     ...summary,

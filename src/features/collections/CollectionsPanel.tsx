@@ -20,13 +20,13 @@ import { Icons, IconSize } from "@/lib/icons";
 import { generateCollectionSuggestion, listCollectionSuggestions, upsertWorkCollection } from "@/services/collectionApi";
 import { isTauriRuntime } from "@/services/dbApi";
 import { demoSuggestions } from "@/mocks/demoData";
-import type { CollectionSortBy, WorkCollectionSummary } from "@/types/collections";
+import type { CollectionSortBy, WorkCollectionInput, WorkCollectionSummary } from "@/types/collections";
 import { invalidateCollectionViews, workCollectionsQueryOptions } from "./collectionQueries";
 import { CollectionCard } from "./CollectionCard";
 import { CollectionFormModal } from "./CollectionFormModal";
 import { CollectionSweepModal } from "./CollectionSweepModal";
 import { Locked } from "@/components/Locked";
-import { SHELF_READ_ONLY, useShelfMode } from "@/features/library/shelfV2";
+import { SHELF_NOT_YET, SHELF_READ_ONLY, editShelfCollection, invalidateShelf, useShelfMode, useShelfWritable } from "@/features/library/shelfV2";
 
 /** The collection list as it appears inside the library, beside 作品 /
  *  作者・クリエイター / シリーズ. The detail screen stays on its own route. */
@@ -61,16 +61,32 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
   const [searchParams, setSearchParams] = useAppSearchParams();
   const [formOpened, form] = useDisclosure(false);
   const generatedSeed = useRef<number | null>(null);
-  // 新しい棚（試験中）では一覧を新しい棚から読み、作る・探す操作は押せない形で残す。
+  // 新しい棚では一覧を新しい棚から読む。作るのは正本に切り替えた棚だけで、探す（まとまりの
+  // 候補）はまだ新しい棚につないでいない。押せない操作は同じ場所に押せない形で残す。
   const { shelfMode, deciding } = useShelfMode(runtime);
-  const locked = shelfMode ? SHELF_READ_ONLY : null;
+  const writable = useShelfWritable(runtime);
+  const locked = shelfMode && !writable ? SHELF_READ_ONLY : null;
+  const sweepLocked = shelfMode ? (writable ? SHELF_NOT_YET : SHELF_READ_ONLY) : null;
   const collectionsQuery = useQuery({ ...workCollectionsQueryOptions(shelfMode), enabled: !deciding });
   const invalidate = () => {
+    if (shelfMode) { void invalidateShelf(queryClient); return; }
     invalidateCollectionViews(queryClient);
     queryClient.invalidateQueries({ queryKey: ["collection-suggestions"] });
   };
   const saveMutation = useMutation({
-    mutationFn: upsertWorkCollection,
+    // 新しい棚では空のコレクションを新しい ID で作る。
+    mutationFn: async (input: WorkCollectionInput) => {
+      if (!shelfMode) return upsertWorkCollection(input);
+      const created = await editShelfCollection(crypto.randomUUID(), {
+        kind: "create",
+        title: input.name,
+        description: input.description ?? null,
+        ordered: input.collectionKind === "ordered",
+        works: [],
+      });
+      if (!created) throw new Error("コレクションを作れませんでした");
+      return created;
+    },
     onSuccess: (saved) => { invalidate(); form.close(); navigate(`/collections/${saved.id}`); notifications.show({ color: "green", message: "コレクションを保存しました" }); },
     onError: (error) => notifications.show({ color: "red", title: "コレクションを保存できません", message: errorMessage(error) }),
   });
@@ -141,7 +157,7 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
           <Text size="sm" c="dimmed">{formatNumber(collections.length)}件</Text>
         </Group>
         <Group gap="xs" wrap="nowrap">
-          <Locked reason={locked} label="まとまりを探す">
+          <Locked reason={sweepLocked} label="まとまりを探す">
           <Button
             variant="subtle"
             leftSection={<Icons.search size={IconSize.action} />}

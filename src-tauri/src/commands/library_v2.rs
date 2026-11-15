@@ -1250,44 +1250,186 @@ pub async fn library_v2_collection(
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let library = state.library()?;
-        let target = match library
-            .collection_by_legacy_id(&id)
+        let target = collection_target(&library, &id)?;
+        collection_view(&state, &library, target)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 画面の ID（旧棚から移したものは旧棚の ID、ほかは新しい棚の ID）からコレクションを引く。
+fn collection_target(library: &Library, id: &str) -> Result<LibraryId, String> {
+    match library
+        .collection_by_legacy_id(id)
+        .map_err(|e| e.to_string())?
+    {
+        Some(found) => Ok(found),
+        None => id
+            .parse::<LibraryId>()
+            .map_err(|_| "コレクションが見つかりません".to_string()),
+    }
+}
+
+fn collection_view(
+    state: &LibraryV2,
+    library: &Library,
+    target: LibraryId,
+) -> Result<CollectionView, String> {
+    let detail = library
+        .collection_detail(target)
+        .map_err(|error| match error {
+            crate::library::Error::ResourceUnavailable => {
+                "コレクションが見つかりません".to_string()
+            }
+            other => other.to_string(),
+        })?;
+    let mut members = Vec::with_capacity(detail.members.len());
+    for mut member in detail.members {
+        let work = member
+            .work
+            .take()
+            .map(|card| state.card_view(library, &card))
+            .transpose()?;
+        let editions = std::mem::take(&mut member.editions)
+            .iter()
+            .map(|card| state.card_view(library, card))
+            .collect::<Result<Vec<_>, _>>()?;
+        members.push(CollectionMemberView {
+            member,
+            work,
+            editions,
+        });
+    }
+    Ok(CollectionView {
+        summary: detail.summary,
+        members,
+    })
+}
+
+/// 画面が作品を指す鍵（取得元と取得元の ID）。棚に無い回も指せる。
+#[derive(serde::Deserialize)]
+pub struct WorkKeyInput {
+    pub source: String,
+    #[serde(rename = "sourceId")]
+    pub source_id: String,
+}
+
+/// 画面からのコレクションの一回の編集。作品は鍵で指す（`CollectionEdit` の作品の ID に読み替える）。
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CollectionChangeInput {
+    Create {
+        title: String,
+        description: Option<String>,
+        ordered: bool,
+        works: Vec<WorkKeyInput>,
+    },
+    Describe {
+        title: String,
+        description: Option<String>,
+        ordered: bool,
+        name_source: Option<String>,
+    },
+    Look {
+        cover_work: Option<WorkKeyInput>,
+        cover_mode: Option<String>,
+    },
+    Add {
+        works: Vec<WorkKeyInput>,
+    },
+    Remove {
+        works: Vec<WorkKeyInput>,
+    },
+    Reorder {
+        works: Vec<WorkKeyInput>,
+    },
+    Sort {
+        by: crate::library_collection_edit::CollectionOrder,
+    },
+    Delete,
+}
+
+fn collection_change(
+    library: &Library,
+    change: CollectionChangeInput,
+) -> Result<crate::library_collection_edit::CollectionEdit, String> {
+    use crate::library_collection_edit::CollectionEdit;
+    let one = |key: WorkKeyInput| -> Result<LibraryId, String> {
+        library
+            .work_by_key(&key.source, &key.source_id)
             .map_err(|e| e.to_string())?
-        {
-            Some(found) => found,
-            None => id
-                .parse::<LibraryId>()
-                .map_err(|_| "コレクションが見つかりません".to_string())?,
-        };
-        let detail = library
-            .collection_detail(target)
+            .ok_or_else(|| "棚に無い作品です".to_string())
+    };
+    let all = |keys: Vec<WorkKeyInput>| keys.into_iter().map(one).collect::<Result<Vec<_>, _>>();
+    Ok(match change {
+        CollectionChangeInput::Create {
+            title,
+            description,
+            ordered,
+            works,
+        } => CollectionEdit::Create {
+            title,
+            description,
+            ordered,
+            works: all(works)?,
+        },
+        CollectionChangeInput::Describe {
+            title,
+            description,
+            ordered,
+            name_source,
+        } => CollectionEdit::Describe {
+            title,
+            description,
+            ordered,
+            name_source,
+        },
+        CollectionChangeInput::Look {
+            cover_work,
+            cover_mode,
+        } => CollectionEdit::Look {
+            cover_work: cover_work.map(one).transpose()?,
+            cover_mode,
+        },
+        CollectionChangeInput::Add { works } => CollectionEdit::Add { works: all(works)? },
+        CollectionChangeInput::Remove { works } => CollectionEdit::Remove { works: all(works)? },
+        CollectionChangeInput::Reorder { works } => CollectionEdit::Reorder { works: all(works)? },
+        CollectionChangeInput::Sort { by } => CollectionEdit::Sort { by },
+        CollectionChangeInput::Delete => CollectionEdit::Delete,
+    })
+}
+
+/// コレクションを一回編集する（正本に切り替えた棚だけ）。作るときは `id` に画面が作った新しい ID を
+/// 渡す。編集した後の中身を返す（消したときは None）。
+#[tauri::command]
+pub async fn library_v2_edit_collection(
+    state: State<'_, Arc<LibraryV2>>,
+    request: LibraryId,
+    id: String,
+    change: CollectionChangeInput,
+) -> Result<Option<CollectionView>, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.writable()?;
+        let target = collection_target(&library, &id)?;
+        let change = collection_change(&library, change)?;
+        let deleting = matches!(
+            change,
+            crate::library_collection_edit::CollectionEdit::Delete
+        );
+        library
+            .edit_collection(request, target, change)
             .map_err(|error| match error {
                 crate::library::Error::ResourceUnavailable => {
                     "コレクションが見つかりません".to_string()
                 }
                 other => other.to_string(),
             })?;
-        let mut members = Vec::with_capacity(detail.members.len());
-        for mut member in detail.members {
-            let work = member
-                .work
-                .take()
-                .map(|card| state.card_view(&library, &card))
-                .transpose()?;
-            let editions = std::mem::take(&mut member.editions)
-                .iter()
-                .map(|card| state.card_view(&library, card))
-                .collect::<Result<Vec<_>, _>>()?;
-            members.push(CollectionMemberView {
-                member,
-                work,
-                editions,
-            });
+        state.forget_derived();
+        if deleting {
+            return Ok(None);
         }
-        Ok(CollectionView {
-            summary: detail.summary,
-            members,
-        })
+        collection_view(&state, &library, target).map(Some)
     })
     .await
     .map_err(|e| e.to_string())?
