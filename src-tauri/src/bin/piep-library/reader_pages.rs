@@ -92,6 +92,32 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
                 Some(edit) => ResourceScope::Edit(edit),
                 None => ResourceScope::Snapshot(card.snapshot_id),
             };
+            // 読む画面の「編集版（v… 基準）」: 編集の有無と、基準の版が今の版より古いか。
+            let old_head = old.get_reader_metadata(old_id)?;
+            let old_stale = old_head.active_edit_revision.as_ref().map(|edit| {
+                (
+                    edit.base_version,
+                    edit.base_version < old_head.download.current_version,
+                )
+            });
+            let new_stale = card
+                .edit_id
+                .map(|edit| new.edit_base_version(card.id, edit))
+                .transpose()?
+                .map(|base| (base, base < card.version_number as i64));
+            if old_stale.is_some() {
+                *counts.entry("edited").or_default() += 1;
+            }
+            if old_stale.is_some_and(|(_, stale)| stale) {
+                *counts.entry("stale_edit_base").or_default() += 1;
+            }
+            if old_stale != new_stale {
+                note(
+                    &mut counts,
+                    "edit_base",
+                    json!({"work": work, "old": old_stale, "new": new_stale}),
+                );
+            }
             let rendered = match new.render_document(card.id, scope, &card.provider) {
                 Ok(rendered) => rendered,
                 Err(error) => {

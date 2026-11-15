@@ -72,6 +72,7 @@ const work: ShelfWork = {
   caption: null,
   authorKey: "77",
   seriesKey: null,
+  editBaseVersion: null,
   versions: [
     { snapshot: FIRST, version: 1, saved_at: Date.UTC(2026, 0, 1), text_length: 3 },
     { snapshot: SECOND, version: 2, saved_at: Date.UTC(2026, 0, 2), text_length: 7 },
@@ -138,6 +139,20 @@ describe("ReaderPage on the new shelf", () => {
     fireEvent.click(await screen.findByRole("button", { name: "原本を見る" }));
     expect(await screen.findByRole("img", { name: "本文.pdf の 1 ページ目" })).toBeInTheDocument();
     expect(api.libraryV2RenderPdfPage).toHaveBeenCalledWith(WORK, pdf, 0, expect.any(Number));
+  });
+
+  it("names an edit made on an older version like the old shelf does", async () => {
+    api.libraryV2Work.mockResolvedValue({ ...work, edit_id: FIRST, editBaseVersion: 1 });
+    renderReader(`#/reader/${WORK}`);
+    expect(await screen.findByText("編集版（v1基準）")).toBeInTheDocument();
+  });
+
+  it("does not warn about an edit made on the current version", async () => {
+    api.libraryV2Work.mockResolvedValue({ ...work, edit_id: FIRST, editBaseVersion: 2 });
+    renderReader(`#/reader/${WORK}`);
+    expect(await screen.findByText("今の本文")).toBeInTheDocument();
+    expect(screen.getAllByText("編集版").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/基準）/)).toBeNull();
   });
 
   it("offers the previous and next works of the series and the author from the new shelf", async () => {

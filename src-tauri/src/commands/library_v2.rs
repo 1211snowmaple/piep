@@ -394,6 +394,9 @@ pub struct WorkView {
     pub series_key: Option<String>,
     /// 保存した版（古い順）。
     pub versions: Vec<VersionView>,
+    /// 有効な編集の基準の版の番号。編集が無ければ None。今の版より古ければ、読む画面が
+    /// 「編集版（v… 基準）」と出す。
+    pub edit_base_version: Option<i64>,
 }
 
 fn text_of(value: Option<&serde_json::Value>) -> Option<String> {
@@ -422,7 +425,13 @@ pub async fn library_v2_work(
             .map(|snapshot| snapshot.metadata.clone())
             .unwrap_or_default();
         let versions = library.work_versions(work).map_err(|e| e.to_string())?;
+        let edit_base_version = card
+            .edit_id
+            .map(|edit| library.edit_base_version(work, edit))
+            .transpose()
+            .map_err(|e| e.to_string())?;
         Ok(WorkView {
+            edit_base_version,
             caption: text_of(metadata.get("caption")).or_else(|| card.excerpt.clone()),
             author_key: text_of(metadata.get("author_key")),
             series_key: text_of(metadata.get("series_id")),

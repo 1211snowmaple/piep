@@ -66,6 +66,7 @@ const work: ShelfWork = {
   caption: "説明",
   authorKey: "77",
   seriesKey: null,
+  editBaseVersion: null,
   versions: [
     { snapshot: FIRST, version: 1, saved_at: Date.UTC(2026, 0, 1), text_length: 3 },
     { snapshot: SECOND, version: 2, saved_at: Date.UTC(2026, 0, 2), text_length: 7 },
@@ -116,6 +117,12 @@ describe("ShelfWorkPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "この版の本文を見る" }));
     await waitFor(() => expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, FIRST, 0));
     expect(await screen.findByText("保存済み v1")).toBeInTheDocument();
+  });
+
+  it("says which version an edit was made on and that a later one is not shown", async () => {
+    api.libraryV2Work.mockResolvedValue({ ...work, edit_id: FIRST, editBaseVersion: 1 });
+    renderPage(`#/works/${WORK}?tab=content`);
+    expect(await screen.findByText("v1 をもとに編集した本文です。取り込み済みの v2 は表示されていません。")).toBeInTheDocument();
   });
 
   it("opens a PDF attachment's pages from the body and from the attachment list", async () => {

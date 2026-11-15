@@ -677,6 +677,62 @@ fn probe_a_real_shelf() {
 
 /// 編集の本文は旧棚と同じ関数で組む。段の間の空行の数・見出し・画像の説明・改ページが旧棚と
 /// 同じ行になり、「何ページ目の何行目」で憶えた読書位置としおりが同じ行を指す。
+/// 編集のあとに改稿を取り込むと、編集版は古い版の上に載ったまま。読む画面がそれを名乗れるよう、
+/// 基準の版の番号を返す。
+#[test]
+fn an_edit_knows_the_version_it_was_made_on() {
+    use crate::library::{EditBlock, EditRequest};
+    let dir = temp("edit-base");
+    let library = Library::create(&dir.0).unwrap();
+    let first = library
+        .capture(capture(
+            "pixiv",
+            SourceBody::PixivText("一".into()),
+            b"art",
+            1,
+        ))
+        .unwrap();
+    let content = EditContent {
+        format: "piep-edit-v1".into(),
+        title: None,
+        blocks: vec![EditBlock {
+            id: LibraryId::now_v7(),
+            ordinal: 0,
+            kind: "paragraph".into(),
+            text: Some("直した一".into()),
+            attrs: json!(null),
+            media_slot: None,
+        }],
+        media: Vec::new(),
+        provenance: None,
+    };
+    let edit = library
+        .save_edit(EditRequest {
+            request_id: LibraryId::now_v7(),
+            work: first.entity_id,
+            user: library.id,
+            base: first.snapshot_id,
+            parent: None,
+            expected: 0,
+            content: &content,
+            activate: true,
+        })
+        .unwrap();
+    assert_eq!(library.edit_base_version(first.entity_id, edit).unwrap(), 1);
+    library
+        .capture(capture(
+            "pixiv",
+            SourceBody::PixivText("二".into()),
+            b"art",
+            1,
+        ))
+        .unwrap();
+    let card = library.work_card(first.entity_id).unwrap();
+    assert_eq!(card.version_number, 2);
+    assert_eq!(card.edit_id, Some(edit));
+    assert_eq!(library.edit_base_version(first.entity_id, edit).unwrap(), 1);
+}
+
 #[test]
 fn an_edit_is_laid_out_line_for_line_like_the_old_shelf() {
     use crate::database::models::WorkBlock;

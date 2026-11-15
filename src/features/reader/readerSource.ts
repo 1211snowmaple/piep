@@ -1,5 +1,5 @@
 import { getAssetUrl, getReaderContentPage, getReaderMetadata, getReaderOutline, isTauriRuntime, searchReaderContent } from "@/services/dbApi";
-import { libraryV2Content, libraryV2Outline, libraryV2SearchContent, libraryV2Work, shelfBodyUrl, type ShelfWork } from "@/services/libraryV2Api";
+import { libraryV2Content, libraryV2Outline, libraryV2SearchContent, libraryV2Work, shelfBodyUrl, staleEditBaseOf, type ShelfWork } from "@/services/libraryV2Api";
 export { SHELF_WORK_ID } from "@/services/libraryV2Api";
 import { getDemoReader } from "@/mocks/demoData";
 import { readingKeyOf } from "@/features/library/readingShelf";
@@ -126,8 +126,8 @@ function shelfHead(work: ShelfWork): ReaderHead {
     currentVersion: work.version_number,
     versions: [...new Set(work.versions.map((item) => item.version))].sort((left, right) => right - left),
     isEdited: work.edit_id !== null,
-    // 新しい棚の頭には編集の基準の版がまだ無い。下書きは移していない。
-    staleEditBase: null,
+    staleEditBase: staleEditBaseOf(work),
+    // 下書きは移していない。
     hasDraft: false,
   };
 }

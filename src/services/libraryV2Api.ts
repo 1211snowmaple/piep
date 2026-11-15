@@ -179,7 +179,16 @@ export type ShelfWork = ShelfCard & {
   seriesKey: string | null;
   /** 古い順。 */
   versions: ShelfVersion[];
+  /** 有効な編集の基準の版の番号。編集が無ければ null。 */
+  editBaseVersion: number | null;
 };
+
+/** 編集版が今の版より古い版の上に載っているとき、その基準の版。旧棚の `staleEditBase` と同じ。 */
+export function staleEditBaseOf(work: Pick<ShelfWork, "edit_id" | "editBaseVersion" | "version_number">): number | null {
+  return work.edit_id !== null && work.editBaseVersion !== null && work.editBaseVersion < work.version_number
+    ? work.editBaseVersion
+    : null;
+}
 
 /** 本文の一ページ。画像は `data-local-path` にファイルの識別子（添付は `識別子/印`）を持つ。 */
 export interface ShelfContentPage {

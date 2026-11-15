@@ -50,6 +50,7 @@ import {
   libraryV2Work,
   shelfBodyUrl,
   shelfFileUrl,
+  staleEditBaseOf,
   type ShelfMedia,
   type ShelfVersion,
 } from "@/services/libraryV2Api";
@@ -165,6 +166,8 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
 
   const entry = shelfEntry(work);
   const edited = work.edit_id !== null;
+  // 編集のあとに取り込んだ改稿は、編集版を読んでいるあいだ見えない。
+  const staleBase = staleEditBaseOf(work);
   const current = versions.find((version) => version.snapshot === work.snapshot_id) ?? versions[0] ?? null;
   const url = sourceUrl(work.provider, work.external_key, work.content_type, work.authorKey);
   const openSource = async () => {
@@ -274,7 +277,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
         <Tabs.Panel value="content" pt="lg">
           {contentQuery.isLoading ? <LoadingState label="本文を読み込んでいます" /> : contentQuery.error ? <ErrorState error={contentQuery.error} retry={() => contentQuery.refetch()} /> : !contentReady ? <LoadingState label="本文を読み込んでいます" /> : <Stack gap="sm">
             {contentSnapshot !== null && <Group justify="space-between"><Text size="xs" c="dimmed">保存済み v{versions.find((version) => version.snapshot === contentSnapshot)?.version ?? "?"}</Text><Button variant="subtle" size="xs" onClick={() => showVersionContent(null)}>現在の本文へ</Button></Group>}
-            {contentSnapshot === null && edited && <Text size="xs" c="dimmed">編集版の本文です。</Text>}
+            {contentSnapshot === null && edited && <Text size="xs" c="dimmed">{work.editBaseVersion === null ? "編集版の本文です。" : `v${work.editBaseVersion} をもとに編集した本文です。`}{staleBase !== null && `取り込み済みの v${work.version_number} は表示されていません。`}</Text>}
             {/* 取得元の応答に本文が無い作品（公開範囲の外の投稿など）。空の枠だけを出さない。 */}
             {contentQuery.data?.html.trim() ? <Paper className="content-frame" withBorder ref={contentFrameRef}>
               <div ref={contentBodyRef} className="content-preview content-preview--paged" onClick={handleContentClick} dangerouslySetInnerHTML={preparedMarkup} />
@@ -307,7 +310,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
           })}</SimpleGrid>{visibleMedia.length < media.length && <Group justify="center"><Button variant="default" onClick={() => setVisibleAssetCount((count) => Math.min(media.length, count + 80))}>さらに表示（残り{formatNumber(media.length - visibleMedia.length)}件）</Button></Group>}</Stack> : <Alert color="gray" icon={<Icons.imageFile size={IconSize.action} />}>この版に画像・添付はありません。</Alert>}
         </Tabs.Panel>
         <Tabs.Panel value="history" pt="lg">
-          {edited && <Alert color="blue" mb="md">編集しても取得元の版は増えません。編集版は取得元の版の上に重ねて保存してあり、いま読む本文に使います。</Alert>}
+          {edited && <Alert color="blue" mb="md">編集しても取得元の版は増えません。編集版は{work.editBaseVersion === null ? "取得元の版" : ` v${work.editBaseVersion} `}の上に重ねて保存してあり、いま読む本文に使います。</Alert>}
           <div className="history-layout">
             <nav className="history-layout__versions" aria-label="保存した版">
               {versions.map((version) => <Paper component="button" type="button" key={version.snapshot} p="xs" withBorder className="version-row" data-active={selected?.snapshot === version.snapshot || undefined} onClick={() => setSelectedSnapshot(version.snapshot)}>

@@ -99,6 +99,23 @@ impl Library {
             .collect())
     }
 
+    /// 編集の基準の版の番号（取得元の改稿の順、`VersionView::version` と同じ数え方）。
+    ///
+    /// 読む画面は、これが今の版より古いと「編集版（v… 基準）」と出す。編集のあとに取り込んだ
+    /// 改稿は、編集版を読んでいるあいだ見えないからである（旧棚の `staleEditBase` と同じ）。
+    pub fn edit_base_version(&self, work: LibraryId, edit: LibraryId) -> Result<i64> {
+        let base: Vec<u8> = self.reader()?.query_row(
+            "SELECT base_snapshot_id FROM edit_revisions WHERE id=?1 AND work_id=?2 AND sealed=1",
+            rusqlite::params![edit.as_bytes().as_slice(), work.as_bytes().as_slice()],
+            |r| r.get(0),
+        )?;
+        self.snapshots(work)?
+            .into_iter()
+            .find(|snapshot| snapshot.id.as_bytes().as_slice() == base.as_slice())
+            .map(|snapshot| snapshot.revision)
+            .ok_or(crate::library::Error::ResourceUnavailable)
+    }
+
     /// 作品の添付の PDF（「原本を見る」）。作品の保存した版のどれかに PDF として載っている
     /// ファイルだけを返し、載っていなければ `None`。
     ///
