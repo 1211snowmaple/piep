@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { forgetReadingPositions, readReadingPosition, readingWorkIds, subscribeReadingPositions, writeReadingPosition } from "@/features/library/readingShelf";
+import { forgetReadingPositions, readReadingPosition, readingKeyOf, readingWorkIds, subscribeReadingPositions, writeReadingPosition } from "@/features/library/readingShelf";
 
 function setPosition(id: number, version: string, value: string) {
   window.localStorage.setItem(`piep.reader-position.${id}.${version}`, value);
@@ -94,5 +94,14 @@ describe("reading shelf membership", () => {
     setPosition(40, "current", "10");
     forgetReadingPositions(4);
     expect(readingWorkIds()).toEqual([5, 40]);
+  });
+});
+
+describe("readingKeyOf", () => {
+  it("keeps a work moved from the old shelf under its old number, so both shelves share one record", () => {
+    const uuid = "0195f1c2-0000-7000-8000-000000000001";
+    expect(readingKeyOf({ id: uuid, legacyId: 12 })).toBe(12);
+    expect(readingKeyOf({ id: uuid, legacyId: null })).toBe(uuid);
+    expect(readingKeyOf({ id: 12 })).toBe(12);
   });
 });

@@ -127,9 +127,8 @@ function decodeShelfCursor(cursor: string | null | undefined): ShelfCursor | nul
  * シリーズの指名（`seriesKey`）は検索語の書き方（`series:取得元:キー`）にして渡す。新しい棚は
  * シリーズを自分の ID で指すので、取得元のキーは書き方の側で引く。
  */
-export function shelfRequest(params: SearchV2Params): { search: ShelfTextSearch; query: ShelfListQuery } {
+export function shelfRequest(params: SearchV2Params): { search: ShelfTextSearch; query: ShelfListQuery; legacyWorks: number[] | null } {
   const unsupported: string[] = [];
-  if (params.idsInclude) unsupported.push("読みかけ");
   if (params.offset !== null && params.offset !== undefined) unsupported.push("ページ番号");
   if (params.personKey) unsupported.push("作者の指名");
   const sortBy = params.sortBy ?? "downloaded_at";
@@ -184,6 +183,8 @@ export function shelfRequest(params: SearchV2Params): { search: ShelfTextSearch;
       filter,
       count: !params.cursor,
     },
+    // 読みかけの棚。読書位置は旧棚の番号で憶えているので、番号のまま渡して棚の側で読み替える。
+    legacyWorks: params.idsInclude ?? null,
   };
 }
 
@@ -197,6 +198,7 @@ export function shelfEntry(card: ShelfCard, match?: ShelfMatch, decoration?: She
     id: card.id,
     shelf: "v2",
     coverUrl: shelfFileUrl(card.coverFile),
+    legacyId: card.legacyId,
     source: card.provider,
     sourceId: card.external_key,
     title: card.title,
@@ -234,8 +236,8 @@ export type ShelfSearchResult = Omit<SearchV2Result, "items"> & { items: ShelfEn
  * 続けて引く（旧棚の一覧と同じく、カードに一致の理由を出す）。
  */
 export async function searchShelf(params: SearchV2Params): Promise<ShelfSearchResult> {
-  const { search, query } = shelfRequest(params);
-  const view = await libraryV2Search(search, query);
+  const { search, query, legacyWorks } = shelfRequest(params);
+  const view = await libraryV2Search(search, query, legacyWorks);
   const decorations = search.text && view.matches.length
     ? await libraryV2Decorations(search.text, view.matches)
     : [];

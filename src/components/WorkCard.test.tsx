@@ -237,7 +237,7 @@ describe("WorkCard", () => {
     window.location.hash = "#/library";
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     const { id: _legacy, ...rest } = demoWorks[0];
-    renderCard({ work: { ...rest, id: shelfId, shelf: "v2", coverUrl: "http://piep-library.localhost/abc", coverPath: null } });
+    renderCard({ work: { ...rest, id: shelfId, shelf: "v2", coverUrl: "http://piep-library.localhost/abc", coverPath: null, legacyId: null } });
 
     expect(screen.getByAltText("雨上がりの図書室での表紙")).toHaveAttribute("src", "http://piep-library.localhost/abc");
     // 書き換える操作は押せない。改稿の印は旧棚の番号で照らすので出さない。

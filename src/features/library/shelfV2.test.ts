@@ -35,6 +35,7 @@ const card: ShelfCard = {
   series_title: "シリーズ",
   series_position: 4,
   coverFile: "ab".repeat(32),
+  legacyId: null,
 };
 
 describe("shelfRequest", () => {
@@ -105,12 +106,17 @@ describe("shelfRequest", () => {
   });
 
   it("refuses conditions the new shelf cannot answer instead of dropping them", () => {
-    expect(() => shelfRequest({ idsInclude: [1], offset: 60, sortBy: "series_order" })).toThrow(ShelfUnsupportedError);
+    expect(() => shelfRequest({ offset: 60, sortBy: "series_order" })).toThrow(ShelfUnsupportedError);
     try {
-      shelfRequest({ idsInclude: [1], offset: 60, sortBy: "series_order" });
+      shelfRequest({ offset: 60, sortBy: "series_order" });
     } catch (error) {
-      expect((error as ShelfUnsupportedError).conditions).toEqual(["読みかけ", "ページ番号", "シリーズ順"]);
+      expect((error as ShelfUnsupportedError).conditions).toEqual(["ページ番号", "シリーズ順"]);
     }
+  });
+
+  it("passes the reading shelf as the old shelf's numbers, which reading positions are kept under", () => {
+    expect(shelfRequest({ idsInclude: [3, 1] }).legacyWorks).toEqual([3, 1]);
+    expect(shelfRequest({}).legacyWorks).toBeNull();
   });
 });
 

@@ -363,13 +363,16 @@ function Reader({ source }: { source: ReaderSource }) {
   const pendingOutlineRef = useRef<number | null>(null);
   // ページを送ったあと、届いた本文の先頭へ寄せるための印。
   const pendingPageStartRef = useRef(false);
-  const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(id, version);
   const metadataQuery = useQuery({
     queryKey: source.head.queryKey,
     queryFn: source.head.queryFn,
     select: source.head.select,
     enabled: validId,
   });
+  // 読書位置・しおりの鍵。新しい棚の作品でも、旧棚から移したものは旧棚の番号で引く（両方の棚で
+  // 同じ記録）。頭が届くまでは分からないので、位置を戻すのも書くのも頭が届いてから。
+  const readingId = metadataQuery.data?.head.readingKey ?? null;
+  const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(readingId ?? id, version);
   // 前後の作品・保存フォルダーは旧棚の作品だけ。
   const legacyWork = metadataQuery.data?.legacy?.download;
   const contentQuery = useQuery({
@@ -532,7 +535,7 @@ function Reader({ source }: { source: ReaderSource }) {
   const pageCount = contentQuery.data?.pageCount ?? 1;
   const hasSourcePages = pageCount > 1;
   const vertical = settings.writing === "vertical";
-  const positionKey = `piep.reader-position.${id}.${version ?? "current"}`;
+  const positionKey = `piep.reader-position.${readingId ?? "pending"}.${version ?? "current"}`;
   // 残り時間の目安に使う全体の字数。編集版なら編集版の字数になる。
   const totalChars = contentQuery.data?.totalPlainTextChars || metadataQuery.data?.head.textLength || 0;
   const sequenceContextLimited = Boolean(officialSeriesQuery.data?.truncated || authorWorksQuery.data?.truncated);
@@ -700,9 +703,9 @@ function Reader({ source }: { source: ReaderSource }) {
   // scrollTop of 0 over the stored position and lose the reader's place.
   useEffect(() => {
     const viewport = scrollRef.current;
-    if (!viewport || !metadataQuery.data || !contentQuery.data) return;
+    if (!viewport || readingId === null || !contentQuery.data) return;
     if (restoredKeyRef.current === positionKey) return;
-    const saved = readReadingPosition(id, version);
+    const saved = readReadingPosition(readingId, version);
     const savedPage = Math.min(Math.max(1, saved?.page ?? 1), Math.max(1, pageCount));
     const savedTop = Math.max(0, saved?.top ?? 0);
     if (sourcePage !== savedPage) {
@@ -762,7 +765,7 @@ function Reader({ source }: { source: ReaderSource }) {
     // 動かないので、フレーム待ちだけに任せると位置がいつまでも戻らない。
     attempt();
     return () => { cancelled = true; cancelAnimationFrame(frame); };
-  }, [contentReady, contentQuery.data, id, metadataQuery.data, pageCount, positionKey, sourcePage, version, vertical]);
+  }, [contentReady, contentQuery.data, pageCount, positionKey, readingId, sourcePage, version, vertical]);
   useEffect(() => {
     const pending = pendingBookmarkRef.current;
     const viewport = scrollRef.current;
@@ -789,7 +792,7 @@ function Reader({ source }: { source: ReaderSource }) {
   }, [contentQuery.data?.page, contentReady, sourcePage, vertical]);
   useEffect(() => {
     const viewport = scrollRef.current;
-    if (!viewport || !contentReady) return;
+    if (!viewport || !contentReady || readingId === null) return;
     // 読んでいる位置の保存は、スクロールのたびに `getItem` + `parse` +
     // `stringify` + `setItem` を同期で走らせていた。指を滑らせている間は
     // 1秒に数十回になり、長い本ではその分だけ引っかかる。**進み具合の表示は
@@ -813,14 +816,14 @@ function Reader({ source }: { source: ReaderSource }) {
       // 最後のページを読み切ったら、読みかけの棚から降ろす。降ろす口が
       // 「作品を消したとき」しか無かったので、読み終えた本も棚に積まれ続けていた。
       if (sourcePage >= pageCount && atFlowEdge(viewport, vertical, 1)) {
-        clearReadingPosition(id, version);
+        clearReadingPosition(readingId, version);
         pendingTop = null;
         pendingPersist = false;
         return;
       }
       const article = articleRef.current;
       const anchor = article ? currentAnchor(viewport, article, vertical) : null;
-      writeReadingPosition(id, version, {
+      writeReadingPosition(readingId, version, {
         page: sourcePage,
         top: pendingTop,
         mode: vertical ? "vertical" : "horizontal",
@@ -892,7 +895,7 @@ function Reader({ source }: { source: ReaderSource }) {
       if (saveTimer !== null) window.clearTimeout(saveTimer);
       flush();
     };
-  }, [contentReady, hasSourcePages, id, positionKey, sourcePage, pageCount, totalChars, version, vertical]);
+  }, [contentReady, hasSourcePages, positionKey, readingId, sourcePage, pageCount, totalChars, version, vertical]);
   // 手元にある作品・作者を指すリンクに印を付ける。押す前に、それがこの道具の
   // 中の場所だと分かる。
   useLibraryLinkMarks(articleRef, preparedHtml);

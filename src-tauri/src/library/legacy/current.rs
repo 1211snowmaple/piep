@@ -262,6 +262,11 @@ CREATE TABLE assets(id INTEGER,download_id INTEGER,asset_type TEXT,filename TEXT
                 assert!(first.unresolved.is_empty(), "{:?}", first.unresolved);
                 let mapped:Vec<u8>=target.conn.lock().unwrap().query_row("SELECT target_id FROM migration_records WHERE source_table='download_current' AND source_key='1' AND status='imported'",[],|r|r.get(0)).unwrap();
                 assert_eq!(mapped, work.snapshot_id.as_bytes());
+                // 端末の読書位置は旧棚の番号で引くので、作品から旧棚の番号へ戻れる。
+                assert_eq!(
+                    target.legacy_work_numbers().unwrap(),
+                    std::collections::HashMap::from([(work.id, 1)])
+                );
             } else {
                 assert!(!first.unresolved.is_empty());
                 assert!(!target.activation_problems().unwrap().is_empty());

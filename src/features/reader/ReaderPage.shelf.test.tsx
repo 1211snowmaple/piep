@@ -67,6 +67,7 @@ const work: ShelfWork = {
   series_title: null,
   series_position: null,
   coverFile: null,
+  legacyId: null,
   caption: null,
   authorKey: "77",
   seriesKey: null,
@@ -149,6 +150,34 @@ describe("ReaderPage on the new shelf", () => {
     expect(legacy.searchDownloadsV2).not.toHaveBeenCalled();
     fireEvent.click(next);
     await waitFor(() => expect(window.location.hash).toBe(`#/reader/${NEXT}`));
+  });
+
+  it("continues a work moved from the old shelf at the place and bookmarks kept under its old number", async () => {
+    const OLD = 4321;
+    api.libraryV2Work.mockResolvedValue({ ...work, legacyId: OLD });
+    api.libraryV2Content.mockImplementation(async (_work: string, _snapshot: string | null, page: number) => ({
+      page, pageCount: 3, html: `<p>${page + 1}ページ目の本文</p>`, totalPlainTextChars: 30, sourcePageStarts: [0],
+    }));
+    // 旧棚の読む画面が憶えた位置としおり（旧棚の番号で引く）。
+    writeReadingPosition(OLD, null, { page: 2, top: 0 });
+    window.localStorage.setItem("piep.bookmarks.v1", JSON.stringify({
+      [String(OLD)]: [{ id: "b1", page: 3, top: 0, label: "3ページ", createdAt: "2026-11-15T00:00:00Z" }],
+    }));
+    renderReader(`#/reader/${WORK}`);
+    expect(await screen.findByText("2ページ目の本文")).toBeInTheDocument();
+    expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, null, 1);
+    expect(screen.getByRole("button", { name: "しおり一覧（1件）" })).toBeInTheDocument();
+    // 新しい棚の ID では書かない（旧棚と別の記録にならない）。
+    expect(window.localStorage.getItem(`piep.reader-position.${WORK}.current`)).toBeNull();
+  });
+
+  it("marks a neighbour as being read when its old number has a reading position", async () => {
+    api.libraryV2Neighbors.mockResolvedValue([
+      { kind: "series", id: "s", title: "続き物", ordered: true, position: 1, total: 2, missing: 0, previous: null, next: card(NEXT, "次の回", { legacyId: 77 }) },
+    ] satisfies ShelfNeighbors[]);
+    writeReadingPosition(77, null, { page: 1, top: 40 });
+    renderReader(`#/reader/${WORK}`);
+    expect(await screen.findByRole("button", { name: "次の作品：次の回" })).toHaveTextContent("読みかけ・続きから");
   });
 
   it("reads a saved version by turning its number into that version's snapshot", async () => {

@@ -61,6 +61,7 @@ const work: ShelfWork = {
   series_title: null,
   series_position: null,
   coverFile: null,
+  legacyId: null,
   caption: "説明",
   authorKey: "77",
   seriesKey: null,

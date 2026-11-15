@@ -539,3 +539,94 @@ fn probe_a_real_shelf() {
         println!("failure {line}");
     }
 }
+
+/// 編集の本文は旧棚と同じ関数で組む。段の間の空行の数・見出し・画像の説明・改ページが旧棚と
+/// 同じ行になり、「何ページ目の何行目」で憶えた読書位置としおりが同じ行を指す。
+#[test]
+fn an_edit_is_laid_out_line_for_line_like_the_old_shelf() {
+    use crate::database::models::WorkBlock;
+    use crate::library::{EditBlock, EditMedia};
+    let picture = Fingerprint::of(b"picture");
+    let blocks = [
+        ("paragraph", Some("一\n二"), json!(null), None),
+        ("heading", Some("見出し"), json!({"gap": 2}), None),
+        ("image", Some("説明"), json!(null), Some("legacy-asset:7")),
+        ("page_break", None, json!(null), None),
+        ("paragraph", Some("三"), json!({"gap": 0}), None),
+        (
+            "image",
+            None,
+            json!({"sourceRef": "[uploadedimage:404]"}),
+            Some("legacy-asset:8"),
+        ),
+    ];
+    let content = EditContent {
+        format: "piep-edit-v1".into(),
+        title: None,
+        blocks: blocks
+            .iter()
+            .enumerate()
+            .map(|(index, (kind, text, attrs, slot))| EditBlock {
+                id: LibraryId::now_v7(),
+                ordinal: index as i64,
+                kind: (*kind).into(),
+                text: text.map(str::to_owned),
+                attrs: attrs.clone(),
+                media_slot: slot.map(str::to_owned),
+            })
+            .collect(),
+        media: vec![EditMedia {
+            slot: "legacy-asset:7".into(),
+            file: picture,
+            original_name: "saved.png".into(),
+            mime_type: None,
+        }],
+        provenance: None,
+    };
+    let entity = LibraryId::now_v7();
+    let scope = ResourceScope::Edit(LibraryId::now_v7());
+    let document = ReaderDocument {
+        format: "test",
+        entity,
+        scope,
+        metadata: BTreeMap::new(),
+        body: ReaderBody::Edit(content),
+        resources: crate::library::ResourceManifest {
+            entity,
+            scope,
+            base_snapshot: None,
+            resources: Vec::new(),
+        },
+        base_resources: None,
+        bindings: Vec::new(),
+        bindings_hash: None,
+    };
+    let old_blocks: Vec<WorkBlock> = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, (kind, text, attrs, slot))| WorkBlock {
+            id: index as i64,
+            edit_revision_id: 1,
+            order: index as i64,
+            block_type: (*kind).into(),
+            text: text.map(str::to_owned),
+            asset_id: slot.map(|slot| if slot.ends_with(":7") { 7 } else { 8 }),
+            attrs_json: (!attrs.is_null()).then(|| attrs.to_string()),
+        })
+        .collect();
+    // 旧棚では画像 8 のファイルが無い（残っていない画像は渡さない）。
+    let old_assets = [AssetEntry {
+        id: 7,
+        download_id: 1,
+        asset_type: "illustration".into(),
+        filename: "saved.png".into(),
+        local_path: picture.to_string(),
+        original_url: None,
+        mime_type: None,
+        file_size_bytes: 0,
+    }];
+    assert_eq!(
+        render_html(&document),
+        crate::database::queries::blocks_to_html(&old_blocks, &old_assets)
+    );
+}

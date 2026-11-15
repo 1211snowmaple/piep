@@ -51,8 +51,8 @@ export interface ReadingPosition {
 }
 
 /**
- * 読書位置を憶える作品。旧棚は番号、新しい棚（試験中）は UUID。新しい棚の作品は、
- * 読みかけの棚（旧棚の作品を並べる）には数えない。
+ * 読書位置を憶える作品。旧棚は番号、新しい棚（試験中）は UUID。旧棚から移した作品は
+ * 新しい棚でも旧棚の番号で憶える（`readingKeyOf`）。UUID の鍵は読みかけの棚に数えない。
  */
 export type ReadingWorkKey = number | string;
 
@@ -110,6 +110,17 @@ function announcePositionChange(): void {
  * Loads a reader position. A session-only value from the previous schema is
  * migrated once so an in-progress read is not lost during the upgrade.
  */
+/**
+ * 端末に作品ごとに残す記録（読書位置・しおり）を引く鍵。
+ *
+ * 旧棚が正本で、新しい棚がその写しのあいだは、新しい棚の作品でも旧棚から移したものは旧棚の
+ * 番号で引く。両方の棚で同じ記録を読み書きするので、どちらで読んでも続きから読め、読みかけの
+ * 棚にも載る。旧棚に無い作品だけが新しい棚の ID（小文字の UUID）で憶える。
+ */
+export function readingKeyOf(work: { id: ReadingWorkKey; legacyId?: number | null }): ReadingWorkKey {
+  return work.legacyId ?? work.id;
+}
+
 export function readReadingPosition(workId: ReadingWorkKey, version: number | null): ReadingPosition | null {
   if (!validKey(workId)) return null;
   const key = keyFor(workId, version);

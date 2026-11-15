@@ -147,7 +147,7 @@ impl Library {
             }
             Err(error) => return Err(error),
         };
-        let html = render_html(&document, provider);
+        let html = render_html(&document);
         let (pages, source_page_starts) =
             crate::database::queries::paginate_reader_html(&html, provider);
         // 旧棚の読む画面と同じく、HTML ではなく本文の平文（検索に使う本文）の字数。
@@ -171,7 +171,7 @@ fn edit_text(content: &EditContent) -> String {
 }
 
 /// 本文を HTML にする。画像は `data-local-path` にファイルの識別子を入れる。
-pub fn render_html(document: &ReaderDocument, provider: &str) -> String {
+pub fn render_html(document: &ReaderDocument) -> String {
     match &document.body {
         ReaderBody::PixivText(text) => {
             parse_pixiv_value_to_html(&json!({ "text": text }), &bound_assets(document).0)
@@ -183,7 +183,7 @@ pub fn render_html(document: &ReaderDocument, provider: &str) -> String {
             parse_fanbox_value_to_html(&json!({ "body": body }), &assets)
         }
         ReaderBody::PlainText(text) => plain_html(text),
-        ReaderBody::Edit(content) => edit_html(content, document, provider),
+        ReaderBody::Edit(content) => edit_html(content, document),
     }
 }
 
@@ -325,55 +325,67 @@ fn bound_assets(document: &ReaderDocument) -> (Vec<AssetEntry>, Marks) {
     (assets, marks)
 }
 
-/// 編集の本文。旧棚の編集の HTML と同じ段の組み（見出し・段落・画像・区切り・改ページ）。
-fn edit_html(content: &EditContent, document: &ReaderDocument, provider: &str) -> String {
-    let media: BTreeMap<&str, String> = content
-        .media
-        .iter()
-        .map(|media| (media.slot.as_str(), media.file.to_string()))
-        .collect();
-    // 取り込んだ画像を指す段は、基準の版の画像の枠（slot）を指す。
-    let base: BTreeMap<String, String> = document
+/// 編集の本文。旧棚の編集と同じ関数（`blocks_to_html`）で組む。
+///
+/// 段の間の空行の数（`gap`）、見出し・引用・リンク・画像の説明の組み方、段の切れ目の印が旧棚と
+/// 同じでなければ、「何ページ目の何行目」で憶えた読書位置としおりが別の行を指す。前は新しい棚で
+/// 組み直していて、段の間を一律に一行にしていたので、編集した作品だけ行の数が違っていた。
+/// 移した編集は段の種類・属性・画像の枠（`legacy-asset:旧い番号`）を旧棚のまま持っている。
+fn edit_html(content: &EditContent, document: &ReaderDocument) -> String {
+    use crate::database::models::WorkBlock;
+    // 枠 → (ファイルの識別子, 名前)。取り込んだ画像と、基準の版の画像。
+    let mut files: BTreeMap<&str, (String, String)> = BTreeMap::new();
+    for info in document
         .base_resources
         .iter()
         .flat_map(|manifest| manifest.resources.iter())
-        .filter_map(|info| match (&info.reference, &info.file) {
-            (ResourceReference::Media { slot }, Some(file)) => {
-                Some((slot.clone(), file.id.to_string()))
+    {
+        if let (ResourceReference::Media { slot }, Some(file)) = (&info.reference, &info.file) {
+            files.insert(slot.as_str(), (file.id.to_string(), slot.clone()));
+        }
+    }
+    for media in &content.media {
+        files.insert(
+            media.slot.as_str(),
+            (media.file.to_string(), media.original_name.clone()),
+        );
+    }
+    let mut assets: Vec<AssetEntry> = Vec::new();
+    let mut asset_of: BTreeMap<&str, i64> = BTreeMap::new();
+    let blocks: Vec<WorkBlock> = content
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let asset_id = block.media_slot.as_deref().and_then(|slot| {
+                let (file, name) = files.get(slot)?;
+                Some(*asset_of.entry(slot).or_insert_with(|| {
+                    let id = assets.len() as i64 + 1;
+                    assets.push(AssetEntry {
+                        id,
+                        download_id: 0,
+                        asset_type: "illustration".into(),
+                        filename: name.clone(),
+                        local_path: file.clone(),
+                        original_url: None,
+                        mime_type: None,
+                        file_size_bytes: 0,
+                    });
+                    id
+                }))
+            });
+            WorkBlock {
+                id: index as i64,
+                edit_revision_id: 0,
+                order: block.ordinal,
+                block_type: block.kind.clone(),
+                text: block.text.clone(),
+                asset_id,
+                attrs_json: (!block.attrs.is_null()).then(|| block.attrs.to_string()),
             }
-            _ => None,
         })
         .collect();
-    let separator = if provider.eq_ignore_ascii_case("pixiv") {
-        "<!-- newpage -->"
-    } else {
-        "<!-- content-block -->"
-    };
-    let mut parts = Vec::with_capacity(content.blocks.len());
-    for block in &content.blocks {
-        let text = block.text.as_deref().unwrap_or("");
-        parts.push(match block.kind.as_str() {
-            "heading" | "header" | "h" => format!("<h2>{}</h2>", escape_html(text)),
-            "separator" => "<hr />".to_string(),
-            "page_break" => separator.to_string(),
-            "image" => {
-                let file = block
-                    .media_slot
-                    .as_deref()
-                    .and_then(|slot| media.get(slot).or_else(|| base.get(slot)));
-                match file {
-                    Some(file) => format!(
-                        r#"<img class="novel-image" data-local-path="{}" alt="{}" />"#,
-                        escape_html(file),
-                        escape_html(text)
-                    ),
-                    None => r#"<div class="missing-image-placeholder" role="note" data-image-missing="true">取得できなかった画像</div>"#.to_string(),
-                }
-            }
-            _ => plain_html(text),
-        });
-    }
-    parts.join("<br />\n")
+    crate::database::queries::blocks_to_html(&blocks, &assets)
 }
 
 #[cfg(test)]

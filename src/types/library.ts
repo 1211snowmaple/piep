@@ -52,6 +52,8 @@ export interface ShelfEntry extends Omit<DownloadEntry, "id"> {
   id: string;
   shelf: "v2";
   coverUrl: string | null;
+  /** 旧棚から移した作品の、旧棚での番号。端末の読書位置・しおりはこの番号で引く。 */
+  legacyId: number | null;
 }
 
 /** 一覧に並ぶ作品。旧棚か新しい棚か。 */

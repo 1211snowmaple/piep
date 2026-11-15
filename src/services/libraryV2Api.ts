@@ -111,6 +111,8 @@ export interface ShelfCard {
   series_title: string | null;
   series_position: number | null;
   coverFile: string | null;
+  /** 旧棚から移した作品の、旧棚での番号。端末の読書位置・しおりはこの番号で引く（旧棚と共有）。 */
+  legacyId: number | null;
 }
 
 export interface ShelfSemanticEvidence {
@@ -150,8 +152,9 @@ export function libraryV2Status(): Promise<LibraryV2Status> {
   return invoke<LibraryV2Status>("library_v2_status");
 }
 
-export function libraryV2Search(search: ShelfTextSearch, query: ShelfListQuery): Promise<ShelfSearchView> {
-  return invoke<ShelfSearchView>("library_v2_search", { search, query });
+/** `legacyWorks` を渡すと、旧棚の番号でその作品だけに絞る（読みかけの棚。読書位置の鍵が旧棚の番号なので）。 */
+export function libraryV2Search(search: ShelfTextSearch, query: ShelfListQuery, legacyWorks: number[] | null = null): Promise<ShelfSearchView> {
+  return invoke<ShelfSearchView>("library_v2_search", { search, query, legacyWorks });
 }
 
 export function libraryV2Decorations(text: string, matches: ShelfMatch[]): Promise<ShelfDecoration[]> {

@@ -14688,6 +14688,22 @@ fn reader_source_content(
     ))
 }
 
+/// 転送用のページの大きさとして数える長さ。画像・添付の置き場（`data-local-path` の値）は数えない。
+///
+/// 置き場の長さは本文と関係がない（旧棚は保存先のフォルダーを含むパス、新しい棚はファイルの
+/// 識別子）。数えていたころは、同じ本文でも保存先を移したり棚を替えたりするだけでページの
+/// 切れ目が動き、「何ページ目の何行目」で憶えた読書位置としおりが別の行を指していた。
+fn transport_len(html: &str) -> usize {
+    static PLACE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r#"data-local-path="[^"]*""#).expect("valid local path regex")
+    });
+    html.len()
+        - PLACE
+            .find_iter(html)
+            .map(|found| found.len())
+            .sum::<usize>()
+}
+
 /// Converts source-level boundaries into reasonably sized transport pages.
 /// Boundaries always sit between complete source blocks, so a page can be
 /// sanitized independently without producing malformed markup.
@@ -14710,6 +14726,7 @@ pub(crate) fn paginate_reader_html(html: &str, source: &str) -> (Vec<String>, Ve
     // `[jump:5]` が 5 ページ目ではない場所へ飛ぶ。
     let mut source_page_starts = Vec::new();
     let mut current = String::new();
+    let mut current_len = 0usize;
     for block in blocks {
         // Pixiv's [newpage] is user-visible page semantics and must never be
         // coalesced. A source page can nevertheless be several megabytes long;
@@ -14718,28 +14735,34 @@ pub(crate) fn paginate_reader_html(html: &str, source: &str) -> (Vec<String>, Ve
         if source.eq_ignore_ascii_case("pixiv") {
             source_page_starts.push(pages.len());
             let mut chunk = String::new();
+            let mut chunk_len = 0usize;
             for line in block.split_inclusive("<br />\n") {
+                let line_len = transport_len(line);
                 if !chunk.is_empty()
-                    && chunk.len().saturating_add(line.len()) > READER_PAGE_TARGET_BYTES
+                    && chunk_len.saturating_add(line_len) > READER_PAGE_TARGET_BYTES
                 {
                     pages.push(std::mem::take(&mut chunk));
+                    chunk_len = 0;
                 }
                 chunk.push_str(line);
+                chunk_len += line_len;
             }
             if !chunk.trim().is_empty() {
                 pages.push(chunk);
             }
             continue;
         }
-        if !current.is_empty()
-            && current.len().saturating_add(block.len()) > READER_PAGE_TARGET_BYTES
-        {
+        let block_len = transport_len(block);
+        if !current.is_empty() && current_len.saturating_add(block_len) > READER_PAGE_TARGET_BYTES {
             pages.push(std::mem::take(&mut current));
+            current_len = 0;
         }
         if !current.is_empty() {
             current.push('\n');
+            current_len += 1;
         }
         current.push_str(block);
+        current_len += block_len;
     }
     if !current.trim().is_empty() {
         pages.push(current);
@@ -14782,7 +14805,7 @@ fn plain_text_from_reader_html(html: &str) -> String {
 ///
 /// ここが吐く HTML は取り込み直されない（版があるときブロックは DB から
 /// 読む）ので、`html_to_editor_blocks` が知らない `<figure>` を使ってよい。
-fn blocks_to_html(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
+pub(crate) fn blocks_to_html(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
     let mut html = String::new();
     for (index, block) in blocks.iter().enumerate() {
         let gap = block_gap(block).unwrap_or(if index == 0 { 0 } else { 1 });

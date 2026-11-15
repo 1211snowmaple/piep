@@ -2,6 +2,7 @@ import { getAssetUrl, getReaderContentPage, getReaderMetadata, getReaderOutline,
 import { libraryV2Content, libraryV2Outline, libraryV2SearchContent, libraryV2Work, shelfBodyUrl, type ShelfWork } from "@/services/libraryV2Api";
 export { SHELF_WORK_ID } from "@/services/libraryV2Api";
 import { getDemoReader } from "@/mocks/demoData";
+import { readingKeyOf } from "@/features/library/readingShelf";
 import type { ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit } from "@/types/library";
 
 /**
@@ -13,6 +14,8 @@ import type { ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearc
 export interface ReaderHead {
   /** 作品の画面の ID（旧棚は番号、新しい棚は UUID）。 */
   id: number | string;
+  /** 読書位置・しおりを引く鍵（`readingKeyOf`）。旧棚から移した作品は、新しい棚でも旧棚の番号。 */
+  readingKey: number | string;
   title: string;
   authorName: string;
   source: string;
@@ -50,7 +53,7 @@ export interface ReaderHeadQuery {
 }
 
 export interface ReaderSource {
-  /** 読書位置・しおり・問い合わせの鍵。旧棚は番号、新しい棚は UUID。 */
+  /** 問い合わせの鍵。旧棚は番号、新しい棚は UUID。読書位置・しおりは頭の `readingKey` で引く。 */
   key: number | string;
   /** 新しい棚の作品。書き換える操作（編集）と、旧棚の保存フォルダー・前後の作品は使えない。 */
   shelf: boolean;
@@ -68,6 +71,7 @@ function legacyHead(doc: ReaderMetadata): ReaderHead {
   const edit = doc.activeEditRevision;
   return {
     id: work.id,
+    readingKey: work.id,
     title: work.title,
     authorName: work.authorName,
     source: work.source,
@@ -110,6 +114,7 @@ export function legacyReaderSource(id: number): ReaderSource {
 function shelfHead(work: ShelfWork): ReaderHead {
   return {
     id: work.id,
+    readingKey: readingKeyOf(work),
     title: work.title,
     authorName: work.author_name,
     source: work.provider,

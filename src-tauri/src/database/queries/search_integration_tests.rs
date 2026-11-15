@@ -560,6 +560,53 @@ fn reader_transport_pages_keep_complete_source_blocks() {
         .all(|page| page.len() <= READER_PAGE_TARGET_BYTES));
 }
 
+/// 画像の置き場（旧棚の長いパスと新しい棚の短い識別子）が違っても、同じ本文は同じ行で切れる。
+/// 切れ目が動くと、「何ページ目の何行目」で憶えた読書位置としおりが別の行を指す。
+#[test]
+fn reader_transport_pages_do_not_depend_on_where_images_are_stored() {
+    let body = |place: &str| {
+        let image = format!(
+            "<img class=\"novel-image\" data-local-path=\"{place}\" alt=\"image_1\" /><br />\n"
+        );
+        let text = format!("{}<br />\n", "あ".repeat(READER_PAGE_TARGET_BYTES / 30));
+        // 本文だけで上限を越える長さ。置き場を数えると、長いパスのほうが早く切れる。
+        let mut html = String::new();
+        for _ in 0..12 {
+            html.push_str(&image);
+            html.push_str(&text);
+        }
+        html
+    };
+    let short = body(&"0".repeat(64));
+    let long = body(&format!(
+        "C:/Users/reader/Documents/piep/{}",
+        "x".repeat(4000)
+    ));
+    let lines = |pages: &[String]| {
+        pages
+            .iter()
+            .map(|page| page.matches("<br />").count())
+            .collect::<Vec<_>>()
+    };
+    for source in ["pixiv", "fanbox"] {
+        let separator = if source == "pixiv" {
+            ""
+        } else {
+            "<!-- content-block -->"
+        };
+        let as_blocks = |html: &str| {
+            html.split_inclusive("<br />\n")
+                .collect::<Vec<_>>()
+                .join(separator)
+        };
+        let (short_pages, short_starts) = paginate_reader_html(&as_blocks(&short), source);
+        let (long_pages, long_starts) = paginate_reader_html(&as_blocks(&long), source);
+        assert!(short_pages.len() >= 2, "{source}: 切れ目のある長さで試す");
+        assert_eq!(lines(&short_pages), lines(&long_pages), "{source}");
+        assert_eq!(short_starts, long_starts, "{source}");
+    }
+}
+
 #[test]
 fn diagnostic_percentiles_are_stable() {
     let mut samples = [9.0, 1.0, 7.0, 3.0, 5.0];

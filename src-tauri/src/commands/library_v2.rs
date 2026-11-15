@@ -18,7 +18,7 @@ use crate::library::{
 use crate::library_search::{parse_query, SearchDecoration, SearchMatch, SearchPage, TextSearch};
 use crate::library_view::{MediaView, RenderedDocument, VersionView};
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::State;
@@ -60,6 +60,8 @@ pub struct LibraryV2 {
     library: OnceLock<Arc<Library>>,
     /// 最近ページに分けた本文。ページをめくるたびに本文全体を組み直さない。
     documents: Mutex<VecDeque<CachedDocument>>,
+    /// 作品の旧棚での番号。読むだけの棚は開いているあいだ変わらないので、一度だけ引く。
+    legacy_numbers: Mutex<Option<Arc<HashMap<LibraryId, i64>>>>,
 }
 
 type CachedDocument = (LibraryId, ResourceScope, Arc<RenderedDocument>);
@@ -73,6 +75,7 @@ impl Default for LibraryV2 {
             status: Mutex::new(LibraryV2Status::Starting),
             library: OnceLock::new(),
             documents: Mutex::new(VecDeque::new()),
+            legacy_numbers: Mutex::new(None),
         }
     }
 }
@@ -89,6 +92,26 @@ impl LibraryV2 {
             .lock()
             .map(|slot| slot.clone())
             .unwrap_or(LibraryV2Status::Starting)
+    }
+
+    /// 作品の旧棚での番号（移行の記録）。棚にある作品は約 3 万件なので、全部を一度に持つ。
+    fn legacy_numbers(&self, library: &Library) -> Result<Arc<HashMap<LibraryId, i64>>, String> {
+        let mut slot = self.legacy_numbers.lock().map_err(|e| e.to_string())?;
+        if let Some(numbers) = slot.as_ref() {
+            return Ok(Arc::clone(numbers));
+        }
+        let numbers = Arc::new(library.legacy_work_numbers().map_err(|e| e.to_string())?);
+        *slot = Some(Arc::clone(&numbers));
+        Ok(numbers)
+    }
+
+    /// 一覧の一件を、画面が読む形にする。
+    fn card_view(&self, library: &Library, card: &WorkCard) -> Result<CardView, String> {
+        Ok(CardView {
+            card: card.clone(),
+            cover_file: card.cover.map(|cover| cover.to_string()),
+            legacy_id: self.legacy_numbers(library)?.get(&card.id).copied(),
+        })
     }
 
     /// 開いた棚。開いていなければ誤り。
@@ -275,6 +298,8 @@ pub struct CardView {
     pub card: WorkCard,
     /// 表紙のファイルの識別子（16 進）。`convertFileSrc(…, "piep-library")` で URL になる。
     pub cover_file: Option<String>,
+    /// 旧棚から移した作品の、旧棚での番号。端末の読書位置・しおりはこの番号で引く（旧棚と共有）。
+    pub legacy_id: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -286,19 +311,14 @@ pub struct SearchView {
     pub cards: Vec<CardView>,
 }
 
-fn card_view(card: &WorkCard) -> CardView {
-    CardView {
-        card: card.clone(),
-        cover_file: card.cover.map(|cover| cover.to_string()),
-    }
-}
-
 /// 一覧・本文の検索。語がなければ一覧（`tag:` などの書き方だけでもよい）で、索引の同期中でも読める。
+/// `legacy_works` を渡すと、旧棚の番号でその作品だけに絞る（読みかけの棚）。
 #[tauri::command]
 pub async fn library_v2_search(
     state: State<'_, Arc<LibraryV2>>,
     search: TextSearch,
-    query: WorkListQuery,
+    mut query: WorkListQuery,
+    legacy_works: Option<Vec<i64>>,
 ) -> Result<SearchView, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
@@ -308,10 +328,34 @@ pub async fn library_v2_search(
         } else {
             state.searchable()?
         };
+        // 読みかけの棚は端末の読書位置の鍵（旧棚の番号）で来る。棚の作品の ID に読み替えて絞る。
+        if let Some(numbers) = legacy_works {
+            let wanted: std::collections::HashSet<i64> = numbers.into_iter().collect();
+            let known = state.legacy_numbers(&library)?;
+            let works = known
+                .iter()
+                .filter(|(_, number)| wanted.contains(number))
+                .map(|(work, _)| *work);
+            query.filter.works = Some(match query.filter.works.take() {
+                Some(existing) => {
+                    let allowed: std::collections::HashSet<LibraryId> = works.collect();
+                    existing
+                        .into_iter()
+                        .filter(|work| allowed.contains(work))
+                        .collect()
+                }
+                None => works.collect(),
+            });
+        }
         let page = library
             .search_works(&search, &query)
             .map_err(|e| e.to_string())?;
-        let cards = page.page.items.iter().map(card_view).collect();
+        let cards = page
+            .page
+            .items
+            .iter()
+            .map(|card| state.card_view(&library, card))
+            .collect::<Result<_, _>>()?;
         Ok(SearchView { page, cards })
     })
     .await
@@ -382,7 +426,7 @@ pub async fn library_v2_work(
             caption: text_of(metadata.get("caption")).or_else(|| card.excerpt.clone()),
             author_key: text_of(metadata.get("author_key")),
             series_key: text_of(metadata.get("series_id")),
-            card: card_view(&card),
+            card: state.card_view(&library, &card)?,
             versions,
         })
     })
@@ -510,20 +554,27 @@ pub async fn library_v2_neighbors(
     tauri::async_runtime::spawn_blocking(move || {
         let library = state.library()?;
         let found = library.work_neighbors(work).map_err(|e| e.to_string())?;
-        Ok(found
-            .into_iter()
-            .map(|row| NeighborsView {
-                kind: row.kind,
-                id: row.id,
-                title: row.title,
-                ordered: row.ordered,
-                position: row.position,
-                total: row.total,
-                missing: row.missing,
-                previous: row.previous.as_ref().map(card_view),
-                next: row.next.as_ref().map(card_view),
+        let view = |card: &Option<WorkCard>| {
+            card.as_ref()
+                .map(|card| state.card_view(&library, card))
+                .transpose()
+        };
+        found
+            .iter()
+            .map(|row| {
+                Ok(NeighborsView {
+                    kind: row.kind,
+                    id: row.id,
+                    title: row.title.clone(),
+                    ordered: row.ordered,
+                    position: row.position,
+                    total: row.total,
+                    missing: row.missing,
+                    previous: view(&row.previous)?,
+                    next: view(&row.next)?,
+                })
             })
-            .collect())
+            .collect()
     })
     .await
     .map_err(|e| e.to_string())?
