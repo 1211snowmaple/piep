@@ -58,7 +58,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     let mut note = |counts: &mut BTreeMap<&str, usize>, name: &'static str, value: Value| {
         *counts.entry(name).or_default() += 1;
         let list = examples.entry(name).or_default();
-        if list.len() < 20 {
+        if list.len() < 50 {
             list.push(value);
         }
     };
@@ -160,6 +160,14 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
                 );
                 continue;
             }
+            // 読む画面の残り時間の目安に使う字数（添付から取り込んだ本文を含む）。
+            if first.total_plain_text_chars != rendered.text_chars {
+                note(
+                    &mut counts,
+                    "text_chars",
+                    json!({"work": work, "old": first.total_plain_text_chars, "new": rendered.text_chars}),
+                );
+            }
             if first.source_page_starts != rendered.source_page_starts {
                 note(
                     &mut counts,
@@ -219,7 +227,11 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
                 }
                 if work_html && old_plain != new_plain {
                     work_html = false;
-                    *counts.entry("html_differs").or_default() += 1;
+                    note(
+                        &mut counts,
+                        "html_differs",
+                        json!({"work": work, "page": index}),
+                    );
                 }
             }
             if work_marks {

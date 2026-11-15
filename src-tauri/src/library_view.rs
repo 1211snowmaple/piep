@@ -147,11 +147,30 @@ impl Library {
             }
             Err(error) => return Err(error),
         };
+        let mut document = document;
+        // FANBOX の保存版は、旧棚と同じく添付の PDF・テキストの本文を添付の位置へ差し込む。
+        // 検索の文書と同じ関数を通すので、読める本文と検索に入る本文が食い違わない。
+        let mut inserted_text = None;
+        if let (ReaderBody::Article(body), ResourceScope::Snapshot(snapshot)) =
+            (&mut document.body, scope)
+        {
+            let mut post = json!({ "body": std::mem::take(body) });
+            let conn = self.reader()?;
+            self.insert_attachment_bodies(&conn, snapshot, provider, &mut post)?;
+            inserted_text = Some(crate::database::search::extract_search_body(
+                &post, "fanbox",
+            ));
+            *body = post["body"].take();
+        }
         let html = render_html(&document);
         let (pages, source_page_starts) =
             crate::database::queries::paginate_reader_html(&html, provider);
-        // 旧棚の読む画面と同じく、HTML ではなく本文の平文（検索に使う本文）の字数。
-        let text_chars = self.work_text(work, scope)?.chars().count();
+        // 旧棚の読む画面と同じく、HTML ではなく本文の平文（検索に使う本文、添付から取り込んだ
+        // 本文を含む）の字数。
+        let text_chars = match inserted_text {
+            Some(text) => text.chars().count(),
+            None => self.work_text(work, scope)?.chars().count(),
+        };
         Ok(RenderedDocument {
             pages,
             source_page_starts,
@@ -179,8 +198,14 @@ pub fn render_html(document: &ReaderDocument) -> String {
         ReaderBody::Article(body) => {
             let (assets, marks) = bound_assets(document);
             let mut body = body.clone();
-            marks.apply(&mut body);
-            parse_fanbox_value_to_html(&json!({ "body": body }), &assets)
+            let restore = marks.apply(&mut body);
+            let mut html = parse_fanbox_value_to_html(&json!({ "body": body }), &assets);
+            // 照合のために置いた画像の印は、画像の説明（alt）と参照にそのまま出る。旧棚と同じく
+            // 取得元の画像の ID に戻す（ID の無い項目は空）。
+            for (token, original) in restore {
+                html = html.replace(&token, &escape_html(&original));
+            }
+            html
         }
         ReaderBody::PlainText(text) => plain_html(text),
         ReaderBody::Edit(content) => edit_html(content, document),
@@ -222,26 +247,14 @@ impl Marks {
         format!("piep-{kind}-z{count}z")
     }
 
-    fn apply(&self, body: &mut serde_json::Value) {
+    /// 印を置く。画像の印と元の ID の組を返す（組んだ HTML の中で元に戻すため）。
+    fn apply(&self, body: &mut serde_json::Value) -> Vec<(String, String)> {
         use serde_json::Value;
-        if let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut) {
-            for block in blocks {
-                let token = block
-                    .get("fileId")
-                    .and_then(Value::as_str)
-                    .and_then(|id| self.file_keys.get(id));
-                if let Some(token) = token {
-                    block["fileId"] = json!(token);
-                }
-            }
-        }
-        if let Some(map) = body.get_mut("fileMap").and_then(Value::as_object_mut) {
-            let renamed: serde_json::Map<String, Value> = std::mem::take(map)
-                .into_iter()
-                .map(|(key, value)| (self.file_keys.get(&key).cloned().unwrap_or(key), value))
-                .collect();
-            *map = renamed;
-        }
+        // 印へ置き換える ID。`blocks` の投稿は `fileMap` の鍵、`files` の投稿は項目の ID。
+        // 添付の本文を差し込んだ `files` の投稿は、`files` から組んだ `blocks` と `fileMap` が
+        // 項目の元の ID で添付を指すので、その ID も印にする。
+        let mut keys = self.file_keys.clone();
+        let mut restore = Vec::new();
         for (name, marks) in [("images", &self.images_at), ("files", &self.files_at)] {
             let Some(items) = body.get_mut(name).and_then(Value::as_array_mut) else {
                 continue;
@@ -253,10 +266,35 @@ impl Marks {
                 // 結ばれていない項目は、保存された別の画像に当たらないよう置き場の手がかりを外す。
                 object.remove("localPath");
                 if let Some(token) = marks.get(&index) {
+                    let original = object.get("id").and_then(Value::as_str).unwrap_or("");
+                    if name == "files" && !original.is_empty() {
+                        keys.insert(original.to_string(), token.clone());
+                    } else if name == "images" {
+                        restore.push((token.clone(), original.to_string()));
+                    }
                     object.insert("id".into(), json!(token));
                 }
             }
         }
+        if let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut) {
+            for block in blocks {
+                let token = block
+                    .get("fileId")
+                    .and_then(Value::as_str)
+                    .and_then(|id| keys.get(id));
+                if let Some(token) = token {
+                    block["fileId"] = json!(token);
+                }
+            }
+        }
+        if let Some(map) = body.get_mut("fileMap").and_then(Value::as_object_mut) {
+            let renamed: serde_json::Map<String, Value> = std::mem::take(map)
+                .into_iter()
+                .map(|(key, value)| (keys.get(&key).cloned().unwrap_or(key), value))
+                .collect();
+            *map = renamed;
+        }
+        restore
     }
 }
 

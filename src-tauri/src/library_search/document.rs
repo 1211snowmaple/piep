@@ -265,13 +265,47 @@ impl Library {
             return Ok(body.text_content());
         };
         let mut post = json!({ "body": body });
-        let texts = self.attachment_text_files(conn, snapshot)?;
-        if !texts.files.is_empty() {
-            crate::database::attachment::apply_attachment_text(&mut post, provider, &texts.files);
-        }
+        self.insert_attachment_bodies(conn, snapshot, provider, &mut post)?;
         Ok(crate::database::search::extract_search_body(
             &post, "fanbox",
         ))
+    }
+
+    /// FANBOX の保存版の投稿（`{"body": …}`）へ、添付の PDF・テキストから取り出した本文を、
+    /// 旧棚と同じく添付の位置へ差し込む。
+    ///
+    /// 検索の文書と読む画面の本文の両方がここを通す。別々に差し込むと「読めるのに検索に
+    /// 出ない」作品ができる（旧棚の `content_from_json` と同じ理由）。
+    pub(crate) fn insert_attachment_bodies(
+        &self,
+        conn: &Connection,
+        snapshot: LibraryId,
+        provider: &str,
+        post: &mut serde_json::Value,
+    ) -> Result<()> {
+        let texts = self.attachment_text_files(conn, snapshot)?;
+        if texts.files.is_empty() {
+            return Ok(());
+        }
+        crate::database::attachment::apply_attachment_text(post, provider, &texts.files);
+        // 差し込んだ印の `localPath`（「原本を見る」）は一時に書き出したファイルを指していて、
+        // ここを出ると消える。新しい棚ではまだ原本を開けないので外す（押しても何も起きない
+        // ボタンを出さない）。開けるようにするときは、ここに添付のファイルの識別子を置く。
+        if let Some(blocks) = post
+            .pointer_mut("/body/blocks")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for block in blocks {
+                if block.get("type").and_then(serde_json::Value::as_str)
+                    == Some(crate::database::attachment::NOTICE_BLOCK_TYPE)
+                {
+                    if let Some(block) = block.as_object_mut() {
+                        block.remove("localPath");
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 本文として取り込める添付（PDF・テキスト）を一時のフォルダーへ書き出す。旧棚の

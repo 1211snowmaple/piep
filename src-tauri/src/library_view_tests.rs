@@ -193,7 +193,8 @@ fn image_and_file_posts_bind_their_lists_by_position() {
     let body = SourceBody::FanboxBody(json!({
         "text": "本文",
         "images": [{"localPath": "./elsewhere.png"}, {"id": "i2"}],
-        "files": [{"id": "f1", "name": "notes", "extension": "txt", "size": 4}, {"id": "f2", "name": "lost", "extension": "psd"}]
+        // 本文を取り込まない種類の添付（テキスト・PDF は下の試験）。
+        "files": [{"id": "f1", "name": "notes", "extension": "zip", "size": 4}, {"id": "f2", "name": "lost", "extension": "psd"}]
     }));
     let saved = library.capture(capture("fanbox", body, b"art", 3)).unwrap();
     let picture = ResourceReference::Media {
@@ -243,11 +244,75 @@ fn image_and_file_posts_bind_their_lists_by_position() {
         "{html}"
     );
     assert_eq!(html.matches("data-image-missing").count(), 1, "{html}");
+    // 照合の印は画像の説明に残さない（旧棚と同じく取得元の ID。ID の無い項目は空）。
+    assert!(!html.contains("piep-image-z"), "{html}");
+    assert!(html.contains(r#"alt="image_""#), "{html}");
     assert!(
         html.contains(&format!(r#"data-local-path="{file}/piep-file-z"#)),
         "{html}"
     );
     assert!(html.contains("lost.psd(見つかりません)"), "{html}");
+}
+
+/// 添付のテキスト・PDF の本文は、旧棚と同じく添付の位置へ差し込む。読む画面と検索の文書は
+/// 同じ差し込みを通すので、読める本文は検索にも入る。
+#[test]
+fn attachment_bodies_are_inserted_for_reading_and_search_alike() {
+    let dir = temp("attachment-body");
+    let library = Library::create(&dir.0).unwrap();
+    let body = SourceBody::FanboxBody(json!({
+        "text": "挨拶",
+        "files": [{"id": "Abc123Def456", "name": "notes", "extension": "txt", "size": 4}]
+    }));
+    let mut captured = capture("fanbox", body, b"art", 2);
+    captured.attachments[0].bytes = "取り込む本文
+
+二段落目"
+        .as_bytes()
+        .to_vec()
+        .into();
+    let saved = library.capture(captured).unwrap();
+    library
+        .publish_reader_bindings(
+            saved.entity_id,
+            saved.snapshot_id,
+            vec![bind(
+                BodyAssetReference::ArticleFileAt { index: 0 },
+                ResourceReference::File {
+                    slot: "attachment".into(),
+                },
+            )],
+        )
+        .unwrap();
+    let rendered = library
+        .render_document(
+            saved.entity_id,
+            ResourceScope::Snapshot(saved.snapshot_id),
+            "fanbox",
+        )
+        .unwrap();
+    let html = rendered.pages.join("");
+    assert!(html.contains("取り込む本文"), "{html}");
+    assert!(html.contains("二段落目"), "{html}");
+    assert!(html.contains("attachment-notice"), "{html}");
+    // 差し込んだあとの `blocks` も、添付の箱は新しい棚のファイルを指す。
+    let file = Fingerprint::of(
+        "取り込む本文
+
+二段落目"
+            .as_bytes(),
+    )
+    .to_string();
+    assert!(
+        html.contains(&format!(r#"data-local-path="{file}/piep-file-z"#)),
+        "{html}"
+    );
+    // 一時に書き出した原本の場所は出さない（新しい棚ではまだ原本を開けない）。
+    assert!(!html.contains("attachment-original"), "{html}");
+    // 残り時間の字数も、検索の文書の本文も、取り込んだ本文を含む。
+    let document = library.search_document(saved.entity_id).unwrap().unwrap();
+    assert!(document.body.contains("取り込む本文"), "{}", document.body);
+    assert_eq!(rendered.text_chars, document.body.chars().count());
 }
 
 #[test]
