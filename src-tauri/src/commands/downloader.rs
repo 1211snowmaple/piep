@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, Once, OnceLock, Weak};
 use tauri::Manager;
 
 #[path = "downloader_shelf.rs"]
-mod shelf;
+pub(super) mod shelf;
 pub use shelf::ShelfSaved;
 
 type WorkSaveMutex = tokio::sync::Mutex<()>;

@@ -76,7 +76,7 @@ fn missing_references<'a>(
 
 /// 応答の中身が今の版の原本と同じで、取得元の画像・添付が今の版に全部あるか。棚から外した作品は
 /// 保存し直して戻すので、同じとは見なさない。
-fn unchanged_on_shelf(
+pub(in crate::commands) fn unchanged_on_shelf(
     library: &Library,
     work: LibraryId,
     data: &Value,
@@ -105,11 +105,30 @@ fn unchanged_on_shelf(
     {
         return Ok(false);
     }
-    let held: HashSet<String> = library
+    let resources = library
         .resource_manifest(work, ResourceScope::Snapshot(snapshot))
         .map_err(fail)?
-        .resources
+        .resources;
+    // 台帳の参照だけで「ある」としない。実体を失った棚は、同じ応答でも保存し直す。
+    for info in &resources {
+        if matches!(info.reference, ResourceReference::Original { .. }) {
+            continue;
+        }
+        if let Some(file) = &info.file {
+            for chunk in library.file(file.id).map_err(fail)?.chunks {
+                if !library
+                    .objects
+                    .has_object(chunk.id)
+                    .map_err(|e| e.to_string())?
+                {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    let held: HashSet<String> = resources
         .iter()
+        .filter(|info| info.file.is_some())
         .filter_map(|info| slot_of(&info.reference).map(str::to_owned))
         .collect();
     let mut targets = Vec::new();

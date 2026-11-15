@@ -12,6 +12,40 @@ pub struct SourceEntityState {
 }
 
 impl Library {
+    /// 確認した保存版がまだ現在版のときだけ確認時刻を進める。
+    /// `deep` は取り寄せた本文がこの保存版と一致したときだけ指定する。
+    pub fn record_work_check(
+        &self,
+        work: LibraryId,
+        snapshot: LibraryId,
+        checked_at: i64,
+        deep: bool,
+    ) -> Result<()> {
+        if chrono::DateTime::from_timestamp_millis(checked_at).is_none() {
+            return Err(Error::Integrity("取得元の確認日時が不正です".into()));
+        }
+        let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let tx = conn.transaction()?;
+        let current: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM entity_current c JOIN library_items li ON li.work_id=c.entity_id WHERE c.entity_id=?1 AND c.snapshot_id=?2)",
+            rusqlite::params![work.as_bytes().as_slice(), snapshot.as_bytes().as_slice()],
+            |r| r.get(0),
+        )?;
+        if !current {
+            return Err(Error::Superseded);
+        }
+        tx.execute(
+            "INSERT INTO source_entity_state(entity_id,last_checked_at,last_deep_checked_at) VALUES(?1,?2,?3)
+             ON CONFLICT(entity_id) DO UPDATE SET
+               last_checked_at=max(coalesce(last_checked_at,excluded.last_checked_at),excluded.last_checked_at),
+               last_deep_checked_at=CASE WHEN excluded.last_deep_checked_at IS NULL THEN last_deep_checked_at
+                 ELSE max(coalesce(last_deep_checked_at,excluded.last_deep_checked_at),excluded.last_deep_checked_at) END",
+            rusqlite::params![work.as_bytes().as_slice(), checked_at, deep.then_some(checked_at)],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn source_entity_state(&self, entity: LibraryId) -> Result<SourceEntityState> {
         let conn = self.reader()?;
         Ok(conn.query_row("SELECT s.last_checked_at,s.last_fetched_at,s.last_deep_checked_at FROM entities e LEFT JOIN source_entity_state s ON s.entity_id=e.id WHERE e.id=?1 AND e.kind IN ('work','person','series')",[entity.as_bytes().as_slice()],|r|Ok(SourceEntityState {entity,last_checked_at:r.get(0)?,last_fetched_at:r.get(1)?,last_deep_checked_at:r.get(2)?}))?)

@@ -25,6 +25,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
+#[path = "update_jobs_shelf.rs"]
+mod shelf;
+
 const UPDATE_JOB_DELAY_MS: u64 = 2_000;
 /// 新作だけの確認で、作者の間にあける時間。
 ///
@@ -720,6 +723,7 @@ fn candidate_matches_scope(
 fn build_initial_items(
     state: &Arc<AppState>,
     request: &StartUpdateJobRequest,
+    library: Option<&crate::library::Library>,
 ) -> Result<Vec<UpdateJobItemInput>, String> {
     let mut items = Vec::new();
     let mut included_work_keys = HashSet::new();
@@ -770,7 +774,7 @@ fn build_initial_items(
         }))
         .collect();
 
-    let mut works = if include_work {
+    let mut works = if include_work && library.is_none() {
         if let Some(filter) = &work_filter {
             let mut entries = Vec::new();
             for id in filter {
@@ -785,7 +789,7 @@ fn build_initial_items(
     };
     // A one-off author check also checks every saved work by that author for
     // revisions, regardless of each work's individual watch setting.
-    if include_author && !new_works_only {
+    if library.is_none() && include_author && !new_works_only {
         for adhoc in request.adhoc_targets.iter().flatten() {
             if adhoc.target_type == "author" {
                 works.extend(
@@ -797,6 +801,17 @@ fn build_initial_items(
         }
     }
     let held_work_keys = state.db.held_update_candidate_keys()?;
+    if let Some(library) = library {
+        for item in shelf::work_items(library, request)? {
+            let key = (
+                item.source.clone().unwrap(),
+                item.source_id.clone().unwrap(),
+            );
+            if !held_work_keys.contains(&key) && included_work_keys.insert(key) {
+                items.push(item);
+            }
+        }
+    }
     for dl in works {
         if dl.source != "pixiv" && dl.source != "fanbox" {
             continue;
@@ -900,10 +915,15 @@ fn build_initial_items(
                     continue;
                 }
                 // すでに手元にあるものは、改稿として見つけた場合だけ残す。
-                let saved = state
-                    .db
-                    .get_download_by_source(&candidate.source, &candidate.source_id)?;
-                if saved.is_some() && candidate.kind != CandidateKind::Revision.key() {
+                let saved = if let Some(library) = library {
+                    shelf::saved_card(library, &candidate.source, &candidate.source_id)?.is_some()
+                } else {
+                    state
+                        .db
+                        .get_download_by_source(&candidate.source, &candidate.source_id)?
+                        .is_some()
+                };
+                if saved && candidate.kind != CandidateKind::Revision.key() {
                     state
                         .db
                         .clear_update_candidate(&candidate.source, &candidate.source_id)?;
@@ -1190,7 +1210,13 @@ pub async fn start_update_job(
     request: StartUpdateJobRequest,
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let items = build_initial_items(&state, &request)?;
+    let library = shelf::switched_library(&app);
+    let (item_state, item_request) = (Arc::clone(&state), request.clone());
+    let items = tauri::async_runtime::spawn_blocking(move || {
+        build_initial_items(&item_state, &item_request, library.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     if items.is_empty() {
         return Err("更新監視対象がありません".to_string());
     }
@@ -2735,22 +2761,7 @@ fn shelf_card(
     let library = app
         .try_state::<Arc<super::library_v2::LibraryV2>>()?
         .switched()?;
-    Some((|| {
-        let Some(work) = library
-            .work_by_key(source, key)
-            .map_err(|e| e.to_string())?
-        else {
-            return Ok(None);
-        };
-        if library
-            .library_item_generation(work)
-            .map_err(|e| e.to_string())?
-            .is_none()
-        {
-            return Ok(None);
-        }
-        library.work_card(work).map(Some).map_err(|e| e.to_string())
-    })())
+    Some(shelf::saved_card(&library, source, key))
 }
 
 /// 保存した作品を更新の監視に載せる。
@@ -3243,6 +3254,9 @@ async fn process_work_item(
     web_index: &mut WebUpdateIndex,
     fanbox_index: &mut FanboxUpdateIndex,
 ) -> Result<ItemOutcome, String> {
+    if let Some(library) = shelf::switched_library(app) {
+        return shelf::process_work(app, state, &library, job_id, item, credentials).await;
+    }
     let payload: Value = serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
     let fanbox_author_check =
         payload.get("fanboxAuthorCheck").and_then(Value::as_bool) == Some(true);
@@ -4458,7 +4472,7 @@ mod tests {
                 new_works_only: Some(true),
                 adhoc_targets: None,
             };
-            let items = build_initial_items(&state, &request).unwrap();
+            let items = build_initial_items(&state, &request, None).unwrap();
             assert!(!items
                 .iter()
                 .any(|item| item.source_id.as_deref() == Some("old")));
@@ -4480,6 +4494,7 @@ mod tests {
                     new_works_only: Some(false),
                     ..request
                 },
+                None,
             )
             .unwrap();
             assert!(full
@@ -4785,7 +4800,7 @@ mod tests {
                 display_name: "Requested".into(),
             }]),
         };
-        let items = build_initial_items(&state, &request).unwrap();
+        let items = build_initial_items(&state, &request, None).unwrap();
         let keys = items
             .iter()
             .filter(|item| item.item_type == "candidate")
@@ -4863,7 +4878,7 @@ mod tests {
             new_works_only: None,
             adhoc_targets: None,
         };
-        let items = build_initial_items(&state, &request).unwrap();
+        let items = build_initial_items(&state, &request, None).unwrap();
         let keys: Vec<_> = items
             .iter()
             .map(|item| (item.item_type.as_str(), item.source_id.as_deref()))
@@ -4932,7 +4947,7 @@ mod tests {
             new_works_only: Some(true),
             adhoc_targets: None,
         };
-        let items = build_initial_items(&state, &request).unwrap();
+        let items = build_initial_items(&state, &request, None).unwrap();
         let keys: Vec<_> = items
             .iter()
             .map(|item| (item.item_type.as_str(), item.source_id.as_deref()))
@@ -4953,7 +4968,7 @@ mod tests {
             }]),
             ..request
         };
-        let adhoc_items = build_initial_items(&state, &adhoc_request).unwrap();
+        let adhoc_items = build_initial_items(&state, &adhoc_request, None).unwrap();
         assert_eq!(adhoc_items.len(), 1);
         assert_eq!(adhoc_items[0].item_type, "target");
         drop(state);
@@ -5012,7 +5027,7 @@ mod tests {
                 display_name: "作者".into(),
             }]),
         };
-        let items = build_initial_items(&state, &request).unwrap();
+        let items = build_initial_items(&state, &request, None).unwrap();
         let work = items.iter().find(|item| item.item_type == "work").unwrap();
         assert_eq!(work.source_id.as_deref(), Some("post-1"));
         assert_eq!(
@@ -5117,7 +5132,7 @@ mod tests {
                 display_name: "requested".into(),
             }]),
         };
-        let items = build_initial_items(&state, &request).unwrap();
+        let items = build_initial_items(&state, &request, None).unwrap();
         let targets: Vec<_> = items
             .iter()
             .filter(|item| item.item_type == "target")
