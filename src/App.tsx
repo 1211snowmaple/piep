@@ -12,6 +12,7 @@ import { isTauriRuntime } from "@/services/dbApi";
 import { rememberWindowColorScheme } from "@/services/startupApi";
 import { useIncompleteSaveRepair } from "@/features/updates/repairIncompleteSaves";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
+import { useAdoptReadingKeys } from "@/features/library/shelfV2";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 const DashboardPage = lazy(() => import("@/features/dashboard/DashboardPage"));
@@ -83,6 +84,7 @@ function confirmDiscardOnNavigation(): Promise<boolean> {
 
 function AppContent() {
   useIncompleteSaveRepair();
+  useAdoptReadingKeys(isTauriRuntime());
   const { pathname } = useAppRouter();
   const queryClient = useQueryClient();
   const { colorScheme } = useMantineColorScheme();

@@ -50,7 +50,7 @@ import { NeighborPlaceholder, NeighborTile, formatReadingTime } from "@/features
 import type { WorkCollection } from "@/types/collections";
 import type { DownloadEntry, SearchV2Params, SearchV2Result, ShelfEntry } from "@/types/library";
 import { libraryV2Neighbors, type ShelfCard, type ShelfNeighbors } from "@/services/libraryV2Api";
-import { shelfEntry } from "@/features/library/shelfV2";
+import { shelfEntry, shelfWritable, useLibraryV2Status } from "@/features/library/shelfV2";
 
 interface ReadingContextRow {
   key: string;
@@ -304,6 +304,9 @@ const READER_FONTS: Record<ReaderFont, { label: string; family: string }> = {
 
 const defaults: ReaderSettings = { fontSize: 18, lineHeight: 1.72, maxWidth: 680, font: "serif", theme: "white", writing: "horizontal" };
 
+/** 棚へ読書位置を書く間隔の下限（ミリ秒）。同じページを読んでいるあいだ。 */
+const SHELF_READING_INTERVAL = 15_000;
+
 /** 版の選択で「編集版」を表す値。数字の版番号と混ざらない印。 */
 const EDITED_VERSION = "edit";
 
@@ -372,6 +375,20 @@ function Reader({ source }: { source: ReaderSource }) {
   // 読書位置・しおりの鍵。新しい棚の作品でも、旧棚から移したものは旧棚の番号で引く（両方の棚で
   // 同じ記録）。頭が届くまでは分からないので、位置を戻すのも書くのも頭が届いてから。
   const readingId = metadataQuery.data?.head.readingKey ?? null;
+  // 正本に切り替えた新しい棚では、読書位置を棚にも書く（携帯と同じ形：ページとその中の割合）。
+  // 端末の記録（何行目か）はこの端末で開き直すための控えとして残す。
+  const shelfStatus = useLibraryV2Status(runtime && source.shelf);
+  const shelfReading = source.shelf && shelfWritable(shelfStatus.data) ? source.shelfReading ?? null : null;
+  const shelfReadingQuery = useQuery({
+    queryKey: ["library-v2-reading", id, version],
+    queryFn: () => shelfReading!.read(version),
+    enabled: Boolean(shelfReading),
+    staleTime: Infinity,
+    gcTime: 0,
+  });
+  // 棚の状態と棚の位置が届くまでは位置を戻さない。ほかの端末で読み進めた位置を飛ばさない。
+  const shelfReadingPending = runtime && source.shelf && (shelfStatus.isPending || (Boolean(shelfReading) && shelfReadingQuery.isPending));
+  const remoteReading = shelfReadingQuery.data ?? null;
   const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(readingId ?? id, version);
   // 前後の作品・保存フォルダーは旧棚の作品だけ。
   const legacyWork = metadataQuery.data?.legacy?.download;
@@ -705,7 +722,16 @@ function Reader({ source }: { source: ReaderSource }) {
     const viewport = scrollRef.current;
     if (!viewport || readingId === null || !contentQuery.data) return;
     if (restoredKeyRef.current === positionKey) return;
-    const saved = readReadingPosition(readingId, version);
+    if (shelfReadingPending) return;
+    const local = readReadingPosition(readingId, version);
+    // ほかの端末（携帯）で、この端末より後に読み進めた位置なら、そちらから開く。時刻を持たない
+    // 古い端末の記録は、今までどおり端末の記録を使う。
+    const remote = remoteReading && !remoteReading.mine && !remoteReading.finished
+      && (!local || (local.at !== undefined && remoteReading.updatedAt > local.at))
+      ? remoteReading
+      : null;
+    const saved = remote ? { page: remote.page, top: 0, mode: undefined, anchor: undefined } : local;
+    const savedRatio = remote ? remote.ratio : null;
     const savedPage = Math.min(Math.max(1, saved?.page ?? 1), Math.max(1, pageCount));
     const savedTop = Math.max(0, saved?.top ?? 0);
     if (sourcePage !== savedPage) {
@@ -729,6 +755,19 @@ function Reader({ source }: { source: ReaderSource }) {
     const sameMode = (saved?.mode ?? "horizontal") === (vertical ? "vertical" : "horizontal");
     const attempt = () => {
       if (cancelled) return;
+      // ほかの端末の位置はページの中の割合。組み上がって長さが落ち着くまで寄せ直す。
+      if (savedRatio !== null) {
+        const length = flowLength(viewport, vertical);
+        scrollToFlowOffset(viewport, vertical, savedRatio * length);
+        const settled = length === lastLength && Math.abs(flowOffset(viewport, vertical) - savedRatio * Math.max(0, length)) < 2;
+        if (settled || performance.now() >= deadline) {
+          restoredKeyRef.current = positionKey;
+          return;
+        }
+        lastLength = length;
+        frame = requestAnimationFrame(attempt);
+        return;
+      }
       // 行の目印があればそれで戻す。文字の大きさを変えていても同じ行へ着く。
       // px しか憶えていなかったころは、読書設定を触った瞬間に迷子になった。
       const article = articleRef.current;
@@ -765,7 +804,7 @@ function Reader({ source }: { source: ReaderSource }) {
     // 動かないので、フレーム待ちだけに任せると位置がいつまでも戻らない。
     attempt();
     return () => { cancelled = true; cancelAnimationFrame(frame); };
-  }, [contentReady, contentQuery.data, pageCount, positionKey, readingId, sourcePage, version, vertical]);
+  }, [contentReady, contentQuery.data, pageCount, positionKey, readingId, remoteReading, shelfReadingPending, sourcePage, version, vertical]);
   useEffect(() => {
     const pending = pendingBookmarkRef.current;
     const viewport = scrollRef.current;
@@ -800,6 +839,25 @@ function Reader({ source }: { source: ReaderSource }) {
     // 最後に読んでいた場所は失われない。
     let pendingTop: number | null = null;
     let pendingPersist = false;
+    // 棚へは間引いて書く（書くたびに棚の記録が一つ増える）。ページを移ったとき・読み終えたとき・
+    // 離れるときは必ず書く。割合は最後に本当にスクロールしたときに測ったもの。
+    let shelfAt = 0;
+    let shelfPage = 0;
+    let shelfDirty = false;
+    let lastRatio = 0;
+    const toShelf = (finished: boolean, force: boolean) => {
+      if (!shelfReading) return;
+      const now = Date.now();
+      if (!force && !finished && sourcePage === shelfPage && now - shelfAt < SHELF_READING_INTERVAL) {
+        shelfDirty = true;
+        return;
+      }
+      shelfAt = now;
+      shelfPage = sourcePage;
+      shelfDirty = false;
+      shelfReading.write(version, sourcePage, finished ? 1 : lastRatio, finished)
+        .catch((error: unknown) => console.warn("読書位置を棚へ書けません", error));
+    };
     let saveTimer: number | null = null;
     let progressFrame: number | null = null;
     const flush = () => {
@@ -817,6 +875,7 @@ function Reader({ source }: { source: ReaderSource }) {
       // 「作品を消したとき」しか無かったので、読み終えた本も棚に積まれ続けていた。
       if (sourcePage >= pageCount && atFlowEdge(viewport, vertical, 1)) {
         clearReadingPosition(readingId, version);
+        toShelf(true, true);
         pendingTop = null;
         pendingPersist = false;
         return;
@@ -829,6 +888,7 @@ function Reader({ source }: { source: ReaderSource }) {
         mode: vertical ? "vertical" : "horizontal",
         ...(anchor === null ? {} : { anchor }),
       });
+      toShelf(false, false);
       pendingTop = null;
       pendingPersist = false;
     };
@@ -865,6 +925,7 @@ function Reader({ source }: { source: ReaderSource }) {
       // 縦書きの `scrollTop` は常に 0 なので、そのまま憶えると「先頭」しか
       // 記録されない。読み始めからの距離で憶える。
       pendingTop = offset;
+      lastRatio = total <= 0 ? 0 : Math.max(0, Math.min(1, offset / total));
       pendingPersist = false;
     };
     const update = (event?: Event) => {
@@ -894,8 +955,9 @@ function Reader({ source }: { source: ReaderSource }) {
       }
       if (saveTimer !== null) window.clearTimeout(saveTimer);
       flush();
+      if (shelfDirty) toShelf(false, true);
     };
-  }, [contentReady, hasSourcePages, positionKey, readingId, sourcePage, pageCount, totalChars, version, vertical]);
+  }, [contentReady, hasSourcePages, positionKey, readingId, shelfReading, sourcePage, pageCount, totalChars, version, vertical]);
   // 手元にある作品・作者を指すリンクに印を付ける。押す前に、それがこの道具の
   // 中の場所だと分かる。
   useLibraryLinkMarks(articleRef, preparedHtml);
@@ -1059,7 +1121,7 @@ function Reader({ source }: { source: ReaderSource }) {
           </Group>
           <Group gap="xs" wrap="nowrap">
             {/* 新しい棚の作品は、そう名乗る。読むだけの写しで、旧棚と中身が違うことがある。 */}
-            {source.shelf && <Tooltip label="新しい棚（試験中）から読んでいます。読むだけで、ここからは何も書き換えません。"><Badge color="gray" variant="light">新しい棚（試験中）</Badge></Tooltip>}
+            {source.shelf && <Tooltip label={shelfReading ? "新しい棚（試験中）から読んでいます。読書位置はこの棚に書きます。" : "新しい棚（試験中）から読んでいます。読むだけで、ここからは何も書き換えません。"}><Badge color="gray" variant="light">新しい棚（試験中）</Badge></Tooltip>}
             {/* 編集版が古い版の上に載っているときは、そう名乗る。取り込み直した
                 本文があるのに、読み手にはそれが見えないままだった。 */}
             {/* 狭い窓でも隠さない。隠していたころは、版の選択のいちばん上の

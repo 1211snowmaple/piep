@@ -66,7 +66,7 @@ function versionDate(version: ShelfVersion): string {
 }
 
 /**
- * 新しい棚（試験中）の作品の画面。読むだけで、お気に入り・編集・削除などの変更は置かない。
+ * 新しい棚（試験中）の作品の画面。正本に切り替えた棚ではお気に入りを書く。編集・削除などの変更はまだ置かない。
  *
  * 旧棚の作品の画面と同じ並び（頭・概要・本文・画像と添付・履歴・保存データ）にして、
  * 切り替えても見る場所が変わらないようにする。本文は新しい棚の「本文の中の指定 → 画像」の
@@ -285,7 +285,9 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
               <Card p="lg" h="100%"><Title order={3} mb="md">作品情報</Title><Text size="xs" c="dimmed" fw={700} mb="sm">取得元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.author_name} icon={<Icons.person size={IconSize.action} />} /><Info label="公開日" value={formatDate(entry.sourceCreatedAt, true)} icon={<Icons.publishedDate size={IconSize.action} />} />{entry.sourceUpdatedAt && entry.sourceUpdatedAt !== entry.sourceCreatedAt && <Info label="最終更新" value={formatDate(entry.sourceUpdatedAt, true)} icon={<Icons.updates size={IconSize.action} />} />}</SimpleGrid><Divider my="lg" /><Text size="xs" c="dimmed" fw={700} mb="sm">手元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label={edited ? "取得元の文字数" : "文字数"} value={`${formatNumber(work.text_length)}字`} icon={<Icons.read size={IconSize.action} />} /><Info label="容量" value={formatBytes(work.logical_size)} icon={<Icons.openFolder size={IconSize.action} />} /><Info label="バージョン" value={`v${current?.version ?? work.version_number}`} icon={<Icons.versionHistory size={IconSize.action} />} /><Info label="保存日" value={formatDate(entry.downloadedAt, true)} icon={<Icons.epubAdd size={IconSize.action} />} /></SimpleGrid></Card>
             </Grid.Col>
             <Grid.Col span={{ base: 12, md: 4 }}>
-              <Note title="新しい棚（試験中）">旧棚から移行した時点の写しを、読むだけで開いています。お気に入り・更新監視・編集・削除・コレクションは、旧棚の作品の画面で変えてください。</Note>
+              <Note title="新しい棚（試験中）">{writable
+                ? "正本に切り替えた棚です。お気に入りはここで変えられます。編集とコレクションは、まだ変えられません。"
+                : "旧棚から移行した時点の写しを、読むだけで開いています。お気に入り・更新監視・編集・削除・コレクションは、旧棚の作品の画面で変えてください。"}</Note>
             </Grid.Col>
           </Grid>
         </Tabs.Panel>

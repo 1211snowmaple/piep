@@ -1,5 +1,5 @@
 import { getAssetUrl, getReaderContentPage, getReaderMetadata, getReaderOutline, isTauriRuntime, searchReaderContent } from "@/services/dbApi";
-import { libraryV2Content, libraryV2Outline, libraryV2SearchContent, libraryV2Work, shelfBodyUrl, staleEditBaseOf, type ShelfWork } from "@/services/libraryV2Api";
+import { libraryV2Content, libraryV2Outline, libraryV2ReadingPosition, libraryV2SearchContent, libraryV2SetReadingPosition, libraryV2Work, shelfBodyUrl, staleEditBaseOf, type ShelfReading, type ShelfWork } from "@/services/libraryV2Api";
 export { SHELF_WORK_ID } from "@/services/libraryV2Api";
 import { getDemoReader } from "@/mocks/demoData";
 import { readingKeyOf } from "@/features/library/readingShelf";
@@ -64,6 +64,14 @@ export interface ReaderSource {
   search(term: string, version: number | null): Promise<ReaderSearchHit[]>;
   /** 本文の `data-local-path` を URL にする。 */
   assetUrl(localPath: string | null | undefined): string | null;
+  /**
+   * 棚の読書位置（新しい棚だけ。正本に切り替えた棚でなければ命令が断る）。ページは 1 から、
+   * `ratio` はそのページの中の割合。端末の細かい位置（何行目か）は端末の記録に残す。
+   */
+  shelfReading?: {
+    read(version: number | null): Promise<ShelfReading | null>;
+    write(version: number | null, page: number, ratio: number, finished: boolean): Promise<void>;
+  };
 }
 
 function legacyHead(doc: ReaderMetadata): ReaderHead {
@@ -165,5 +173,9 @@ export function shelfReaderSource(id: string): ReaderSource {
     outline: async (version) => libraryV2Outline(id, await snapshotOf(version)),
     search: async (term, version) => libraryV2SearchContent(id, await snapshotOf(version), term),
     assetUrl: shelfBodyUrl,
+    shelfReading: {
+      read: async (version) => libraryV2ReadingPosition(id, await snapshotOf(version)),
+      write: async (version, page, ratio, finished) => libraryV2SetReadingPosition(id, await snapshotOf(version), page, ratio, finished),
+    },
   };
 }

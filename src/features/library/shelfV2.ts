@@ -1,6 +1,10 @@
 import { useLocalStorage } from "@mantine/hooks";
-import { useQuery, type QueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { adoptDeviceReadingKeys, readingKeysAdopted } from "@/features/library/readingShelf";
+import { rekeyBookmarks } from "@/features/reader/bookmarks";
 import {
+  libraryV2AdoptDevicePositions,
   libraryV2Decorations,
   libraryV2Entities,
   libraryV2Collection,
@@ -104,6 +108,28 @@ export function useShelfMode(runtime: boolean): { shelfMode: boolean; deciding: 
   };
 }
 
+/** 読みかけの棚を旧棚の番号で渡すか（端末の記録を棚の ID へ書き直す前だけ）。 */
+function legacyReadingWorks(params: SearchV2Params): number[] | null {
+  return readingKeysAdopted() ? null : params.idsInclude ?? null;
+}
+
+/**
+ * 棚を正本に切り替えたら、端末に旧棚の番号で残した読書位置としおりを一度だけ棚の ID へ
+ * 書き直し、読みかけを棚へ引き取る。アプリの頭で一度だけ使う。
+ */
+export function useAdoptReadingKeys(runtime: boolean) {
+  const queryClient = useQueryClient();
+  const pending = runtime && !readingKeysAdopted();
+  const status = useLibraryV2Status(pending);
+  const ready = pending && shelfWritable(status.data);
+  useEffect(() => {
+    if (!ready) return;
+    adoptDeviceReadingKeys(libraryV2AdoptDevicePositions, rekeyBookmarks)
+      .then(() => invalidateShelf(queryClient))
+      .catch((error: unknown) => console.error("端末の読書位置を棚へ引き取れません", error));
+  }, [ready, queryClient]);
+}
+
 /** 新しい棚では使えない条件。画面はこれを出して、黙って外さない。 */
 export class ShelfUnsupportedError extends Error {
   constructor(readonly conditions: string[]) {
@@ -183,6 +209,8 @@ export function shelfFilter(params: SearchV2Params, scope: ShelfEntityScope = {}
     content_type: params.contentType ?? null,
     favorite: params.favorite ?? null,
     watching: params.watchFilter ? params.watchFilter === "watched" : null,
+    // 読みかけの棚。端末の記録を棚の ID へ書き直したあとは、棚の読書位置で絞る。
+    reading: params.idsInclude && readingKeysAdopted() ? true : null,
     edited: params.editFilter ? params.editFilter === "edited" : null,
     has_cover: params.coverFilter ? params.coverFilter === "has_cover" : null,
     in_series: params.seriesFilter ? params.seriesFilter === "in_series" : null,
@@ -247,8 +275,8 @@ export function shelfRequest(params: SearchV2Params, scope: ShelfEntityScope = {
       filter,
       count: !params.cursor || Boolean(params.offset),
     },
-    // 読みかけの棚。読書位置は旧棚の番号で憶えているので、番号のまま渡して棚の側で読み替える。
-    legacyWorks: params.idsInclude ?? null,
+    // 読みかけの棚。読書位置を旧棚の番号で憶えているあいだは、番号のまま渡して棚の側で読み替える。
+    legacyWorks: legacyReadingWorks(params),
     // 作者の指名（前後の作品・作者からの一覧）。棚の側で取得元の ID から引く。
     person: params.personKey ? { provider: params.personSource ?? null, key: params.personKey } : null,
   };
@@ -433,7 +461,7 @@ export async function searchShelfEntities(
   const page = await libraryV2Entities(kind, {
     query: searchText,
     filter: shelfFilter(params),
-    legacyWorks: params.idsInclude ?? null,
+    legacyWorks: legacyReadingWorks(params),
     series: params.seriesKey ? { provider: params.seriesSource ?? null, key: params.seriesKey } : null,
     scope: scope
       ? { watch: scope.watch ?? null, min_work_count: scope.minWorkCount ?? null, concluded: scope.concluded ?? null }

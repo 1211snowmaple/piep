@@ -50,6 +50,8 @@ export interface ShelfFilter {
   content_type?: string | null;
   favorite?: boolean | null;
   watching?: boolean | null;
+  /** 読みかけ（棚の読書位置があり、読み終えていない）。正本に切り替えた棚の読みかけの棚。 */
+  reading?: boolean | null;
   edited?: boolean | null;
   has_cover?: boolean | null;
   in_series?: boolean | null;
@@ -174,6 +176,31 @@ export function libraryV2SetUserState(work: string, change: { favorite?: boolean
     favorite: change.favorite ?? null,
     watching: change.watching ?? null,
   });
+}
+
+/** 棚の読書位置。ページは 1 から、`ratio` はそのページの中の割合（0〜1）。 */
+export interface ShelfReading {
+  page: number;
+  ratio: number;
+  finished: boolean;
+  /** このアプリが書いた位置か。そうなら端末に残した細かい位置を使う。 */
+  mine: boolean;
+  /** ミリ秒。 */
+  updatedAt: number;
+}
+
+/** 読書位置（正本に切り替えた棚だけ）。`snapshot` を省くと今読む本文。ほかの本文の位置なら null。 */
+export function libraryV2ReadingPosition(work: string, snapshot: string | null): Promise<ShelfReading | null> {
+  return invoke<ShelfReading | null>("library_v2_reading_position", { work, snapshot });
+}
+
+export function libraryV2SetReadingPosition(work: string, snapshot: string | null, page: number, ratio: number, finished: boolean): Promise<void> {
+  return invoke<void>("library_v2_set_reading_position", { request: crypto.randomUUID(), work, snapshot, page, ratio, finished });
+}
+
+/** 端末に旧棚の番号で残した読書位置（番号・ページ）を棚へ引き取り、番号に当たる作品の ID を返す。 */
+export function libraryV2AdoptDevicePositions(positions: [number, number][]): Promise<[number, string][]> {
+  return invoke<[number, string][]>("library_v2_adopt_device_positions", { positions });
 }
 
 /** 作品を棚から外す（正本に切り替えた棚だけ）。 */

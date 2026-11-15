@@ -339,6 +339,62 @@ fn filters_count_only_matching_works_and_favorites_update_the_list_at_once() {
 }
 
 #[test]
+fn the_reading_filter_lists_works_part_read_by_this_user_until_they_are_finished() {
+    use crate::library::{ReadingAnchor, ReadingLocation, ReadingUpdate};
+    let temp = Temp::new();
+    let library = Library::create(&temp.0).unwrap();
+    let ids = shelf(&library);
+    let reading = |value: bool| WorkListQuery {
+        filter: WorkFilter {
+            reading: Some(value),
+            ..WorkFilter::default()
+        },
+        ..WorkListQuery::default()
+    };
+    let everything = library
+        .list_works(&WorkListQuery::default())
+        .unwrap()
+        .total
+        .unwrap();
+    assert_eq!(library.list_works(&reading(true)).unwrap().total, Some(0));
+    let place = |user: LibraryId, expected: i64, finished: bool| {
+        let snapshot = library.work_card(ids[2]).unwrap().snapshot_id;
+        library
+            .set_reading_position(ReadingUpdate {
+                request: LibraryId::now_v7(),
+                work: ids[2],
+                user,
+                device: LibraryId::now_v7(),
+                expected,
+                location: Some(ReadingLocation::Source {
+                    snapshot,
+                    anchor: ReadingAnchor::Page {
+                        page: 0,
+                        ratio_ppm: 500_000,
+                    },
+                }),
+                finished,
+            })
+            .unwrap();
+    };
+    // 別の利用者の読みかけは、この棚の一覧に混ざらない。
+    place(LibraryId::now_v7(), 0, false);
+    assert_eq!(library.list_works(&reading(true)).unwrap().total, Some(0));
+    place(library.id, 0, false);
+    let page = library.list_works(&reading(true)).unwrap();
+    assert_eq!(page.total, Some(1));
+    assert_eq!(page.items[0].id, ids[2]);
+    assert_eq!(
+        library.list_works(&reading(false)).unwrap().total,
+        Some(everything - 1)
+    );
+    // 読み終えたら降りる。
+    place(library.id, 1, true);
+    assert_eq!(library.list_works(&reading(true)).unwrap().total, Some(0));
+    library.verify().unwrap();
+}
+
+#[test]
 fn an_active_edit_title_is_what_the_title_sort_uses_and_the_list_is_rebuilt_when_stale() {
     let temp = Temp::new();
     let ids;

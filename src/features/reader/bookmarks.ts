@@ -69,6 +69,22 @@ function bucketKey(workId: number | string, version: number | null): string {
   return version === null ? String(workId) : `${workId}.${version}`;
 }
 
+/** 旧棚の番号で挟んだしおりを、新しい棚の ID へ書き直す（棚を正本に切り替えたあと一度だけ）。 */
+export function rekeyBookmarks(ids: Map<number, string>): void {
+  const store = readStore();
+  let changed = false;
+  for (const key of Object.keys(store)) {
+    const [segment = "", ...rest] = key.split(".");
+    const work = /^\d+$/.test(segment) ? ids.get(Number(segment)) : undefined;
+    if (!work) continue;
+    const target = [work, ...rest].join(".");
+    store[target] = [...(store[target] ?? []), ...store[key]];
+    delete store[key];
+    changed = true;
+  }
+  if (changed) writeStore(store);
+}
+
 /**
  * Bookmarks live in local storage rather than the library database: they are a
  * per-device reading aid, and keeping them here means adding one costs nothing

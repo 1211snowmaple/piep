@@ -49,7 +49,9 @@ pub use reader::{
     ReaderBinding, ReaderBindingSet, ReaderBody, ReaderDocument, ResolvedReaderBinding,
 };
 pub use reader_references::BodyAssetReference;
-pub use reading::{ReadingAnchor, ReadingLocation, ReadingPosition, ReadingUpdate};
+pub use reading::{
+    ReadingAnchor, ReadingLocation, ReadingPosition, ReadingUpdate, PAGE_RATIO_SCALE,
+};
 pub use reclaim::{ReclaimOptions, ReclaimReport};
 pub use repository::{
     Capture, CaptureResult, CaptureSource, CapturedAttachment, CapturedMedia, EntityKind, Library,

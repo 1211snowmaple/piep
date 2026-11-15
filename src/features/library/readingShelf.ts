@@ -48,6 +48,22 @@ export interface ReadingPosition {
    * 組み方を変えたあとの `top` は当てにしない。
    */
   mode?: "horizontal" | "vertical";
+  /** 書いた時刻（ミリ秒）。棚にほかの端末が書いた位置と、どちらが新しいかを比べる。 */
+  at?: number;
+}
+
+/**
+ * 端末の記録を新しい棚の ID で引くようにしたか（棚を正本に切り替えたあと、一度だけ書き直す）。
+ * 書き直したあとは旧棚の番号を使わない。
+ */
+const ADOPTED_KEY = "piep.reading-keys-adopted";
+
+export function readingKeysAdopted(): boolean {
+  try {
+    return storage()?.getItem(ADOPTED_KEY) === "1";
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -67,7 +83,7 @@ function keyFor(workId: ReadingWorkKey, version: number | null): string {
   return `${POSITION_PREFIX}${workId}.${version ?? "current"}`;
 }
 
-function normalizePosition(page: unknown, top: unknown, anchor?: unknown, mode?: unknown): ReadingPosition | null {
+function normalizePosition(page: unknown, top: unknown, anchor?: unknown, mode?: unknown, at?: unknown): ReadingPosition | null {
   const normalizedPage = Number(page);
   const normalizedTop = Number(top);
   if (!Number.isSafeInteger(normalizedPage) || normalizedPage < 1) return null;
@@ -78,6 +94,7 @@ function normalizePosition(page: unknown, top: unknown, anchor?: unknown, mode?:
     position.anchor = normalizedAnchor;
   }
   if (mode === "horizontal" || mode === "vertical") position.mode = mode;
+  if (typeof at === "number" && Number.isSafeInteger(at) && at > 0) position.at = at;
   return position;
 }
 
@@ -88,8 +105,8 @@ function parsePosition(raw: string | null): ReadingPosition | null {
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed === "number" || typeof parsed === "string") return normalizePosition(1, parsed);
     if (parsed && typeof parsed === "object") {
-      const value = parsed as { page?: unknown; top?: unknown; anchor?: unknown; mode?: unknown };
-      return normalizePosition(value.page, value.top, value.anchor, value.mode);
+      const value = parsed as { page?: unknown; top?: unknown; anchor?: unknown; mode?: unknown; at?: unknown };
+      return normalizePosition(value.page, value.top, value.anchor, value.mode, value.at);
     }
   } catch {
     // The oldest build stored an unquoted numeric offset.
@@ -118,6 +135,8 @@ function announcePositionChange(): void {
  * 棚にも載る。旧棚に無い作品だけが新しい棚の ID（小文字の UUID）で憶える。
  */
 export function readingKeyOf(work: { id: ReadingWorkKey; legacyId?: number | null }): ReadingWorkKey {
+  // 棚を正本に切り替えて端末の記録を書き直したあとは、新しい棚の ID だけで引く。
+  if (typeof work.id === "string" && readingKeysAdopted()) return work.id;
   return work.legacyId ?? work.id;
 }
 
@@ -141,7 +160,7 @@ export function readReadingPosition(workId: ReadingWorkKey, version: number | nu
 /** Writes the single schema consumed by both the reader and the shelf. */
 export function writeReadingPosition(workId: ReadingWorkKey, version: number | null, position: ReadingPosition): void {
   if (!validKey(workId)) return;
-  const normalized = normalizePosition(position.page, position.top, position.anchor, position.mode);
+  const normalized = normalizePosition(position.page, position.top, position.anchor, position.mode, Date.now());
   const store = storage();
   if (!normalized || !store) return;
   const key = keyFor(workId, version);
@@ -206,6 +225,44 @@ export function clearReadingPosition(workId: ReadingWorkKey, version: number | n
   } catch {
     // 消せなくても読書は続く。
   }
+}
+
+/**
+ * 棚を正本に切り替えたあと、端末に旧棚の番号で残した読書位置を一度だけ棚の ID へ書き直す。
+ * `adopt` は読みかけの番号とページを棚へ渡し、番号に当たる作品の ID を返す（棚は位置の
+ * ない作品にだけ、そのページの頭として書く）。棚に無い作品の記録は番号のまま残す。
+ */
+export async function adoptDeviceReadingKeys(
+  adopt: (positions: [number, number][]) => Promise<[number, string][]>,
+  rekeyBookmarks: (ids: Map<number, string>) => void,
+): Promise<void> {
+  const store = storage();
+  if (!store || readingKeysAdopted()) return;
+  const numbered: { key: string; id: number; rest: string }[] = [];
+  const pages = new Map<number, number>();
+  for (let index = 0; index < store.length; index += 1) {
+    const key = store.key(index);
+    if (!key || !key.startsWith(POSITION_PREFIX)) continue;
+    const [segment = "", ...rest] = key.slice(POSITION_PREFIX.length).split(".");
+    if (!/^\d+$/.test(segment)) continue;
+    const id = Number(segment);
+    numbered.push({ key, id, rest: rest.join(".") });
+    // 棚へは今の本文の位置だけを渡す（ほかの版の位置は端末の記録のまま）。
+    const position = parsePosition(store.getItem(key));
+    if (rest.join(".") === "current" && isPartRead(position)) pages.set(id, position!.page);
+  }
+  const ids = new Map(await adopt([...pages.entries()]));
+  for (const { key, id, rest } of numbered) {
+    const work = ids.get(id);
+    if (!work) continue;
+    const value = store.getItem(key);
+    const target = `${POSITION_PREFIX}${work}.${rest}`;
+    if (value !== null && store.getItem(target) === null) store.setItem(target, value);
+    store.removeItem(key);
+  }
+  rekeyBookmarks(ids);
+  store.setItem(ADOPTED_KEY, "1");
+  announcePositionChange();
 }
 
 /** Drops the recorded position for a work, used when it leaves the library. */

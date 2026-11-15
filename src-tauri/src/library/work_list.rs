@@ -185,6 +185,8 @@ pub struct WorkFilter {
     pub content_type: Option<String>,
     pub favorite: Option<bool>,
     pub watching: Option<bool>,
+    /// 読みかけか（利用者の読書位置があり、読み終えていない）。
+    pub reading: Option<bool>,
     /// 有効な編集があるか。
     pub edited: Option<bool>,
     pub has_cover: Option<bool>,
@@ -602,6 +604,13 @@ impl WorkFilter {
         // しか使えない。
         c.flag(self.favorite, "p.favorite=1");
         c.flag(self.watching, "p.watching=1");
+        if let Some(reading) = self.reading {
+            let owner = c.bind(owner.as_bytes().to_vec());
+            c.filters.push(format!(
+                "p.work_id {}IN (SELECT work_id FROM reading_positions WHERE user_id={owner} AND cleared=0 AND finished=0)",
+                if reading { "" } else { "NOT " }
+            ));
+        }
         if let Some(works) = &self.works {
             let ids: Vec<String> = works.iter().map(|id| id.simple().to_string()).collect();
             let value = c.bind_names(&ids);

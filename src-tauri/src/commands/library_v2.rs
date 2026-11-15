@@ -361,6 +361,192 @@ pub async fn library_v2_set_user_state(
     .map_err(|e| e.to_string())?
 }
 
+/// このアプリが棚へ書く読書位置の端末。棚ごとに決まる（携帯は端末ごとの識別を別に持つ）。
+fn desktop_device(library: &Library) -> LibraryId {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("piep-desktop-device\0{}", library.id).as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_custom_bytes(bytes).into_uuid()
+}
+
+/// 棚の読書位置を、読む画面の形（ページは 1 から、ページの中の割合は 0〜1）で。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShelfReading {
+    pub page: u64,
+    pub ratio: f64,
+    pub finished: bool,
+    /// このアプリが書いた位置か。そうなら端末に残した細かい位置のほうを使う。
+    pub mine: bool,
+    /// ミリ秒。
+    pub updated_at: i64,
+}
+
+fn location_scope(location: &crate::library::ReadingLocation) -> ResourceScope {
+    match location {
+        crate::library::ReadingLocation::Source { snapshot, .. } => {
+            ResourceScope::Snapshot(*snapshot)
+        }
+        crate::library::ReadingLocation::Edit { edit, .. } => ResourceScope::Edit(*edit),
+    }
+}
+
+/// 読書位置（正本に切り替えた棚だけ）。`snapshot` を省くと今読む本文。その本文の位置でなければ
+/// （別の版・編集で読んでいた、ページの位置でない）返さない。
+#[tauri::command]
+pub async fn library_v2_reading_position(
+    state: State<'_, Arc<LibraryV2>>,
+    work: LibraryId,
+    snapshot: Option<LibraryId>,
+) -> Result<Option<ShelfReading>, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.writable()?;
+        let card = library.work_card(work).map_err(|e| e.to_string())?;
+        let position = library
+            .reading_position(work, library.id)
+            .map_err(|e| e.to_string())?;
+        let Some(location) = &position.location else {
+            return Ok(None);
+        };
+        if location_scope(location) != scope_of(&card, snapshot) {
+            return Ok(None);
+        }
+        let anchor = match location {
+            crate::library::ReadingLocation::Source { anchor, .. }
+            | crate::library::ReadingLocation::Edit { anchor, .. } => anchor,
+        };
+        let crate::library::ReadingAnchor::Page { page, ratio_ppm } = anchor else {
+            return Ok(None);
+        };
+        Ok(Some(ShelfReading {
+            page: page + 1,
+            ratio: f64::from(*ratio_ppm) / f64::from(crate::library::PAGE_RATIO_SCALE),
+            finished: position.finished,
+            mine: position.device == Some(desktop_device(&library)),
+            updated_at: position.updated_at.unwrap_or(0),
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 読書位置を書く（正本に切り替えた棚だけ）。ページは 1 から、割合は 0〜1。`snapshot` を省くと
+/// 今読む本文。読み終えたら `finished`（読みかけの棚から降りる）。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn library_v2_set_reading_position(
+    state: State<'_, Arc<LibraryV2>>,
+    request: LibraryId,
+    work: LibraryId,
+    snapshot: Option<LibraryId>,
+    page: u64,
+    ratio: f64,
+    finished: bool,
+) -> Result<(), String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.writable()?;
+        if page == 0 || !(0.0..=1.0).contains(&ratio) {
+            return Err("読書位置が不正です".to_string());
+        }
+        let card = library.work_card(work).map_err(|e| e.to_string())?;
+        let anchor = crate::library::ReadingAnchor::Page {
+            page: page - 1,
+            ratio_ppm: (ratio * f64::from(crate::library::PAGE_RATIO_SCALE)).round() as u32,
+        };
+        let location = match scope_of(&card, snapshot) {
+            ResourceScope::Snapshot(snapshot) => {
+                crate::library::ReadingLocation::Source { snapshot, anchor }
+            }
+            ResourceScope::Edit(edit) => crate::library::ReadingLocation::Edit { edit, anchor },
+        };
+        let expected = library
+            .reading_position(work, library.id)
+            .map_err(|e| e.to_string())?
+            .generation;
+        library
+            .set_reading_position(crate::library::ReadingUpdate {
+                request,
+                work,
+                user: library.id,
+                device: desktop_device(&library),
+                expected,
+                location: Some(location),
+                finished,
+            })
+            .map_err(|e| e.to_string())?;
+        state.forget_derived();
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 端末に旧棚の番号で残した読書位置を、切り替えた棚へ引き取る。番号に当たる作品の ID を返し、
+/// 画面は端末の記録をその ID で書き直す。棚に位置がない作品だけ、そのページの頭として書く
+/// （端末の細かい位置は px なので割合にできない。この端末では端末の記録のほうを使う）。
+#[tauri::command]
+pub async fn library_v2_adopt_device_positions(
+    state: State<'_, Arc<LibraryV2>>,
+    positions: Vec<(i64, u64)>,
+) -> Result<Vec<(i64, LibraryId)>, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.writable()?;
+        let numbers: HashMap<i64, LibraryId> = library
+            .legacy_work_numbers()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(work, number)| (number, work))
+            .collect();
+        let device = desktop_device(&library);
+        let mut adopted = Vec::new();
+        for (number, page) in positions {
+            let Some(&work) = numbers.get(&number) else {
+                continue;
+            };
+            adopted.push((number, work));
+            let Ok(card) = library.work_card(work) else {
+                continue;
+            };
+            let current = library
+                .reading_position(work, library.id)
+                .map_err(|e| e.to_string())?;
+            if current.generation != 0 {
+                continue;
+            }
+            let anchor = crate::library::ReadingAnchor::Page {
+                page: page.saturating_sub(1),
+                ratio_ppm: 0,
+            };
+            let location = match scope_of(&card, None) {
+                ResourceScope::Snapshot(snapshot) => {
+                    crate::library::ReadingLocation::Source { snapshot, anchor }
+                }
+                ResourceScope::Edit(edit) => crate::library::ReadingLocation::Edit { edit, anchor },
+            };
+            // 本文に無いページ（版が変わった）は引き取らない。端末の記録は残る。
+            if let Err(error) = library.set_reading_position(crate::library::ReadingUpdate {
+                request: LibraryId::now_v7(),
+                work,
+                user: library.id,
+                device,
+                expected: 0,
+                location: Some(location),
+                finished: false,
+            }) {
+                log::warn!("端末の読書位置を棚へ引き取れません（{number}）: {error}");
+            }
+        }
+        state.forget_derived();
+        Ok(adopted)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 作品を棚から外す（正本に切り替えた棚だけ）。保存版・編集・コレクションの行は残る。
 /// 本文の検索の索引からは、続けて同期して消す。
 #[tauri::command]
