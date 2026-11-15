@@ -854,6 +854,23 @@ impl Library {
         Ok(())
     }
 
+    /// 作品の絞り込みを、一覧の表（`work_current_projection p`）への条件と値（`?1` から）にする。
+    /// 条件がなければ `1`。作者・シリーズの一覧が、作品と同じ意味の条件で数を絞るのに使う。
+    pub fn work_filter_sql(
+        &self,
+        conn: &Connection,
+        filter: &WorkFilter,
+    ) -> Result<(String, Vec<Box<dyn ToSql>>)> {
+        let reach = TagReach::measure(conn, filter)?;
+        let c = filter.conditions(self.id, &reach);
+        let sql = if c.filters.is_empty() {
+            "1".to_owned()
+        } else {
+            c.filters.join(" AND ")
+        };
+        Ok((sql, c.values))
+    }
+
     /// 一覧の行が欠けているか、作り方が古ければ作り直す。書き込みで開いたときに一度だけ確かめる。
     pub(super) fn ensure_work_list(&self) -> Result<()> {
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;

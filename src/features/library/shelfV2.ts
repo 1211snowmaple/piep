@@ -2,7 +2,11 @@ import { useLocalStorage } from "@mantine/hooks";
 import { useQuery } from "@tanstack/react-query";
 import {
   libraryV2Decorations,
+  libraryV2Entities,
+  libraryV2EntityCollections,
+  type ShelfCollectionSummary,
   type ShelfEntityHead,
+  type ShelfEntityRow,
   type ShelfSeriesFacet,
   libraryV2Search,
   libraryV2Status,
@@ -17,7 +21,8 @@ import {
   type ShelfSort,
   type ShelfTextSearch,
 } from "@/services/libraryV2Api";
-import type { EntityFacet, EntityVersion, LibrarySortBy, ListedWork, PersonEntry, SearchV2Params, SearchV2Result, SeriesEntry, ShelfEntry } from "@/types/library";
+import type { CollectionCoverMode, CollectionNameSource, WorkCollectionSummary } from "@/types/collections";
+import type { EntityFacet, EntityFacetScope, EntitySortBy, EntityVersion, LibrarySortBy, ListedWork, PersonEntry, SearchV2Params, SearchV2Result, SeriesEntry, ShelfEntry, SourceKind } from "@/types/library";
 
 /**
  * ライブラリの一覧を新しい棚から出す（試験中・読むだけ）。
@@ -130,29 +135,9 @@ export interface ShelfEntityScope {
   series?: string | null;
 }
 
-/**
- * 一覧の条件を新しい棚の問い合わせにする。使えない条件があれば `ShelfUnsupportedError`。
- *
- * シリーズの指名（`seriesKey`）は検索語の書き方（`series:取得元:キー`）にして渡す。新しい棚は
- * シリーズを自分の ID で指すので、取得元のキーは書き方の側で引く。作者・シリーズの画面は
- * 頭を引いた棚の ID を `scope` で渡す。
- */
-export function shelfRequest(params: SearchV2Params, scope: ShelfEntityScope = {}): { search: ShelfTextSearch; query: ShelfListQuery; legacyWorks: number[] | null } {
-  const unsupported: string[] = [];
-  if (params.offset !== null && params.offset !== undefined) unsupported.push("ページ番号");
-  if (params.personKey) unsupported.push("作者の指名");
-  const sortBy = params.sortBy ?? "downloaded_at";
-  const sort = SORTS[sortBy];
-  if (!sort) unsupported.push("この並び順");
-  if (unsupported.length) throw new ShelfUnsupportedError(unsupported);
-
-  const terms = [params.text?.trim() ?? ""];
-  if (params.seriesKey) {
-    terms.push(params.seriesSource ? `series:${params.seriesSource}:${params.seriesKey}` : `series:${params.seriesKey}`);
-  }
-  const text = terms.filter(Boolean).join(" ");
-
-  const filter: ShelfFilter = {
+/** 作品の絞り込み（検索語・並び順・ページを除いたもの）を、新しい棚の絞り込みにする。 */
+export function shelfFilter(params: SearchV2Params, scope: ShelfEntityScope = {}): ShelfFilter {
+  return {
     provider: params.source ?? null,
     content_type: params.contentType ?? null,
     favorite: params.favorite ?? null,
@@ -181,6 +166,31 @@ export function shelfRequest(params: SearchV2Params, scope: ShelfEntityScope = {
     person: scope.person ?? null,
     series: scope.series ?? null,
   };
+}
+
+/**
+ * 一覧の条件を新しい棚の問い合わせにする。使えない条件があれば `ShelfUnsupportedError`。
+ *
+ * シリーズの指名（`seriesKey`）は検索語の書き方（`series:取得元:キー`）にして渡す。新しい棚は
+ * シリーズを自分の ID で指すので、取得元のキーは書き方の側で引く。作者・シリーズの画面は
+ * 頭を引いた棚の ID を `scope` で渡す。
+ */
+export function shelfRequest(params: SearchV2Params, scope: ShelfEntityScope = {}): { search: ShelfTextSearch; query: ShelfListQuery; legacyWorks: number[] | null } {
+  const unsupported: string[] = [];
+  if (params.offset !== null && params.offset !== undefined) unsupported.push("ページ番号");
+  if (params.personKey) unsupported.push("作者の指名");
+  const sortBy = params.sortBy ?? "downloaded_at";
+  const sort = SORTS[sortBy];
+  if (!sort) unsupported.push("この並び順");
+  if (unsupported.length) throw new ShelfUnsupportedError(unsupported);
+
+  const terms = [params.text?.trim() ?? ""];
+  if (params.seriesKey) {
+    terms.push(params.seriesSource ? `series:${params.seriesSource}:${params.seriesKey}` : `series:${params.seriesKey}`);
+  }
+  const text = terms.filter(Boolean).join(" ");
+
+  const filter = shelfFilter(params, scope);
   return {
     search: {
       text,
@@ -354,5 +364,102 @@ export function shelfSeriesFacet(item: ShelfSeriesFacet): EntityFacet {
     iconPath: null,
     bannerPath: null,
     isConcluded: item.is_concluded,
+  };
+}
+
+/**
+ * ライブラリの「作者・クリエイター」「シリーズ」タブの一ページを新しい棚から引く。
+ *
+ * 作品の絞り込みは作品の一覧と同じ関数で直す（二つのタブで同じ条件が別の意味にならない）。
+ * シリーズの指名は取得元が分かるときだけ使える。行は旧棚の `EntityFacet` の形にし、監視の
+ * 登録（移した時点の写し）を `watch` に添える。
+ */
+export async function searchShelfEntities(
+  kind: "person" | "series",
+  searchText: string | null,
+  pageSize: number,
+  offset: number,
+  filters: SearchV2Params | null,
+  sortBy: EntitySortBy,
+  sortOrder: "asc" | "desc" | null,
+  scope: EntityFacetScope | null,
+): Promise<{ items: ShelfEntityFacet[]; total: number }> {
+  const params = filters ?? {};
+  if (params.seriesKey && !params.seriesSource) throw new ShelfUnsupportedError(["取得元のないシリーズの指名"]);
+  const page = await libraryV2Entities(kind, {
+    query: searchText,
+    filter: shelfFilter(params),
+    legacyWorks: params.idsInclude ?? null,
+    series: params.seriesKey && params.seriesSource ? { provider: params.seriesSource, key: params.seriesKey } : null,
+    scope: scope
+      ? { watch: scope.watch ?? null, min_work_count: scope.minWorkCount ?? null, concluded: scope.concluded ?? null }
+      : null,
+    sort: sortBy,
+    order: sortOrder,
+    offset,
+    limit: pageSize,
+  });
+  return { items: page.items.map(shelfEntityFacet), total: page.total };
+}
+
+/** 新しい棚の作者・シリーズの一覧の一件。`watch` は移した時点の更新監視の登録。 */
+export type ShelfEntityFacet = EntityFacet & { shelf: "v2"; watch: "watching" | "paused" | null };
+
+/** 一覧の一件を、カードが読む形にする。画像はファイルの識別子（`shelf: "v2"`）。 */
+export function shelfEntityFacet(row: ShelfEntityRow): ShelfEntityFacet {
+  return {
+    shelf: "v2",
+    source: row.provider,
+    sourceKey: row.external_key,
+    displayName: row.name,
+    count: row.work_count,
+    // 旧棚と同じく、作者はアイコン（なければヘッダー）、シリーズは表紙。
+    coverPath: row.icon ?? row.banner ?? row.cover,
+    description: row.description,
+    updatedAt: isoOrNull(row.updated_at),
+    latestDownloadedAt: isoOrNull(row.latest_saved_at),
+    latestSourceUpdatedAt: isoOrNull(row.latest_updated_at),
+    sampleTitle: row.sample_title,
+    iconPath: row.icon,
+    bannerPath: row.banner ?? row.cover,
+    isConcluded: row.is_concluded,
+    watch: row.watch,
+  };
+}
+
+/** 作者・シリーズに関わるコレクションを、カードが読む形にする（新しい順）。 */
+export async function shelfEntityCollections(kind: "person" | "series", entity: string): Promise<WorkCollectionSummary[]> {
+  return (await libraryV2EntityCollections(kind, entity)).map(shelfCollectionSummary);
+}
+
+/**
+ * 新しい棚のコレクションの要約を、旧棚の形にする。ID は旧棚の ID（コレクションの画面はまだ
+ * 旧棚で開く）。表紙はファイルの識別子で、`shelf: "v2"` で読み分ける。
+ */
+export function shelfCollectionSummary(item: ShelfCollectionSummary): WorkCollectionSummary {
+  return {
+    shelf: "v2",
+    id: item.legacy_id ?? item.id,
+    name: item.name,
+    description: item.description,
+    collectionKind: item.ordered ? "ordered" : "unordered",
+    coverDownloadId: null,
+    coverPath: item.cover,
+    coverMode: item.cover_mode as CollectionCoverMode,
+    coverImagePath: item.cover_image,
+    coverTiles: item.tiles.map((tile) => ({
+      source: tile.provider as SourceKind,
+      sourceId: tile.external_key,
+      title: tile.title,
+      authorName: tile.author_name,
+      coverPath: tile.cover,
+    })),
+    nameSource: item.name_source as CollectionNameSource,
+    revision: item.revision,
+    memberCount: item.member_count,
+    availableCount: item.available_count,
+    totalTextLength: item.total_text_length,
+    createdAt: new Date(item.created_at).toISOString(),
+    updatedAt: new Date(item.updated_at).toISOString(),
   };
 }

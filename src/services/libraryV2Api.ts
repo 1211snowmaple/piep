@@ -384,6 +384,112 @@ export function libraryV2PersonSeries(
   });
 }
 
+/** ライブラリの作者・シリーズの一覧の一件（`EntityRow`）。日時はミリ秒、画像はファイルの識別子。 */
+export interface ShelfEntityRow {
+  id: string;
+  provider: string;
+  external_key: string;
+  name: string;
+  work_count: number;
+  description: string | null;
+  is_concluded: boolean | null;
+  icon: string | null;
+  banner: string | null;
+  cover: string | null;
+  sample_title: string | null;
+  updated_at: number | null;
+  latest_saved_at: number;
+  latest_published_at: number;
+  latest_updated_at: number;
+  total_text_length: number;
+  total_size: number;
+  total_media: number;
+  total_revisions: number;
+  /** 更新監視の登録（移した時点の写し）。 */
+  watch: "watching" | "paused" | null;
+}
+
+export interface ShelfEntityListPage {
+  items: ShelfEntityRow[];
+  /** 条件に当てはまる数（ページに依らない）。 */
+  total: number;
+}
+
+/** 作者・シリーズ自身の性質で絞る条件（`EntityScope`）。 */
+export interface ShelfEntityListScope {
+  watch?: "watched" | "paused" | "unwatched" | null;
+  min_work_count?: number | null;
+  concluded?: boolean | null;
+}
+
+/**
+ * ライブラリの「作者・クリエイター」「シリーズ」タブの一ページ。`filter`・`legacyWorks` は作品の
+ * 一覧と同じ絞り込みで、当てはまる作品を持つものだけを、その作品の数で出す。
+ */
+export function libraryV2Entities(
+  kind: "person" | "series",
+  options: {
+    query?: string | null;
+    filter: ShelfFilter;
+    legacyWorks?: number[] | null;
+    series?: { provider: string; key: string } | null;
+    scope?: ShelfEntityListScope | null;
+    sort?: ShelfSeriesSort | null;
+    order?: "asc" | "desc" | null;
+    offset?: number | null;
+    limit: number;
+  },
+): Promise<ShelfEntityListPage> {
+  return invoke<ShelfEntityListPage>("library_v2_entities", {
+    kind,
+    query: options.query ?? null,
+    filter: options.filter,
+    legacyWorks: options.legacyWorks ?? null,
+    series: options.series ?? null,
+    scope: options.scope ?? null,
+    sort: options.sort ?? null,
+    order: options.order ?? null,
+    offset: options.offset ?? null,
+    limit: options.limit,
+  });
+}
+
+/** コレクションの表紙のモザイクの一マス（`CollectionTile`）。 */
+export interface ShelfCollectionTile {
+  provider: string;
+  external_key: string;
+  title: string;
+  author_name: string;
+  cover: string | null;
+}
+
+/** 作者・シリーズに関わるコレクションの一件（`CollectionSummary`）。日時はミリ秒。 */
+export interface ShelfCollectionSummary {
+  id: string;
+  /** 旧棚での ID。コレクションの画面はまだ旧棚で開く。 */
+  legacy_id: string | null;
+  name: string;
+  description: string | null;
+  ordered: boolean;
+  cover: string | null;
+  cover_image: string | null;
+  cover_mode: string;
+  name_source: string;
+  track: string;
+  tiles: ShelfCollectionTile[];
+  revision: number;
+  member_count: number;
+  available_count: number;
+  total_text_length: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/** 作者・シリーズの作品を一つでも含むコレクション。最後に変えた順。 */
+export function libraryV2EntityCollections(kind: "person" | "series", entity: string): Promise<ShelfCollectionSummary[]> {
+  return invoke<ShelfCollectionSummary[]>("library_v2_entity_collections", { kind, entity });
+}
+
 /** 作者・シリーズの今の版を作った取得元の応答（画面の「保存データ」）。 */
 export function libraryV2EntityOriginal(entity: string, snapshot: string): Promise<string | null> {
   return invoke<string | null>("library_v2_entity_original", { entity, snapshot });

@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
+const tauri = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string, protocol: string) => `http://${protocol}.localhost/${path}`,
-  invoke: vi.fn(),
+  invoke: tauri.invoke,
 }));
 
-import { encodeShelfCursor, shelfEntry, shelfRequest, ShelfUnsupportedError } from "@/features/library/shelfV2";
-import type { ShelfCard } from "@/services/libraryV2Api";
+import { encodeShelfCursor, searchShelfEntities, shelfCollectionSummary, shelfEntry, shelfFilter, shelfRequest, ShelfUnsupportedError } from "@/features/library/shelfV2";
+import type { ShelfCard, ShelfCollectionSummary, ShelfEntityRow } from "@/services/libraryV2Api";
 
 const card: ShelfCard = {
   id: "0195f1c2-0000-7000-8000-000000000001",
@@ -147,5 +148,100 @@ describe("shelfEntry", () => {
     expect(entry.matchFields).toEqual(["body"]);
     expect(entry.matchedVersion).toBe(2);
     expect(entry.historicalMatchCount).toBe(3);
+  });
+});
+
+const row: ShelfEntityRow = {
+  id: "0195f1c2-0000-7000-8000-0000000000a1",
+  provider: "pixiv",
+  external_key: "77",
+  name: "作者一",
+  work_count: 4,
+  description: null,
+  is_concluded: null,
+  icon: null,
+  banner: "ef".repeat(32),
+  cover: null,
+  sample_title: "見本",
+  updated_at: null,
+  latest_saved_at: Date.UTC(2026, 0, 2),
+  latest_published_at: Date.UTC(2026, 0, 1),
+  latest_updated_at: Date.UTC(2026, 0, 3),
+  total_text_length: 10,
+  total_size: 20,
+  total_media: 0,
+  total_revisions: 1,
+  watch: "paused",
+};
+
+describe("searchShelfEntities", () => {
+  it("narrows the authors by the same work filter as the works tab and keeps the watch state", async () => {
+    tauri.invoke.mockResolvedValueOnce({ items: [row], total: 9 });
+    const page = await searchShelfEntities("person", "作", 60, 120, { favorite: true, tagsInclude: ["雨"], idsInclude: [3] }, "name", "asc", { watch: "paused", minWorkCount: 2, concluded: null });
+    const [command, args] = tauri.invoke.mock.calls[0];
+    expect(command).toBe("library_v2_entities");
+    expect(args).toMatchObject({
+      kind: "person",
+      query: "作",
+      filter: shelfFilter({ favorite: true, tagsInclude: ["雨"] }),
+      legacyWorks: [3],
+      series: null,
+      scope: { watch: "paused", min_work_count: 2, concluded: null },
+      sort: "name",
+      order: "asc",
+      offset: 120,
+      limit: 60,
+    });
+    expect(page.total).toBe(9);
+    const [facet] = page.items;
+    expect(facet).toMatchObject({ shelf: "v2", source: "pixiv", sourceKey: "77", displayName: "作者一", count: 4, watch: "paused", sampleTitle: "見本" });
+    // アイコンのない作者はヘッダーを顔にする（旧棚と同じ）。
+    expect(facet.coverPath).toBe("ef".repeat(32));
+    expect(facet.latestDownloadedAt).toBe("2026-01-02T00:00:00.000Z");
+  });
+
+  it("names a series by its provider, and refuses a series named without one", async () => {
+    tauri.invoke.mockResolvedValueOnce({ items: [], total: 0 });
+    await searchShelfEntities("series", null, 60, 0, { seriesSource: "pixiv", seriesKey: "s1" }, "work_count", null, null);
+    expect(tauri.invoke.mock.lastCall?.[1]).toMatchObject({ series: { provider: "pixiv", key: "s1" }, scope: null });
+    await expect(searchShelfEntities("series", null, 60, 0, { seriesKey: "s1" }, "work_count", null, null)).rejects.toBeInstanceOf(ShelfUnsupportedError);
+  });
+});
+
+describe("shelfCollectionSummary", () => {
+  it("opens the collection by its old id and serves its covers by fingerprint", () => {
+    const item: ShelfCollectionSummary = {
+      id: "0195f1c2-0000-7000-8000-0000000000d1",
+      legacy_id: "c1",
+      name: "束",
+      description: null,
+      ordered: false,
+      cover: null,
+      cover_image: "12".repeat(32),
+      cover_mode: "file",
+      name_source: "manual",
+      track: "manual",
+      tiles: [{ provider: "pixiv", external_key: "1", title: "題", author_name: "作者", cover: null }],
+      revision: 3,
+      member_count: 2,
+      available_count: 1,
+      total_text_length: 40,
+      created_at: Date.UTC(2026, 0, 1),
+      updated_at: Date.UTC(2026, 0, 5),
+    };
+    const summary = shelfCollectionSummary(item);
+    expect(summary).toMatchObject({
+      shelf: "v2",
+      id: "c1",
+      collectionKind: "unordered",
+      coverMode: "file",
+      coverImagePath: "12".repeat(32),
+      memberCount: 2,
+      availableCount: 1,
+      updatedAt: "2026-01-05T00:00:00.000Z",
+    });
+    expect(summary.coverTiles[0]).toEqual({ source: "pixiv", sourceId: "1", title: "題", authorName: "作者", coverPath: null });
+    // 旧棚に無い（新しい棚で作った）コレクションは新しい棚の ID のまま。
+    expect(shelfCollectionSummary({ ...item, legacy_id: null }).id).toBe(item.id);
   });
 });

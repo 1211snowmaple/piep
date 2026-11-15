@@ -43,4 +43,22 @@ describe("EntityCard", () => {
     fireEvent.keyDown(screen.getByRole("link", { name: "テスト作者を開く" }), { key: "Enter" });
     expect(window.location.hash).toBe("#/people/pixiv/123");
   });
+
+  it("shows the watch state but does not change it when the shelf is read-only", () => {
+    const onToggleWatch = vi.fn();
+    window.location.hash = "#/library";
+    render(
+      <MantineProvider>
+        <AppRouter>
+          <EntityCard entity={entity} kind="series" watch="paused" watchHint="新しい棚では変えられません" />
+        </AppRouter>
+      </MantineProvider>,
+    );
+    const button = screen.getByRole("button", { name: "このシリーズの更新監視は停止中（新しい棚では変えられません）" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveAttribute("data-state", "paused");
+    fireEvent.click(button);
+    expect(onToggleWatch).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe("#/library");
+  });
 });

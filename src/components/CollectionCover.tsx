@@ -3,12 +3,13 @@ import { Box } from "@mantine/core";
 import { WorkCover } from "@/components/WorkCover";
 import { authorHue, sigilCells } from "@shared/coverSigil";
 import { getAssetUrl } from "@/services/dbApi";
+import { shelfFileUrl } from "@/services/libraryV2Api";
 import type { CollectionCoverTile, WorkCollectionSummary } from "@/types/collections";
 
 type CollectionCoverData = Pick<
   WorkCollectionSummary,
   "id" | "name" | "coverMode" | "coverPath" | "coverImagePath" | "coverTiles" | "memberCount"
->;
+> & Partial<Pick<WorkCollectionSummary, "shelf">>;
 
 /**
  * 束の表紙。
@@ -31,12 +32,14 @@ export function CollectionCover({
   className?: string;
 }) {
   const tiles = collection.coverTiles ?? [];
+  // 新しい棚の表紙はパスでなくファイルの識別子。
+  const asset = collection.shelf === "v2" ? shelfFileUrl : getAssetUrl;
   const requestedMode = resolveMode(collection, tiles);
   const [failedImage, setFailedImage] = useState<string | null>(null);
   const imageSrc = requestedMode === "file"
-    ? getAssetUrl(collection.coverImagePath)
+    ? asset(collection.coverImagePath)
     : requestedMode === "single"
-      ? getAssetUrl(collection.coverPath)
+      ? asset(collection.coverPath)
       : null;
   const imageUnavailable = (requestedMode === "file" || requestedMode === "single")
     && (!imageSrc || failedImage === imageSrc);
@@ -82,7 +85,7 @@ export function CollectionCover({
   return (
     <Box className={classes} data-tiles={shown.length} role="img" aria-label={`${collection.name}の複合表紙`}>
       {shown.map((tile, index) => {
-        const backdrop = getAssetUrl(tile.coverPath);
+        const backdrop = asset(tile.coverPath);
         return (
           // 背表紙は奥へ向かってずれる。手前が並び順の先頭。ずらす量は外の枠に
           // 持たせて、`WorkCover` 自身は棚と同じものをそのまま使う。
@@ -106,7 +109,7 @@ export function CollectionCover({
                 onError={(event) => { event.currentTarget.hidden = true; }}
               />
             )}
-            <WorkCover work={tile} variant="compact" className="collection-cover__tile" />
+            <WorkCover work={{ ...tile, coverUrl: backdrop }} variant="compact" className="collection-cover__tile" />
           </span>
         );
       })}

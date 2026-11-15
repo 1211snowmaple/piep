@@ -111,12 +111,12 @@ pub struct SeriesFacetPage {
 
 const SERIES_PAGE_LIMIT: usize = 200;
 
-fn id(bytes: Vec<u8>) -> Result<LibraryId> {
+pub(crate) fn id(bytes: Vec<u8>) -> Result<LibraryId> {
     LibraryId::from_slice(&bytes)
         .map_err(|_| crate::library::Error::Integrity("識別子の長さが不正です".into()))
 }
 
-fn fingerprint(bytes: Option<Vec<u8>>) -> Result<Option<String>> {
+pub(crate) fn fingerprint(bytes: Option<Vec<u8>>) -> Result<Option<String>> {
     bytes
         .map(|bytes| {
             bytes
@@ -127,7 +127,7 @@ fn fingerprint(bytes: Option<Vec<u8>>) -> Result<Option<String>> {
         .transpose()
 }
 
-fn text(value: Option<&serde_json::Value>) -> Option<String> {
+pub(crate) fn text(value: Option<&serde_json::Value>) -> Option<String> {
     value
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
@@ -135,14 +135,14 @@ fn text(value: Option<&serde_json::Value>) -> Option<String> {
 }
 
 /// 旧棚の `LIKE … COLLATE NOCASE`（ASCII だけ大文字と小文字を区別しない）と同じ一致。
-fn contains_nocase(haystack: &str, needle: &str) -> bool {
+pub(crate) fn contains_nocase(haystack: &str, needle: &str) -> bool {
     haystack
         .to_ascii_lowercase()
         .contains(&needle.to_ascii_lowercase())
 }
 
 /// SQLite の `COLLATE NOCASE` と同じ比べ方（ASCII だけ大文字を小文字に寄せる）。
-fn nocase(left: &str, right: &str) -> Ordering {
+pub(crate) fn nocase(left: &str, right: &str) -> Ordering {
     left.bytes()
         .map(|b| b.to_ascii_lowercase())
         .cmp(right.bytes().map(|b| b.to_ascii_lowercase()))
@@ -367,7 +367,7 @@ impl Library {
                     max(p.saved_at),max(coalesce(p.published_at,p.saved_at)),
                     max(coalesce(p.updated_at,p.published_at,p.saved_at)),
                     sum(p.text_length),sum(p.logical_size),sum(p.media_count),
-                    sum(p.version_number-1)
+                    sum((SELECT count(*) FROM source_revisions v WHERE v.entity_id=p.work_id AND v.ordinal>1 AND v.repair=0))
              FROM work_current_projection p
              JOIN snapshot_series ss ON ss.snapshot_id=p.snapshot_id
              JOIN external_identities x ON x.entity_id=ss.series_id AND x.kind='series'

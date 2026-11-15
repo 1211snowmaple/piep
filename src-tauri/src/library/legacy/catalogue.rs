@@ -77,7 +77,7 @@ impl LegacyImporter {
                 let cover_file=if let Some((id,file,_))=covers.get(key) {Library::register_file(&tx,file)?;Some(id.0.to_vec())} else {None};
                 let appearance=json!({"cover_mode":row.optional_text("cover_mode")?,"name_source":row.optional_text("name_source")?,"track":row.optional_text("track")?});
                 tx.execute("INSERT INTO entities(id,kind,created_at) VALUES(?1,'collection',?2)",params![id.as_bytes().as_slice(),created])?;
-                tx.execute("INSERT INTO collections(id,title,description,appearance_json,cover_work_id,cover_file_id,ordered,generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![id.as_bytes().as_slice(),row.text("name")?,row.optional_text("description")?,appearance.to_string(),cover_work.map(|id|id.as_bytes().to_vec()),cover_file,ordered,row.integer("revision")?])?;
+                tx.execute("INSERT INTO collections(id,title,description,appearance_json,cover_work_id,cover_file_id,ordered,generation,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![id.as_bytes().as_slice(),row.text("name")?,row.optional_text("description")?,appearance.to_string(),cover_work.map(|id|id.as_bytes().to_vec()),cover_file,ordered,row.integer("revision")?,row.optional_time("updated_at")?.unwrap_or(created)])?;
                 mark_row(&tx,"work_collections",key,id)
             })?;
             mark_table(&tx, "work_collections")?;
@@ -239,6 +239,76 @@ impl LegacyImporter {
     }
 }
 
+/// 移行の原記録の一行の文字の列（`{"sqlite_text_bytes":[…]}`）を文字にする。
+fn evidence_text(row: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+    let bytes = row.get(key)?.get("sqlite_text_bytes")?.as_array()?;
+    let bytes: Option<Vec<u8>> = bytes
+        .iter()
+        .map(|b| b.as_u64().and_then(|b| u8::try_from(b).ok()))
+        .collect();
+    String::from_utf8(bytes?).ok()
+}
+
+impl Library {
+    /// 更新日時を写していなかった移行（版 14 まで）のコレクションに、旧棚の値を戻す。
+    ///
+    /// 移行は旧棚の `work_collections` の全行を原記録として棚に残しているので、旧棚を開かずに
+    /// 戻せる。原記録がない・読めない行は空のまま残し、読む側が作った時で代える。
+    pub(in crate::library) fn restore_collection_times(&self) -> Result<()> {
+        let evidence: Option<Vec<u8>> = {
+            let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+            let missing: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM collections WHERE updated_at IS NULL)",
+                [],
+                |r| r.get(0),
+            )?;
+            if !missing {
+                return Ok(());
+            }
+            conn.query_row(
+                "SELECT evidence_file_id FROM migration_records WHERE source_table='work_collections' AND source_key='__all_rows__'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten()
+        };
+        let Some(evidence) = evidence else {
+            return Ok(());
+        };
+        let id = crate::library::Fingerprint(
+            evidence
+                .try_into()
+                .map_err(|_| Error::Integrity("移行の原記録の識別子が不正です".into()))?,
+        );
+        let file = self.file(id)?;
+        let mut bytes = Vec::new();
+        self.objects.export(&file, &mut bytes)?;
+        let mut times = Vec::new();
+        for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
+            let row: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(line)?;
+            let (Some(key), Some(updated)) =
+                (evidence_text(&row, "id"), evidence_text(&row, "updated_at"))
+            else {
+                continue;
+            };
+            if let Ok(updated) = super::rows::parse_time(&updated) {
+                times.push((key, updated));
+            }
+        }
+        let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let tx = conn.transaction()?;
+        for (key, updated) in times {
+            tx.execute(
+                "UPDATE collections SET updated_at=?2 WHERE updated_at IS NULL AND id=(SELECT target_id FROM migration_records WHERE source_table='work_collections' AND source_key=?1 AND status='imported')",
+                params![key, updated],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +421,51 @@ INSERT INTO collection_pair_feedback VALUES('pixiv','one','pixiv','two','reject'
             library.verify().unwrap();
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_shelf_migrated_without_collection_times_takes_them_back_from_the_preserved_rows() {
+        let root =
+            std::env::temp_dir().join(format!("piep-catalogue-time-{}", LibraryId::now_v7()));
+        let old = root.join("old");
+        source(&old, false);
+        let updated = parse_time_for_test("2026-01-02 00:00:00");
+        {
+            let importer = LegacyImporter::open(&old).unwrap();
+            let library = Library::create(&root.join("new")).unwrap();
+            importer
+                .import(&library, &AtomicBool::new(false), |_| {})
+                .unwrap();
+            let conn = library.conn.lock().unwrap();
+            let time = || {
+                conn.query_row("SELECT updated_at FROM collections", [], |r| {
+                    r.get::<_, Option<i64>>(0)
+                })
+                .unwrap()
+            };
+            // 移行は旧棚の更新日時を写す。
+            assert_eq!(time(), Some(updated));
+            // 版 14 までの移行は写していなかった。
+            conn.execute("UPDATE collections SET updated_at=NULL", [])
+                .unwrap();
+            assert_eq!(time(), None);
+        }
+        // 開き直すと、移行の原記録から戻る。
+        let library = Library::open(&root.join("new")).unwrap();
+        let time: Option<i64> = library
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT updated_at FROM collections", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(time, Some(updated));
+        library.verify().unwrap();
+        drop(library);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn parse_time_for_test(value: &str) -> i64 {
+        super::super::rows::parse_time(value).unwrap()
     }
 
     #[test]

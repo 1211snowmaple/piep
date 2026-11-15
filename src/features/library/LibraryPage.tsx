@@ -49,7 +49,7 @@ import { errorMessage, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { listenForScrollIntent, scrollViewportToTop } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
-import { searchShelf, shelfListable, ShelfUnsupportedError, useLibraryV2Status, useShelfV2Preference, type ShelfSearchResult } from "@/features/library/shelfV2";
+import { searchShelf, searchShelfEntities, shelfListable, ShelfUnsupportedError, useLibraryV2Status, useShelfV2Preference, type ShelfEntityFacet, type ShelfSearchResult } from "@/features/library/shelfV2";
 import { LibraryShelfMenu } from "./LibraryShelfMenu";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { parseViewMode, useViewMode } from "@/lib/viewMode";
@@ -1535,7 +1535,7 @@ export default function LibraryPage() {
     .filter((entity) => !searchText || `${entity.displayName} ${entity.description ?? ""}`.toLocaleLowerCase("ja-JP").includes(searchText.toLocaleLowerCase("ja-JP")))
     .filter((entity) => !entityFilters?.source || entity.source === entityFilters.source),
   [entityKind, searchText, entityFilters]);
-  const entities = useInfiniteQuery({
+  const legacyEntities = useInfiniteQuery({
     ...boundedInfiniteListOptions,
     // The mode belongs in the key, not just the offset it produces. Scrolling
     // and page one both start at offset zero, so the two modes shared one cache
@@ -1550,17 +1550,42 @@ export default function LibraryPage() {
       ? undefined
       : lastPageParam + lastPage.length,
     placeholderData: keepPreviousData,
-    enabled: tab === "people" || tab === "series",
+    enabled: (tab === "people" || tab === "series") && !shelfMode,
   });
+  // 新しい棚の一覧。作品の一覧と同じく別の鍵で持つ（旧棚の監視の切り替えが触らないように）。
+  // 集計は棚の側が条件ごとに覚えているので、ページをめくる・件数を聞くたびに集め直さない。
+  const shelfEntities = useInfiniteQuery({
+    ...boundedInfiniteListOptions,
+    queryKey: ["library-v2-entities", entityKind, searchText, pageSize, entityOffset, numberedPageEnabled, entityFilters, entitySortBy, entitySortOrder, entityScopeParam],
+    queryFn: ({ pageParam }): Promise<EntityFacet[]> => searchShelfEntities(entityKind, searchText || null, pageSize, pageParam, entityFilters, entitySortBy, entitySortOrder, entityScopeParam)
+      .then((page) => page.items),
+    initialPageParam: entityOffset,
+    getNextPageParam: (lastPage, _allPages, lastPageParam) => lastPage.length < pageSize
+      ? undefined
+      : lastPageParam + lastPage.length,
+    placeholderData: keepPreviousData,
+    enabled: (tab === "people" || tab === "series") && shelfMode,
+    retry: (failures, error) => !(error instanceof ShelfUnsupportedError) && failures < 2,
+  });
+  const entities = shelfMode ? shelfEntities : legacyEntities;
   // One pass over the same grouping, per set of conditions rather than per page
   // turned. Without it the pager cannot name a last page, and the count beside
   // the tabs had to hedge with "以上".
-  const entityTotal = useQuery({
+  const legacyEntityTotal = useQuery({
     queryKey: ["library-entity-count", entityKind, searchText, entityFilters, entityScopeParam],
     queryFn: () => runtime ? countEntityFacets(entityKind, searchText || null, entityFilters, entityScopeParam) : Promise.resolve(demoEntityMatches().length),
-    enabled: tab === "people" || tab === "series",
+    enabled: (tab === "people" || tab === "series") && !shelfMode,
     staleTime: 60_000,
   });
+  const shelfEntityTotal = useQuery({
+    queryKey: ["library-v2-entity-count", entityKind, searchText, entityFilters, entityScopeParam],
+    queryFn: () => searchShelfEntities(entityKind, searchText || null, 1, 0, entityFilters, entitySortBy, entitySortOrder, entityScopeParam)
+      .then((page) => page.total),
+    enabled: (tab === "people" || tab === "series") && shelfMode,
+    staleTime: 60_000,
+    retry: (failures, error) => !(error instanceof ShelfUnsupportedError) && failures < 2,
+  });
+  const entityTotal = shelfMode ? shelfEntityTotal : legacyEntityTotal;
   /**
    * 追いかけている相手の一覧。
    *
@@ -1571,7 +1596,8 @@ export default function LibraryPage() {
   const watchTargets = useQuery({
     queryKey: ["update-targets", "library"],
     queryFn: () => runtime ? listUpdateTargets<UpdateTarget>(null, false) : Promise.resolve([] as UpdateTarget[]),
-    enabled: tab === "people" || tab === "series",
+    // 新しい棚の行は、移した時点の監視の登録を自分で持っている。
+    enabled: (tab === "people" || tab === "series") && !shelfMode,
     staleTime: 30_000,
   });
   const watchStateByKey = useMemo(() => {
@@ -1613,9 +1639,10 @@ export default function LibraryPage() {
     onError: (error) => notifications.show({ color: "red", title: "更新監視を変更できません", message: errorMessage(error) }),
   });
   const toggleEntityWatch = useCallback((entity: EntityFacet, next: boolean) => watchToggleMutation.mutate({ entity, next }), [watchToggleMutation]);
-  const entityWatchState = useCallback((entity: { source: string; sourceKey: string }) =>
-    watchStateByKey.get(`${entityKind}:${entity.source}:${entity.sourceKey}`) ?? null,
-  [entityKind, watchStateByKey]);
+  const entityWatchState = useCallback((entity: { source: string; sourceKey: string }) => shelfMode
+    ? (entity as Partial<ShelfEntityFacet>).watch ?? null
+    : watchStateByKey.get(`${entityKind}:${entity.source}:${entity.sourceKey}`) ?? null,
+  [entityKind, shelfMode, watchStateByKey]);
 
   // 押す前に分かっていることは、押す前に言う。
   const entitiesToWatch = useMemo(() => selectedEntities.filter((entity) => entityWatchState(entity) !== "watching"), [entityWatchState, selectedEntities]);
@@ -1823,9 +1850,14 @@ export default function LibraryPage() {
               ? <SearchInterpretation meta={searchMeta} />
               : null}
           </Group>
-          {/* 新しい棚の一覧は読むだけなので、選んでできること（削除・まとめて変更）がない。
-                消すと右端が空いて行が変わって見えるので、押せない形で残す。 */}
-          {!selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} disabled={tab === "works" && shelfMode} onClick={() => setSelectionMode(true)}>複数選択</Button>}
+          {/* 新しい棚の一覧は読むだけなので、選んでできること（削除・まとめて変更・監視・
+                書き出し）がない。作品・作者・シリーズのどのタブでも同じ。消すと右端が空いて
+                行が変わって見えるので、押せない形で残す。 */}
+          {!selectionMode && (
+            <Tooltip label="複数選択（新しい棚では変えられません）" disabled={!shelfMode}>
+              <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} data-disabled={shelfMode || undefined} aria-disabled={shelfMode || undefined} aria-label={shelfMode ? "複数選択（新しい棚では変えられません）" : undefined} onClick={() => { if (!shelfMode) setSelectionMode(true); }}>複数選択</Button>
+            </Tooltip>
+          )}
         </Group>}
 
         {tab === "collections" ? <CollectionsPanel query={searchText} sortBy={collectionSortBy} sortOrder={collectionSortOrder} /> : <>
@@ -1903,7 +1935,8 @@ export default function LibraryPage() {
               selected={selectedEntityKeys}
               onSelect={toggleEntity}
               watchState={entityWatchState}
-              onToggleWatch={toggleEntityWatch}
+              onToggleWatch={shelfMode ? undefined : toggleEntityWatch}
+              watchHint={shelfMode ? "新しい棚では変えられません" : undefined}
             />
             <ListPager
               scope={pagingScope}

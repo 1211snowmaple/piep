@@ -71,6 +71,7 @@ import { ENTITY_SERIES_PAGE_SIZE, listEntitySeriesPage, listEntityTags } from "@
 import { libraryV2Entity, libraryV2EntityOriginal, libraryV2EntityTags, libraryV2PersonSeries, shelfFileUrl } from "@/services/libraryV2Api";
 import {
   searchShelf,
+  shelfEntityCollections,
   shelfEntityVersions,
   shelfListable,
   shelfPersonEntry,
@@ -136,9 +137,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const legacyMode = !shelfMode && !shelfDeciding;
   const { pathname, search, navigationId } = useAppRouter();
   const [urlParams, setUrlParams] = useAppSearchParams();
-  // コレクションは新しい棚の画面にまだ無い。
-  const requestedTab = parseEntityTab(urlParams.get("tab"), kind);
-  const tab = shelfMode && requestedTab === "collections" ? "works" : requestedTab;
+  const tab = parseEntityTab(urlParams.get("tab"), kind);
   const tabsRef = useRef<HTMLDivElement>(null);
   const entityHeroRef = useRef<HTMLDivElement>(null);
   const entityMarksRef = useRef<HTMLDivElement>(null);
@@ -520,11 +519,13 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   // それが関わっているまとまりへ直接辿れるようにする。**作者にしか無いと、
   // 同じ画面で作りが割れる。**
   const entityCollections = useQuery({
-    queryKey: ["collections-for-entity", kind, source, key],
-    queryFn: () => runtime
-      ? (kind === "person" ? listCollectionsForPerson(source, key) : listCollectionsForSeries(source, key))
-      : Promise.resolve([] as WorkCollectionSummary[]),
-    enabled: legacyMode,
+    queryKey: ["collections-for-entity", kind, source, key, shelfId ?? "legacy"],
+    queryFn: () => shelfId
+      ? shelfEntityCollections(kind, shelfId)
+      : runtime
+        ? (kind === "person" ? listCollectionsForPerson(source, key) : listCollectionsForSeries(source, key))
+        : Promise.resolve([] as WorkCollectionSummary[]),
+    enabled: legacyMode || Boolean(shelfId),
     staleTime: 60_000,
   });
   const [storedCollectionSort, setStoredCollectionSort] = useLocalStorage<unknown>({
@@ -1014,7 +1015,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
           <Stack gap="lg">
             <Card p="lg"><Stack gap="md"><Group justify="space-between"><Box><Text fw={700}>新作・改稿を監視</Text><Text size="xs" c="dimmed" mt={4}>{kind === "person" ? "新しい作品を検出" : "シリーズの続編を検出"}</Text></Box><Switch checked={targetMutation.isPending ? targetMutation.variables : target.data?.enabled ?? false} disabled={shelfMode || targetMutation.isPending || target.isLoading} onChange={(event) => targetMutation.mutate(event.currentTarget.checked)} aria-label={shelfMode ? `新作と改稿の監視（${READ_ONLY}）` : "新作と改稿の監視"} /></Group>{/* 監視に入れなくても、その場で一度だけ見に行ける。 */}<Button variant="light" disabled={shelfMode} aria-label={shelfMode ? `${kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}（${READ_ONLY}）` : undefined} leftSection={<Icons.updates size={IconSize.menu} />} onClick={() => runSingleCheck({ kind: kind === "person" ? "author" : "series", source, sourceKey: key, label: displayName }, () => navigate("/updates"))}>{kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}</Button></Stack></Card>
             <Card p="lg"><Text fw={700} mb="md">プロフィール情報</Text><Stack gap="sm">{profileData.account && <Meta label="アカウント" value={`@${profileData.account}`} />}{profileStats && <><Meta label="小説" value={`${formatNumber(profileStats.totalNovels ?? 0)}作品`} /><Meta label="小説シリーズ" value={`${formatNumber(profileStats.totalNovelSeries ?? 0)}件`} /></>}{typeof profileData.sampleNovelCount === "number" && <Meta label="取得済み構成作品" value={`${formatNumber(profileData.sampleNovelCount)}件`} />}<Meta label="現在のバージョン" value={entry.currentVersion > 0 ? `v${entry.currentVersion}` : "なし"} /><Meta label="最終取得" value={formatDate(entry.lastFetchedAt, true)} /><Meta label="最終確認" value={formatDate(entry.lastCheckedAt, true)} /></Stack></Card>
-            {shelfMode && <Note title="新しい棚（試験中）">旧棚から移行した時点の写しを、読むだけで開いています。更新監視・情報の更新・書き出し・コレクションは、設定で新しい棚を切ると使えます。</Note>}
+            {shelfMode && <Note title="新しい棚（試験中）">旧棚から移行した時点の写しを、読むだけで開いています。更新監視・情報の更新・書き出しは、設定で新しい棚を切ると使えます。コレクションの中身は旧棚で開きます。</Note>}
             {!runtime && <Note>プレビューではデモプロフィールを表示しています。</Note>}
           </Stack>
         </Grid.Col>

@@ -315,6 +315,7 @@ impl Library {
             _process_lock: lock,
         };
         library.ensure_work_list()?;
+        library.restore_collection_times()?;
         Ok(library)
     }
 
@@ -353,6 +354,7 @@ impl Library {
             _process_lock: lock,
         };
         library.ensure_work_list()?;
+        library.restore_collection_times()?;
         Ok(library)
     }
 

@@ -151,7 +151,7 @@ impl Library {
                 params![request.id.as_bytes().as_slice(), now],
             )?;
         }
-        tx.execute("INSERT INTO collections(id,title,description,ordered,generation) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET title=excluded.title,description=excluded.description,ordered=excluded.ordered,generation=excluded.generation",params![request.id.as_bytes().as_slice(),request.title,request.description,request.ordered,next])?;
+        tx.execute("INSERT INTO collections(id,title,description,ordered,generation,updated_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET title=excluded.title,description=excluded.description,ordered=excluded.ordered,generation=excluded.generation,updated_at=excluded.updated_at",params![request.id.as_bytes().as_slice(),request.title,request.description,request.ordered,next,now])?;
         let created = {
             let mut stmt = tx.prepare(
                 "SELECT work_id,created_at FROM collection_members WHERE collection_id=?1",

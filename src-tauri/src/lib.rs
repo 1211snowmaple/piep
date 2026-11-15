@@ -10,6 +10,7 @@ pub mod fanbox_api;
 /// 元ファイルを保持する新しいライブラリの保管・履歴モデル。
 pub mod library;
 pub mod library_entity;
+pub mod library_entity_list;
 pub mod library_search;
 pub mod library_view;
 mod logging;
@@ -322,6 +323,8 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_entity_tags,
             commands::library_v2::library_v2_person_series,
             commands::library_v2::library_v2_entity_original,
+            commands::library_v2::library_v2_entities,
+            commands::library_v2::library_v2_entity_collections,
             commands::library_v2::library_v2_version_text,
             commands::library_v2::library_v2_original,
             // サーバーモード (commands::server)

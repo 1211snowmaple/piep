@@ -60,6 +60,11 @@ export interface WorkCollectionSummary {
   totalTextLength: number;
   createdAt: string;
   updatedAt: string;
+  /**
+   * 新しい棚から読んだもの。表紙（`coverPath`・`coverImagePath`・各マスの `coverPath`）は
+   * パスでなくファイルの識別子で、`shelfFileUrl` で URL にする。
+   */
+  shelf?: "v2";
 }
 
 export interface WorkCollectionMember {

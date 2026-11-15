@@ -13,9 +13,11 @@
 use crate::database::models::{ReaderOutlineEntry, ReaderSearchHit};
 use crate::database::queries::{reader_outline, search_reader_pages};
 use crate::library::{
-    Fingerprint, Library, LibraryId, NeighborKind, ResourceScope, WorkCard, WorkListQuery,
+    Fingerprint, Library, LibraryId, NeighborKind, ResourceScope, WorkCard, WorkFilter,
+    WorkListQuery,
 };
 use crate::library_entity::{EntityHead, SeriesFacetPage, SeriesSort, TagCount};
+use crate::library_entity_list::{CollectionSummary, EntityListPage, EntityRow, EntityScope};
 use crate::library_search::{parse_query, SearchDecoration, SearchMatch, SearchPage, TextSearch};
 use crate::library_view::{MediaView, RenderedDocument, VersionView};
 use serde::Serialize;
@@ -63,7 +65,15 @@ pub struct LibraryV2 {
     documents: Mutex<VecDeque<CachedDocument>>,
     /// 作品の旧棚での番号。読むだけの棚は開いているあいだ変わらないので、一度だけ引く。
     legacy_numbers: Mutex<Option<Arc<HashMap<LibraryId, i64>>>>,
+    /// 最近集計した作者・シリーズの一覧（条件・棚の世代・行）。ページをめくる・並べ替える・
+    /// 件数を聞くたびに全作品を集め直さない（旧棚の一覧も同じく覚えている）。
+    entity_rows: Mutex<VecDeque<CachedEntityRows>>,
 }
+
+type CachedEntityRows = (String, i64, Arc<Vec<EntityRow>>);
+
+/// 作者・シリーズの一覧の集計を覚えておく数。タブ二つと、絞り込みを行き来するぶん。
+const ENTITY_ROWS_CACHE: usize = 4;
 
 type CachedDocument = (LibraryId, ResourceScope, Arc<RenderedDocument>);
 
@@ -77,6 +87,7 @@ impl Default for LibraryV2 {
             library: OnceLock::new(),
             documents: Mutex::new(VecDeque::new()),
             legacy_numbers: Mutex::new(None),
+            entity_rows: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -312,6 +323,35 @@ pub struct SearchView {
     pub cards: Vec<CardView>,
 }
 
+/// 読みかけの棚は端末の読書位置の鍵（旧棚の番号）で来る。棚の作品の ID に読み替えて絞る。
+fn narrow_to_legacy_works(
+    state: &LibraryV2,
+    library: &Library,
+    filter: &mut WorkFilter,
+    legacy_works: Option<Vec<i64>>,
+) -> Result<(), String> {
+    let Some(numbers) = legacy_works else {
+        return Ok(());
+    };
+    let wanted: std::collections::HashSet<i64> = numbers.into_iter().collect();
+    let known = state.legacy_numbers(library)?;
+    let works = known
+        .iter()
+        .filter(|(_, number)| wanted.contains(number))
+        .map(|(work, _)| *work);
+    filter.works = Some(match filter.works.take() {
+        Some(existing) => {
+            let allowed: std::collections::HashSet<LibraryId> = works.collect();
+            existing
+                .into_iter()
+                .filter(|work| allowed.contains(work))
+                .collect()
+        }
+        None => works.collect(),
+    });
+    Ok(())
+}
+
 /// 一覧・本文の検索。語がなければ一覧（`tag:` などの書き方だけでもよい）で、索引の同期中でも読める。
 /// `legacy_works` を渡すと、旧棚の番号でその作品だけに絞る（読みかけの棚）。
 #[tauri::command]
@@ -329,25 +369,7 @@ pub async fn library_v2_search(
         } else {
             state.searchable()?
         };
-        // 読みかけの棚は端末の読書位置の鍵（旧棚の番号）で来る。棚の作品の ID に読み替えて絞る。
-        if let Some(numbers) = legacy_works {
-            let wanted: std::collections::HashSet<i64> = numbers.into_iter().collect();
-            let known = state.legacy_numbers(&library)?;
-            let works = known
-                .iter()
-                .filter(|(_, number)| wanted.contains(number))
-                .map(|(work, _)| *work);
-            query.filter.works = Some(match query.filter.works.take() {
-                Some(existing) => {
-                    let allowed: std::collections::HashSet<LibraryId> = works.collect();
-                    existing
-                        .into_iter()
-                        .filter(|work| allowed.contains(work))
-                        .collect()
-                }
-                None => works.collect(),
-            });
-        }
+        narrow_to_legacy_works(&state, &library, &mut query.filter, legacy_works)?;
         let page = library
             .search_works(&search, &query)
             .map_err(|e| e.to_string())?;
@@ -780,6 +802,112 @@ pub async fn library_v2_entity_original(
         state
             .library()?
             .entity_profile(entity, snapshot)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 取得元のシリーズの指名（ライブラリの絞り込みの `seriesSource`・`seriesKey`）。
+#[derive(serde::Deserialize)]
+pub struct SeriesKey {
+    pub provider: String,
+    pub key: String,
+}
+
+/// ライブラリの「作者・クリエイター」「シリーズ」タブの一ページ。`filter`・`legacy_works` は
+/// 作品の一覧と同じ絞り込みで、当てはまる作品を持つものだけを、その作品の数で出す。`order` は
+/// `asc`・`desc`（省くと鍵ごとの既定）、`sort` を省くと作品の多い順。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn library_v2_entities(
+    state: State<'_, Arc<LibraryV2>>,
+    kind: String,
+    query: Option<String>,
+    mut filter: WorkFilter,
+    legacy_works: Option<Vec<i64>>,
+    series: Option<SeriesKey>,
+    scope: Option<EntityScope>,
+    sort: Option<SeriesSort>,
+    order: Option<String>,
+    offset: Option<usize>,
+    limit: usize,
+) -> Result<EntityListPage, String> {
+    let state = Arc::clone(&state);
+    let kind = entity_kind(&kind)?;
+    let sort = sort.unwrap_or(SeriesSort::WorkCount);
+    let ascending = match order.as_deref() {
+        Some("asc") => true,
+        Some("desc") => false,
+        _ => sort.ascending_by_default(),
+    };
+    let query = query.unwrap_or_default().trim().to_owned();
+    if query.chars().count() > 200 {
+        return Err("絞り込みの語は 200 文字までです".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        narrow_to_legacy_works(&state, &library, &mut filter, legacy_works)?;
+        if let Some(series) = series {
+            match library
+                .entity_by_key(
+                    crate::library::EntityKind::Series,
+                    &series.provider,
+                    &series.key,
+                )
+                .map_err(|e| e.to_string())?
+            {
+                Some(id) => filter.series = Some(id),
+                // 棚にないシリーズの作品はない。
+                None => filter.works = Some(Vec::new()),
+            }
+        }
+        let scope = scope.unwrap_or_default();
+        let generation = library.catalogue_generation().map_err(|e| e.to_string())?;
+        let key = format!("{kind:?}\u{1f}{query}\u{1f}{filter:?}\u{1f}{scope:?}");
+        let cached = state
+            .entity_rows
+            .lock()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .find(|(k, g, _)| *k == key && *g == generation)
+            .map(|(_, _, rows)| Arc::clone(rows));
+        let rows = match cached {
+            Some(rows) => rows,
+            None => {
+                let rows = Arc::new(
+                    library
+                        .entity_rows(kind, &query, &filter, scope)
+                        .map_err(|e| e.to_string())?,
+                );
+                let mut cache = state.entity_rows.lock().map_err(|e| e.to_string())?;
+                cache.retain(|(k, _, _)| *k != key);
+                cache.push_front((key, generation, Arc::clone(&rows)));
+                cache.truncate(ENTITY_ROWS_CACHE);
+                rows
+            }
+        };
+        library
+            .entity_page(&rows, kind, sort, ascending, offset.unwrap_or(0), limit)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 作者・シリーズの作品を一つでも含むコレクション（作者・シリーズの画面のコレクションの欄）。
+#[tauri::command]
+pub async fn library_v2_entity_collections(
+    state: State<'_, Arc<LibraryV2>>,
+    kind: String,
+    entity: LibraryId,
+) -> Result<Vec<CollectionSummary>, String> {
+    let state = Arc::clone(&state);
+    let kind = entity_kind(&kind)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        state
+            .library()?
+            .entity_collections(kind, entity)
             .map_err(|e| e.to_string())
     })
     .await

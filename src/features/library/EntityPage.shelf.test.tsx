@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   libraryV2EntityTags: vi.fn(),
   libraryV2PersonSeries: vi.fn(),
   libraryV2EntityOriginal: vi.fn(),
+  libraryV2EntityCollections: vi.fn(),
   libraryV2Search: vi.fn(),
   libraryV2Decorations: vi.fn(),
 }));
@@ -169,6 +170,7 @@ describe("author and series pages on the new shelf", () => {
     api.libraryV2EntityOriginal.mockResolvedValue(JSON.stringify({ displayName: "作者一", sampleNovelCount: 4 }));
     api.libraryV2Search.mockResolvedValue({ page: { items: [], next: null, total: 1 }, intent: null, matches: [], cards: [card] });
     api.libraryV2Decorations.mockResolvedValue([]);
+    api.libraryV2EntityCollections.mockResolvedValue([]);
   });
 
   it("reads an author from the new shelf and never asks the old one", async () => {
@@ -198,7 +200,41 @@ describe("author and series pages on the new shelf", () => {
     expect(screen.getByRole("button", { name: "いま新作・改稿を確認（新しい棚では変えられません）" })).toBeDisabled();
     // 開く操作は取得元へ行くだけなので残す。
     expect(screen.getByRole("button", { name: "ブラウザで開く" })).toBeEnabled();
+    // コレクションに入っていなければ、旧棚と同じくタブを出さない。
+    await waitFor(() => expect(api.libraryV2EntityCollections).toHaveBeenCalledWith("person", PERSON));
     expect(screen.queryByRole("tab", { name: /コレクション/ })).toBeNull();
+  });
+
+  it("lists the collections holding the author's works and opens them by their old id", async () => {
+    api.libraryV2EntityCollections.mockResolvedValue([{
+      id: "0195f1c2-0000-7000-8000-0000000000d1",
+      legacy_id: "c-old",
+      name: "雨の束",
+      description: null,
+      ordered: true,
+      cover: null,
+      cover_image: null,
+      cover_mode: "mosaic",
+      name_source: "manual",
+      track: "manual",
+      tiles: [{ provider: "pixiv", external_key: "1", title: "題", author_name: "作者一", cover: ICON }],
+      revision: 1,
+      member_count: 3,
+      available_count: 2,
+      total_text_length: 1200,
+      created_at: Date.UTC(2026, 0, 1),
+      updated_at: Date.UTC(2026, 0, 4),
+    }]);
+    renderEntity("person", "#/people/pixiv/77?tab=collections");
+    const tab = await screen.findByRole("tab", { name: /コレクション/ });
+    expect(within(tab).getByText("1")).toBeInTheDocument();
+    expect(await screen.findByText("雨の束")).toBeInTheDocument();
+    expect(screen.getByText("未保存 1")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /雨の束/ })).toHaveAttribute("href", "#/collections/c-old");
+    // 表紙のマスは棚のファイルの識別子から。
+    expect(document.querySelector(`img[src="http://piep-library.localhost/${ICON}"]`)).not.toBeNull();
+    expect(screen.getByText(/コレクションの中身は旧棚で開きます/)).toBeInTheDocument();
+    for (const call of Object.values(legacy)) expect(call).not.toHaveBeenCalled();
   });
 
   it("shows the profile's versions and the response that made the current one", async () => {

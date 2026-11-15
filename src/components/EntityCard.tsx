@@ -24,7 +24,15 @@ function watchTooltip(watch: EntityWatchState, kind: "person" | "series"): strin
   return `${noun}の更新を監視する`;
 }
 
-export function EntityCard({ entity, kind, selectionMode = false, selected = false, onSelect, watch = null, onToggleWatch }: {
+/** 変えられないときの文言。押したら何が起きるかでなく、いまの状態を言う。 */
+function watchStateText(watch: EntityWatchState, kind: "person" | "series"): string {
+  const noun = kind === "person" ? "この作者" : "このシリーズ";
+  if (watch === "watching") return `${noun}は更新監視中`;
+  if (watch === "paused") return `${noun}の更新監視は停止中`;
+  return `${noun}は更新監視していません`;
+}
+
+export function EntityCard({ entity, kind, selectionMode = false, selected = false, onSelect, watch = null, onToggleWatch, watchHint }: {
   entity: EntityFacet;
   kind: "person" | "series";
   selectionMode?: boolean;
@@ -34,6 +42,8 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
   watch?: EntityWatchState;
   /** 追いかけるかどうかを、その場で切り替える。 */
   onToggleWatch?: (entity: EntityFacet, next: boolean) => void;
+  /** 変えられない理由。渡すと監視のボタンは状態だけを見せ、押せない（場所と幅は変えない）。 */
+  watchHint?: string;
 }) {
   const navigate = useAppNavigate();
   const route = kind === "person" ? "people" : "series";
@@ -126,16 +136,20 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
             開く合図の山括弧は置かない - カード全体が押せるのは作品カードと
             同じで、あちらにも無い。 */}
         <Group gap={2} wrap="nowrap" className="entity-card__actions">
-        {!selectionMode && onToggleWatch && (
-          <Tooltip label={watchTooltip(watch, kind)}>
+        {!selectionMode && (onToggleWatch || watchHint) && (
+          <Tooltip label={watchHint ? `${watchStateText(watch, kind)}（${watchHint}）` : watchTooltip(watch, kind)}>
             <ActionIcon
               className="entity-card__watch"
               variant="subtle"
               size="lg"
               data-state={watch ?? "off"}
-              aria-label={watchTooltip(watch, kind)}
+              // 押せない形でも吹き出しは出し、押してもカードを開かない（disabled だと押した位置の
+              // 下のカードへ抜ける）。
+              data-disabled={watchHint ? true : undefined}
+              aria-disabled={watchHint ? true : undefined}
+              aria-label={watchHint ? `${watchStateText(watch, kind)}（${watchHint}）` : watchTooltip(watch, kind)}
               aria-pressed={watch === "watching"}
-              onClick={(event) => { event.stopPropagation(); onToggleWatch(entity, watch !== "watching"); }}
+              onClick={(event) => { event.stopPropagation(); if (!watchHint) onToggleWatch?.(entity, watch !== "watching"); }}
             >
               <Icons.watch size={IconSize.action} />
             </ActionIcon>
