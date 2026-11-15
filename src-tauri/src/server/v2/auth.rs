@@ -5,9 +5,17 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+/// 認証できた端末と、その端末が読む利用者。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Grant {
+    /// 同時に読める数を端末ごとに数えるための識別。
+    pub device: String,
+    pub subject: Id,
+}
+
 /// 認証済み端末を棚と利用者へ明示的に結ぶ。利用者 ID を端末 ID から作らない。
 pub trait Authority: Send + Sync {
-    fn subject(&self, bearer: &str, library: Id) -> Option<Id>;
+    fn grant(&self, bearer: &str, library: Id) -> Option<Grant>;
 }
 
 /// 既存の bearer 検証を使うアダプター。grants は管理側が明示して投入する。
@@ -42,12 +50,16 @@ impl DeviceAuthority {
     }
 }
 impl Authority for DeviceAuthority {
-    fn subject(&self, bearer: &str, library: Id) -> Option<Id> {
+    fn grant(&self, bearer: &str, library: Id) -> Option<Grant> {
         let device = self.store.authorize(bearer)?;
-        self.grants
+        let subject = *self
+            .grants
             .read()
             .ok()?
-            .get(&(device.id, library.get()))
-            .copied()
+            .get(&(device.id.clone(), library.get()))?;
+        Some(Grant {
+            device: device.id,
+            subject,
+        })
     }
 }

@@ -39,7 +39,7 @@ impl LibraryIdentity {
             sync_epoch,
             capabilities: Capabilities {
                 resource_transfer: true,
-                reader_bundle: false,
+                reader_bundle: true,
                 mutations: false,
             },
             max_file_bytes: Decimal::new(MAX_FILE_BYTES),

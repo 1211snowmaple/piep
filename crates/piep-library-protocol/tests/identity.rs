@@ -17,7 +17,7 @@ fn authenticated_identity_keeps_library_subject_epoch_and_explicit_readiness() {
     assert_eq!(LibraryIdentity::parse(&encoded).unwrap(), known);
     assert_ne!(known.library_id, known.subject_id);
     assert!(known.capabilities.resource_transfer);
-    assert!(!known.capabilities.reader_bundle && !known.capabilities.mutations);
+    assert!(known.capabilities.reader_bundle && !known.capabilities.mutations);
     let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
     assert_eq!(value["maxFileBytes"], "536870912");
     assert_eq!(value["maxBodyBytes"], "16777216");

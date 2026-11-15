@@ -63,6 +63,7 @@ pub use searches::{SavedSearch, SavedSearchDefinition, SavedSearchUpdate};
 pub use source_state::SourceEntityState;
 pub use store::{ContentFile, FileChunk, ObjectStore, StorageStats};
 pub use suggestions::{CollectionSuggestion, SuggestedMember, SuggestionDecision, SuggestionJson};
+pub use transfer::reader_may_read;
 pub use work_list::{
     AcquisitionFilter, CountRange, DateField, DateRange, MediaFilter, NeighborKind, RevisionFilter,
     SortValue, TextMatches, WorkCard, WorkCursor, WorkFilter, WorkListPage, WorkListQuery,

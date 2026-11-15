@@ -1,6 +1,6 @@
 //! 新ライブラリ用の認証付き読取 API。旧 API の意味や本番の保存先を変更しない。
 mod auth;
-pub use auth::{Authority, DeviceAuthority};
+pub use auth::{Authority, DeviceAuthority, Grant};
 
 use crate::library::{
     protocol::{self, Decimal, Hash, Id},
@@ -9,15 +9,26 @@ use crate::library::{
 use axum::{
     body::Body,
     extract::{Path, Query, Request, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
     Extension, Json, Router,
 };
-use headers::{authorization::Bearer, Authorization, ETag, HeaderMapExt, IfNoneMatch};
+use headers::{authorization::Bearer, Authorization, HeaderMapExt};
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+/// 全端末あわせて同時に読める数。
+const READERS: usize = 8;
+/// 一台が同時に読める数（一台が全体を占めないように）。
+const READERS_PER_DEVICE: usize = 4;
+/// 空きを待つ長さ。越えたら 429 と `Retry-After` を返す。
+const READ_WAIT: Duration = Duration::from_secs(2);
 
 pub struct Context {
     library: Arc<Library>,
@@ -25,6 +36,7 @@ pub struct Context {
     authority: Arc<dyn Authority>,
     sync_epoch: Id,
     readers: Arc<tokio::sync::Semaphore>,
+    devices: Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
 }
 impl Context {
     /// sync_epoch は管理側の永続状態から渡し、棚の復元・再作成時には更新する。
@@ -39,12 +51,14 @@ impl Context {
             library,
             authority,
             sync_epoch,
-            readers: Arc::new(tokio::sync::Semaphore::new(4)),
+            readers: Arc::new(tokio::sync::Semaphore::new(READERS)),
+            devices: Mutex::new(HashMap::new()),
         })
     }
 }
 #[derive(Clone)]
 struct Principal {
+    device: String,
     subject: Id,
 }
 
@@ -57,6 +71,11 @@ impl IntoResponse for ApiError {
             header::CACHE_CONTROL,
             header::HeaderValue::from_static("no-store"),
         );
+        if self.0 == StatusCode::TOO_MANY_REQUESTS {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+        }
         response
     }
 }
@@ -101,9 +120,9 @@ async fn authorize(
         .typed_try_get::<Authorization<Bearer>>()
         .map_err(|_| denied())?
         .ok_or_else(denied)?;
-    let subject = ctx
+    let Grant { device, subject } = ctx
         .authority
-        .subject(token.token(), ctx.library_id)
+        .grant(token.token(), ctx.library_id)
         .ok_or_else(denied)?;
     if request.headers().contains_key(header::ORIGIN) {
         return Err(ApiError(StatusCode::FORBIDDEN, "origin_forbidden"));
@@ -111,7 +130,9 @@ async fn authorize(
     if request.uri().to_string().len() > 32768 {
         return Err(ApiError(StatusCode::URI_TOO_LONG, "uri_too_long"));
     }
-    request.extensions_mut().insert(Principal { subject });
+    request
+        .extensions_mut()
+        .insert(Principal { device, subject });
     let mut response = next.run(request).await;
     response.headers_mut().insert(
         "x-piep-subject-id",
@@ -136,11 +157,39 @@ async fn authorize(
     Ok(response)
 }
 
-fn read_permit(ctx: &Context) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
-    ctx.readers
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ApiError(StatusCode::TOO_MANY_REQUESTS, "busy"))
+/// 読む許可。端末ごとの枠と全体の枠の両方を取る。空きがなければ少し待ち、それでも
+/// なければ 429 で断る（`Retry-After` を付ける）。
+struct ReadPermit {
+    _device: tokio::sync::OwnedSemaphorePermit,
+    _all: tokio::sync::OwnedSemaphorePermit,
+}
+
+async fn read_permit(ctx: &Context, device: &str) -> Result<ReadPermit, ApiError> {
+    let busy = || ApiError(StatusCode::TOO_MANY_REQUESTS, "busy");
+    let own = {
+        let mut devices = ctx.devices.lock().map_err(|_| internal())?;
+        // 使われていない端末の枠は捨てる（登録を消した端末が残り続けないように）。
+        devices.retain(|_, semaphore| {
+            Arc::strong_count(semaphore) > 1 || semaphore.available_permits() < READERS_PER_DEVICE
+        });
+        devices
+            .entry(device.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(READERS_PER_DEVICE)))
+            .clone()
+    };
+    let deadline = tokio::time::Instant::now() + READ_WAIT;
+    let device = tokio::time::timeout_at(deadline, own.acquire_owned())
+        .await
+        .map_err(|_| busy())?
+        .map_err(|_| internal())?;
+    let all = tokio::time::timeout_at(deadline, ctx.readers.clone().acquire_owned())
+        .await
+        .map_err(|_| busy())?
+        .map_err(|_| internal())?;
+    Ok(ReadPermit {
+        _device: device,
+        _all: all,
+    })
 }
 
 fn reader_resource(
@@ -159,7 +208,7 @@ fn reader_resource(
             .library
             .resource_info(entity, scope, reference)
             .map_err(library_error)?;
-        if !matches!(info.role.as_str(), "attachment" | "document") {
+        if !crate::library::reader_may_read(&info) {
             return Err(ApiError(StatusCode::FORBIDDEN, "archive_forbidden"));
         }
     }
@@ -171,6 +220,7 @@ fn reader_resource(
 pub fn router(ctx: Arc<Context>) -> Router {
     Router::new()
         .route("/api/v2/identity",get(identity))
+        .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/bundle",get(bundle))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/manifest",get(manifest))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/files/{file}/chunks/{ordinal}",get(chunk))
         .route_layer(middleware::from_fn_with_state(ctx.clone(),authorize))
@@ -199,6 +249,13 @@ struct Location {
     view_kind: String,
     view_id: Id,
     resource_kind: String,
+}
+#[derive(Deserialize)]
+struct ViewLocation {
+    library: Id,
+    entity: Id,
+    view_kind: String,
+    view_id: Id,
 }
 #[derive(Deserialize)]
 struct ChunkLocation {
@@ -249,26 +306,17 @@ fn target(
     };
     Ok((location.entity.get(), scope, reference))
 }
-fn representation(
-    bytes: Vec<u8>,
-    mime: &'static str,
-    headers: &HeaderMap,
-) -> Result<Response, ApiError> {
-    let etag_value = format!("\"sha256-{}\"", crate::library::Fingerprint::of(&bytes));
-    let etag: ETag = etag_value.parse().map_err(|_| internal())?;
-    let conditional = headers
-        .typed_try_get::<IfNoneMatch>()
-        .map_err(|_| invalid())?;
-    let not_modified = conditional.is_some_and(|condition| !condition.precondition_passes(&etag));
-    let mut response = if not_modified {
-        StatusCode::NOT_MODIFIED.into_response()
-    } else {
-        ([(header::CONTENT_TYPE, mime)], Body::from(bytes)).into_response()
-    };
-    response.headers_mut().typed_insert(etag);
+/// 中身のハッシュで指定して取るので、取り直しの確認（ETag・304）は持たない。部分実体は
+/// 同じ URL の中身が変わらないので長く持ってよい。記録（manifest・bundle）は毎回確かめる。
+fn representation(bytes: Vec<u8>, mime: &'static str, immutable: bool) -> Response {
+    let mut response = ([(header::CONTENT_TYPE, mime)], Body::from(bytes)).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        header::HeaderValue::from_static("private, no-cache, no-transform"),
+        header::HeaderValue::from_static(if immutable {
+            "private, max-age=31536000, immutable, no-transform"
+        } else {
+            "private, no-cache, no-transform"
+        }),
     );
     response.headers_mut().insert(
         header::VARY,
@@ -278,18 +326,55 @@ fn representation(
         header::X_CONTENT_TYPE_OPTIONS,
         header::HeaderValue::from_static("nosniff"),
     );
-    Ok(response)
+    response
 }
+async fn bundle(
+    State(ctx): State<Arc<Context>>,
+    Extension(principal): Extension<Principal>,
+    path: Result<Path<ViewLocation>, axum::extract::rejection::PathRejection>,
+    query: Result<Query<EmptyQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Path(location) = path.map_err(|_| invalid())?;
+    query.map_err(|_| invalid())?;
+    if location.library != ctx.library_id {
+        return Err(not_found());
+    }
+    let scope = match location.view_kind.as_str() {
+        "snapshot" => ResourceScope::Snapshot(location.view_id.get()),
+        "edit" => ResourceScope::Edit(location.view_id.get()),
+        _ => return Err(invalid()),
+    };
+    let entity = location.entity.get();
+    let permit = read_permit(&ctx, &principal.device).await?;
+    let bytes = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        ctx.library
+            .reader_bundle(entity, scope)
+            .map_err(library_error)?
+            .encode()
+            .map_err(|_| internal())
+    })
+    .await
+    .map_err(|_| internal())??;
+    Ok(representation(
+        bytes,
+        "application/vnd.piep.reader-bundle+json",
+        false,
+    ))
+}
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyQuery {}
 async fn manifest(
     State(ctx): State<Arc<Context>>,
+    Extension(principal): Extension<Principal>,
     path: Result<Path<Location>, axum::extract::rejection::PathRejection>,
     query: Result<Query<ResourceQuery>, axum::extract::rejection::QueryRejection>,
-    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let Path(location) = path.map_err(|_| invalid())?;
     let Query(query) = query.map_err(|_| invalid())?;
     let (entity, scope, reference) = target(&ctx, location, query)?;
-    let permit = read_permit(&ctx)?;
+    let permit = read_permit(&ctx, &principal.device).await?;
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         reader_resource(&ctx, entity, scope, &reference)?;
@@ -301,17 +386,17 @@ async fn manifest(
     })
     .await
     .map_err(|_| internal())??;
-    representation(
+    Ok(representation(
         bytes,
         "application/vnd.piep.resource-transfer+json",
-        &headers,
-    )
+        false,
+    ))
 }
 async fn chunk(
     State(ctx): State<Arc<Context>>,
+    Extension(principal): Extension<Principal>,
     path: Result<Path<ChunkLocation>, axum::extract::rejection::PathRejection>,
     query: Result<Query<ResourceQuery>, axum::extract::rejection::QueryRejection>,
-    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let Path(location) = path.map_err(|_| invalid())?;
     let Query(query) = query.map_err(|_| invalid())?;
@@ -326,11 +411,11 @@ async fn chunk(
         },
         query,
     )?;
-    let permit = read_permit(&ctx)?;
+    let permit = read_permit(&ctx, &principal.device).await?;
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         reader_resource(&ctx, entity, scope, &reference)?;
-        // 順番や ETag の照合より前に、要求した保存状態・資産・file の所属を確認する。
+        // 順番より前に、要求した保存状態・資産・file の所属を確認する。
         let owned = ctx
             .library
             .resource_transfer_manifest(entity, scope, &reference)
@@ -355,7 +440,11 @@ async fn chunk(
     })
     .await
     .map_err(|_| internal())??;
-    representation(bytes, "application/vnd.piep.object-v1", &headers)
+    Ok(representation(
+        bytes,
+        "application/vnd.piep.object-v1",
+        true,
+    ))
 }
 
 #[cfg(test)]

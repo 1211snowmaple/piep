@@ -25,9 +25,16 @@ struct TestAuthority {
     active: AtomicBool,
 }
 impl Authority for TestAuthority {
-    fn subject(&self, bearer: &str, library: Id) -> Option<Id> {
-        (bearer == "fixture" && library == self.library && self.active.load(Ordering::SeqCst))
-            .then_some(self.subject)
+    fn grant(&self, bearer: &str, library: Id) -> Option<Grant> {
+        let device = match bearer {
+            "fixture" => "phone",
+            "second" => "tablet",
+            _ => return None,
+        };
+        (library == self.library && self.active.load(Ordering::SeqCst)).then(|| Grant {
+            device: device.into(),
+            subject: self.subject,
+        })
     }
 }
 struct Server {
@@ -114,20 +121,37 @@ fn capture(key: &str, bytes: Option<&[u8]>) -> Capture {
 }
 
 #[tokio::test]
-async fn read_capacity_is_bounded_and_scope_headers_identify_the_epoch() {
+async fn one_device_cannot_take_every_reader_and_a_short_wait_comes_before_refusing() {
     let server = Server::start().await;
     let saved = save(&server.library, capture("one", Some(b"image")));
     let path = format!(
         "{}/manifest?slot=cover",
         server.resource(saved.entity_id, saved.snapshot_id)
     );
-    let held: Vec<_> = (0..4)
-        .map(|_| read_permit(&server.context).unwrap())
-        .collect();
-    assert_eq!(
-        server.get(&path).send().await.unwrap().status(),
-        StatusCode::TOO_MANY_REQUESTS
-    );
+    let mut held = Vec::new();
+    for _ in 0..READERS_PER_DEVICE {
+        held.push(read_permit(&server.context, "phone").await.unwrap());
+    }
+    // 一台が自分の枠を使い切っても、ほかの端末は読める。
+    let other = server
+        .client
+        .get(format!("{}{path}", server.base))
+        .bearer_auth("second")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other.status(), StatusCode::OK);
+    let refused = server.get(&path).send().await.unwrap();
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(refused.headers()[header::RETRY_AFTER], "1");
+    // 待っているあいだに空けば、断らずに読める。
+    let waiting = tokio::spawn({
+        let request = server.get(&path);
+        async move { request.send().await.unwrap().status() }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    held.pop();
+    assert_eq!(waiting.await.unwrap(), StatusCode::OK);
     drop(held);
     let response = server.get(&path).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -163,13 +187,7 @@ async fn raw_response_archives_are_not_exposed_by_the_reader_gateway() {
         .unwrap();
     let path=format!("/api/v2/libraries/{}/entities/{}/views/snapshot/{}/resources/original/manifest?observation={observation}",server.library.id,saved.entity_id,saved.snapshot_id);
     assert_eq!(
-        server
-            .get(&path)
-            .header(header::IF_NONE_MATCH, "*")
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        server.get(&path).send().await.unwrap().status(),
         StatusCode::FORBIDDEN
     );
 }
@@ -189,7 +207,7 @@ fn save(library: &Library, input: Capture) -> crate::library::CaptureResult {
 }
 
 #[tokio::test]
-async fn identity_requires_bearer_and_exposes_no_reader_or_mutation_capability() {
+async fn identity_requires_bearer_and_offers_the_reader_bundle_but_no_mutation() {
     let server = Server::start().await;
     for path in ["/api/v2/identity", "/api/v2/identity?token=fixture"] {
         assert_eq!(
@@ -208,7 +226,7 @@ async fn identity_requires_bearer_and_exposes_no_reader_or_mutation_capability()
     let identity = protocol::LibraryIdentity::parse(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(identity.library_id.get(), server.library.id);
     assert_eq!(identity.subject_id, server.authority.subject);
-    assert!(!identity.capabilities.reader_bundle && !identity.capabilities.mutations);
+    assert!(identity.capabilities.reader_bundle && !identity.capabilities.mutations);
     assert_eq!(
         server
             .get("/api/v2/identity")
@@ -222,7 +240,7 @@ async fn identity_requires_bearer_and_exposes_no_reader_or_mutation_capability()
 }
 
 #[tokio::test]
-async fn transfer_roundtrips_and_conditional_reads_recheck_authority_and_ownership() {
+async fn transfer_roundtrips_and_every_read_rechecks_authority_and_ownership() {
     let server = Server::start().await;
     let original = vec![b'x'; 30_000];
     let saved = save(&server.library, capture("one", Some(&original)));
@@ -234,56 +252,38 @@ async fn transfer_roundtrips_and_conditional_reads_recheck_authority_and_ownersh
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let manifest_etag = response.headers()[header::ETAG]
-        .to_str()
-        .unwrap()
-        .to_owned();
+    assert!(response.headers().get(header::ETAG).is_none());
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "private, no-cache, no-transform"
+    );
     let bytes = response.bytes().await.unwrap();
     let transfer = protocol::ValidatedTransfer::parse(&bytes).unwrap();
-    assert_eq!(manifest_etag, format!("\"sha256-{}\"", transfer.id()));
     let path = format!(
         "{resource}/files/{}/chunks/0?slot=cover",
         transfer.file().id
     );
-    let response = server.get(&path).send().await.unwrap();
+    let response = server
+        .get(&path)
+        .header(header::IF_NONE_MATCH, "*")
+        .send()
+        .await
+        .unwrap();
+    // 取り直しの確認は持たない。中身のハッシュで取るので、同じ URL の中身は変わらない。
     assert_eq!(response.status(), StatusCode::OK);
-    let etag = response.headers()[header::ETAG]
+    assert!(response.headers().get(header::ETAG).is_none());
+    assert!(response.headers()[header::CACHE_CONTROL]
         .to_str()
         .unwrap()
-        .to_owned();
+        .contains("immutable"));
     let encoded = response.bytes().await.unwrap();
-    assert_eq!(
-        etag,
-        format!("\"sha256-{}\"", crate::library::Fingerprint::of(&encoded))
-    );
     assert_eq!(
         piep_storage::decode_chunk(&encoded, &transfer.file().chunks[0]).unwrap(),
         original
     );
-    for conditional in [
-        etag.clone(),
-        format!("W/{etag}"),
-        format!("\"other\", {etag}"),
-        "*".into(),
-    ] {
-        let response = server
-            .get(&path)
-            .header(header::IF_NONE_MATCH, conditional)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
-        assert!(response.bytes().await.unwrap().is_empty());
-    }
     let wrong = path.replace(&saved.entity_id.to_string(), &foreign.entity_id.to_string());
     assert_eq!(
-        server
-            .get(&wrong)
-            .header(header::IF_NONE_MATCH, "*")
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        server.get(&wrong).send().await.unwrap().status(),
         StatusCode::NOT_FOUND
     );
     let wrong = path.replace(
@@ -291,26 +291,109 @@ async fn transfer_roundtrips_and_conditional_reads_recheck_authority_and_ownersh
         &crate::library::Fingerprint::of(b"other").to_string(),
     );
     assert_eq!(
-        server
-            .get(&wrong)
-            .header(header::IF_NONE_MATCH, "*")
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        server.get(&wrong).send().await.unwrap().status(),
         StatusCode::NOT_FOUND
     );
     server.authority.active.store(false, Ordering::SeqCst);
     assert_eq!(
-        server
-            .get(&path)
-            .header(header::IF_NONE_MATCH, etag)
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        server.get(&path).send().await.unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn one_bundle_describes_every_readable_file_and_each_chunk_comes_back_through_it() {
+    let server = Server::start().await;
+    let original = vec![b'y'; 20_000];
+    let saved = save(&server.library, capture("one", Some(&original)));
+    let missing = save(&server.library, capture("two", None));
+    let view = format!(
+        "/api/v2/libraries/{}/entities/{}/views/snapshot/{}",
+        server.library.id, saved.entity_id, saved.snapshot_id
+    );
+    let response = server.get(&format!("{view}/bundle")).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bundle = protocol::ReaderBundle::parse(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(bundle.entity_id.get(), saved.entity_id);
+    assert_eq!(bundle.document["format"], "piep-reader-v1");
+    // 本文と表紙。原応答は入らない。
+    let kinds: Vec<_> = bundle
+        .files
+        .iter()
+        .map(|item| match &item.resource {
+            protocol::ResourceReference::Body => "body".to_owned(),
+            protocol::ResourceReference::Media { slot } => format!("media:{slot}"),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(kinds, vec!["body", "media:cover"]);
+    for item in &bundle.files {
+        let (kind, query) = match &item.resource {
+            protocol::ResourceReference::Body => ("body", String::new()),
+            protocol::ResourceReference::Media { slot } => ("media", format!("?slot={slot}")),
+            _ => unreachable!(),
+        };
+        let native = item.file.to_native();
+        let mut restored = Vec::new();
+        for (ordinal, chunk) in native.chunks.iter().enumerate() {
+            let url = format!(
+                "{view}/resources/{kind}/files/{}/chunks/{ordinal}{query}",
+                item.file.id.get()
+            );
+            let encoded = server
+                .get(&url)
+                .send()
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+            restored.extend(piep_storage::decode_chunk(&encoded, chunk).unwrap());
+        }
+        assert_eq!(crate::library::Fingerprint::of(&restored), native.id);
+        if kind == "media" {
+            assert_eq!(restored, original);
+        }
+    }
+    // 画像が未保存の作品では、表紙の file は載らない（取りに行かせない）。
+    let response = server
+        .get(&format!(
+            "/api/v2/libraries/{}/entities/{}/views/snapshot/{}/bundle",
+            server.library.id, missing.entity_id, missing.snapshot_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    let bundle = protocol::ReaderBundle::parse(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(bundle.files.len(), 1);
+    // ほかの作品の保存版・ほかの棚・知らない view・余計な問い合わせは断る。
+    for (path, status) in [
+        (
+            format!(
+                "/api/v2/libraries/{}/entities/{}/views/snapshot/{}/bundle",
+                server.library.id, missing.entity_id, saved.snapshot_id
+            ),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            view.replace(
+                &server.library.id.to_string(),
+                &uuid::Uuid::now_v7().to_string(),
+            ) + "/bundle",
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            view.replace("views/snapshot/", "views/current/") + "/bundle",
+            StatusCode::BAD_REQUEST,
+        ),
+        (format!("{view}/bundle?slot=cover"), StatusCode::BAD_REQUEST),
+    ] {
+        assert_eq!(
+            server.get(&path).send().await.unwrap().status(),
+            status,
+            "{path}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -350,7 +433,7 @@ async fn missing_resources_invalid_parameters_and_wrong_libraries_do_not_fall_ba
 }
 
 #[tokio::test]
-async fn corrupt_cached_bytes_never_become_a_not_modified_response_or_expose_paths() {
+async fn corrupt_stored_bytes_are_not_sent_and_do_not_expose_paths() {
     let server = Server::start().await;
     let saved = save(&server.library, capture("one", Some(b"image")));
     let manifest = server
@@ -376,12 +459,7 @@ async fn corrupt_cached_bytes_never_become_a_not_modified_response_or_expose_pat
         server.resource(saved.entity_id, saved.snapshot_id),
         manifest.file.id.get()
     );
-    let response = server
-        .get(&url)
-        .header(header::IF_NONE_MATCH, "*")
-        .send()
-        .await
-        .unwrap();
+    let response = server.get(&url).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let text = response.text().await.unwrap();
     assert!(
