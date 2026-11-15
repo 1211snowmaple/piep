@@ -5,7 +5,7 @@
 //! piep は PDF を外のアプリへ渡さない（[`crate::commands::shell`] が起動して
 //! よい種類を絞っている）ので、見る手段はアプリの中にしか作れない。
 
-use super::engine::{bindings, read_pdf_bytes};
+use super::engine::{bindings, read_pdf_bytes, MAX_PDF_BYTES};
 use pdfium_render::prelude::*;
 use std::path::Path;
 
@@ -62,17 +62,28 @@ const PAPER: u32 = 0xFFFF_FFFF;
 
 /// PDF の1ページを WebP にする。`index` は 0 から数える。
 pub fn render_page(path: &Path, index: usize, target_width: u32) -> Result<RenderedPage, String> {
-    let bindings = bindings()?;
     // 道ではなく中身を渡す理由は [`super::extract::extract_text`] と同じ。
     let bytes = read_pdf_bytes(path)?;
-    let document = unsafe { bindings.FPDF_LoadMemDocument64(&bytes, None) };
+    render_page_bytes(&bytes, index, target_width)
+}
+
+/// 中身から描く。新しい棚の添付はファイルの識別子で指すので、場所を持たない。
+pub fn render_page_bytes(
+    bytes: &[u8],
+    index: usize,
+    target_width: u32,
+) -> Result<RenderedPage, String> {
+    if bytes.len() as u64 > MAX_PDF_BYTES {
+        return Err("PDF が大きすぎます".into());
+    }
+    let bindings = bindings()?;
+    let document = unsafe { bindings.FPDF_LoadMemDocument64(bytes, None) };
     if document.is_null() {
         return Err("PDF として開けません（壊れているか、鍵がかかっています）".to_string());
     }
+    // 文書を閉じるまで、pdfium はこの領域を読み続ける（`bytes` は呼び出し側が持っている）。
     let result = render_from_document(bindings, document, index, target_width);
     unsafe { bindings.FPDF_CloseDocument(document) };
-    // 文書を閉じるまで、pdfium はこの領域を読み続ける。
-    drop(bytes);
     result
 }
 

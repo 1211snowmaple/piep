@@ -442,7 +442,7 @@ function LegacyWorkPage() {
     const originalPath = original?.dataset.localPath;
     if (originalPath) {
       event.preventDefault();
-      setPdfOriginal({ downloadId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
+      setPdfOriginal({ workId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
       return;
     }
     void openContentLink(event);
@@ -673,7 +673,7 @@ function LegacyWorkPage() {
             const original = Boolean(asset.originalUrl && (/original/i.test(asset.originalUrl) || !/\/c\//.test(asset.originalUrl)));
             const openTarget = () => {
               if (image) previewAsset(asset);
-              else if (pdf) setPdfOriginal({ downloadId: id, localPath: asset.localPath, fileName: asset.filename });
+              else if (pdf) setPdfOriginal({ workId: id, localPath: asset.localPath, fileName: asset.filename });
             };
             return <Card key={asset.id} p={0} className="asset-card surface--interactive" onClick={openTarget}>
               <Box className="asset-card__preview">

@@ -6,7 +6,7 @@
 //! 同じ作品で使うには、ページの数と、各ページの目印の並びが同じでなければならない。
 
 use piep_lib::database::Database;
-use piep_lib::library::{Library, ResourceScope, WorkListQuery};
+use piep_lib::library::{Fingerprint, Library, ResourceScope, WorkListQuery};
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -52,6 +52,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     let mark = Regex::new(r"(?i)<(br|p|h2|h3|hr|img|figure|blockquote|li)[\s/>]")?;
     // 画像の場所（旧棚はファイルのパス、新しい棚はファイルの識別子）は違って当然なので外して比べる。
     let place = Regex::new(r#"\s(?:data-local-path|src)="[^"]*""#)?;
+    let original = Regex::new(r#"class="attachment-original" data-local-path="([^"]*)""#)?;
 
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut examples: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
@@ -232,6 +233,25 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
                         "html_differs",
                         json!({"work": work, "page": index}),
                     );
+                }
+                // 「原本を見る」は、その作品の PDF の添付を指し、紙面を描けること。
+                for found in original.captures_iter(&new_html) {
+                    let opened = Fingerprint::parse(&found[1])
+                        .ok()
+                        .and_then(|file| new.work_pdf_attachment(card.id, file).ok().flatten())
+                        .and_then(|content| {
+                            let mut bytes = Vec::new();
+                            new.objects.export(&content, &mut bytes).ok()?;
+                            piep_lib::pdf::render_page_bytes(&bytes, 0, 320).ok()
+                        });
+                    match opened {
+                        Some(_) => *counts.entry("originals_opened").or_default() += 1,
+                        None => note(
+                            &mut counts,
+                            "original_unopenable",
+                            json!({"work": work, "page": index}),
+                        ),
+                    }
                 }
             }
             if work_marks {

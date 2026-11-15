@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type { ReaderOutlineEntry, ReaderSearchHit, ScoreReason, SearchHighlight } from "@/types/library";
+import type { PdfPageImage } from "@/services/dbApi";
 
 /**
  * 新しい棚（読み取り専用の写し）の命令。`src-tauri/src/commands/library_v2.rs` と対になる。
@@ -246,6 +247,19 @@ export function libraryV2Neighbors(work: string): Promise<ShelfNeighbors[]> {
 
 export function libraryV2Media(work: string, snapshot: string | null): Promise<ShelfMedia[]> {
   return invoke<ShelfMedia[]>("library_v2_media", { work, snapshot });
+}
+
+/**
+ * 作品の添付の PDF の1ページを絵にする（「原本を見る」）。`file` はファイルの識別子、
+ * `page` は 0 から。旧棚の `renderPdfAttachmentPage` の新しい棚の版。
+ */
+export function libraryV2RenderPdfPage(work: string, file: string, page: number, width: number): Promise<PdfPageImage> {
+  return invoke<PdfPageImage>("library_v2_render_pdf_page", { work, file, page, width });
+}
+
+/** 画像・添付の一覧で、紙面を開ける添付（PDF）か。 */
+export function isShelfPdf(item: ShelfMedia): item is ShelfMedia & { file: string } {
+  return item.kind === "file" && item.file !== null && /\.pdf$/i.test(item.name ?? "");
 }
 
 export function libraryV2VersionText(work: string, snapshot: string): Promise<string> {

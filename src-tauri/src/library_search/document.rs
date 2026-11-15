@@ -289,17 +289,36 @@ impl Library {
         }
         crate::database::attachment::apply_attachment_text(post, provider, &texts.files);
         // 差し込んだ印の `localPath`（「原本を見る」）は一時に書き出したファイルを指していて、
-        // ここを出ると消える。新しい棚ではまだ原本を開けないので外す（押しても何も起きない
-        // ボタンを出さない）。開けるようにするときは、ここに添付のファイルの識別子を置く。
+        // ここを出ると消える。添付のファイルの識別子に置き換え、原本はそれで開く
+        // （`library_v2_render_pdf_page`）。知らない場所を指す印は外す（押しても開けない）。
         if let Some(blocks) = post
             .pointer_mut("/body/blocks")
             .and_then(serde_json::Value::as_array_mut)
         {
             for block in blocks {
                 if block.get("type").and_then(serde_json::Value::as_str)
-                    == Some(crate::database::attachment::NOTICE_BLOCK_TYPE)
+                    != Some(crate::database::attachment::NOTICE_BLOCK_TYPE)
                 {
-                    if let Some(block) = block.as_object_mut() {
+                    continue;
+                }
+                let Some(block) = block.as_object_mut() else {
+                    continue;
+                };
+                let file = block
+                    .get("localPath")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|path| {
+                        texts
+                            .files
+                            .iter()
+                            .position(|entry| entry.local_path == path)
+                    })
+                    .map(|index| texts.fingerprints[index].to_string());
+                match file {
+                    Some(file) => {
+                        block.insert("localPath".into(), file.into());
+                    }
+                    None => {
                         block.remove("localPath");
                     }
                 }
@@ -325,6 +344,7 @@ impl Library {
         let mut texts = TextFiles {
             dir: None,
             files: Vec::new(),
+            fingerprints: Vec::new(),
         };
         if rows.is_empty() {
             return Ok(texts);
@@ -334,13 +354,11 @@ impl Library {
         std::fs::create_dir_all(&dir)?;
         texts.dir = Some(dir.clone());
         for (index, (file, name, mime)) in rows.into_iter().enumerate() {
-            let content = Self::file_from_conn(
-                conn,
-                Fingerprint(
-                    file.try_into()
-                        .map_err(|_| Error::Integrity("添付のハッシュが不正です".into()))?,
-                ),
-            )?;
+            let fingerprint = Fingerprint(
+                file.try_into()
+                    .map_err(|_| Error::Integrity("添付のハッシュが不正です".into()))?,
+            );
+            let content = Self::file_from_conn(conn, fingerprint)?;
             // 旧棚は添付を「名前が一致する」か「場所に取得元のファイル ID を含む」で探す。
             // 保存名は `名前_ID.拡張子` なので、保存名のまま置かないと見つからない。
             // フォルダーを分けて名前の衝突を避け、危ない文字は保存時と同じ規則で均す。
@@ -361,6 +379,7 @@ impl Library {
                 mime_type: mime,
                 file_size_bytes: content.length as i64,
             });
+            texts.fingerprints.push(fingerprint);
         }
         Ok(texts)
     }
@@ -370,6 +389,8 @@ impl Library {
 struct TextFiles {
     dir: Option<PathBuf>,
     files: Vec<AssetEntry>,
+    /// `files` と同じ並びの、棚のファイルの識別子。
+    fingerprints: Vec<Fingerprint>,
 }
 
 impl Drop for TextFiles {

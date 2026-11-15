@@ -21,7 +21,7 @@ static LIBRARY_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 static BINDINGS: OnceLock<Result<Bindings, String>> = OnceLock::new();
 
-pub(super) const MAX_PDF_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_PDF_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Restored/local attachments need the same size limit as network downloads.
 /// Bound the read itself as well, so a growing file cannot evade the check.

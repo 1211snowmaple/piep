@@ -33,6 +33,7 @@ import { WorkCover } from "@/components/WorkCover";
 import { BoundedJsonView } from "@/components/BoundedJsonView";
 import { RevisionDiff } from "@/components/RevisionDiff";
 import { Note } from "@/components/Note";
+import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { Icons, IconSize } from "@/lib/icons";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
 import { contentTypeLabel, formatBytes, formatDate, formatNumber } from "@/lib/format";
@@ -41,6 +42,7 @@ import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLink
 import { isTauriRuntime } from "@/services/dbApi";
 import { openExternalUrl } from "@/services/openerApi";
 import {
+  isShelfPdf,
   libraryV2Content,
   libraryV2Media,
   libraryV2Original,
@@ -86,6 +88,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   const [assetSnapshot, setAssetSnapshot] = useState<string | null>(null);
   const [selectedSnapshot, setSelectedSnapshot] = useState<string | null>(null);
   const [visibleAssetCount, setVisibleAssetCount] = useState(80);
+  const [pdfOriginal, setPdfOriginal] = useState<PdfOriginalTarget | null>(null);
   const contentFrameRef = useRef<HTMLDivElement>(null);
   const contentBodyRef = useRef<HTMLDivElement>(null);
 
@@ -145,9 +148,12 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
     setTab("content");
   };
   const handleContentClick = (event: React.MouseEvent<HTMLElement>) => {
-    // 添付の原本は旧棚の保存フォルダーから開く仕組みなので、新しい棚ではまだ開かない。
-    if ((event.target as HTMLElement).closest("button.attachment-original")) {
+    // 取り込んだ本文の頭の「原本を見る」。印はファイルの識別子を持つ。
+    const original = (event.target as HTMLElement).closest<HTMLElement>("button.attachment-original");
+    if (original) {
       event.preventDefault();
+      const file = original.dataset.localPath;
+      if (file) setPdfOriginal({ workId, localPath: file, fileName: original.dataset.fileName || "添付ファイル" });
       return;
     }
     void openContentLink(event);
@@ -281,9 +287,13 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
           {mediaQuery.isLoading ? <LoadingState label="画像・添付を読み込んでいます" /> : mediaQuery.error ? <ErrorState error={mediaQuery.error} retry={() => mediaQuery.refetch()} /> : media.length ? <Stack gap="lg"><SimpleGrid cols={{ base: 2, sm: 3, lg: 4, xl: 5 }} spacing="md">{visibleMedia.map((item, index) => {
             const src = item.kind === "media" ? shelfFileUrl(item.file) : null;
             const name = item.name ?? item.role;
-            return <Card key={`${item.kind}-${index}`} p={0} className={src ? "asset-card surface--interactive" : "asset-card"} onClick={src ? () => previewImage(item) : undefined}>
+            // PDF は外のアプリへ渡さない方針なので、旧棚と同じくアプリの中で紙面を見せる。
+            const pdf = isShelfPdf(item) ? item.file : null;
+            const open = src ? () => previewImage(item) : pdf ? () => setPdfOriginal({ workId, localPath: pdf, fileName: name }) : undefined;
+            return <Card key={`${item.kind}-${index}`} p={0} className={open ? "asset-card surface--interactive" : "asset-card"} onClick={open}>
               <Box className="asset-card__preview">
                 {src ? <Image src={src} alt={name} className="asset-card__image" loading="lazy" decoding="async" /> : <ThemeIcon size={56} variant="light" color="gray"><Icons.file size={IconSize.feature} /></ThemeIcon>}
+                {pdf && <Badge className="asset-card__badge" size="xs" color="gray" variant="filled">原本を見る</Badge>}
                 {!item.file && <Badge className="asset-card__badge" size="xs" color="gray" variant="filled">未保存</Badge>}
               </Box>
               <Stack gap={2} className="asset-card__meta">
@@ -325,6 +335,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
         </Tabs.Panel>
         <Tabs.Panel value="json" pt="lg">{originalQuery.isLoading ? <LoadingState /> : originalQuery.error ? <ErrorState error={originalQuery.error} retry={() => originalQuery.refetch()} /> : originalQuery.data ? <BoundedJsonView jsonText={originalQuery.data} description="現在の版を作ったときに取得元から受け取ったデータを表示します（JSON形式）" /> : <Alert color="gray">この版には取得元から受け取ったデータが残っていません。</Alert>}</Tabs.Panel>
       </Tabs>
+      <PdfOriginalViewer target={pdfOriginal} onClose={() => setPdfOriginal(null)} />
     </div>
   );
 }

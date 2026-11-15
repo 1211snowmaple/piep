@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   libraryV2Media: vi.fn(),
   libraryV2VersionText: vi.fn(),
   libraryV2Original: vi.fn(),
+  libraryV2RenderPdfPage: vi.fn(),
 }));
 vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
@@ -115,5 +116,28 @@ describe("ShelfWorkPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "この版の本文を見る" }));
     await waitFor(() => expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, FIRST, 0));
     expect(await screen.findByText("保存済み v1")).toBeInTheDocument();
+  });
+
+  it("opens a PDF attachment's pages from the body and from the attachment list", async () => {
+    const pdf = "cd".repeat(32);
+    api.libraryV2Content.mockResolvedValue({
+      page: 0,
+      pageCount: 1,
+      html: `<div class="attachment-notice">取り込んだ本文 <button type="button" class="attachment-original" data-local-path="${pdf}" data-file-name="本文.pdf">原本を見る</button></div><p>本文</p>`,
+    });
+    api.libraryV2Media.mockResolvedValue([{ kind: "file", role: "attachment", name: "本文.pdf", mime_type: "application/pdf", length: 10, file: pdf }]);
+    api.libraryV2RenderPdfPage.mockResolvedValue({ image: "data:image/webp;base64,page", width: 1200, height: 1553, pageCount: 2 });
+    renderPage(`#/works/${WORK}?tab=content`);
+
+    fireEvent.click(await screen.findByRole("button", { name: "原本を見る" }));
+    expect(await screen.findByRole("img", { name: "本文.pdf の 1 ページ目" })).toBeInTheDocument();
+    expect(api.libraryV2RenderPdfPage).toHaveBeenCalledWith(WORK, pdf, 0, expect.any(Number));
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+
+    api.libraryV2RenderPdfPage.mockClear();
+    fireEvent.click(screen.getByRole("tab", { name: /画像・添付/ }));
+    fireEvent.click(await screen.findByText("原本を見る"));
+    expect(await screen.findByRole("img", { name: "本文.pdf の 1 ページ目" })).toBeInTheDocument();
   });
 });

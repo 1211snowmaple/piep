@@ -934,9 +934,9 @@ function Reader({ source }: { source: ReaderSource }) {
     // 図版が紙面にしか無いときのための道。
     const original = (event.target as HTMLElement).closest<HTMLElement>("button.attachment-original");
     const originalPath = original?.dataset.localPath;
-    if (originalPath && typeof id === "number") {
+    if (originalPath) {
       event.preventDefault();
-      setPdfOriginal({ downloadId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
+      setPdfOriginal({ workId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
       return;
     }
     const image = (event.target as HTMLElement).closest<HTMLImageElement>("img.novel-image, .reader-content img");

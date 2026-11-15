@@ -307,12 +307,82 @@ fn attachment_bodies_are_inserted_for_reading_and_search_alike() {
         html.contains(&format!(r#"data-local-path="{file}/piep-file-z"#)),
         "{html}"
     );
-    // 一時に書き出した原本の場所は出さない（新しい棚ではまだ原本を開けない）。
+    // テキストには紙面が無いので「原本を見る」は出さない（旧棚と同じ）。
     assert!(!html.contains("attachment-original"), "{html}");
     // 残り時間の字数も、検索の文書の本文も、取り込んだ本文を含む。
     let document = library.search_document(saved.entity_id).unwrap().unwrap();
     assert!(document.body.contains("取り込む本文"), "{}", document.body);
     assert_eq!(rendered.text_chars, document.body.chars().count());
+}
+
+/// PDF の添付は「原本を見る」から紙面を開ける。ボタンは一時に書き出した場所ではなく
+/// 棚のファイルの識別子を指し、開くのはその作品の PDF の添付だけ。
+#[test]
+fn a_pdf_attachment_opens_its_original_by_its_file() {
+    let dir = temp("attachment-pdf");
+    let pdf_dir = crate::pdf::fixture::temp_dir();
+    let pdf = std::fs::read(crate::pdf::fixture::write_pdf(&pdf_dir, true)).unwrap();
+    let _ = std::fs::remove_dir_all(&pdf_dir);
+    let library = Library::create(&dir.0).unwrap();
+    let body = SourceBody::FanboxBody(json!({
+        "text": "挨拶",
+        "files": [{"id": "Abc123Def456", "name": "sample", "extension": "pdf", "size": 4}]
+    }));
+    let mut captured = capture("fanbox", body, b"art", 2);
+    captured.attachments[0].original_name = "sample.pdf".into();
+    captured.attachments[0].mime_type = Some("application/pdf".into());
+    captured.attachments[0].bytes = pdf.clone().into();
+    let saved = library.capture(captured).unwrap();
+    library
+        .publish_reader_bindings(
+            saved.entity_id,
+            saved.snapshot_id,
+            vec![bind(
+                BodyAssetReference::ArticleFileAt { index: 0 },
+                ResourceReference::File {
+                    slot: "attachment".into(),
+                },
+            )],
+        )
+        .unwrap();
+    let html = library
+        .render_document(
+            saved.entity_id,
+            ResourceScope::Snapshot(saved.snapshot_id),
+            "fanbox",
+        )
+        .unwrap()
+        .pages
+        .join("");
+    let file = Fingerprint::of(&pdf);
+    assert!(
+        html.contains(&format!(
+            r#"class="attachment-original" data-local-path="{file}" data-file-name="sample.pdf""#
+        )),
+        "{html}"
+    );
+    assert!(
+        !html.contains("piep-search-"),
+        "一時の場所を出さない: {html}"
+    );
+
+    let original = library
+        .work_pdf_attachment(saved.entity_id, file)
+        .unwrap()
+        .expect("作品の PDF の添付は開ける");
+    let mut bytes = Vec::new();
+    library.objects.export(&original, &mut bytes).unwrap();
+    let page = crate::pdf::render_page_bytes(&bytes, 1, 400).unwrap();
+    assert_eq!(page.page_count, 2);
+    // 同じ作品のファイルでも PDF の添付でないもの、棚に無いものは開かない。
+    assert!(library
+        .work_pdf_attachment(saved.entity_id, Fingerprint::of(b"art"))
+        .unwrap()
+        .is_none());
+    assert!(library
+        .work_pdf_attachment(LibraryId::now_v7(), file)
+        .unwrap()
+        .is_none());
 }
 
 #[test]

@@ -599,6 +599,40 @@ pub async fn library_v2_media(
     .map_err(|e| e.to_string())?
 }
 
+/// 作品の添付の PDF の1ページを絵にする（「原本を見る」）。`file` はファイルの識別子、
+/// `page` は 0 から。作品の版に PDF として載っていないファイルは断る。旧棚の
+/// `render_pdf_attachment_page` と同じく控えは持たず、要求のたびに描く。
+#[tauri::command]
+pub async fn library_v2_render_pdf_page(
+    state: State<'_, Arc<LibraryV2>>,
+    work: LibraryId,
+    file: String,
+    page: usize,
+    width: u32,
+) -> Result<crate::commands::pdf::PdfPageImage, String> {
+    let state = Arc::clone(&state);
+    let file = Fingerprint::parse(&file).map_err(|_| "ファイルの識別子が正しくありません")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        let content = library
+            .work_pdf_attachment(work, file)
+            .map_err(|e| e.to_string())?
+            .ok_or("この作品の添付の PDF ではありません")?;
+        if content.length > crate::pdf::MAX_PDF_BYTES {
+            return Err("PDF が大きすぎます".to_string());
+        }
+        let mut bytes = Vec::with_capacity(content.length as usize);
+        library
+            .objects
+            .export(&content, &mut bytes)
+            .map_err(|e| e.to_string())?;
+        let rendered = crate::pdf::render_page_bytes(&bytes, page, width)?;
+        Ok(rendered.into())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 版の本文の平文。版どうしの比較に使う。
 #[tauri::command]
 pub async fn library_v2_version_text(

@@ -13,10 +13,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 const dbApi = vi.hoisted(() => ({ renderPdfAttachmentPage: vi.fn() }));
 vi.mock("@/services/dbApi", () => dbApi);
+const shelfApi = vi.hoisted(() => ({ libraryV2RenderPdfPage: vi.fn() }));
+vi.mock("@/services/libraryV2Api", () => shelfApi);
 
-import { PdfOriginalViewer } from "./PdfOriginalViewer";
+import { PdfOriginalViewer, type PdfOriginalTarget } from "./PdfOriginalViewer";
 
-const target = { downloadId: 7, localPath: "C:/library/work/本文.pdf", fileName: "本文.pdf" };
+const target = { workId: 7, localPath: "C:/library/work/本文.pdf", fileName: "本文.pdf" };
 
 function page(index: number) {
   return {
@@ -27,17 +29,17 @@ function page(index: number) {
   };
 }
 
-function renderViewer() {
+function renderViewer(first: PdfOriginalTarget = target) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const viewer = (current: typeof target | null) => (
+  const viewer = (current: PdfOriginalTarget | null) => (
     <MantineProvider>
       <QueryClientProvider client={client}>
         <PdfOriginalViewer target={current} onClose={vi.fn()} />
       </QueryClientProvider>
     </MantineProvider>
   );
-  const view = render(viewer(target));
-  return { ...view, show: (current: typeof target | null) => view.rerender(viewer(current)) };
+  const view = render(viewer(first));
+  return { ...view, show: (current: PdfOriginalTarget | null) => view.rerender(viewer(current)) };
 }
 
 describe("PdfOriginalViewer", () => {
@@ -101,7 +103,7 @@ describe("PdfOriginalViewer", () => {
     await screen.findByRole("img", { name: "本文.pdf の 1 ページ目" });
     await userEvent.click(screen.getByRole("button", { name: /次のページ/ }));
     await screen.findByText("2 / 3 ページ");
-    const next = { downloadId: 8, localPath: samePath ? target.localPath : "C:/library/other.pdf", fileName: "別の添付.pdf" };
+    const next = { workId: 8, localPath: samePath ? target.localPath : "C:/library/other.pdf", fileName: "別の添付.pdf" };
     view.show(next);
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
     await waitFor(() => expect(dbApi.renderPdfAttachmentPage).toHaveBeenCalledWith(8, next.localPath, 0, expect.any(Number)));
@@ -121,6 +123,18 @@ describe("PdfOriginalViewer", () => {
     });
     await waitFor(() => expect(screen.getByText("3 / 3 ページ")).toBeInTheDocument());
     expect(dbApi.renderPdfAttachmentPage.mock.calls.some(([, , index]) => index >= 3)).toBe(false);
+  });
+
+  it("新しい棚の作品は、ファイルの識別子で新しい棚に描かせる", async () => {
+    const work = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+    const file = "ab".repeat(32);
+    shelfApi.libraryV2RenderPdfPage.mockReset().mockImplementation(
+      (_work: string, _file: string, index: number) => Promise.resolve(page(index)),
+    );
+    renderViewer({ workId: work, localPath: file, fileName: "本文.pdf" });
+    await screen.findByRole("img", { name: "本文.pdf の 1 ページ目" });
+    expect(shelfApi.libraryV2RenderPdfPage).toHaveBeenCalledWith(work, file, 0, expect.any(Number));
+    expect(dbApi.renderPdfAttachmentPage).not.toHaveBeenCalled();
   });
 
   it("says so when a page cannot be drawn, instead of showing an empty sheet", async () => {

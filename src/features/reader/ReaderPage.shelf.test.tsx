@@ -18,6 +18,7 @@ const api = vi.hoisted(() => ({
   libraryV2Outline: vi.fn(),
   libraryV2SearchContent: vi.fn(),
   libraryV2Neighbors: vi.fn(),
+  libraryV2RenderPdfPage: vi.fn(),
 }));
 vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
@@ -121,6 +122,22 @@ describe("ReaderPage on the new shelf", () => {
     expect(screen.getByRole("button", { name: /保存フォルダー/ })).toBeDisabled();
     expect(legacy.getReaderMetadata).not.toHaveBeenCalled();
     expect(legacy.getReaderContentPage).not.toHaveBeenCalled();
+  });
+
+  it("opens the original pages of a PDF attachment from the new shelf", async () => {
+    const pdf = "ab".repeat(32);
+    api.libraryV2Content.mockResolvedValue({
+      page: 0,
+      pageCount: 1,
+      html: `<div class="attachment-notice">取り込んだ本文 <button type="button" class="attachment-original" data-local-path="${pdf}" data-file-name="本文.pdf">原本を見る</button></div><p>今の本文</p>`,
+      totalPlainTextChars: 4,
+      sourcePageStarts: [0],
+    });
+    api.libraryV2RenderPdfPage.mockResolvedValue({ image: "data:image/webp;base64,page", width: 1200, height: 1553, pageCount: 2 });
+    renderReader(`#/reader/${WORK}`);
+    fireEvent.click(await screen.findByRole("button", { name: "原本を見る" }));
+    expect(await screen.findByRole("img", { name: "本文.pdf の 1 ページ目" })).toBeInTheDocument();
+    expect(api.libraryV2RenderPdfPage).toHaveBeenCalledWith(WORK, pdf, 0, expect.any(Number));
   });
 
   it("offers the previous and next works of the series and the author from the new shelf", async () => {

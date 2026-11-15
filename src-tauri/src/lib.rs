@@ -316,6 +316,7 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_search_content,
             commands::library_v2::library_v2_neighbors,
             commands::library_v2::library_v2_media,
+            commands::library_v2::library_v2_render_pdf_page,
             commands::library_v2::library_v2_version_text,
             commands::library_v2::library_v2_original,
             // サーバーモード (commands::server)

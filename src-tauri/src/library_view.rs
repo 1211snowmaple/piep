@@ -10,9 +10,10 @@
 use crate::database::models::AssetEntry;
 use crate::database::parser::{escape_html, parse_fanbox_value_to_html, parse_pixiv_value_to_html};
 use crate::library::{
-    BodyAssetReference, EditContent, Library, LibraryId, ReaderBody, ReaderDocument, ResourceInfo,
-    ResourceReference, ResourceScope, Result,
+    BodyAssetReference, ContentFile, EditContent, Fingerprint, Library, LibraryId, ReaderBody,
+    ReaderDocument, ResourceInfo, ResourceReference, ResourceScope, Result,
 };
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -96,6 +97,33 @@ impl Library {
                 })
             })
             .collect())
+    }
+
+    /// 作品の添付の PDF（「原本を見る」）。作品の保存した版のどれかに PDF として載っている
+    /// ファイルだけを返し、載っていなければ `None`。
+    ///
+    /// 画面から受け取った識別子をそのまま開くと、作品と関係のないファイルを読ませる口になる
+    /// （旧棚の `render_pdf_attachment_page` が作品のアセットに限るのと同じ）。
+    pub fn work_pdf_attachment(
+        &self,
+        work: LibraryId,
+        file: Fingerprint,
+    ) -> Result<Option<ContentFile>> {
+        let listed = self
+            .reader()?
+            .query_row(
+                "SELECT 1 FROM snapshot_files f JOIN revision_snapshots s ON s.id=f.snapshot_id
+                 WHERE s.entity_id=?1 AND s.published=1 AND f.file_id=?2
+                   AND lower(f.original_name) LIKE '%.pdf'
+                 LIMIT 1",
+                rusqlite::params![work.as_bytes().as_slice(), file.0.as_slice()],
+                |_| Ok(()),
+            )
+            .optional()?;
+        match listed {
+            Some(()) => Ok(Some(self.file(file)?)),
+            None => Ok(None),
+        }
     }
 
     /// 取得元の応答（保存データ）。版に結び付いた最初のもの。

@@ -33,6 +33,7 @@ pub(crate) mod fixture;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use engine::MAX_PDF_BYTES;
 pub use engine::{library_path, set_library_path};
 pub use extract::{extract_text, ExtractMethod, PdfDocumentText};
-pub use render::{render_page, RenderedPage};
+pub use render::{render_page, render_page_bytes, RenderedPage};
