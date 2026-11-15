@@ -15,6 +15,8 @@ impl Library {
         if destination.try_exists()? {
             return Err(Error::UnsafePath(destination.into()));
         }
+        // 写す途中で、写し元の台帳が参照しなくなった実体を回収されないようにする。
+        let _turn = self.storage_gate.lock().map_err(|_| Error::Busy)?;
         let stage = parent.join(format!(".piep-backup-{}.part", LibraryId::now_v7()));
         // 作成した瞬間から、コピー先を通常の棚としては開けない。
         let backup = Library::create_backup_stage(&stage, self.id)?;

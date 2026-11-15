@@ -136,6 +136,45 @@ pub(super) fn guarded_row(
 }
 
 impl LegacyImporter {
+    /// 旧棚の一つの保存版の指紋：版の行、その作品の資産の行（全部）、原本 JSON の大きさと
+    /// 更新時刻。どれかが変われば、追いつきでその版を読み直す。
+    pub(super) fn version_fingerprint(
+        &self,
+        work: i64,
+        version: i64,
+        json: &std::path::Path,
+    ) -> Result<crate::library::Fingerprint> {
+        let mut bytes = Vec::new();
+        let mut push_rows = |sql: &str, key: i64| -> Result<()> {
+            let mut stmt = self.conn.prepare_cached(sql)?;
+            let columns = stmt.column_count();
+            let mut rows = stmt.query([key])?;
+            while let Some(row) = rows.next()? {
+                for index in 0..columns {
+                    let value: rusqlite::types::Value = row.get(index)?;
+                    bytes.extend_from_slice(format!("{value:?}").as_bytes());
+                    bytes.push(0x1f);
+                }
+                bytes.push(0x1e);
+            }
+            bytes.push(0x1d);
+            Ok(())
+        };
+        push_rows("SELECT * FROM download_versions WHERE id=?1", version)?;
+        push_rows(
+            "SELECT * FROM assets WHERE download_id=?1 ORDER BY id",
+            work,
+        )?;
+        let meta = std::fs::metadata(json)?;
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |at| at.as_nanos());
+        bytes.extend_from_slice(format!("{}:{modified}", meta.len()).as_bytes());
+        Ok(crate::library::Fingerprint::of(&bytes))
+    }
+
     pub(super) fn has_column(&self, table: &str, column: &str) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",

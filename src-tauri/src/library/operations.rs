@@ -280,6 +280,79 @@ impl Library {
         Ok(result)
     }
 
+    /// 棚に載っている作品の世代（外す操作の `expected` に渡す）。載っていなければ `None`。
+    pub fn library_item_generation(&self, work: LibraryId) -> Result<Option<i64>> {
+        let conn = self.reader()?;
+        Ok(conn
+            .query_row(
+                "SELECT generation FROM library_items WHERE work_id=?1",
+                [work.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// 作品を棚から外す。一覧・検索の索引・過去の版の索引から消えるが、作品の識別・保存版・
+    /// 編集・利用者の状態・コレクションの行は残す（コレクションでは保存のない作品として出る）。
+    /// 実体の回収や完全な削除は別の操作。同じ作品をもう一度保存すれば棚に戻る。
+    /// 世代が `expected` と違えば競合として断る。戻り値は外した時点の棚の世代。
+    pub fn remove_work(&self, request: LibraryId, work: LibraryId, expected: i64) -> Result<i64> {
+        if expected < 1 {
+            return Err(Error::Integrity("更新世代が不正です".into()));
+        }
+        let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let tx = conn.transaction()?;
+        let payload = serde_json::json!({ "work": work, "expected": expected });
+        let receipt: Option<String> = tx
+            .query_row(
+                "SELECT payload_json FROM outbox WHERE request_id=?1 AND operation='remove_work'",
+                [request.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(stored) = receipt {
+            let receipt: serde_json::Value = serde_json::from_str(&stored)?;
+            if receipt["request"] != payload {
+                return Err(Error::Integrity(
+                    "同じ要求 ID が異なる更新に使われました".into(),
+                ));
+            }
+            return Ok(serde_json::from_value(receipt["result"].clone())?);
+        }
+        let generation: Option<i64> = tx
+            .query_row(
+                "SELECT generation FROM library_items WHERE work_id=?1",
+                [work.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match generation {
+            None => return Err(Error::Integrity("棚に載っていない作品です".into())),
+            Some(generation) if generation != expected => {
+                return Err(Error::Integrity(format!(
+                    "更新が競合しました。現在の世代は {generation} です"
+                )))
+            }
+            Some(_) => {}
+        }
+        tx.execute(
+            "DELETE FROM work_current_projection WHERE work_id=?1",
+            [work.as_bytes().as_slice()],
+        )?;
+        tx.execute(
+            "DELETE FROM library_items WHERE work_id=?1",
+            [work.as_bytes().as_slice()],
+        )?;
+        let shelf: i64 = tx.query_row(
+            "UPDATE library_meta SET generation=generation+1 WHERE singleton=1 RETURNING generation",
+            [],
+            |r| r.get(0),
+        )?;
+        tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'remove_work',?3,?4)",params![request.as_bytes().as_slice(),work.as_bytes().as_slice(),serde_json::json!({"request":payload,"result":shelf}).to_string(),chrono::Utc::now().timestamp_millis()])?;
+        tx.commit()?;
+        Ok(shelf)
+    }
+
     /// 編集は固定した snapshot に対して保存する。別作品の基準は FK が拒否する。
     pub fn save_edit(&self, request: EditRequest<'_>) -> Result<LibraryId> {
         let EditRequest {

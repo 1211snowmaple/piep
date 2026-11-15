@@ -227,6 +227,28 @@ impl LegacyImporter {
             mark_table(&tx, "update_candidates")?;
         }
         if !marked(&tx, "work_links")? {
+            // 旧棚の一行が新しい棚の根拠一つ。旧棚で消えた根拠を外し、根拠の無くなった関係を消す。
+            let mut present = std::collections::BTreeSet::new();
+            self.each_row("work_links", |row| {
+                present.insert(row.integer("id")?.to_string());
+                Ok(())
+            })?;
+            remove_absent(&tx, "work_link_evidence", &present, |tx, evidence| {
+                let link: Option<Vec<u8>> = tx
+                    .query_row(
+                        "SELECT link_id FROM link_evidence WHERE id=?1",
+                        [evidence],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                tx.execute("DELETE FROM link_evidence WHERE id=?1", [evidence])?;
+                if let Some(link) = link {
+                    tx.execute("DELETE FROM work_links WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1)", [&link])?;
+                    tx.execute(LINK_STATUS, [&link])?;
+                }
+                Ok(())
+            })?;
+            remove_absent(&tx, "work_links", &present, |_, _| Ok(()))?;
             self.each_row("work_links",|row|{
                 let created=row.time("discovered_at")?;
                 let from=Library::relation_entity(&tx,row.text("from_source")?,EntityKind::Work,row.text("from_source_id")?,created)?;
@@ -238,7 +260,7 @@ impl LegacyImporter {
                 let old=row.integer("id")?.to_string();let evidence=mapped_id(&tx,"work_link_evidence",&old)?;
                 let confidence=row.0.get("confidence").and_then(serde_json::Value::as_f64).ok_or_else(||Error::Integrity("関係の確度が不正です".into()))?;
                 tx.execute("INSERT INTO link_evidence VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET link_id=excluded.link_id,kind=excluded.kind,decision=excluded.decision,anchor_text=excluded.anchor_text,context_text=excluded.context_text,confidence=excluded.confidence",params![evidence.as_bytes().as_slice(),id.as_bytes().as_slice(),row.text("evidence_type")?,row.text("status")?,row.optional_text("anchor_text")?,row.optional_text("context_text")?,confidence,created])?;
-                tx.execute("UPDATE work_links SET status=CASE WHEN EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='accepted') AND NOT EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='rejected') THEN 'accepted' WHEN EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='rejected') AND NOT EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='accepted') THEN 'rejected' ELSE 'observed' END WHERE id=?1",[id.as_bytes().as_slice()])?;
+                tx.execute(LINK_STATUS,[id.as_bytes().as_slice()])?;
                 mark_row(&tx,"work_links",&old,id)?;mark_row(&tx,"work_link_evidence",&old,evidence)
             })?;
             mark_table(&tx, "work_links")?;
@@ -290,6 +312,9 @@ impl LegacyImporter {
         Ok(())
     }
 }
+
+/// 関係の状態を根拠から決め直す。受け入れだけなら受け入れ、退けだけなら退け、ほかは観測。
+const LINK_STATUS: &str = "UPDATE work_links SET status=CASE WHEN EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='accepted') AND NOT EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='rejected') THEN 'accepted' WHEN EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='rejected') AND NOT EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='accepted') THEN 'rejected' ELSE 'observed' END WHERE id=?1";
 
 /// 追いつき：前に移した行のうち、旧棚の今の行に無いものを片付ける。`remove` は移行先の ID
 /// （バイト列）を受け取り、その行から作ったものを消す。対応の記録も消す。
@@ -538,7 +563,8 @@ DELETE FROM watch_group_members; DELETE FROM update_targets;
 UPDATE watch_groups SET name='名前を変えた束';
 UPDATE update_candidates SET status='dismissed' WHERE source_id='two';
 DELETE FROM update_candidates WHERE source_id='three';
-UPDATE collection_pair_feedback SET decision='accept';",
+UPDATE collection_pair_feedback SET decision='accept';
+DELETE FROM work_links WHERE id=2;",
             )
             .unwrap();
         let report = import();
@@ -570,15 +596,23 @@ UPDATE collection_pair_feedback SET decision='accept';",
             count("SELECT count(*) FROM collection_pair_feedback WHERE decision='accept'"),
             1
         );
+        // 退けた根拠が消え、受け入れの根拠だけが残る。
+        assert_eq!(count("SELECT count(*) FROM link_evidence"), 1);
+        assert_eq!(
+            count("SELECT count(*) FROM work_links WHERE status='accepted'"),
+            1
+        );
         // 旧棚で消したコレクションは一覧から消え、旧い ID でも開けない。
         rusqlite::Connection::open(old.join("piep.db"))
             .unwrap()
             .execute_batch(
-                "DELETE FROM work_collection_members WHERE collection_id='c1'; DELETE FROM work_collections WHERE id='c1';",
+                "DELETE FROM work_collection_members WHERE collection_id='c1'; DELETE FROM work_collections WHERE id='c1'; DELETE FROM work_links;",
             )
             .unwrap();
         import();
         assert_eq!(count(live), 1);
+        // 根拠が全部消えた関係は消える。
+        assert_eq!(count("SELECT count(*) FROM work_links"), 0);
         assert_eq!(
             count("SELECT count(*) FROM migration_records WHERE source_table='work_collections' AND source_key='c1'"),
             0

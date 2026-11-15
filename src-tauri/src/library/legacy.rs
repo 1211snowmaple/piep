@@ -1,3 +1,4 @@
+use super::repository::REQUEST_REUSED;
 use super::{
     cover_identity, image_identity, Capture, CaptureSource, CapturedAttachment, CapturedMedia,
     EntityKind, Error, Library, LibraryId, Result, SourceBody,
@@ -49,6 +50,11 @@ pub struct LegacyImportReport {
     pub stages: Vec<StageTime>,
     /// 前回の移行から行が変わっていた旧表（追いつきのとき）。
     pub changed_tables: Vec<String>,
+    /// 前回から変わっていないので読み直さなかった保存版（`snapshots` にも数える）。
+    pub unchanged_snapshots: usize,
+    /// 前に移した古い版（旧棚の今の版でないもの）が旧棚で変わっていたが、履歴の途中に
+    /// 新しい版を差し込めないので前の保存状態のままにした数（`snapshots` にも数える）。
+    pub kept_old_snapshots: usize,
     #[serde(skip)]
     lap: Option<Instant>,
 }
@@ -100,6 +106,19 @@ struct LegacyVersion<'a> {
     json_path: &'a str,
     kind: &'a str,
     acquired_at: Option<i64>,
+    /// 旧棚でその作品の最後の版（旧棚の今の版）か。
+    latest: bool,
+}
+
+/// 追いつきで一つの保存版をどう扱ったか。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VersionRead {
+    /// 読んで保存した（初めての移行、または旧棚で変わった今の版）。
+    Read,
+    /// 前回から変わっていないので読み直さなかった。
+    Unchanged,
+    /// 前に移した古い版が旧棚で変わっていた。履歴の途中を書き換えないので前のまま。
+    KeptOld,
 }
 
 impl LegacyImporter {
@@ -245,9 +264,11 @@ impl LegacyImporter {
                     r.get::<_, Option<String>>(4)?,
                 ))
             })?;
+            let editions = editions.collect::<rusqlite::Result<Vec<_>>>()?;
+            let last = editions.len().saturating_sub(1);
             let mut work = None;
-            for edition in editions {
-                let (version_id, number, json_path, kind, created_at) = edition?;
+            for (index, edition) in editions.into_iter().enumerate() {
+                let (version_id, number, json_path, kind, created_at) = edition;
                 let result = created_at
                     .as_deref()
                     .map(rows::parse_time)
@@ -264,13 +285,19 @@ impl LegacyImporter {
                                 json_path: &json_path,
                                 kind: &kind,
                                 acquired_at,
+                                latest: index == last,
                             },
                         )
                     });
                 match result {
-                    Ok(saved) => {
+                    Ok((saved, read)) => {
                         work = Some(saved.entity_id);
                         report.snapshots += 1;
+                        match read {
+                            VersionRead::Read => {}
+                            VersionRead::Unchanged => report.unchanged_snapshots += 1,
+                            VersionRead::KeptOld => report.kept_old_snapshots += 1,
+                        }
                     }
                     Err(error) => {
                         report
@@ -467,7 +494,7 @@ impl LegacyImporter {
         &self,
         target: &Library,
         version: LegacyVersion<'_>,
-    ) -> Result<super::CaptureResult> {
+    ) -> Result<(super::CaptureResult, VersionRead)> {
         let LegacyVersion {
             work_id,
             version_id,
@@ -477,209 +504,241 @@ impl LegacyImporter {
             json_path,
             kind,
             acquired_at,
+            latest,
         } = version;
         let migration_key = format!("{work_id}:{version_id}:{number}");
-        let request_id = migration_request(target, "download_versions", &migration_key)?;
         let path = self.managed_path(json_path)?;
-        let mut raw = Vec::new();
-        File::open(&path)?
-            .take(16 * 1024 * 1024 + 1)
-            .read_to_end(&mut raw)?;
-        if raw.len() > 16 * 1024 * 1024 {
-            return Err(Error::Integrity(
-                "原本 JSON が移行の読み込み上限を超えています".into(),
-            ));
+        // 追いつき：前回この版を移した時から、版の行・作品の資産の行・原本が変わっていなければ、
+        // 読み直さずに前回の保存状態を使う。
+        let fingerprint = self.version_fingerprint(work_id, version_id, &path)?;
+        if let Some(saved) = moved_version(target, &migration_key, Some(&fingerprint))? {
+            return Ok((saved, VersionRead::Unchanged));
         }
-        let data: Value = serde_json::from_slice(&raw)?;
-        let detail = data.get("detail").unwrap_or(&data);
-        let mut metadata = BTreeMap::new();
-        match provider {
-            "pixiv" => {
-                metadata.insert("content_type".into(), json!("novel"));
+        // まず前と同じ要求 ID で送る。中身が同じなら前の保存状態が返るだけで、保存状態は増えない
+        // （要求を分けると、同じ中身でも取得の記録が一つ増える）。一度移し終えた版の中身が旧棚で
+        // 変わっていて断られたときだけ、読み直した中身（指紋）ごとの要求で送り直す。
+        let imported = imported_before(target, &migration_key)?;
+        let mut request_key = migration_key.clone();
+        let (saved, request_id, included_assets) = loop {
+            let request_id = migration_request(target, "download_versions", &request_key)?;
+            let mut raw = Vec::new();
+            File::open(&path)?
+                .take(16 * 1024 * 1024 + 1)
+                .read_to_end(&mut raw)?;
+            if raw.len() > 16 * 1024 * 1024 {
+                return Err(Error::Integrity(
+                    "原本 JSON が移行の読み込み上限を超えています".into(),
+                ));
             }
-            "fanbox" => {
-                if let Some(kind) = detail.get("type").and_then(Value::as_str) {
-                    metadata.insert("content_type".into(), json!(kind));
+            let data: Value = serde_json::from_slice(&raw)?;
+            let detail = data.get("detail").unwrap_or(&data);
+            let mut metadata = BTreeMap::new();
+            match provider {
+                "pixiv" => {
+                    metadata.insert("content_type".into(), json!("novel"));
+                }
+                "fanbox" => {
+                    if let Some(kind) = detail.get("type").and_then(Value::as_str) {
+                        metadata.insert("content_type".into(), json!(kind));
+                    }
+                }
+                _ => (),
+            }
+            for name in [
+                "title",
+                "caption",
+                "create_date",
+                "series_id",
+                "series_title",
+                "text_length",
+            ] {
+                if let Some(value) = detail.get(name) {
+                    metadata.insert(name.to_owned(), value.clone());
                 }
             }
-            _ => (),
-        }
-        for name in [
-            "title",
-            "caption",
-            "create_date",
-            "series_id",
-            "series_title",
-            "text_length",
-        ] {
-            if let Some(value) = detail.get(name) {
-                metadata.insert(name.to_owned(), value.clone());
+            if let Some(user) = detail.get("user") {
+                if let Some(name) = user.get("name") {
+                    metadata.insert("author_name".into(), name.clone());
+                }
+                if let Some(id) = user.get("id") {
+                    metadata.insert("author_key".into(), id.clone());
+                }
             }
-        }
-        if let Some(user) = detail.get("user") {
-            if let Some(name) = user.get("name") {
-                metadata.insert("author_name".into(), name.clone());
+            if provider == "fanbox" {
+                if let Some(creator) = detail.get("creatorId").and_then(Value::as_str) {
+                    metadata.insert("author_key".into(), json!(creator));
+                }
+                if let Some(date) = detail.get("publishedDatetime").and_then(Value::as_str) {
+                    metadata.insert("create_date".into(), json!(date));
+                }
+                // 一覧の更新日とカードの抜粋。比較の対象ではないので、変わっても改稿にしない。
+                if let Some(date) = detail.get("updatedDatetime").and_then(Value::as_str) {
+                    metadata.insert("update_date".into(), json!(date));
+                }
+                if let Some(excerpt) = detail.get("excerpt").and_then(Value::as_str) {
+                    metadata.insert("excerpt".into(), json!(excerpt));
+                }
             }
-            if let Some(id) = user.get("id") {
-                metadata.insert("author_key".into(), id.clone());
+            if let Some(tags) = detail.get("tags").and_then(Value::as_array) {
+                let mut names: Vec<_> = tags
+                    .iter()
+                    .filter_map(|t| t.as_str().or_else(|| t.get("name").and_then(Value::as_str)))
+                    .map(str::to_owned)
+                    .collect();
+                names.sort();
+                names.dedup();
+                metadata.insert("tags".into(), json!(names));
             }
-        }
-        if provider == "fanbox" {
-            if let Some(creator) = detail.get("creatorId").and_then(Value::as_str) {
-                metadata.insert("author_key".into(), json!(creator));
-            }
-            if let Some(date) = detail.get("publishedDatetime").and_then(Value::as_str) {
-                metadata.insert("create_date".into(), json!(date));
-            }
-            // 一覧の更新日とカードの抜粋。比較の対象ではないので、変わっても改稿にしない。
-            if let Some(date) = detail.get("updatedDatetime").and_then(Value::as_str) {
-                metadata.insert("update_date".into(), json!(date));
-            }
-            if let Some(excerpt) = detail.get("excerpt").and_then(Value::as_str) {
-                metadata.insert("excerpt".into(), json!(excerpt));
-            }
-        }
-        if let Some(tags) = detail.get("tags").and_then(Value::as_array) {
-            let mut names: Vec<_> = tags
-                .iter()
-                .filter_map(|t| t.as_str().or_else(|| t.get("name").and_then(Value::as_str)))
-                .map(str::to_owned)
-                .collect();
-            names.sort();
-            names.dedup();
-            metadata.insert("tags".into(), json!(names));
-        }
-        let body = if provider == "fanbox" {
-            data.get("body")
-                .filter(|body| !body.is_null())
-                .cloned()
-                .map(SourceBody::FanboxBody)
-        } else {
-            data.get("text")
-                .or_else(|| detail.get("text"))
-                .and_then(Value::as_str)
-                .map(|text| {
-                    if provider == "pixiv" {
-                        SourceBody::PixivText(text.into())
-                    } else {
-                        SourceBody::PlainText(text.into())
-                    }
-                })
-        };
-        let mut states = BTreeMap::new();
-        // 旧棚の版は、その版のフォルダーの画像と添付がすべて。前の版にあって消えた画像を
-        // 引き継ぐと、旧棚の読書画面にない画像が現在の保存状態に残る。
-        states.insert("attachments".into(), "known".into());
-        states.insert("media".into(), "known".into());
-        if metadata
-            .get("caption")
-            .is_some_and(|v| v.as_str() == Some(""))
-            && metadata
-                .get("tags")
-                .is_some_and(|v| v.as_array().is_some_and(Vec::is_empty))
-        {
-            states.insert("caption".into(), "unknown".into());
-            states.insert("tags".into(), "unknown".into());
-        }
-        let mut media = Vec::new();
-        let mut attachments = Vec::new();
-        let mut included_assets = Vec::new();
-        let mut assets=self.conn.prepare("SELECT id,asset_type,filename,local_path,original_url,mime_type,file_size_bytes FROM assets WHERE download_id=?1 ORDER BY id")?;
-        for asset in assets.query_map([work_id], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, i64>(6)?,
-            ))
-        })? {
-            let (asset_id, role, name, stored, url, mime, size) = asset?;
-            // 他版の欠損を現在版の欠損と誤認しない。所属を調べてからファイルを開く。
-            if role == "editor_image" || !self.asset_in_version(work_id, &stored, json_path)? {
-                continue;
-            }
-            let asset_path = self.managed_path(&stored)?;
-            if size < 0 || fs::metadata(&asset_path)?.len() != size as u64 {
-                return Err(Error::Integrity(format!(
-                    "画像・添付 {asset_id} の容量が記録と違います"
-                )));
-            }
-            if role == "cover" || role == "illustration" {
-                let crate::library::ResourceReference::Media { slot } =
-                    reader::asset_reference(&role, &name)?
-                else {
-                    unreachable!()
-                };
-                let media_key = if role == "cover" {
-                    url.as_deref()
-                        .or_else(|| data.get("cover_url").and_then(Value::as_str))
-                        .or_else(|| detail.get("cover_url").and_then(Value::as_str))
-                        .or_else(|| data.get("coverImageUrl").and_then(Value::as_str))
-                        .map(|url| cover_identity(provider, url))
-                } else {
-                    url.as_deref().map(|url| image_identity(provider, url))
-                };
-                let quality = if url.as_deref().is_some_and(|u| u.contains("/c/")) {
-                    "thumbnail"
-                } else if url.as_deref().is_some_and(|u| u.contains("-original/")) {
-                    "original"
-                } else {
-                    "unknown"
-                };
-                included_assets.push((asset_id, slot.clone()));
-                media.push(CapturedMedia {
-                    slot,
-                    role: if role == "cover" {
-                        "cover"
-                    } else {
-                        "illustration"
-                    }
-                    .into(),
-                    source_key: media_key,
-                    source_url: url,
-                    quality: quality.into(),
-                    original_name: name,
-                    mime_type: mime.unwrap_or_else(|| "application/octet-stream".into()),
-                    bytes: Some(CaptureSource::File(asset_path)),
-                });
+            let body = if provider == "fanbox" {
+                data.get("body")
+                    .filter(|body| !body.is_null())
+                    .cloned()
+                    .map(SourceBody::FanboxBody)
             } else {
-                let crate::library::ResourceReference::File { slot } =
-                    reader::asset_reference(&role, &name)?
-                else {
-                    unreachable!()
-                };
-                included_assets.push((asset_id, slot.clone()));
-                attachments.push(CapturedAttachment {
-                    slot,
-                    original_name: name,
-                    mime_type: mime,
-                    bytes: CaptureSource::File(asset_path),
-                });
+                data.get("text")
+                    .or_else(|| detail.get("text"))
+                    .and_then(Value::as_str)
+                    .map(|text| {
+                        if provider == "pixiv" {
+                            SourceBody::PixivText(text.into())
+                        } else {
+                            SourceBody::PlainText(text.into())
+                        }
+                    })
+            };
+            let mut states = BTreeMap::new();
+            // 旧棚の版は、その版のフォルダーの画像と添付がすべて。前の版にあって消えた画像を
+            // 引き継ぐと、旧棚の読書画面にない画像が現在の保存状態に残る。
+            states.insert("attachments".into(), "known".into());
+            states.insert("media".into(), "known".into());
+            if metadata
+                .get("caption")
+                .is_some_and(|v| v.as_str() == Some(""))
+                && metadata
+                    .get("tags")
+                    .is_some_and(|v| v.as_array().is_some_and(Vec::is_empty))
+            {
+                states.insert("caption".into(), "unknown".into());
+                states.insert("tags".into(), "unknown".into());
             }
-        }
-        let saved = target.capture_with_legacy_classification(
-            Capture {
-                acquired_at,
-                request_id,
-                provider: provider.into(),
-                external_key: key.into(),
-                kind: EntityKind::Work,
-                route: "legacy-import".into(),
-                raw: CaptureSource::File(path.clone()),
-                metadata,
-                field_states: states,
-                body,
-                media,
-                attachments,
-            },
-            Some(kind),
-        )?;
+            let mut media = Vec::new();
+            let mut attachments = Vec::new();
+            let mut included_assets = Vec::new();
+            let mut assets=self.conn.prepare("SELECT id,asset_type,filename,local_path,original_url,mime_type,file_size_bytes FROM assets WHERE download_id=?1 ORDER BY id")?;
+            for asset in assets.query_map([work_id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, i64>(6)?,
+                ))
+            })? {
+                let (asset_id, role, name, stored, url, mime, size) = asset?;
+                // 他版の欠損を現在版の欠損と誤認しない。所属を調べてからファイルを開く。
+                if role == "editor_image" || !self.asset_in_version(work_id, &stored, json_path)? {
+                    continue;
+                }
+                let asset_path = self.managed_path(&stored)?;
+                if size < 0 || fs::metadata(&asset_path)?.len() != size as u64 {
+                    return Err(Error::Integrity(format!(
+                        "画像・添付 {asset_id} の容量が記録と違います"
+                    )));
+                }
+                if role == "cover" || role == "illustration" {
+                    let crate::library::ResourceReference::Media { slot } =
+                        reader::asset_reference(&role, &name)?
+                    else {
+                        unreachable!()
+                    };
+                    let media_key = if role == "cover" {
+                        url.as_deref()
+                            .or_else(|| data.get("cover_url").and_then(Value::as_str))
+                            .or_else(|| detail.get("cover_url").and_then(Value::as_str))
+                            .or_else(|| data.get("coverImageUrl").and_then(Value::as_str))
+                            .map(|url| cover_identity(provider, url))
+                    } else {
+                        url.as_deref().map(|url| image_identity(provider, url))
+                    };
+                    let quality = if url.as_deref().is_some_and(|u| u.contains("/c/")) {
+                        "thumbnail"
+                    } else if url.as_deref().is_some_and(|u| u.contains("-original/")) {
+                        "original"
+                    } else {
+                        "unknown"
+                    };
+                    included_assets.push((asset_id, slot.clone()));
+                    media.push(CapturedMedia {
+                        slot,
+                        role: if role == "cover" {
+                            "cover"
+                        } else {
+                            "illustration"
+                        }
+                        .into(),
+                        source_key: media_key,
+                        source_url: url,
+                        quality: quality.into(),
+                        original_name: name,
+                        mime_type: mime.unwrap_or_else(|| "application/octet-stream".into()),
+                        bytes: Some(CaptureSource::File(asset_path)),
+                    });
+                } else {
+                    let crate::library::ResourceReference::File { slot } =
+                        reader::asset_reference(&role, &name)?
+                    else {
+                        unreachable!()
+                    };
+                    included_assets.push((asset_id, slot.clone()));
+                    attachments.push(CapturedAttachment {
+                        slot,
+                        original_name: name,
+                        mime_type: mime,
+                        bytes: CaptureSource::File(asset_path),
+                    });
+                }
+            }
+            let result = target.capture_with_legacy_classification(
+                Capture {
+                    acquired_at,
+                    request_id,
+                    provider: provider.into(),
+                    external_key: key.into(),
+                    kind: EntityKind::Work,
+                    route: "legacy-import".into(),
+                    raw: CaptureSource::File(path.clone()),
+                    metadata,
+                    field_states: states,
+                    body,
+                    media,
+                    attachments,
+                },
+                Some(kind),
+            );
+            match result {
+                Err(Error::Integrity(message))
+                    if imported && request_key == migration_key && message == REQUEST_REUSED =>
+                {
+                    // 古い版を読み直すと、旧棚の今の版より後ろに積まれて今の版になってしまう。
+                    if !latest {
+                        if let Some(saved) = moved_version(target, &migration_key, None)? {
+                            return Ok((saved, VersionRead::KeptOld));
+                        }
+                    }
+                    request_key = format!("{migration_key}#{fingerprint}");
+                }
+                result => break (result?, request_id, included_assets),
+            }
+        };
         let mut conn = target.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         rows::mark_row(&tx, "download_versions", &migration_key, saved.snapshot_id)?;
+        tx.execute(
+            "INSERT INTO migration_fingerprints VALUES('download_versions',?1,?2) ON CONFLICT(source_table,source_key) DO UPDATE SET fingerprint=excluded.fingerprint",
+            params![migration_key, fingerprint.0.as_slice()],
+        )?;
         let raw: Vec<u8> = tx.query_row(
             "SELECT raw_file_id FROM acquisition_observations WHERE request_id=?1",
             [request_id.as_bytes().as_slice()],
@@ -697,7 +756,7 @@ impl LegacyImporter {
             tx.execute("UPDATE migration_records SET evidence_file_id=?2 WHERE source_table='asset_placements' AND source_key=?1",params![asset.to_string(),file])?;
         }
         tx.commit()?;
-        Ok(saved)
+        Ok((saved, VersionRead::Read))
     }
 
     fn preserve_tables(&self, target: &Library, report: &mut LegacyImportReport) -> Result<()> {
@@ -808,6 +867,50 @@ impl LegacyImporter {
     }
 }
 
+/// 前に移し終えた保存版の、移した先の保存状態。指紋を渡すと、前回の指紋と同じときだけ返す。
+fn moved_version(
+    target: &Library,
+    key: &str,
+    fingerprint: Option<&super::Fingerprint>,
+) -> Result<Option<super::CaptureResult>> {
+    let conn = target.conn.lock().map_err(|_| Error::Busy)?;
+    let found: Option<(Vec<u8>, Vec<u8>)> = conn
+        .query_row(
+            "SELECT s.entity_id,s.id FROM migration_records r
+             JOIN revision_snapshots s ON s.id=r.target_id
+             WHERE r.source_table='download_versions' AND r.source_key=?1 AND r.status='imported'
+               AND (?2 IS NULL OR EXISTS(SELECT 1 FROM migration_fingerprints f WHERE f.source_table=r.source_table AND f.source_key=r.source_key AND f.fingerprint=?2))",
+            params![key, fingerprint.map(|f| f.0.to_vec())],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((entity, snapshot)) = found else {
+        return Ok(None);
+    };
+    let id = |bytes: &[u8]| {
+        LibraryId::from_slice(bytes)
+            .map_err(|_| Error::Integrity("移行対応表の ID が不正です".into()))
+    };
+    Ok(Some(super::CaptureResult {
+        entity_id: id(&entity)?,
+        snapshot_id: id(&snapshot)?,
+        created_revision: false,
+    }))
+}
+
+/// この旧棚の保存版を、前に一度移し終えているか。
+fn imported_before(target: &Library, key: &str) -> Result<bool> {
+    let conn = target.conn.lock().map_err(|_| Error::Busy)?;
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM migration_records WHERE source_table='download_versions' AND source_key=?1 AND status='imported'",
+            [key],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 /// 移行が書く一つの変更の要求 ID。同じ鍵では前回と同じ ID を返すので、途中で止まった移行を
 /// 再開しても二重に書かない。移行先の利用者の変更と見分ける印にもなる。
 fn migration_request(target: &Library, table: &str, key: &str) -> Result<LibraryId> {
@@ -889,8 +992,29 @@ mod tests {
                 .import(&target, &AtomicBool::new(false), |_| {})
                 .unwrap();
             assert_eq!(second.snapshots, 1);
+            assert_eq!(first.unchanged_snapshots, 0);
+            assert_eq!(second.unchanged_snapshots, 1);
+            // 旧棚で資産の行が変われば、その版は読み直す。
+            Connection::open(old.join("piep.db"))
+                .unwrap()
+                .execute(
+                    "UPDATE assets SET original_url='https://example.invalid/cover.png' WHERE id=1",
+                    [],
+                )
+                .unwrap();
+            let third = source
+                .import(&target, &AtomicBool::new(false), |_| {})
+                .unwrap();
+            assert_eq!(third.snapshots, 1, "{:?}", third.unresolved);
+            // 変わった版をもう一度追いつかせても、同じ要求で書き直さない。
+            let fourth = source
+                .import(&target, &AtomicBool::new(false), |_| {})
+                .unwrap();
+            assert_eq!(fourth.unchanged_snapshots, 1);
+            assert_eq!(third.unchanged_snapshots, 0);
             let work = &target.works(10).unwrap()[0];
-            assert_eq!(target.snapshots(work.id).unwrap().len(), 1);
+            // 取得元の URL は保存版の中身に入るので、変われば版が一つ増える（二度目の追いつきでは増えない）。
+            assert_eq!(target.snapshots(work.id).unwrap().len(), 2);
             assert!(target.user_state(work.id, target.id).unwrap().favorite);
             let file = target
                 .media_file(work.id, work.snapshot_id, "cover")
@@ -965,6 +1089,27 @@ INSERT INTO downloads VALUES(1,'pixiv','123','title','author',0);").unwrap();
             .collect::<std::result::Result<_, _>>()
             .unwrap();
         assert_eq!(counts, vec![2, 1]);
+        target.verify().unwrap();
+        // 旧棚で古い版の画像の取得元だけが変わっても、追いつきは履歴の途中に版を足さない。
+        // 足すと、それが今の版になって旧棚の今の版と食い違う。
+        Connection::open(old.join("piep.db"))
+            .unwrap()
+            .execute(
+                "UPDATE assets SET original_url='https://example.invalid/a.png' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        let again = LegacyImporter::open(&old)
+            .unwrap()
+            .import(&target, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        assert_eq!(again.unresolved_records, 0, "{:?}", again.unresolved);
+        assert_eq!(
+            (again.kept_old_snapshots, again.unchanged_snapshots),
+            (1, 0)
+        );
+        assert_eq!(target.snapshots(work).unwrap().len(), 2);
+        assert_eq!(target.work_card(work).unwrap().version_number, 2);
         target.verify().unwrap();
         drop(target);
         fs::remove_dir_all(temp).unwrap();

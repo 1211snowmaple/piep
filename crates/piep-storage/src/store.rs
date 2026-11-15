@@ -151,6 +151,39 @@ pub fn regular_file(path: &Path) -> Result<fs::Metadata> {
 }
 
 /// 原本の実体を DB から参照する前に、ディレクトリの公開も同期する。
+/// 使い回した実体の更新時刻を今にする。回収は、未参照でも最後に使われてから猶予が
+/// 過ぎていない実体を退けない。保存は実体を置いた（使い回した）あとで台帳に確定するので、
+/// その間の実体を未参照と見て退けないための印になる。印を付けられなくても保存は続ける
+/// （回収の猶予が短くなるだけで、退けた実体は台帳が参照すれば戻せる）。
+fn freshen(path: &Path) {
+    let _ = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(std::time::SystemTime::now()));
+}
+
+/// 実体領域にあるファイルの種類。回収が一覧に使う。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoredEntry {
+    /// 公開済みの実体 `<hash>.obj`。
+    Object(Fingerprint),
+    /// 書き込み途中で残った一時ファイル `<hash>.<UUID>.part`。
+    Part,
+    /// 壊れて退けた実体 `<hash>.<UUID>.damaged`。
+    Damaged,
+    /// 回収で隔離した実体 `<hash>.<隔離した時刻 ms>.quarantined`。
+    Quarantined { id: Fingerprint, at_ms: i64 },
+}
+
+/// 実体領域の一つのファイル。
+#[derive(Clone, Debug)]
+pub struct StoredListing {
+    pub entry: StoredEntry,
+    pub path: PathBuf,
+    pub modified: std::time::SystemTime,
+    pub bytes: u64,
+}
+
 pub fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(windows)]
     let file = {
@@ -461,6 +494,7 @@ impl ObjectStore {
         // 壊れた既存の実体は再利用しない。下で検証した中身と置き換える。
         match self.load(&dest, &result) {
             Ok((_, encoding)) => {
+                freshen(&dest);
                 self.remember(id, encoding);
                 return Ok((result, encoding));
             }
@@ -528,7 +562,10 @@ impl ObjectStore {
             Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 match self.read_chunk(expected) {
-                    Ok(_) => false,
+                    Ok(_) => {
+                        freshen(dest);
+                        false
+                    }
                     Err(error) if damaged(&error) || missing(&error) => {
                         self.replace_damaged(temporary, dest, expected)?
                     }
@@ -575,7 +612,11 @@ impl ObjectStore {
     /// 正しい中身を渡すと置き換わるので、受信し直す対象として扱える。
     pub fn chunk_state(&self, expected: &FileChunk) -> Result<ChunkState> {
         match self.read_chunk(expected) {
-            Ok(_) => Ok(ChunkState::Verified),
+            Ok(_) => {
+                // 受信し直さずに使い回す判断に使われる。回収の猶予を今から数え直す。
+                freshen(&self.chunk_path(expected.id, false)?);
+                Ok(ChunkState::Verified)
+            }
             Err(error) if missing(&error) => Ok(ChunkState::Missing),
             Err(error) if damaged(&error) => Ok(ChunkState::Damaged),
             Err(error) => Err(error),
@@ -586,7 +627,10 @@ impl ObjectStore {
     /// 受信し直す部分を決めるときは、破損も区別できる `chunk_state` を使う。
     pub fn has_verified_chunk(&self, expected: &FileChunk) -> Result<bool> {
         match self.read_chunk(expected) {
-            Ok(_) => Ok(true),
+            Ok(_) => {
+                freshen(&self.chunk_path(expected.id, false)?);
+                Ok(true)
+            }
             Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e),
         }
@@ -716,9 +760,14 @@ impl ObjectStore {
     }
 
     /// `verify` と同じ検査を一度の読み取りで行い、各部分の保存表現も返す。
+    /// 既存のファイルを新しい参照に使う前に呼ばれるので、各部分の回収の猶予を数え直す。
     pub fn inspect(&self, file: &ContentFile) -> Result<StoredFile> {
+        let encodings = self.restore(file, std::io::sink())?;
+        for chunk in &file.chunks {
+            freshen(&self.chunk_path(chunk.id, false)?);
+        }
         Ok(StoredFile {
-            encodings: self.restore(file, std::io::sink())?,
+            encodings,
             file: file.clone(),
         })
     }
@@ -782,6 +831,110 @@ impl ObjectStore {
         drop(output);
         publish_new(&pending.0, destination)?;
         sync_directory(parent)?;
+        Ok(())
+    }
+
+    /// 実体領域のファイルを全部並べる。中身は読まない。知らない名前のファイルは返さない。
+    pub fn listing(&self) -> Result<Vec<StoredListing>> {
+        let mut found = Vec::new();
+        for dir in fs::read_dir(&self.root)? {
+            let dir = dir?;
+            let name = dir.file_name();
+            let name = name.to_string_lossy();
+            if name.len() != 2 || !name.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            regular_directory(&dir.path())?;
+            for entry in fs::read_dir(dir.path())? {
+                let path = entry?.path();
+                let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let parts: Vec<&str> = file_name.split('.').collect();
+                let entry = match parts.as_slice() {
+                    [hash, "obj"] => StoredEntry::Object(Fingerprint::parse(hash)?),
+                    [_, _, "part"] => StoredEntry::Part,
+                    [_, _, "damaged"] => StoredEntry::Damaged,
+                    [hash, at, "quarantined"] => StoredEntry::Quarantined {
+                        id: Fingerprint::parse(hash)?,
+                        at_ms: at
+                            .parse()
+                            .map_err(|_| Error::Integrity("隔離した実体の名前が不正です".into()))?,
+                    },
+                    _ => continue,
+                };
+                let meta = regular_file(&path)?;
+                found.push(StoredListing {
+                    entry,
+                    modified: meta.modified()?,
+                    bytes: meta.len(),
+                    path,
+                });
+            }
+        }
+        Ok(found)
+    }
+
+    /// 公開済みの実体ファイルがあるか（中身は読まない）。
+    pub fn has_object(&self, id: Fingerprint) -> Result<bool> {
+        match regular_file(&self.chunk_path(id, false)?) {
+            Ok(_) => Ok(true),
+            Err(error) if missing(&error) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// 実体を隔離する。最後に使われたのが `unused_since` より後なら退けず false を返す
+    /// （一覧を作ったあとに保存が使い回した実体）。実体がなければ false。
+    pub fn quarantine(
+        &self,
+        id: Fingerprint,
+        unused_since: std::time::SystemTime,
+        at_ms: i64,
+    ) -> Result<bool> {
+        let path = self.chunk_path(id, false)?;
+        let meta = match regular_file(&path) {
+            Ok(meta) => meta,
+            Err(error) if missing(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if meta.modified()? > unused_since {
+            return Ok(false);
+        }
+        fs::rename(&path, path.with_extension(format!("{at_ms}.quarantined")))?;
+        sync_directory(path.parent().unwrap())?;
+        Ok(true)
+    }
+
+    /// 隔離した実体を戻す。同じ実体がもう置き直されていれば、隔離した方を消す。
+    /// 戻したら true。
+    pub fn restore_quarantined(&self, listing: &StoredListing) -> Result<bool> {
+        let StoredEntry::Quarantined { id, .. } = listing.entry else {
+            return Err(Error::Integrity("隔離した実体ではありません".into()));
+        };
+        let dest = self.chunk_path(id, false)?;
+        let restored = match fs::hard_link(&listing.path, &dest) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(e) => return Err(e.into()),
+        };
+        fs::remove_file(&listing.path)?;
+        sync_directory(dest.parent().unwrap())?;
+        Ok(restored)
+    }
+
+    /// 一覧で見つけた、実体でないファイル（隔離・壊れ・一時）を消す。公開済みの実体は消さない。
+    pub fn remove_listed(&self, listing: &StoredListing) -> Result<()> {
+        if matches!(listing.entry, StoredEntry::Object(_)) {
+            return Err(Error::Integrity(
+                "公開済みの実体は隔離してから消します".into(),
+            ));
+        }
+        regular_file(&listing.path)?;
+        if !listing.path.starts_with(&self.root) {
+            return Err(Error::UnsafePath(listing.path.clone()));
+        }
+        fs::remove_file(&listing.path)?;
         Ok(())
     }
 

@@ -1291,3 +1291,55 @@ fn neighbors_follow_each_collection_series_and_author_in_the_old_reader_order() 
         Some(&library.work_card(ids["w2"]).unwrap())
     );
 }
+
+#[test]
+fn a_removed_work_leaves_the_list_and_counts_but_keeps_its_history_and_comes_back_when_saved_again()
+{
+    let temp = Temp::new();
+    let library = Library::create(&temp.0).unwrap();
+    let ids = shelf(&library);
+    let before = library.list_works(&WorkListQuery::default()).unwrap();
+    let generation = library.library_item_generation(ids[2]).unwrap().unwrap();
+    // 古い世代は競合として断る。
+    assert!(library
+        .remove_work(LibraryId::now_v7(), ids[2], generation + 1)
+        .is_err());
+    let request = LibraryId::now_v7();
+    let shelf_generation = library.remove_work(request, ids[2], generation).unwrap();
+    // 同じ要求の再送は同じ結果。別の内容に使い回すと断る。
+    assert_eq!(
+        library.remove_work(request, ids[2], generation).unwrap(),
+        shelf_generation
+    );
+    assert!(library.remove_work(request, ids[3], 1).is_err());
+    assert!(library
+        .remove_work(LibraryId::now_v7(), ids[2], generation)
+        .is_err());
+    assert_eq!(library.library_item_generation(ids[2]).unwrap(), None);
+    let after = library.list_works(&WorkListQuery::default()).unwrap();
+    assert_eq!(after.total, before.total.map(|n| n - 1));
+    assert!(after.items.iter().all(|card| card.id != ids[2]));
+    // 作品の識別と保存版は残る。
+    assert!(!library.snapshots(ids[2]).unwrap().is_empty());
+    library.verify().unwrap();
+    // もう一度保存すると棚に戻る。
+    let again = library
+        .capture(capture(&Work {
+            provider: "pixiv",
+            key: "3",
+            title: "a",
+            author: "X",
+            created: None,
+            updated: None,
+            acquired: 8_000,
+            body: "12345",
+        }))
+        .unwrap();
+    assert_eq!(again.entity_id, ids[2]);
+    assert!(library.library_item_generation(ids[2]).unwrap().is_some());
+    assert_eq!(
+        library.list_works(&WorkListQuery::default()).unwrap().total,
+        before.total
+    );
+    library.verify().unwrap();
+}

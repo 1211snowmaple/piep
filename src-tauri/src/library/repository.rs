@@ -103,6 +103,10 @@ pub struct Capture {
     pub attachments: Vec<CapturedAttachment>,
 }
 
+/// 同じ要求 ID が前と違う内容で送られたときの、完全性の失敗の文言。移行の追いつきは、これを
+/// 見て旧棚で中身が変わった版を別の要求で送り直す。
+pub(crate) const REQUEST_REUSED: &str = "同じ要求 ID が異なる内容で再送されました";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CaptureResult {
     pub entity_id: LibraryId,
@@ -162,6 +166,8 @@ pub struct Library {
     pub(crate) conn: Mutex<Connection>,
     /// 使い終えた読み取り専用の接続。`reader` が貸し出す。
     readers: Mutex<Vec<Connection>>,
+    /// 実体の回収と、台帳の全ファイルを読む処理（検証・バックアップ）を同時に走らせない。
+    pub(crate) storage_gate: Mutex<()>,
     _process_lock: File,
 }
 
@@ -312,6 +318,7 @@ impl Library {
             objects,
             conn: Mutex::new(conn),
             readers: Mutex::new(Vec::new()),
+            storage_gate: Mutex::new(()),
             _process_lock: lock,
         };
         library.ensure_work_list()?;
@@ -351,6 +358,7 @@ impl Library {
             objects,
             conn: Mutex::new(conn),
             readers: Mutex::new(Vec::new()),
+            storage_gate: Mutex::new(()),
             _process_lock: lock,
         };
         library.ensure_work_list()?;
@@ -753,9 +761,7 @@ impl Library {
         let receipt = tx.query_row("SELECT entity_id,result_snapshot_id,created_revision,request_hash FROM acquisition_observations WHERE request_id=?1",[capture.request_id.as_bytes().as_slice()],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,bool>(2)?,r.get::<_,Vec<u8>>(3)?))).optional()?;
         if let Some((entity, snapshot, created, hash)) = receipt {
             if hash != request_hash.0 {
-                return Err(Error::Integrity(
-                    "同じ要求 ID が異なる内容で再送されました".into(),
-                ));
+                return Err(Error::Integrity(REQUEST_REUSED.into()));
             }
             if let Some(context) = &context {
                 let info = super::acquisitions::load_info(&tx, context.ticket.id)?;
@@ -1524,6 +1530,7 @@ impl Library {
     /// 全ファイルを復元して確かめる。棚の大きさに比例して時間がかかるので、
     /// 書き込み用の接続をふさがず、一ファイルごとに読み取りを手放す。
     pub fn verify(&self) -> Result<u64> {
+        let _turn = self.storage_gate.lock().map_err(|_| Error::Busy)?;
         let conn = self.reader()?;
         let unsealed: i64 = conn.query_row(
             "SELECT (SELECT count(*) FROM content_files WHERE sealed=0)+(SELECT count(*) FROM revision_snapshots WHERE published=0)+(SELECT count(*) FROM edit_revisions WHERE sealed=0)",

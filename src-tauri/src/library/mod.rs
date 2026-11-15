@@ -17,6 +17,7 @@ mod operations;
 mod reader;
 mod reader_references;
 mod reading;
+mod reclaim;
 mod renditions;
 mod repository;
 mod resources;
@@ -49,6 +50,7 @@ pub use reader::{
 };
 pub use reader_references::BodyAssetReference;
 pub use reading::{ReadingAnchor, ReadingLocation, ReadingPosition, ReadingUpdate};
+pub use reclaim::{ReclaimOptions, ReclaimReport};
 pub use repository::{
     Capture, CaptureResult, CaptureSource, CapturedAttachment, CapturedMedia, EntityKind, Library,
     WorkSummary,
