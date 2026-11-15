@@ -635,8 +635,28 @@ export function libraryV2SaveEditor(work: string, save: {
   return invoke<ShelfEditState>("library_v2_save_editor", { request: crypto.randomUUID(), work, save });
 }
 
-/** 下書きを捨てる・反映をやめる。正本に切り替えた棚だけ。 */
-export function libraryV2EditPointer(work: string, expected: number, change: "discard" | "unpublish"): Promise<ShelfEditState> {
+/** 作品の編集のようす（下書き・反映中の版・以前の編集版を新しい順に）。 */
+export interface ShelfEditHistory {
+  generation: number;
+  active: ShelfEditorRevision | null;
+  draft: ShelfEditorRevision | null;
+  archived: ShelfEditorRevision[];
+}
+
+export function libraryV2EditHistory(work: string): Promise<ShelfEditHistory> {
+  return invoke<ShelfEditHistory>("library_v2_edit_history", { work });
+}
+
+/**
+ * 編集の指し先の変更。下書きを捨てる・反映をやめる・以前の編集版をもう一度反映する・
+ * 以前の編集版を一覧から外す（版そのものは棚に残る）・全部外す。
+ */
+export type ShelfEditChange =
+  | { kind: "discard" | "unpublish" | "forget_all" }
+  | { kind: "restore" | "forget"; edit: string };
+
+/** 編集の指し先を変える。正本に切り替えた棚だけ。 */
+export function libraryV2EditPointer(work: string, expected: number, change: ShelfEditChange): Promise<ShelfEditState> {
   return invoke<ShelfEditState>("library_v2_edit_pointer", { request: crypto.randomUUID(), work, expected, change });
 }
 

@@ -37,9 +37,10 @@ pub struct UserStateChange {
     pub watching: Option<bool>,
 }
 
-/// 編集の指し先の変更（下書きと反映中の版）。版そのものは消さない。
+/// 編集の指し先の変更（下書き・反映中の版・以前の編集版の一覧）。版そのものは消さない。
+/// 反映から外れた版は以前の編集版の一覧へ載り、反映し直した版は一覧から外れる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", tag = "kind")]
 pub enum EditPointerChange {
     /// 下書きを反映する（反映中の版を下書きに替え、下書きを空にする）。
     Publish,
@@ -47,6 +48,12 @@ pub enum EditPointerChange {
     Discard,
     /// 反映をやめ、取り込んだ本文へ戻す。
     Unpublish,
+    /// 以前の編集版をもう一度反映する（下書きはそのまま）。
+    Restore { edit: LibraryId },
+    /// 以前の編集版を一覧から外す。
+    Forget { edit: LibraryId },
+    /// 以前の編集版を一覧から全部外す。
+    ForgetAll,
 }
 
 pub struct EditRequest<'a> {
@@ -408,6 +415,19 @@ impl Library {
         if generation != expected {
             return Err(Error::Integrity("編集中に別の変更が保存されました".into()));
         }
+        let archived: Vec<Vec<u8>> = tx
+            .prepare("SELECT edit_id FROM edit_archive WHERE work_id=?1 AND user_id=?2")?
+            .query_map(params![key.0, key.1], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let listed = |edit: LibraryId| {
+            let edit = edit.as_bytes().to_vec();
+            if archived.contains(&edit) {
+                Ok(edit)
+            } else {
+                Err(Error::Integrity("以前の編集版にありません".into()))
+            }
+        };
+        let mut forget: Vec<Vec<u8>> = Vec::new();
         let (next_active, next_draft) = match change {
             EditPointerChange::Publish => match &draft {
                 Some(draft) => (Some(draft.clone()), None),
@@ -415,6 +435,15 @@ impl Library {
             },
             EditPointerChange::Discard => (active.clone(), None),
             EditPointerChange::Unpublish => (None, draft.clone()),
+            EditPointerChange::Restore { edit } => (Some(listed(edit)?), draft.clone()),
+            EditPointerChange::Forget { edit } => {
+                forget.push(listed(edit)?);
+                (active.clone(), draft.clone())
+            }
+            EditPointerChange::ForgetAll => {
+                forget.clone_from(&archived);
+                (active.clone(), draft.clone())
+            }
         };
         let to_id = |value: &Option<Vec<u8>>| {
             value
@@ -423,17 +452,38 @@ impl Library {
                 .transpose()
                 .map_err(|_| Error::Integrity("編集の識別子が不正です".into()))
         };
-        if (next_active.as_ref(), next_draft.as_ref()) == (active.as_ref(), draft.as_ref()) {
+        if (next_active.as_ref(), next_draft.as_ref()) == (active.as_ref(), draft.as_ref())
+            && forget.is_empty()
+        {
             return Ok(super::EditState {
                 active: to_id(&active)?,
                 draft: to_id(&draft)?,
                 generation,
             });
         }
+        // 一覧にだけある作品（旧棚から移した以前の編集版）には、まだ編集文書の行が無い。
+        tx.execute("INSERT INTO edit_documents(work_id,user_id,generation) VALUES(?1,?2,0) ON CONFLICT(work_id,user_id) DO NOTHING",params![key.0, key.1])?;
         tx.execute(
             "UPDATE edit_documents SET active_id=?3,draft_id=?4,generation=generation+1 WHERE work_id=?1 AND user_id=?2",
             params![key.0, key.1, next_active, next_draft],
         )?;
+        if next_active != active {
+            if let Some(old) = &active {
+                tx.execute(
+                    "INSERT OR IGNORE INTO edit_archive(work_id,user_id,edit_id) VALUES(?1,?2,?3)",
+                    params![key.0, key.1, old],
+                )?;
+            }
+            if let Some(new) = &next_active {
+                forget.push(new.clone());
+            }
+        }
+        for edit in &forget {
+            tx.execute(
+                "DELETE FROM edit_archive WHERE work_id=?1 AND user_id=?2 AND edit_id=?3",
+                params![key.0, key.1, edit],
+            )?;
+        }
         if next_active != active && user == self.id {
             self.refresh_work_list(&tx, work)?;
         }

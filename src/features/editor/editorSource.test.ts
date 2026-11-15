@@ -66,7 +66,7 @@ describe("the editor on the new shelf", () => {
 
     // 画面を作り直しても（同じ作品なら）最後に見た世代で続ける。
     await shelfEditorSource(WORK).discard();
-    expect(api.libraryV2EditPointer).toHaveBeenCalledWith(WORK, 4, "discard");
+    expect(api.libraryV2EditPointer).toHaveBeenCalledWith(WORK, 4, { kind: "discard" });
     expect(api.libraryV2Editor).toHaveBeenCalledTimes(2);
   });
 });

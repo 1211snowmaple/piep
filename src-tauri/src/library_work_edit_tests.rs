@@ -137,6 +137,95 @@ fn the_editor_opens_the_source_saves_drafts_once_publishes_and_goes_back() {
         .collect();
     assert!(texts.iter().any(|t| t.contains("一行目")), "{texts:?}");
     assert!(!texts.iter().any(|t| t.contains("直した本文")), "{texts:?}");
+    // 戻した版は以前の編集版に載り、もう一度反映すると一覧から外れる。
+    let history = library.edit_history(work).unwrap();
+    assert_eq!(history.generation, back.generation);
+    assert_eq!(history.archived.len(), 1);
+    let old = history.archived[0].id;
+    assert_eq!(history.archived[0].title.as_deref(), Some("新しい題"));
+    let restored = library
+        .change_edit_pointers(
+            LibraryId::now_v7(),
+            work,
+            library.id,
+            back.generation,
+            EditPointerChange::Restore { edit: old },
+        )
+        .unwrap();
+    assert_eq!(restored.active, Some(old));
+    assert!(library.edit_history(work).unwrap().archived.is_empty());
+    assert_eq!(library.work_card(work).unwrap().title, "新しい題");
+    // 一覧に無い版は反映し直せない。
+    assert!(library
+        .change_edit_pointers(
+            LibraryId::now_v7(),
+            work,
+            library.id,
+            restored.generation,
+            EditPointerChange::Restore { edit: old },
+        )
+        .is_err());
+    // 別の下書きを反映すると、前の版が一覧に載る。一覧から外しても版は残る。
+    let drafted = library
+        .save_editor(
+            LibraryId::now_v7(),
+            work,
+            EditorSave {
+                expected: restored.generation,
+                title: None,
+                ..save(0, None, true)
+            },
+        )
+        .unwrap();
+    let history = library.edit_history(work).unwrap();
+    assert_eq!(
+        history.archived.iter().map(|e| e.id).collect::<Vec<_>>(),
+        vec![old]
+    );
+    let forgot = library
+        .change_edit_pointers(
+            LibraryId::now_v7(),
+            work,
+            library.id,
+            drafted.generation,
+            EditPointerChange::Forget { edit: old },
+        )
+        .unwrap();
+    assert_eq!(forgot.generation, drafted.generation + 1);
+    assert!(library.edit_history(work).unwrap().archived.is_empty());
+    assert!(library.edit(work, old).is_ok());
+    let back = library
+        .change_edit_pointers(
+            LibraryId::now_v7(),
+            work,
+            library.id,
+            forgot.generation,
+            EditPointerChange::Unpublish,
+        )
+        .unwrap();
+    assert_eq!(library.edit_history(work).unwrap().archived.len(), 1);
+    let cleared = library
+        .change_edit_pointers(
+            LibraryId::now_v7(),
+            work,
+            library.id,
+            back.generation,
+            EditPointerChange::ForgetAll,
+        )
+        .unwrap();
+    assert!(library.edit_history(work).unwrap().archived.is_empty());
+    // 一覧が空なら、全部外しても書かない。
+    let same = library
+        .change_edit_pointers(
+            LibraryId::now_v7(),
+            work,
+            library.id,
+            cleared.generation,
+            EditPointerChange::ForgetAll,
+        )
+        .unwrap();
+    assert_eq!(same.generation, cleared.generation);
+    let back = cleared;
     // 下書きが無ければ反映できない。捨てるのは変わらなければ書かない。
     assert!(library
         .change_edit_pointers(
@@ -157,5 +246,79 @@ fn the_editor_opens_the_source_saves_drafts_once_publishes_and_goes_back() {
         )
         .unwrap();
     assert_eq!(same.generation, back.generation);
+    library.verify().unwrap();
+}
+
+#[test]
+fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
+    let temp =
+        Temp(std::env::temp_dir().join(format!("piep-edit-archive-{}", LibraryId::now_v7())));
+    let library = Library::create(&temp.0).unwrap();
+    let work = library
+        .capture(Capture {
+            acquired_at: None,
+            request_id: LibraryId::now_v7(),
+            provider: "local".into(),
+            external_key: "w".into(),
+            kind: EntityKind::Work,
+            route: "test".into(),
+            raw: serde_json::to_vec(&json!({ "key": "w" })).unwrap().into(),
+            metadata: BTreeMap::from([("title".into(), json!("元の題"))]),
+            field_states: BTreeMap::new(),
+            body: Some("本文".into()),
+            media: vec![],
+            attachments: vec![],
+        })
+        .unwrap()
+        .entity_id;
+    let base = library.editor_view(work).unwrap().base;
+    let save = |expected, text: &str, publish| EditorSave {
+        base,
+        expected,
+        title: None,
+        blocks: vec![input("paragraph", Some(text), None)],
+        media: vec![],
+        publish,
+    };
+    // 一つ目を反映し、二つ目（一つ目を親にした下書き）を反映すると、一つ目は親なので載らない。
+    let first = library
+        .save_editor(LibraryId::now_v7(), work, save(0, "一", true))
+        .unwrap();
+    let second = library
+        .save_editor(
+            LibraryId::now_v7(),
+            work,
+            save(first.generation, "二", true),
+        )
+        .unwrap();
+    let back = library
+        .change_edit_pointers(
+            LibraryId::now_v7(),
+            work,
+            library.id,
+            second.generation,
+            EditPointerChange::Unpublish,
+        )
+        .unwrap();
+    assert!(back.active.is_none());
+    // スキーマ 17 の棚に戻して開き直す。
+    {
+        let conn = library.conn.lock().unwrap();
+        conn.execute_batch(
+            "DROP TABLE edit_archive; DELETE FROM schema_migrations WHERE version=18; PRAGMA user_version=17;",
+        )
+        .unwrap();
+    }
+    drop(library);
+    let library = Library::open(&temp.0).unwrap();
+    let history = library.edit_history(work).unwrap();
+    assert_eq!(
+        history
+            .archived
+            .iter()
+            .map(|e| Some(e.id))
+            .collect::<Vec<_>>(),
+        vec![second.active]
+    );
     library.verify().unwrap();
 }

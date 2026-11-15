@@ -60,6 +60,18 @@ pub struct EditorView {
     pub media: Vec<EditorMedia>,
 }
 
+/// 作品の画面に出す編集のようす：下書き・反映中の版・以前の編集版（新しい順）。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditHistory {
+    /// 編集の世代。指し先を変えるときにそのまま返す。
+    pub generation: i64,
+    pub active: Option<EditorRevision>,
+    pub draft: Option<EditorRevision>,
+    /// 反映から外れた版。もう一度反映するか、一覧から外せる。
+    pub archived: Vec<EditorRevision>,
+}
+
 /// 編集画面からの保存。
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,6 +125,44 @@ impl Library {
             base_version: self.edit_base_version(work, edit)?,
             title: info.content.title,
             created_at: info.created_at,
+        })
+    }
+
+    /// 作品の編集のようす（本文は組まない）。
+    pub fn edit_history(&self, work: LibraryId) -> Result<EditHistory> {
+        let EditState {
+            active,
+            draft,
+            generation,
+        } = self.edit_state(work, self.id)?;
+        let archived: Vec<Vec<u8>> = {
+            let conn = self.reader()?;
+            let mut stmt = conn.prepare(
+                "SELECT a.edit_id FROM edit_archive a JOIN edit_revisions r ON r.id=a.edit_id
+                 WHERE a.work_id=?1 AND a.user_id=?2 ORDER BY r.created_at DESC,r.id DESC",
+            )?;
+            let rows = stmt.query_map(
+                [work.as_bytes().as_slice(), self.id.as_bytes().as_slice()],
+                |r| r.get(0),
+            )?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let revision = |edit: Option<LibraryId>| {
+            edit.map(|edit| self.editor_revision(work, edit))
+                .transpose()
+        };
+        Ok(EditHistory {
+            generation,
+            active: revision(active)?,
+            draft: revision(draft)?,
+            archived: archived
+                .iter()
+                .map(|edit| {
+                    let edit = LibraryId::from_slice(edit)
+                        .map_err(|_| Error::Integrity("編集の ID が不正です".into()))?;
+                    self.editor_revision(work, edit)
+                })
+                .collect::<Result<_>>()?,
         })
     }
 

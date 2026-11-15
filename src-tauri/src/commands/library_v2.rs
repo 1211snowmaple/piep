@@ -1460,6 +1460,23 @@ fn after_edit(state: &LibraryV2, library: &Library) {
     }
 }
 
+/// 作品の編集のようす（下書き・反映中の版・以前の編集版）。読むだけなので切り替える前も開ける。
+#[tauri::command]
+pub async fn library_v2_edit_history(
+    state: State<'_, Arc<LibraryV2>>,
+    work: String,
+) -> Result<crate::library_work_edit::EditHistory, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        library
+            .edit_history(parse_id(&work)?)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 編集画面の段を下書きに保存する（`publish` なら続けて反映する。正本に切り替えた棚だけ）。
 #[tauri::command]
 pub async fn library_v2_save_editor(
@@ -1505,7 +1522,13 @@ pub async fn library_v2_edit_pointer(
                 change,
             )
             .map_err(|e| e.to_string())?;
-        if change != crate::library::EditPointerChange::Discard {
+        // 反映中の版が変わるときだけ、一覧の集計と本文の検索を追いつかせる。
+        if matches!(
+            change,
+            crate::library::EditPointerChange::Publish
+                | crate::library::EditPointerChange::Unpublish
+                | crate::library::EditPointerChange::Restore { .. }
+        ) {
             after_edit(&state, &library);
         }
         Ok(changed)

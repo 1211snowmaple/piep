@@ -138,6 +138,8 @@ impl LegacyImporter {
         }
         let mut wanted: BTreeMap<LibraryId, Pointers> =
             current.keys().map(|work| (*work, (None, None))).collect();
+        // 旧棚の「以前の編集版」。切り替える前は旧棚が正なので、一覧は旧棚に合わせて作り直す。
+        let mut archived: Vec<(LibraryId, LibraryId)> = Vec::new();
         for edit in edits {
             let old = edit.row.integer("id")?;
             let old_work = edit.row.integer("download_id")?;
@@ -203,7 +205,9 @@ impl LegacyImporter {
                 mark_row(&tx, "work_edit_blocks", &old.to_string(), block.id)?;
             }
             let status = edit.row.text("status")?;
-            if status != "archived" {
+            if status == "archived" {
+                archived.push((work, id));
+            } else {
                 let slot = wanted.entry(work).or_default();
                 let place = if status == "active" {
                     &mut slot.0
@@ -229,6 +233,20 @@ impl LegacyImporter {
             if before.0 != active {
                 target.refresh_work_list(&tx, work)?;
             }
+        }
+        tx.execute(
+            "DELETE FROM edit_archive WHERE user_id=?1",
+            [target.id.as_bytes().as_slice()],
+        )?;
+        for (work, edit) in archived {
+            tx.execute(
+                "INSERT OR IGNORE INTO edit_archive(work_id,user_id,edit_id) VALUES(?1,?2,?3)",
+                params![
+                    work.as_bytes().as_slice(),
+                    target.id.as_bytes().as_slice(),
+                    edit.as_bytes().as_slice()
+                ],
+            )?;
         }
         mark_table(&tx, "work_edit_revisions")?;
         mark_table(&tx, "work_edit_blocks")?;
@@ -428,6 +446,14 @@ INSERT INTO work_edit_blocks VALUES(12,7,9,'image',NULL,99,NULL);"#).unwrap();
         again();
         let third = library.edit_state(work, library.id).unwrap();
         assert!(third.active.is_none());
+        // 外した編集は以前の編集版の一覧に載る。
+        let listed: i64 = library
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM edit_archive", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(listed, 1);
         assert_eq!(third.generation, second.generation + 1);
         library.verify().unwrap();
     }
@@ -451,6 +477,13 @@ INSERT INTO work_edit_blocks VALUES(12,7,9,'image',NULL,99,NULL);"#).unwrap();
                 .get::<_, i64>(0))
                 .unwrap(),
             3
+        );
+        // 旧棚の「以前の編集版」は、新しい棚の一覧にも載る。
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM edit_archive", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
         );
     }
 }

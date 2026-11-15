@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import type { ShelfWork } from "@/services/libraryV2Api";
+import { SHELF_V2_PREFERENCE_KEY } from "@/features/library/shelfV2";
 import WorkPage from "./WorkPage";
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
@@ -20,6 +21,9 @@ const api = vi.hoisted(() => ({
   libraryV2VersionText: vi.fn(),
   libraryV2Original: vi.fn(),
   libraryV2RenderPdfPage: vi.fn(),
+  libraryV2Status: vi.fn(),
+  libraryV2EditHistory: vi.fn(),
+  libraryV2EditPointer: vi.fn(),
 }));
 vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
@@ -82,7 +86,9 @@ function renderPage(hash: string) {
 describe("ShelfWorkPage", () => {
   beforeEach(() => {
     for (const fn of Object.values(api)) fn.mockReset();
+    window.localStorage.clear();
     api.libraryV2Work.mockResolvedValue(work);
+    api.libraryV2EditHistory.mockResolvedValue({ generation: 0, active: null, draft: null, archived: [] });
     api.libraryV2Content.mockImplementation(async (_work: string, _snapshot: string | null, page: number) => ({
       page,
       pageCount: 2,
@@ -123,6 +129,51 @@ describe("ShelfWorkPage", () => {
     api.libraryV2Work.mockResolvedValue({ ...work, edit_id: FIRST, editBaseVersion: 1 });
     renderPage(`#/works/${WORK}?tab=content`);
     expect(await screen.findByText("v1 をもとに編集した本文です。取り込み済みの v2 は表示されていません。")).toBeInTheDocument();
+  });
+
+  it("re-publishes an earlier edit and takes one off the list on a switched shelf", async () => {
+    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    const OLD = "0195f1c2-0000-7000-8000-0000000000e1";
+    const OLDER = "0195f1c2-0000-7000-8000-0000000000e2";
+    api.libraryV2EditHistory.mockResolvedValue({
+      generation: 6,
+      active: null,
+      draft: { id: "0195f1c2-0000-7000-8000-0000000000d1", baseVersion: 2, title: null, createdAt: Date.UTC(2026, 0, 4) },
+      archived: [
+        { id: OLD, baseVersion: 2, title: null, createdAt: Date.UTC(2026, 0, 3) },
+        { id: OLDER, baseVersion: 1, title: null, createdAt: Date.UTC(2026, 0, 2) },
+      ],
+    });
+    api.libraryV2EditPointer.mockResolvedValue({ active: OLD, draft: null, generation: 7 });
+    renderPage(`#/works/${WORK}?tab=history`);
+
+    // 下書きは作品の画面でも知らせる。
+    expect(await screen.findByText("未反映")).toBeInTheDocument();
+    const restore = await screen.findAllByRole("button", { name: "もう一度反映" });
+    fireEvent.click(restore[0]);
+    fireEvent.click(await screen.findByRole("button", { name: "反映する" }));
+    await waitFor(() => expect(api.libraryV2EditPointer).toHaveBeenCalledWith(WORK, 6, { kind: "restore", edit: OLD }));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "一覧から外す" })[1]);
+    fireEvent.click(await screen.findByRole("button", { name: "外す" }));
+    await waitFor(() => expect(api.libraryV2EditPointer).toHaveBeenCalledWith(WORK, 6, { kind: "forget", edit: OLDER }));
+
+    fireEvent.click(screen.getByRole("button", { name: "すべて外す" }));
+    expect(await screen.findByText("以前の編集版を2件すべて一覧から外しますか？")).toBeInTheDocument();
+  });
+
+  it("keeps the earlier edits read-only before the shelf is switched", async () => {
+    api.libraryV2EditHistory.mockResolvedValue({
+      generation: 1,
+      active: null,
+      draft: null,
+      archived: [{ id: "0195f1c2-0000-7000-8000-0000000000e1", baseVersion: 2, title: null, createdAt: Date.UTC(2026, 0, 3) }],
+    });
+    renderPage(`#/works/${WORK}?tab=history`);
+    expect(await screen.findByText("以前の編集版")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "もう一度反映" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "一覧から外す" })).not.toBeInTheDocument();
   });
 
   it("opens a PDF attachment's pages from the body and from the attachment list", async () => {

@@ -317,6 +317,7 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_remove_work,
             commands::library_v2::library_v2_edit_collection,
             commands::library_v2::library_v2_editor,
+            commands::library_v2::library_v2_edit_history,
             commands::library_v2::library_v2_save_editor,
             commands::library_v2::library_v2_edit_pointer,
             commands::library_v2::library_v2_import_edit_image,

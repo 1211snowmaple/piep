@@ -45,8 +45,8 @@ import { openExternalUrl } from "@/services/openerApi";
 import {
   isShelfPdf,
   libraryV2Content,
+  libraryV2EditHistory,
   libraryV2EditPointer,
-  libraryV2Editor,
   libraryV2Media,
   libraryV2Original,
   libraryV2VersionText,
@@ -55,12 +55,17 @@ import {
   shelfBodyUrl,
   shelfFileUrl,
   staleEditBaseOf,
+  type ShelfEditChange,
+  type ShelfEditorRevision,
   type ShelfMedia,
   type ShelfVersion,
 } from "@/services/libraryV2Api";
 import { invalidateShelf, shelfEntry, useShelfWritable } from "@/features/library/shelfV2";
 import { ContentPagination, Info, parseWorkTab } from "@/features/library/workPageParts";
 import { ActionRow } from "@/components/ActionRow";
+import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
+import { EditStatusStrip } from "@/features/library/EditStatusStrip";
+import type { WorkEditRevision } from "@/types/library";
 
 const READ_ONLY = "新しい棚では変えられません";
 
@@ -68,9 +73,19 @@ function versionDate(version: ShelfVersion): string {
   return formatDate(new Date(version.saved_at).toISOString(), true);
 }
 
+function revisionDate(revision: ShelfEditorRevision): string {
+  return formatDate(new Date(revision.createdAt).toISOString(), true);
+}
+
+/** 本文の上の知らせ（旧棚と共用）が読む形へ。 */
+function stripRevision(revision: ShelfEditorRevision, status: string): WorkEditRevision {
+  const at = new Date(revision.createdAt).toISOString();
+  return { id: 0, downloadId: 0, baseVersion: revision.baseVersion, status, title: revision.title, contentHash: null, createdAt: at, updatedAt: at };
+}
+
 /**
  * 新しい棚（試験中）の作品の画面。正本に切り替えた棚では、お気に入りと編集（編集画面へ進む・取り込んだ
- * 本文に戻す）を書く。
+ * 本文に戻す・以前の編集版をもう一度反映する・一覧から外す）を書く。
  *
  * 旧棚の作品の画面と同じ並び（頭・概要・本文・画像と添付・履歴・保存データ）にして、
  * 切り替えても見る場所が変わらないようにする。本文は新しい棚の「本文の中の指定 → 画像」の
@@ -110,21 +125,48 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   const writable = useShelfWritable(runtime);
   const favoriteLabel = !writable ? `お気に入り（${READ_ONLY}）` : work?.favorite ? "お気に入りを解除" : "お気に入りに追加";
   const editLabel = writable ? "編集" : `編集（${READ_ONLY}）`;
-  // 反映中の編集を下ろす（版は残る）。今の世代は編集画面と同じ問い合わせで引く。
-  const [reverting, setReverting] = useState(false);
-  const revertEdit = async () => {
-    setReverting(true);
+  // 下書き・反映中の版・以前の編集版。
+  const historyQuery = useQuery({
+    queryKey: ["library-v2-edit-history", workId],
+    queryFn: () => libraryV2EditHistory(workId),
+    enabled: runtime,
+  });
+  const editHistory = historyQuery.data;
+  const archived = editHistory?.archived ?? [];
+  // 編集の指し先を変える（版そのものは残る）。今の世代は押したときに引き直す。
+  const [changing, setChanging] = useState<string | null>(null);
+  const changeEdit = async (key: string, change: ShelfEditChange, done: string, failed: string) => {
+    setChanging(key);
     try {
-      const view = await libraryV2Editor(workId);
-      await libraryV2EditPointer(workId, view.generation, "unpublish");
+      const { generation } = await libraryV2EditHistory(workId);
+      await libraryV2EditPointer(workId, generation, change);
       await invalidateShelf(queryClient);
-      notifications.show({ color: "green", message: "取り込んだ本文に戻しました" });
+      notifications.show({ color: "green", message: done });
     } catch (error) {
-      notifications.show({ color: "red", title: "本文を戻せません", message: errorMessage(error) });
+      notifications.show({ color: "red", title: failed, message: errorMessage(error) });
     } finally {
-      setReverting(false);
+      setChanging(null);
     }
   };
+  const revertEdit = () => changeEdit("revert", { kind: "unpublish" }, "取り込んだ本文に戻しました", "本文を戻せません");
+  const confirmRestore = (revision: ShelfEditorRevision) => modals.openConfirmModal({
+    title: "この編集版をもう一度反映しますか？",
+    children: <Text size="sm">読書画面とEPUBは、{revisionDate(revision)}の編集版を使うようになります。{editHistory?.active ? "いま反映している編集版は、ここに残ります。" : ""}</Text>,
+    labels: { confirm: "反映する", cancel: "やめる" },
+    onConfirm: () => { void changeEdit(`restore-${revision.id}`, { kind: "restore", edit: revision.id }, "編集版を反映しました", "編集版を反映できません"); },
+  });
+  // 一覧から外す。封をした版は棚に残るが、ここからはもう反映できない。
+  const confirmForget = (revision: ShelfEditorRevision | null) => modals.openConfirmModal({
+    title: revision ? "この編集版を一覧から外しますか？" : `以前の編集版を${formatNumber(archived.length)}件すべて一覧から外しますか？`,
+    children: <Text size="sm">{revision ? `${revisionDate(revision)}の編集版を一覧から外します。` : ""}外した編集版は、ここからはもう反映できません。取り込んだ本文と、いま反映している編集版・下書きは残ります。</Text>,
+    labels: { confirm: "外す", cancel: "やめる" },
+    confirmProps: DANGER_CONFIRM,
+    onConfirm: () => {
+      void (revision
+        ? changeEdit(`forget-${revision.id}`, { kind: "forget", edit: revision.id }, "編集版を一覧から外しました", "編集版を外せません")
+        : changeEdit("forget-all", { kind: "forget_all" }, "以前の編集版を一覧から外しました", "編集版を外せません"));
+    },
+  });
   const toggleFavorite = async () => {
     if (!work) return;
     try {
@@ -307,9 +349,11 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
             </Grid.Col>
             <Grid.Col span={{ base: 12, md: 4 }}>
               <Stack gap="lg">
-                {writable && edited && <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は編集版です</Text></Box><Badge color="gray" variant="light">反映中</Badge></Group><Text size="xs" c="dimmed" mb="sm">取り込んだ本文はそのまま残っています。戻しても、編集した版は残ります。</Text><ActionRow><Button variant="default" size="xs" leftSection={<Icons.undo size={IconSize.menu} />} loading={reverting} onClick={() => modals.openConfirmModal({ title: "取り込んだ本文に戻しますか？", children: <Text size="sm">リーダーとEPUBは取り込んだままの本文を使うようになります。編集した版は残ります。</Text>, labels: { confirm: "元に戻す", cancel: "キャンセル" }, onConfirm: () => { void revertEdit(); } })}>取り込んだ本文に戻す</Button></ActionRow></Card>}
+                {writable && edited ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は編集版です</Text></Box><Badge color="gray" variant="light">反映中</Badge></Group><Text size="xs" c="dimmed" mb="sm">取り込んだ本文はそのまま残っています。戻しても、編集した版は履歴から選び直せます。</Text>{editHistory?.draft && <Text size="xs" c="yellow.8" mb="sm">このほかに、反映していない下書きがあります（{revisionDate(editHistory.draft)}保存）。</Text>}<ActionRow><Button variant="default" size="xs" leftSection={<Icons.undo size={IconSize.menu} />} loading={changing === "revert"} onClick={() => modals.openConfirmModal({ title: "取り込んだ本文に戻しますか？", children: <Text size="sm">リーダーとEPUBは取り込んだままの本文を使うようになります。編集した版は履歴に残ります。</Text>, labels: { confirm: "元に戻す", cancel: "キャンセル" }, onConfirm: () => { void revertEdit(); } })}>取り込んだ本文に戻す</Button></ActionRow></Card>
+                  : writable && editHistory?.draft ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は取り込んだままです</Text></Box><Badge color="yellow" variant="light">下書きのみ</Badge></Group><Text size="xs" c="dimmed" mb="sm">{revisionDate(editHistory.draft)}に保存した下書きは、編集画面で「反映」を押すまで読書画面とEPUBに使われません。</Text><ActionRow><Button variant="default" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${workId}`)}>編集画面で開く</Button></ActionRow></Card>
+                  : null}
                 <Note title="新しい棚（試験中）">{writable
-                  ? "正本に切り替えた棚です。お気に入りと編集はここで変えられます。"
+                  ? `正本に切り替えた棚です。お気に入りと編集はここで変えられます。${archived.length ? "以前に反映した編集版は、履歴タブからもう一度反映できます。" : ""}`
                   : "旧棚から移行した時点の写しを、読むだけで開いています。お気に入り・更新監視・編集・削除・コレクションは、旧棚の作品の画面で変えてください。"}</Note>
               </Stack>
             </Grid.Col>
@@ -318,6 +362,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
         <Tabs.Panel value="content" pt="lg">
           {contentQuery.isLoading ? <LoadingState label="本文を読み込んでいます" /> : contentQuery.error ? <ErrorState error={contentQuery.error} retry={() => contentQuery.refetch()} /> : !contentReady ? <LoadingState label="本文を読み込んでいます" /> : <Stack gap="sm">
             {contentSnapshot !== null && <Group justify="space-between"><Text size="xs" c="dimmed">保存済み v{versions.find((version) => version.snapshot === contentSnapshot)?.version ?? "?"}</Text><Button variant="subtle" size="xs" onClick={() => showVersionContent(null)}>現在の本文へ</Button></Group>}
+            {contentSnapshot === null && writable && editHistory?.draft && <EditStatusStrip activeRevision={null} draftRevision={stripRevision(editHistory.draft, "draft")} onEdit={() => navigate(`/editor/${workId}`)} />}
             {contentSnapshot === null && edited && <Text size="xs" c="dimmed">{work.editBaseVersion === null ? "編集版の本文です。" : `v${work.editBaseVersion} をもとに編集した本文です。`}{staleBase !== null && `取り込み済みの v${work.version_number} は表示されていません。`}</Text>}
             {/* 取得元の応答に本文が無い作品（公開範囲の外の投稿など）。空の枠だけを出さない。 */}
             {contentQuery.data?.html.trim() ? <Paper className="content-frame" withBorder ref={contentFrameRef}>
@@ -354,6 +399,29 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
           {edited && <Alert color="blue" mb="md">編集しても取得元の版は増えません。編集版は{work.editBaseVersion === null ? "取得元の版" : ` v${work.editBaseVersion} `}の上に重ねて保存してあり、いま読む本文に使います。</Alert>}
           <div className="history-layout">
             <nav className="history-layout__versions" aria-label="保存した版">
+              {editHistory?.active && <Paper p="xs" withBorder className="version-row version-row--static">
+                <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>編集版</Text><Badge size="xs" color="blue">現在</Badge></Group>
+                <Text size="xs" c="dimmed">v{editHistory.active.baseVersion} をもとに</Text>
+                <Text size="xs" c="dimmed">{revisionDate(editHistory.active)}</Text>
+              </Paper>}
+              {editHistory?.draft && <Paper p="xs" withBorder className="version-row version-row--static">
+                <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>下書き</Text><Badge size="xs" color="yellow" variant="light">未反映</Badge></Group>
+                <Text size="xs" c="dimmed">{revisionDate(editHistory.draft)}</Text>
+                {writable && <Button mt={6} size="compact-xs" variant="default" fullWidth onClick={() => navigate(`/editor/${workId}`)}>編集画面で開く</Button>}
+              </Paper>}
+              {writable && archived.length >= 2 && <Group justify="space-between" wrap="nowrap" gap={6} px={4}>
+                <Text size="xs" c="dimmed">以前の編集版 {formatNumber(archived.length)}件</Text>
+                <DangerButton size="compact-xs" loading={changing === "forget-all"} onClick={() => confirmForget(null)}>すべて外す</DangerButton>
+              </Group>}
+              {archived.map((revision) => <Paper key={`edit-${revision.id}`} p="xs" withBorder className="version-row version-row--static">
+                <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>以前の編集版</Text><Badge size="xs" color="gray" variant="light">未使用</Badge></Group>
+                <Text size="xs" c="dimmed">v{revision.baseVersion} をもとに</Text>
+                <Text size="xs" c="dimmed">{revisionDate(revision)}</Text>
+                {writable && <>
+                  <Button mt={6} size="compact-xs" variant="default" fullWidth loading={changing === `restore-${revision.id}`} onClick={() => confirmRestore(revision)}>もう一度反映</Button>
+                  <DangerButton mt={4} size="compact-xs" fullWidth loading={changing === `forget-${revision.id}`} onClick={() => confirmForget(revision)}>一覧から外す</DangerButton>
+                </>}
+              </Paper>)}
               {versions.map((version) => <Paper component="button" type="button" key={version.snapshot} p="xs" withBorder className="version-row" data-active={selected?.snapshot === version.snapshot || undefined} onClick={() => setSelectedSnapshot(version.snapshot)}>
                 <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>v{version.version}</Text>{version.snapshot === current?.snapshot && <Badge size="xs">{edited ? "取得元の最新版" : "現在"}</Badge>}</Group>
                 <Text size="xs" c="dimmed">{versionDate(version)}</Text>

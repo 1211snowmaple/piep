@@ -182,7 +182,7 @@ export function shelfEditorSource(work: string): EditorSource {
     saveDraft: (doc, title, blocks) => save(doc, title, blocks, false),
     publish: (doc, title, blocks) => save(doc, title, blocks, true),
     discard: async () => {
-      await libraryV2EditPointer(work, state.generation, "discard");
+      await libraryV2EditPointer(work, state.generation, { kind: "discard" });
       return load();
     },
     importImage: async (doc, path) => {
