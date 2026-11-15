@@ -12,7 +12,9 @@
 
 use crate::database::models::{ReaderOutlineEntry, ReaderSearchHit};
 use crate::database::queries::{reader_outline, search_reader_pages};
-use crate::library::{Fingerprint, Library, LibraryId, ResourceScope, WorkCard, WorkListQuery};
+use crate::library::{
+    Fingerprint, Library, LibraryId, NeighborKind, ResourceScope, WorkCard, WorkListQuery,
+};
 use crate::library_search::{parse_query, SearchDecoration, SearchMatch, SearchPage, TextSearch};
 use crate::library_view::{MediaView, RenderedDocument, VersionView};
 use serde::Serialize;
@@ -477,6 +479,51 @@ pub async fn library_v2_search_content(
             &query,
             limit.unwrap_or(50),
         ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 読む画面の前後の作品の、一つの並び。前後の作品は一覧の一件と同じ形（表紙の識別子つき）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeighborsView {
+    pub kind: NeighborKind,
+    pub id: LibraryId,
+    pub title: String,
+    pub ordered: bool,
+    pub position: usize,
+    pub total: usize,
+    pub missing: usize,
+    pub previous: Option<CardView>,
+    pub next: Option<CardView>,
+}
+
+/// 作品が入っているコレクション・シリーズ・作者ごとの、前後の作品。並びを丸ごと返さず、
+/// 位置と両隣だけを返す（長いシリーズや作者でも一往復で済む）。
+#[tauri::command]
+pub async fn library_v2_neighbors(
+    state: State<'_, Arc<LibraryV2>>,
+    work: LibraryId,
+) -> Result<Vec<NeighborsView>, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        let found = library.work_neighbors(work).map_err(|e| e.to_string())?;
+        Ok(found
+            .into_iter()
+            .map(|row| NeighborsView {
+                kind: row.kind,
+                id: row.id,
+                title: row.title,
+                ordered: row.ordered,
+                position: row.position,
+                total: row.total,
+                missing: row.missing,
+                previous: row.previous.as_ref().map(card_view),
+                next: row.next.as_ref().map(card_view),
+            })
+            .collect())
     })
     .await
     .map_err(|e| e.to_string())?

@@ -48,7 +48,9 @@ import { legacyReaderSource, shelfReaderSource, SHELF_WORK_ID, type ReaderSource
 import { RecapPanel } from "@/features/assist/RecapPanel";
 import { NeighborPlaceholder, NeighborTile, formatReadingTime } from "@/features/reader/ReaderNextUp";
 import type { WorkCollection } from "@/types/collections";
-import type { DownloadEntry, SearchV2Params, SearchV2Result } from "@/types/library";
+import type { DownloadEntry, SearchV2Params, SearchV2Result, ShelfEntry } from "@/types/library";
+import { libraryV2Neighbors, type ShelfCard, type ShelfNeighbors } from "@/services/libraryV2Api";
+import { shelfEntry } from "@/features/library/shelfV2";
 
 interface ReadingContextRow {
   key: string;
@@ -60,10 +62,44 @@ interface ReadingContextRow {
    *  display arrangement: calling its neighbours 続き would invent a sequence
    *  the reader never asked for. */
   sequential: boolean;
-  previous: { id: number; title: string } | null;
-  next: { id: number; title: string } | null;
+  previous: NeighborRef | null;
+  next: NeighborRef | null;
   /** いま読んでいる作品。「前回のあらすじ」をここにぶら下げる。 */
-  currentId: number;
+  currentId: ReaderWorkKey;
+}
+
+/** 旧棚の作品は番号、新しい棚の作品は UUID。 */
+type ReaderWorkKey = number | string;
+interface NeighborRef { id: ReaderWorkKey; title: string }
+
+/**
+ * 新しい棚の前後の作品を、旧棚と同じ札の行にする。旧棚と同じ名乗り方・同じ数え方で、
+ * 隣の作品の詳しい情報（表紙・作者・字数）は、引いた並びにもう入っている。
+ */
+function shelfReadingContexts(rows: ShelfNeighbors[], currentId: string, authorName: string) {
+  const neighbors = new Map<ReaderWorkKey, ShelfEntry>();
+  const ref = (card: ShelfCard | null): NeighborRef | null => {
+    if (!card) return null;
+    neighbors.set(card.id, shelfEntry(card));
+    return { id: card.id, title: card.title };
+  };
+  const contexts = rows.map((row): ReadingContextRow => {
+    const base = { key: `${row.kind}:${row.id}`, sequential: row.ordered, currentId, previous: ref(row.previous), next: ref(row.next) };
+    if (row.kind === "collection") {
+      const progress = row.ordered ? `${row.position} / ${row.total}` : `${row.total}作品`;
+      return {
+        ...base,
+        label: `コレクション「${row.title}」`,
+        detail: [progress, row.ordered ? "読む順あり" : "順序なし", row.missing > 0 ? `未保存${row.missing}作品は除外` : null].filter(Boolean).join(" · "),
+      };
+    }
+    if (row.kind === "series") {
+      return { ...base, label: row.title ? `公式シリーズ「${row.title}」` : "公式シリーズ", detail: `${row.position} / ${row.total} · 公式順` };
+    }
+    // 作者の投稿順は「物語の次」ではないため、続きとしては案内しない。
+    return { ...base, sequential: false, label: `${row.title || authorName}の作品`, detail: `${row.total}作品の公開順` };
+  });
+  return { contexts, neighbors };
 }
 
 function adjacentWorks(items: { id: number; title: string }[], currentId: number) {
@@ -122,10 +158,10 @@ async function loadReaderSequence(params: SearchV2Params, currentId: number): Pr
 function ReadingContextCard({ context, neighbors, onOpen }: {
   context: ReadingContextRow;
   /** 隣の作品の詳しい情報。届くまでは題だけで描く。 */
-  neighbors: ReadonlyMap<number, DownloadEntry>;
+  neighbors: ReadonlyMap<ReaderWorkKey, DownloadEntry | ShelfEntry>;
   onOpen: (path: string) => void;
 }) {
-  const href = (id: number) => `/reader/${id}${context.collectionId ? `?collection=${encodeURIComponent(context.collectionId)}` : ""}`;
+  const href = (id: ReaderWorkKey) => `/reader/${id}${context.collectionId ? `?collection=${encodeURIComponent(context.collectionId)}` : ""}`;
   const previousLabel = context.sequential ? "前の作品はありません" : "ほかの作品はありません";
   const nextLabel = context.sequential ? "次の作品はありません" : "ほかの作品はありません";
   // 順序のない並びは「前・次」と呼ばない。並べてあるだけで、読む順ではない。
@@ -144,8 +180,9 @@ function ReadingContextCard({ context, neighbors, onOpen }: {
         {!context.sequential && <Text size="xs" c="dimmed">読む順は決まっていません。同じまとまりの作品です。</Text>}
         {/* 読む順があって、前の話があるときだけ。順序なしのまとまりで
             「前回のあらすじ」を出すと、無い連続性をあるように見せてしまう。 */}
-        {context.sequential && context.previous && (
-          <RecapPanel currentId={context.currentId} previous={context.previous} />
+        {/* 前回のあらすじは旧棚の作品だけ（あらすじの記録が旧棚の番号で引くため）。 */}
+        {context.sequential && context.previous && typeof context.currentId === "number" && typeof context.previous.id === "number" && (
+          <RecapPanel currentId={context.currentId} previous={{ id: context.previous.id, title: context.previous.title }} />
         )}
         {/* 題だけのボタンだったころは、どれが何の話か、どれだけの長さか、
             読みかけたものかが、押してみるまで分からなかった。 */}
@@ -410,7 +447,17 @@ function Reader({ source }: { source: ReaderSource }) {
     enabled: runtime && Boolean(legacyWork?.personId || legacyWork?.authorId),
     staleTime: 60_000,
   });
-  const readingContexts = useMemo<ReadingContextRow[]>(() => {
+  const shelfNeighborsQuery = useQuery({
+    queryKey: ["library-v2-neighbors", id],
+    queryFn: () => libraryV2Neighbors(String(id)),
+    enabled: runtime && source.shelf && validId,
+    staleTime: 60_000,
+  });
+  const shelfContexts = useMemo(
+    () => shelfNeighborsQuery.data ? shelfReadingContexts(shelfNeighborsQuery.data, String(id), metadataQuery.data?.head.authorName ?? "") : null,
+    [id, metadataQuery.data?.head.authorName, shelfNeighborsQuery.data],
+  );
+  const legacyContexts = useMemo<ReadingContextRow[]>(() => {
     const work = legacyWork;
     if (!work) return [];
     const rows: ReadingContextRow[] = [];
@@ -460,16 +507,18 @@ function Reader({ source }: { source: ReaderSource }) {
     }
     return rows;
   }, [authorWorksQuery.data, explicitCollectionQuery.data, legacyWork, memberCollectionsQuery.data, officialSeriesQuery.data]);
+  const readingContexts = shelfContexts?.contexts ?? legacyContexts;
   // 読了の札に表紙・作者・分量を出すため、隣の作品だけ詳しく読む。並びは
   // 軽い形（題と番号だけ）で引いているので、そこには表紙が無い。
-  const neighborIds = useMemo(() => [...new Set(readingContexts.flatMap((context) => [context.previous?.id, context.next?.id]).filter((value): value is number => typeof value === "number"))].sort((a, b) => a - b), [readingContexts]);
+  const neighborIds = useMemo(() => [...new Set(legacyContexts.flatMap((context) => [context.previous?.id, context.next?.id]).filter((value): value is number => typeof value === "number"))].sort((a, b) => a - b), [legacyContexts]);
   const neighborsQuery = useQuery({
     queryKey: ["reader-neighbors", neighborIds],
     queryFn: () => getDownloads(neighborIds),
     enabled: runtime && neighborIds.length > 0,
     staleTime: 60_000,
   });
-  const neighbors = useMemo(() => new Map((neighborsQuery.data ?? []).map((entry) => [entry.id, entry])), [neighborsQuery.data]);
+  const legacyNeighbors = useMemo(() => new Map<ReaderWorkKey, DownloadEntry>((neighborsQuery.data ?? []).map((entry) => [entry.id, entry])), [neighborsQuery.data]);
+  const neighbors: ReadonlyMap<ReaderWorkKey, DownloadEntry | ShelfEntry> = shelfContexts?.neighbors ?? legacyNeighbors;
   // Only while reading: an address you cannot follow is noise here, whereas the
   // detail screen deliberately shows the work as its author wrote it.
   const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === sourcePage - 1;

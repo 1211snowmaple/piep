@@ -1,7 +1,7 @@
 use super::*;
 use crate::library::{
-    Capture, CapturedAttachment, CapturedMedia, EditBlock, EditContent, EditRequest, EntityKind,
-    TagProvenance, TagUpdate, UserStateChange, UserTag,
+    Capture, CapturedAttachment, CapturedMedia, CollectionMember, CollectionSave, EditBlock,
+    EditContent, EditRequest, EntityKind, TagProvenance, TagUpdate, UserStateChange, UserTag,
 };
 use serde_json::json;
 use std::{cmp::Ordering, collections::BTreeMap, fs, path::PathBuf};
@@ -1100,4 +1100,174 @@ fn a_rare_tag_collects_works_through_the_snapshot_index_and_both_ways_agree() {
     assert_eq!(measured.snapshots.get("R"), Some(&3));
     assert!(!measured.narrow(&["R".into()]));
     assert!(measured.narrow(&["ない".into()]));
+}
+
+/// 並びの種類・名前・読む順・位置・数・前の作品・次の作品（取得元のキー）。
+type NeighborRow = (
+    NeighborKind,
+    String,
+    bool,
+    usize,
+    usize,
+    Option<String>,
+    Option<String>,
+);
+
+#[test]
+fn neighbors_follow_each_collection_series_and_author_in_the_old_reader_order() {
+    let temp = Temp::new();
+    let library = Library::create(&temp.0).unwrap();
+    let make = |key: &str, author: &str, created: &str, series: Option<Option<i64>>| {
+        let mut c = capture(&Work {
+            provider: "pixiv",
+            key,
+            title: key,
+            author,
+            created: Some(created),
+            updated: None,
+            acquired: 1_000,
+            body: "本文",
+        });
+        c.metadata.insert("author_key".into(), json!(author));
+        if let Some(position) = series {
+            c.metadata.insert("series_id".into(), json!("s1"));
+            c.metadata.insert("series_title".into(), json!("続き物"));
+            if let Some(position) = position {
+                c.metadata.insert("series_position".into(), json!(position));
+            }
+        }
+        c
+    };
+    let mut ids = BTreeMap::new();
+    for (key, author, created, series) in [
+        ("w1", "p1", "2024-01-01T00:00:00Z", Some(Some(2))),
+        ("w2", "p1", "2025-01-01T00:00:00Z", Some(Some(1))),
+        // 話数のない回は、話数のある回の後ろ。
+        ("w3", "p1", "2023-01-01T00:00:00Z", Some(None)),
+        ("w4", "p2", "2021-01-01T00:00:00Z", None),
+        ("w5", "p1", "2022-01-01T00:00:00Z", None),
+        ("w6", "p3", "2020-01-01T00:00:00Z", None),
+    ] {
+        let id = library
+            .capture(make(key, author, created, series))
+            .unwrap()
+            .entity_id;
+        ids.insert(key, id);
+    }
+    let member = |key: &str| CollectionMember {
+        work_id: ids[key],
+        title_at_add: key.into(),
+        author_at_add: String::new(),
+        role: "main".into(),
+        added_by: "manual".into(),
+        pinned: false,
+        note: None,
+    };
+    library
+        .save_collection(CollectionSave {
+            request_id: LibraryId::now_v7(),
+            id: LibraryId::now_v7(),
+            expected_generation: 0,
+            title: "束".into(),
+            description: None,
+            ordered: false,
+            members: vec![member("w4"), member("w1"), member("w5")],
+        })
+        .unwrap();
+    let key_of = |card: &Option<WorkCard>| card.as_ref().map(|card| card.external_key.clone());
+    let rows = |key: &str| -> Vec<NeighborRow> {
+        library
+            .work_neighbors(ids[key])
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                (
+                    row.kind,
+                    row.title,
+                    row.ordered,
+                    row.position,
+                    row.total,
+                    key_of(&row.previous),
+                    key_of(&row.next),
+                )
+            })
+            .collect()
+    };
+    let s = |value: &str| Some(value.to_string());
+    assert_eq!(
+        rows("w1"),
+        vec![
+            (
+                NeighborKind::Collection,
+                "束".into(),
+                false,
+                2,
+                3,
+                s("w4"),
+                s("w5")
+            ),
+            (
+                NeighborKind::Series,
+                "続き物".into(),
+                true,
+                2,
+                3,
+                s("w2"),
+                s("w3")
+            ),
+            (
+                NeighborKind::Person,
+                "p1".into(),
+                false,
+                3,
+                4,
+                s("w3"),
+                s("w2")
+            ),
+        ]
+    );
+    // 一人きりの作者（p2）の並びは出さない。
+    assert_eq!(
+        rows("w4"),
+        vec![(
+            NeighborKind::Collection,
+            "束".into(),
+            false,
+            1,
+            3,
+            None,
+            s("w1")
+        )]
+    );
+    assert_eq!(
+        rows("w2"),
+        vec![
+            (
+                NeighborKind::Series,
+                "続き物".into(),
+                true,
+                1,
+                3,
+                None,
+                s("w1")
+            ),
+            (
+                NeighborKind::Person,
+                "p1".into(),
+                false,
+                4,
+                4,
+                s("w1"),
+                None
+            ),
+        ]
+    );
+    // どの並びにも隣がいない作品には、何も出さない。
+    assert!(rows("w6").is_empty());
+    // 前後の作品は一覧の一件と同じ中身。
+    let first = library.work_neighbors(ids["w1"]).unwrap();
+    assert_eq!(
+        first[1].previous.as_ref(),
+        Some(&library.work_card(ids["w2"]).unwrap())
+    );
 }

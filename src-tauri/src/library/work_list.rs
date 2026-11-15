@@ -306,6 +306,35 @@ pub struct WorkCard {
     pub series_position: Option<i64>,
 }
 
+/// 前後の作品を引いた並びの種類。
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NeighborKind {
+    Collection,
+    Series,
+    Person,
+}
+
+/// 一つの並びの中での、ある作品の位置と前後の作品（`Library::work_neighbors`）。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WorkNeighbors {
+    pub kind: NeighborKind,
+    /// コレクション・シリーズ・作者の棚の ID。
+    pub id: LibraryId,
+    /// コレクションの名前・シリーズの題・作者の名前。
+    pub title: String,
+    /// 読む順のある並びか（シリーズと、読む順ありのコレクション）。作者の公開順は読む順ではない。
+    pub ordered: bool,
+    /// 1 から。
+    pub position: usize,
+    /// 棚にある作品の数。
+    pub total: usize,
+    /// 棚にない所属作品の数（コレクションだけ）。
+    pub missing: usize,
+    pub previous: Option<WorkCard>,
+    pub next: Option<WorkCard>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkListPage {
     pub items: Vec<WorkCard>,
@@ -919,14 +948,121 @@ impl Library {
     /// 一作品のカード。作品の詳細の画面の見出しに使う。棚にない作品は見つからない扱い。
     pub fn work_card(&self, work: LibraryId) -> Result<WorkCard> {
         let conn = self.reader()?;
+        Self::card_of(&conn, self.id, work.as_bytes())
+    }
+
+    fn card_of(conn: &Connection, owner: LibraryId, work: &[u8]) -> Result<WorkCard> {
         let row = conn
             .prepare_cached(&format!(
                 "SELECT {COLUMNS} FROM work_current_projection WHERE work_id=?1"
             ))?
-            .query_row([work.as_bytes().as_slice()], read_row)
+            .query_row([work], read_row)
             .optional()?
             .ok_or(Error::ResourceUnavailable)?;
-        Self::work_card_from_conn(&conn, self.id, card(row)?)
+        Self::work_card_from_conn(conn, owner, card(row)?)
+    }
+
+    /// 読む画面の「前後の作品」。作品が入っているコレクション・シリーズ・作者ごとに、並びの中の
+    /// 位置と前後の作品を返す。前も後もない並び（その作品だけ）は返さない。
+    ///
+    /// 並べ方は旧棚の読む画面と同じ。コレクションは並べた順、シリーズは取得元の話数（ないものは
+    /// 後ろ）から公開日、作者は公開日の古い順。公開日のない作品は保存日で並べる。どれも今の版の
+    /// 所属で引く（古い版でだけシリーズにいた作品は入れない）。
+    pub fn work_neighbors(&self, work: LibraryId) -> Result<Vec<WorkNeighbors>> {
+        let conn = self.reader()?;
+        let current = work.as_bytes().as_slice();
+        let snapshot: Vec<u8> = conn
+            .prepare_cached("SELECT snapshot_id FROM work_current_projection WHERE work_id=?1")?
+            .query_row([current], |r| r.get(0))
+            .optional()?
+            .ok_or(Error::ResourceUnavailable)?;
+        let mut found = Vec::new();
+
+        let collections: Vec<(Vec<u8>, String, bool)> = conn
+            .prepare_cached("SELECT c.id,c.title,c.ordered FROM collection_members m JOIN collections c ON c.id=m.collection_id WHERE m.work_id=?1 ORDER BY c.title,c.id")?
+            .query_map([current], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (collection, title, ordered) in collections {
+            // 棚にない所属（移行で引けなかった作品）は並びから外し、数だけ伝える。
+            let members: Vec<(Vec<u8>, bool)> = conn
+                .prepare_cached("SELECT m.work_id,p.work_id IS NOT NULL FROM collection_members m LEFT JOIN work_current_projection p ON p.work_id=m.work_id WHERE m.collection_id=?1 ORDER BY m.position,m.work_id")?
+                .query_map([&collection], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            let missing = members.iter().filter(|(_, present)| !present).count();
+            let order: Vec<Vec<u8>> = members
+                .into_iter()
+                .filter_map(|(member, present)| present.then_some(member))
+                .collect();
+            let context = (NeighborKind::Collection, id(collection)?, title, ordered);
+            Self::push_neighbors(
+                &conn, self.id, &mut found, context, &order, current, missing,
+            )?;
+        }
+
+        let series: Vec<(Vec<u8>, String)> = conn
+            .prepare_cached("SELECT series_id,title FROM snapshot_series WHERE snapshot_id=?1 ORDER BY series_id")?
+            .query_map([&snapshot], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (series, title) in series {
+            let order: Vec<Vec<u8>> = conn
+                .prepare_cached("SELECT p.work_id FROM snapshot_series s JOIN revision_snapshots v ON v.id=s.snapshot_id JOIN work_current_projection p ON p.work_id=v.entity_id AND p.snapshot_id=s.snapshot_id WHERE s.series_id=?1 ORDER BY s.position IS NULL,s.position,coalesce(p.published_at,p.saved_at),p.work_id")?
+                .query_map([&series], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            let context = (NeighborKind::Series, id(series)?, title, true);
+            Self::push_neighbors(&conn, self.id, &mut found, context, &order, current, 0)?;
+        }
+
+        // 一人が二つの役で載っていても、作者の並びは一つ。
+        let people: Vec<(Vec<u8>, String)> = conn
+            .prepare_cached("SELECT person_id,min(display_name) FROM snapshot_people WHERE snapshot_id=?1 GROUP BY person_id ORDER BY min(role NOT IN ('author','creator')),person_id")?
+            .query_map([&snapshot], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (person, name) in people {
+            let order: Vec<Vec<u8>> = conn
+                .prepare_cached("SELECT p.work_id FROM snapshot_people s JOIN revision_snapshots v ON v.id=s.snapshot_id JOIN work_current_projection p ON p.work_id=v.entity_id AND p.snapshot_id=s.snapshot_id WHERE s.person_id=?1 GROUP BY p.work_id ORDER BY coalesce(p.published_at,p.saved_at),p.work_id")?
+                .query_map([&person], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            let context = (NeighborKind::Person, id(person)?, name, false);
+            Self::push_neighbors(&conn, self.id, &mut found, context, &order, current, 0)?;
+        }
+        Ok(found)
+    }
+
+    fn push_neighbors(
+        conn: &Connection,
+        owner: LibraryId,
+        found: &mut Vec<WorkNeighbors>,
+        (kind, context, title, ordered): (NeighborKind, LibraryId, String, bool),
+        order: &[Vec<u8>],
+        current: &[u8],
+        missing: usize,
+    ) -> Result<()> {
+        let Some(index) = order.iter().position(|work| work.as_slice() == current) else {
+            return Ok(());
+        };
+        if order.len() < 2 {
+            return Ok(());
+        }
+        let previous = match index.checked_sub(1) {
+            Some(before) => Some(Self::card_of(conn, owner, &order[before])?),
+            None => None,
+        };
+        let next = match order.get(index + 1) {
+            Some(after) => Some(Self::card_of(conn, owner, after)?),
+            None => None,
+        };
+        found.push(WorkNeighbors {
+            kind,
+            id: context,
+            title,
+            ordered,
+            position: index + 1,
+            total: order.len(),
+            missing,
+            previous,
+            next,
+        });
+        Ok(())
     }
 
     /// 取得元の ID から、棚の作品・作者・シリーズの ID を引く。作者やシリーズで絞るときに使う。

@@ -1,9 +1,10 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
-import type { ShelfWork } from "@/services/libraryV2Api";
+import type { ShelfCard, ShelfNeighbors, ShelfWork } from "@/services/libraryV2Api";
+import { writeReadingPosition } from "@/features/library/readingShelf";
 import ReaderPage from "./ReaderPage";
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
@@ -16,6 +17,7 @@ const api = vi.hoisted(() => ({
   libraryV2Content: vi.fn(),
   libraryV2Outline: vi.fn(),
   libraryV2SearchContent: vi.fn(),
+  libraryV2Neighbors: vi.fn(),
 }));
 vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
@@ -24,6 +26,8 @@ vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
 const legacy = vi.hoisted(() => ({
   getReaderMetadata: vi.fn(),
   getReaderContentPage: vi.fn(),
+  getDownloads: vi.fn(),
+  searchDownloadsV2: vi.fn(),
 }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
@@ -72,6 +76,14 @@ const work: ShelfWork = {
   ],
 };
 
+const PREVIOUS = "0195f1c2-0000-7000-8000-000000000002";
+const NEXT = "0195f1c2-0000-7000-8000-000000000003";
+const COVER = "ef".repeat(32);
+
+function card(id: string, title: string, extra: Partial<ShelfCard> = {}): ShelfCard {
+  return { ...work, id, snapshot_id: id, title, text_length: 1100, excerpt: null, coverFile: null, ...extra };
+}
+
 function renderReader(hash: string) {
   window.location.hash = hash;
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -92,6 +104,7 @@ describe("ReaderPage on the new shelf", () => {
     }));
     api.libraryV2Outline.mockResolvedValue([]);
     api.libraryV2SearchContent.mockResolvedValue([]);
+    api.libraryV2Neighbors.mockResolvedValue([]);
   });
 
   it("reads the body, images and outline from the new shelf and offers no edits", async () => {
@@ -107,6 +120,35 @@ describe("ReaderPage on the new shelf", () => {
     expect(screen.getByRole("button", { name: /保存フォルダー/ })).toBeDisabled();
     expect(legacy.getReaderMetadata).not.toHaveBeenCalled();
     expect(legacy.getReaderContentPage).not.toHaveBeenCalled();
+  });
+
+  it("offers the previous and next works of the series and the author from the new shelf", async () => {
+    const rows: ShelfNeighbors[] = [
+      { kind: "series", id: "s", title: "続き物", ordered: true, position: 2, total: 3, missing: 0, previous: card(PREVIOUS, "前の回"), next: card(NEXT, "次の回", { coverFile: COVER, author_name: "別名", excerpt: "一行目<br />二行目" }) },
+      { kind: "person", id: "p", title: "", ordered: false, position: 5, total: 9, missing: 0, previous: card(PREVIOUS, "前の回"), next: null },
+    ];
+    api.libraryV2Neighbors.mockResolvedValue(rows);
+    writeReadingPosition(NEXT, null, { page: 2, top: 10 });
+    renderReader(`#/reader/${WORK}`);
+    expect(await screen.findByText("公式シリーズ「続き物」")).toBeInTheDocument();
+    expect(api.libraryV2Neighbors).toHaveBeenCalledWith(WORK);
+    expect(screen.getByText("2 / 3 · 公式順")).toBeInTheDocument();
+    // 名前のない作者の並びは、作品の作者名で名乗る。読む順ではないので「前の作品」と呼ばない。
+    expect(screen.getByText("作者の作品")).toBeInTheDocument();
+    expect(screen.getByText("9作品の公開順")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "並びの前：前の回" })).toBeInTheDocument();
+    const next = screen.getByRole("button", { name: "次の作品：次の回" });
+    // 隣の作品の表紙・作者・字数は並びと一緒に届く。読みかけなら続きからと名乗る。
+    expect(next.querySelector("img")).toHaveAttribute("src", `http://piep-library.localhost/${COVER}`);
+    expect(next).toHaveTextContent("別名 · 1,100字 · 約2分");
+    expect(next).toHaveTextContent("読みかけ・続きから");
+    // 説明の HTML は地の文にして見せる。
+    expect(next).toHaveTextContent("一行目 二行目");
+    expect(next).not.toHaveTextContent("<br />");
+    expect(legacy.getDownloads).not.toHaveBeenCalled();
+    expect(legacy.searchDownloadsV2).not.toHaveBeenCalled();
+    fireEvent.click(next);
+    await waitFor(() => expect(window.location.hash).toBe(`#/reader/${NEXT}`));
   });
 
   it("reads a saved version by turning its number into that version's snapshot", async () => {

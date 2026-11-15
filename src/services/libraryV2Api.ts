@@ -218,6 +218,29 @@ export function libraryV2SearchContent(work: string, snapshot: string | null, qu
   return invoke<ReaderSearchHit[]>("library_v2_search_content", { work, snapshot, query, limit });
 }
 
+/** 作品が入っている一つの並び（コレクション・シリーズ・作者）での、位置と両隣。 */
+export interface ShelfNeighbors {
+  kind: "collection" | "series" | "person";
+  /** コレクション・シリーズ・作者の棚の ID。 */
+  id: string;
+  /** コレクションの名前・シリーズの題・作者の名前。 */
+  title: string;
+  /** 読む順のある並びか（シリーズと、読む順ありのコレクション）。 */
+  ordered: boolean;
+  /** 1 から。 */
+  position: number;
+  total: number;
+  /** 棚にない所属作品の数（コレクションだけ）。 */
+  missing: number;
+  previous: ShelfCard | null;
+  next: ShelfCard | null;
+}
+
+/** 読む画面の前後の作品。前も後もない並びは含まない。 */
+export function libraryV2Neighbors(work: string): Promise<ShelfNeighbors[]> {
+  return invoke<ShelfNeighbors[]>("library_v2_neighbors", { work });
+}
+
 export function libraryV2Media(work: string, snapshot: string | null): Promise<ShelfMedia[]> {
   return invoke<ShelfMedia[]>("library_v2_media", { work, snapshot });
 }
