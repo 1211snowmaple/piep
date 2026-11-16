@@ -43,6 +43,24 @@ fn moved_history_is_not_listed_or_deleted_from_the_old_queue_and_paused_jobs_sur
         state.library_v2 = Arc::new(super::super::library_v2::LibraryV2::with_test_library(
             library.clone(),
         ));
+        let paused = LibraryId::now_v7().to_string();
+        let current = LibraryId::now_v7().to_string();
+        state
+            .jobs()
+            .create_update_job(&paused, &request, &[])
+            .unwrap();
+        state
+            .jobs()
+            .set_update_job_status(&paused, "paused", None)
+            .unwrap();
+        state
+            .jobs()
+            .create_update_job(&current, &request, &[])
+            .unwrap();
+        state
+            .jobs()
+            .set_update_job_status(&current, "completed", None)
+            .unwrap();
         let summaries = current_job_summaries(&state).unwrap();
         assert_eq!(summaries.len(), 2);
         assert!(summaries.iter().all(|j| j.job_id != "moved"));
@@ -61,6 +79,7 @@ fn moved_history_is_not_listed_or_deleted_from_the_old_queue_and_paused_jobs_sur
         );
         assert_eq!(library.job_history_entry(job).unwrap().status, "completed");
         assert_eq!(clear_finished_jobs(&state, true).unwrap(), 0);
+        assert_eq!(state.db.list_update_jobs().unwrap().len(), 3);
         library.verify().unwrap();
     }
     assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));

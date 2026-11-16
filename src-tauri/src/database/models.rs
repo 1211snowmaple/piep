@@ -1162,6 +1162,8 @@ pub struct UpdateJobCandidate {
     pub id: i64,
     #[serde(default)]
     pub download_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<crate::library::LibraryId>,
     pub key: String,
     pub source: String,
     pub source_id: String,
@@ -1248,6 +1250,8 @@ pub struct UpdateJobItemState {
     /// Local library ID, when this job item is already saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<crate::library::LibraryId>,
 }
 
 /// A small progress notification for a running update/save job.

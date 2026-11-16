@@ -272,7 +272,7 @@ impl WebUpdateIndex {
             match api
                 .user_novels_by_ids_with_control(author_id, &ids, || {
                     state
-                        .db
+                        .jobs()
                         .update_job_status_value(job_id)
                         .is_ok_and(|status| status == "running")
                 })
@@ -377,7 +377,7 @@ fn has_pending_restart(job_id: &str) -> bool {
 }
 
 fn make_job_id() -> String {
-    format!("job-{:032x}", rand::random::<u128>())
+    crate::library::LibraryId::now_v7().to_string()
 }
 
 fn pixiv_token(credentials: &UpdateCredentials) -> Option<String> {
@@ -1066,7 +1066,7 @@ fn build_initial_items(
 }
 
 async fn emit_snapshot(app: &tauri::AppHandle, state: &Arc<AppState>, job_id: &str) {
-    match state.db.update_job_snapshot(job_id) {
+    match state.jobs().update_job_snapshot(job_id) {
         Ok(snapshot) => {
             if let Err(error) = app.emit("update-job-progress", snapshot) {
                 log::warn!("更新ジョブ {job_id} の進捗を画面へ送れません: {error}");
@@ -1090,7 +1090,10 @@ async fn emit_progress_delta(
     job_id: &str,
     changed_item_id: Option<i64>,
 ) {
-    match state.db.update_job_progress_delta(job_id, changed_item_id) {
+    match state
+        .jobs()
+        .update_job_progress_delta(job_id, changed_item_id)
+    {
         Ok(delta) => {
             if let Err(error) = app.emit("update-job-progress-delta", delta) {
                 log::warn!("更新ジョブ {job_id} の差分進捗を画面へ送れません: {error}");
@@ -1114,7 +1117,7 @@ async fn announce_author_listing(
 ) -> Result<(), String> {
     let label = format!("{author_name}の投稿一覧を読んでいます");
     state
-        .db
+        .jobs()
         .transition_update_job_status(job_id, "running", "running", Some(&label))?;
     emit_progress_delta(app, state, job_id, None).await;
     Ok(())
@@ -1154,7 +1157,7 @@ fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCr
         };
         if let Err(error) = run_result {
             let state = app.state::<Arc<AppState>>().inner().clone();
-            if let Err(log_error) = state.db.append_update_job_log(&job_id, "error", &error) {
+            if let Err(log_error) = state.jobs().append_update_job_log(&job_id, "error", &error) {
                 log::error!("更新ジョブ {job_id} の失敗をDBへ記録できません: {log_error}");
             }
             if has_pending_restart(&job_id) {
@@ -1164,7 +1167,7 @@ fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCr
             } else {
                 // A late network/database error must not resurrect a job after the
                 // user canceled it while an item was in flight.
-                match state.db.update_job_status_value(&job_id).as_deref() {
+                match state.jobs().update_job_status_value(&job_id).as_deref() {
                     Ok("canceling") => {
                         if let Err(cancel_error) =
                             finish_update_job_cancellation(&app, &state, &job_id).await
@@ -1178,7 +1181,7 @@ fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCr
                     _ => {
                         if let Err(status_error) =
                             state
-                                .db
+                                .jobs()
                                 .set_update_job_status(&job_id, "failed", Some(&error))
                         {
                             log::error!(
@@ -1221,12 +1224,12 @@ async fn finish_update_job_cancellation(
     state: &Arc<AppState>,
     job_id: &str,
 ) -> Result<(), String> {
-    state.db.prepare_update_job_resume(job_id, false)?;
+    state.jobs().prepare_update_job_resume(job_id, false)?;
     state
-        .db
+        .jobs()
         .set_update_job_status(job_id, "canceled", Some("キャンセルしました"))?;
     state
-        .db
+        .jobs()
         .append_update_job_log(job_id, "warn", "更新ジョブをキャンセルしました")?;
     emit_snapshot(app, state, job_id).await;
     Ok(())
@@ -1242,12 +1245,12 @@ async fn transition_running_worker_status(
     label: &str,
 ) -> Result<bool, String> {
     if state
-        .db
+        .jobs()
         .transition_update_job_status(job_id, "running", next_status, Some(label))?
     {
         return Ok(true);
     }
-    if state.db.update_job_status_value(job_id)? == "canceling" {
+    if state.jobs().update_job_status_value(job_id)? == "canceling" {
         finish_update_job_cancellation(app, state, job_id).await?;
     }
     Ok(false)
@@ -1278,7 +1281,7 @@ pub async fn start_update_job(
     }
     let job_id = make_job_id();
     let snapshot = state
-        .db
+        .jobs()
         .create_update_job_if_idle(&job_id, &request, &items)?;
     spawn_update_job(
         app.clone(),
@@ -1349,9 +1352,9 @@ pub async fn start_save_job(
     // back, a fresh SavePage can submit the same candidates again while the
     // first worker is still running. The check and insert must be atomic.
     let snapshot = state
-        .db
+        .jobs()
         .create_update_job_if_idle(&job_id, &request, &items)?;
-    state.db.append_update_job_log(
+    state.jobs().append_update_job_log(
         &job_id,
         "info",
         &format!("{}件の保存を受け付けました", items.len()),
@@ -1415,15 +1418,15 @@ pub async fn pause_update_job(
     job_id: String,
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    state.db.prepare_update_job_resume(&job_id, false)?;
+    state.jobs().prepare_update_job_resume(&job_id, false)?;
     state
-        .db
+        .jobs()
         .set_update_job_status(&job_id, "paused", Some("一時停止しました"))?;
     state
-        .db
+        .jobs()
         .append_update_job_log(&job_id, "warn", "更新ジョブを一時停止しました")?;
     emit_snapshot(&app, &state, &job_id).await;
-    state.db.update_job_snapshot(&job_id)
+    state.jobs().update_job_snapshot(&job_id)
 }
 
 /// 止めたジョブを続きから走らせる。
@@ -1442,14 +1445,14 @@ pub async fn resume_update_job(
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     state
-        .db
+        .jobs()
         .resume_update_job_if_idle(&job_id, retry_failed.unwrap_or(false))?;
     state
-        .db
+        .jobs()
         .append_update_job_log(&job_id, "info", "更新ジョブを再開しました")?;
     spawn_update_job(app.clone(), job_id.clone(), credentials);
     emit_snapshot(&app, &state, &job_id).await;
-    state.db.update_job_snapshot(&job_id)
+    state.jobs().update_job_snapshot(&job_id)
 }
 
 /// ジョブを中止する。返るのは要求したあとの姿。
@@ -1464,14 +1467,14 @@ pub async fn cancel_update_job(
     job_id: String,
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let current = state.db.update_job_status_value(&job_id)?;
+    let current = state.jobs().update_job_status_value(&job_id)?;
     match canceled_status_for(&current)? {
         Some("canceled") => finish_update_job_cancellation(&app, &state, &job_id).await?,
         Some("canceling") => {
             state
-                .db
+                .jobs()
                 .set_update_job_status(&job_id, "canceling", Some("キャンセル中"))?;
-            state.db.append_update_job_log(
+            state.jobs().append_update_job_log(
                 &job_id,
                 "warn",
                 "更新ジョブのキャンセルを要求しました",
@@ -1483,7 +1486,7 @@ pub async fn cancel_update_job(
     // did so without credentials; that worker first changed the job back to
     // running and then commonly stopped at auth_required instead of canceled.
     emit_snapshot(&app, &state, &job_id).await;
-    state.db.update_job_snapshot(&job_id)
+    state.jobs().update_job_snapshot(&job_id)
 }
 
 /// ジョブの今の姿を返す。候補とログは頁で切って返す。
@@ -1502,7 +1505,7 @@ pub async fn get_update_job(
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>();
     state
-        .db
+        .jobs()
         .update_job_snapshot_page(&job_id, candidate_after_id, log_before_id)
 }
 
@@ -1516,7 +1519,7 @@ pub async fn list_update_job_item_states(
     job_id: String,
 ) -> Result<Vec<UpdateJobItemState>, String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.list_update_job_item_states(&job_id)
+    state.jobs().list_update_job_item_states(&job_id)
 }
 
 /// 実行中の「結果」に必要な保留項目だけを返す。
@@ -1527,7 +1530,7 @@ pub async fn list_update_job_held_item_states(
     job_id: String,
 ) -> Result<Vec<UpdateJobItemState>, String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.list_update_job_held_item_states(&job_id)
+    state.jobs().list_update_job_held_item_states(&job_id)
 }
 
 /// ジョブの一覧を、要約だけで返す。
@@ -1540,21 +1543,11 @@ pub async fn list_update_jobs(app: tauri::AppHandle) -> Result<Vec<UpdateJobSumm
 }
 
 fn current_job_summaries(state: &AppState) -> Result<Vec<UpdateJobSummary>, String> {
-    let mut jobs = state.db.list_update_jobs()?;
-    if let Some(library) = state.library_v2.switched() {
-        let moved = library
-            .migrated_job_history_keys()
-            .map_err(|e| e.to_string())?;
-        jobs.retain(|job| !moved.contains(&job.job_id));
-    }
-    Ok(jobs)
+    state.jobs().list_update_jobs()
 }
 
 fn clear_finished_jobs(state: &AppState, include_shelf: bool) -> Result<usize, String> {
     if let Some(library) = state.library_v2.switched() {
-        let moved = library
-            .migrated_job_history_keys()
-            .map_err(|e| e.to_string())?;
         let hidden = if include_shelf {
             library
                 .set_job_history_hidden(crate::library::LibraryId::now_v7(), None, true)
@@ -1563,11 +1556,11 @@ fn clear_finished_jobs(state: &AppState, include_shelf: bool) -> Result<usize, S
             0
         };
         return state
-            .db
-            .clear_finished_update_jobs_excluding(&moved)
+            .jobs()
+            .clear_finished_update_jobs()
             .map(|count| count + hidden);
     }
-    state.db.clear_finished_update_jobs()
+    state.jobs().clear_finished_update_jobs()
 }
 
 /// 選んだ候補を保存キューへ積み、ジョブを動かし直す。
@@ -1593,17 +1586,17 @@ pub async fn save_update_job_candidates(
     let changed = {
         let _library_write_guard = state.library_gate.clone().write_owned().await;
         state
-            .db
+            .jobs()
             .queue_update_job_candidates(&job_id, &candidate_ids)?
     };
     if changed > 0 {
-        state.db.append_update_job_log(
+        state.jobs().append_update_job_log(
             &job_id,
             "info",
             &format!("{}件の候補を保存キューに追加しました", changed),
         )?;
         state
-            .db
+            .jobs()
             .set_update_job_status(&job_id, "queued", Some("候補保存待ち"))?;
         spawn_update_job(
             app.clone(),
@@ -1612,7 +1605,7 @@ pub async fn save_update_job_candidates(
         );
     }
     emit_snapshot(&app, &state, &job_id).await;
-    state.db.update_job_snapshot(&job_id)
+    state.jobs().update_job_snapshot(&job_id)
 }
 
 fn snapshot_credentials_missing() -> UpdateCredentials {
@@ -1643,7 +1636,7 @@ pub async fn clear_update_job(app: tauri::AppHandle, job_id: String) -> Result<(
                 .map_err(|e| e.to_string());
         }
     }
-    state.db.clear_update_job(&job_id)
+    state.jobs().clear_update_job(&job_id)
 }
 
 /// 終わった更新ジョブをまとめて消す。操作履歴の「完了履歴を消去」から呼ぶ。
@@ -1820,8 +1813,10 @@ pub async fn recheck_deferred_update_candidates(
         credentials: credentials.clone(),
     };
     let job_id = make_job_id();
-    let snapshot = state.db.create_update_job(&job_id, &request, &items)?;
-    state.db.append_update_job_log(
+    let snapshot = state
+        .jobs()
+        .create_update_job_if_idle(&job_id, &request, &items)?;
+    state.jobs().append_update_job_log(
         &job_id,
         "info",
         "保留した作品の閲覧条件を再確認します。保存や監視登録は行いません",
@@ -1884,19 +1879,25 @@ fn complete_held_item(
     item: &UpdateJobItem,
     known: bool,
     reason: &str,
-    result_download_id: Option<i64>,
+    saved: Option<SavedRef>,
     log: &str,
 ) -> Result<(), String> {
-    state
-        .db
-        .complete_update_job_item(item.id, "held", Some(reason), result_download_id)?;
+    state.jobs().complete_saved_item(
+        item.id,
+        "held",
+        Some(reason),
+        saved.and_then(SavedRef::legacy),
+        saved.and_then(SavedRef::shelf),
+    )?;
     if known {
-        state.db.mark_update_job_item_known_hold(item.id)?;
-        state
-            .db
-            .append_update_job_log(job_id, "info", &format!("{log}（前回から変わらない保留）"))
+        state.jobs().mark_update_job_item_known_hold(item.id)?;
+        state.jobs().append_update_job_log(
+            job_id,
+            "info",
+            &format!("{log}（前回から変わらない保留）"),
+        )
     } else {
-        state.db.append_update_job_log(job_id, "warn", log)
+        state.jobs().append_update_job_log(job_id, "warn", log)
     }
 }
 
@@ -1954,7 +1955,7 @@ async fn hold_candidate(
         target_type: item.target_type.clone(),
     })?;
     state
-        .db
+        .jobs()
         .set_update_job_item_payload(item.id, &payload.to_string())
 }
 
@@ -2043,7 +2044,7 @@ async fn recheck_deferred_item(
         expected,
     )?;
     state
-        .db
+        .jobs()
         .set_update_job_item_payload(item.id, &payload.to_string())?;
     Ok(ItemOutcome::Available(format!(
         "{}: 候補に戻しました。保存するか選んでください",
@@ -2157,7 +2158,7 @@ async fn run_update_job(
     credentials: UpdateCredentials,
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let starting_status = state.db.update_job_status_value(&job_id)?;
+    let starting_status = state.jobs().update_job_status_value(&job_id)?;
     match starting_status.as_str() {
         "canceling" => {
             finish_update_job_cancellation(&app, &state, &job_id).await?;
@@ -2167,13 +2168,13 @@ async fn run_update_job(
         // A stale scheduled task must not revive a paused or terminal job.
         _ => return Ok(()),
     }
-    if !state.db.transition_update_job_status(
+    if !state.jobs().transition_update_job_status(
         &job_id,
         &starting_status,
         "running",
         Some("更新チェックを開始しています"),
     )? {
-        if state.db.update_job_status_value(&job_id)? == "canceling" {
+        if state.jobs().update_job_status_value(&job_id)? == "canceling" {
             finish_update_job_cancellation(&app, &state, &job_id).await?;
         }
         return Ok(());
@@ -2182,8 +2183,14 @@ async fn run_update_job(
 
     // 保存した作品をそのまま監視に載せるかは、ジョブを始めたときの依頼が持つ。
     // 再開したワーカーも同じ設定で動く。
-    let watch_saved = state.db.update_job_watch_saved(&job_id).unwrap_or(false);
-    let new_works_only = state.db.update_job_new_works_only(&job_id).unwrap_or(false);
+    let watch_saved = state
+        .jobs()
+        .update_job_watch_saved(&job_id)
+        .unwrap_or(false);
+    let new_works_only = state
+        .jobs()
+        .update_job_new_works_only(&job_id)
+        .unwrap_or(false);
     crate::downloader::session::set_pixiv_web_session(
         credentials.pixiv_cookie.as_deref(),
         credentials.pixiv_user_agent.as_deref(),
@@ -2200,7 +2207,7 @@ async fn run_update_job(
     let mut processed_since_trim: u32 = 0;
     // The save page uses each changed-item event to update its individual
     // rows. Preserve that behavior for explicit save jobs.
-    let throttle_fast_progress = state.db.update_job_mode_value(&job_id)? != "save";
+    let throttle_fast_progress = state.jobs().update_job_mode_value(&job_id)? != "save";
     let mut last_progress_emit = Instant::now() - FAST_PROGRESS_INTERVAL;
     // このワーカーが保存できたもの。終わりに、作者とシリーズの横顔をまとめて
     // 取りに行くための控え。再開で別のワーカーに替わったら空から数え直す -
@@ -2211,7 +2218,7 @@ async fn run_update_job(
         if has_pending_restart(&job_id) {
             break;
         }
-        let status = state.db.update_job_status_value(&job_id)?;
+        let status = state.jobs().update_job_status_value(&job_id)?;
         if status == "paused"
             || status == "auth_required"
             || status == "completed"
@@ -2222,11 +2229,13 @@ async fn run_update_job(
         }
         if status == "canceling" {
             state
-                .db
+                .jobs()
                 .set_update_job_status(&job_id, "canceled", Some("キャンセルしました"))?;
-            state
-                .db
-                .append_update_job_log(&job_id, "warn", "更新ジョブをキャンセルしました")?;
+            state.jobs().append_update_job_log(
+                &job_id,
+                "warn",
+                "更新ジョブをキャンセルしました",
+            )?;
             emit_snapshot(&app, &state, &job_id).await;
             // 中止でも、そこまでに保存できた作品は手元に残っている。完了と
             // 同じように索引の遅れを拾う。
@@ -2234,8 +2243,8 @@ async fn run_update_job(
             break;
         }
 
-        let Some(item) = state.db.next_update_job_item(&job_id)? else {
-            let snapshot = state.db.update_job_snapshot(&job_id)?;
+        let Some(item) = state.jobs().next_update_job_item(&job_id)? else {
+            let snapshot = state.jobs().update_job_snapshot(&job_id)?;
             // 仕上げは、完了と印を付ける前に。「完了」が出てからまだ取りに
             // 行っているのでは、画面が閉じられる頃に途中で切れる。
             // まとめ保存だけでなく、更新監視が新作を自動保存した場合にも
@@ -2245,7 +2254,7 @@ async fn run_update_job(
             // Rebuild the complete saved set from durable items so profiles saved
             // by an earlier worker are not omitted.
             let profile_download_ids = state
-                .db
+                .jobs()
                 .saved_update_job_download_ids(&job_id)
                 .unwrap_or_else(|error| {
                     log::warn!("更新ジョブ {job_id} の保存済み作品を復元できません: {error}");
@@ -2263,7 +2272,7 @@ async fn run_update_job(
                 // プロフィール取得中に停止要求が来た場合、仕上げを完了扱いに
                 // してしまわない。残りの作品は保存済みなので、次回の保存で
                 // プロフィールを再取得できる。
-                match state.db.update_job_status_value(&job_id)?.as_str() {
+                match state.jobs().update_job_status_value(&job_id)?.as_str() {
                     "canceling" => {
                         finish_update_job_cancellation(&app, &state, &job_id).await?;
                         break;
@@ -2282,18 +2291,18 @@ async fn run_update_job(
             } else {
                 "完了しました"
             };
-            if !state.db.transition_update_job_status(
+            if !state.jobs().transition_update_job_status(
                 &job_id,
                 "running",
                 final_status,
                 Some(label),
             )? {
-                if state.db.update_job_status_value(&job_id)? == "canceling" {
+                if state.jobs().update_job_status_value(&job_id)? == "canceling" {
                     finish_update_job_cancellation(&app, &state, &job_id).await?;
                 }
                 break;
             }
-            state.db.append_update_job_log(
+            state.jobs().append_update_job_log(
                 &job_id,
                 if final_status == "failed" {
                     "error"
@@ -2377,25 +2386,29 @@ async fn run_update_job(
             }
             Ok(ItemOutcome::Available(message)) => {
                 state
-                    .db
+                    .jobs()
                     .complete_update_job_item(item.id, "candidate", None, None)?;
                 state
-                    .db
+                    .jobs()
                     .append_update_job_log(&job_id, "success", &message)?;
             }
             Ok(ItemOutcome::Done(message)) => {
                 state
-                    .db
+                    .jobs()
                     .complete_update_job_item(item.id, "done", None, None)?;
                 state
-                    .db
+                    .jobs()
                     .append_update_job_log(&job_id, "success", &message)?;
             }
             Ok(ItemOutcome::Saved(saved, message)) => {
                 saved_download_ids.extend(saved.legacy());
-                state
-                    .db
-                    .complete_update_job_item(item.id, "saved", None, saved.legacy())?;
+                state.jobs().complete_saved_item(
+                    item.id,
+                    "saved",
+                    None,
+                    saved.legacy(),
+                    saved.shelf(),
+                )?;
                 // 保存できた候補は、もう「決めていないもの」ではない。
                 if let (Some(source), Some(source_id)) =
                     (item.source.as_deref(), item.source_id.as_deref())
@@ -2408,7 +2421,7 @@ async fn run_update_job(
                     }
                 }
                 state
-                    .db
+                    .jobs()
                     .append_update_job_log(&job_id, "success", &message)?;
                 // 保存したものを続けて追いたい、という設定のときだけ監視に載せる。
                 // 失敗しても保存そのものは済んでいるので、警告に留める。
@@ -2425,19 +2438,11 @@ async fn run_update_job(
                 if item.item_type != "target" {
                     hold_candidate(&state, &item, None, &reason).await?;
                 }
-                complete_held_item(
-                    &state,
-                    &job_id,
-                    &item,
-                    known,
-                    &reason,
-                    saved.legacy(),
-                    &reason,
-                )?;
+                complete_held_item(&state, &job_id, &item, known, &reason, Some(saved), &reason)?;
             }
             Ok(ItemOutcome::Skipped(message) | ItemOutcome::LocalSkipped(message)) => {
                 state
-                    .db
+                    .jobs()
                     .complete_update_job_item(item.id, "skipped", None, None)?;
                 // 候補を実際に取りに行き、正常に「保存不要」と判定できたなら
                 // 未処理として残さない。改稿では、取得元の更新時刻だけが動いて
@@ -2456,11 +2461,13 @@ async fn run_update_job(
                         }
                     }
                 }
-                state.db.append_update_job_log(&job_id, "info", &message)?;
+                state
+                    .jobs()
+                    .append_update_job_log(&job_id, "info", &message)?;
             }
             Ok(ItemOutcome::AuthRequired(message)) => {
                 state
-                    .db
+                    .jobs()
                     .complete_update_job_item(item.id, "queued", Some(&message), None)?;
                 if restart_pending {
                     break;
@@ -2476,7 +2483,9 @@ async fn run_update_job(
                     {
                         break;
                     }
-                    state.db.append_update_job_log(&job_id, "warn", &message)?;
+                    state
+                        .jobs()
+                        .append_update_job_log(&job_id, "warn", &message)?;
                     emit_snapshot(&app, &state, &job_id).await;
                     break;
                 }
@@ -2488,10 +2497,10 @@ async fn run_update_job(
                     // newly supplied credentials.
                     break;
                 }
-                let control_status = state.db.update_job_status_value(&job_id)?;
+                let control_status = state.jobs().update_job_status_value(&job_id)?;
                 if matches!(control_status.as_str(), "paused" | "canceling") {
                     state
-                        .db
+                        .jobs()
                         .complete_update_job_item(item.id, "queued", None, None)?;
                     if control_status == "canceling" {
                         finish_update_job_cancellation(&app, &state, &job_id).await?;
@@ -2501,9 +2510,12 @@ async fn run_update_job(
                 let kind = classify_failure(&error);
                 if kind == FailureKind::Auth {
                     let message = format!("{}の認証を更新してください", item.title);
-                    state
-                        .db
-                        .complete_update_job_item(item.id, "queued", Some(&message), None)?;
+                    state.jobs().complete_update_job_item(
+                        item.id,
+                        "queued",
+                        Some(&message),
+                        None,
+                    )?;
                     if !transition_running_worker_status(
                         &app,
                         &state,
@@ -2515,20 +2527,27 @@ async fn run_update_job(
                     {
                         break;
                     }
-                    state.db.append_update_job_log(&job_id, "warn", &message)?;
+                    state
+                        .jobs()
+                        .append_update_job_log(&job_id, "warn", &message)?;
                     emit_snapshot(&app, &state, &job_id).await;
                     break;
                 }
 
                 if kind == FailureKind::Verification {
                     let message = format!("{}: {error}。未確認のまま一時停止しました", item.title);
-                    state
-                        .db
-                        .complete_update_job_item(item.id, "queued", Some(&message), None)?;
+                    state.jobs().complete_update_job_item(
+                        item.id,
+                        "queued",
+                        Some(&message),
+                        None,
+                    )?;
                     if transition_running_worker_status(&app, &state, &job_id, "paused", &message)
                         .await?
                     {
-                        state.db.append_update_job_log(&job_id, "warn", &message)?;
+                        state
+                            .jobs()
+                            .append_update_job_log(&job_id, "warn", &message)?;
                         emit_snapshot(&app, &state, &job_id).await;
                     }
                     break;
@@ -2541,7 +2560,7 @@ async fn run_update_job(
                         && error.to_ascii_lowercase().contains("cloudflare")
                     {
                         let message = "FANBOXのアクセス確認が必要なため一時停止しました。連続再試行はしません。時間をおいて公式サイトと連携状態を確認してください";
-                        state.db.complete_update_job_item(
+                        state.jobs().complete_update_job_item(
                             item.id,
                             "queued",
                             Some(message),
@@ -2554,7 +2573,9 @@ async fn run_update_job(
                         {
                             break;
                         }
-                        state.db.append_update_job_log(&job_id, "warn", message)?;
+                        state
+                            .jobs()
+                            .append_update_job_log(&job_id, "warn", message)?;
                         emit_snapshot(&app, &state, &job_id).await;
                         break;
                     }
@@ -2576,7 +2597,7 @@ async fn run_update_job(
                             delay_ms / 1000,
                             item.title
                         );
-                        state.db.complete_update_job_item(
+                        state.jobs().complete_update_job_item(
                             item.id,
                             "queued",
                             Some(&message),
@@ -2589,7 +2610,9 @@ async fn run_update_job(
                         {
                             break;
                         }
-                        state.db.append_update_job_log(&job_id, "warn", &message)?;
+                        state
+                            .jobs()
+                            .append_update_job_log(&job_id, "warn", &message)?;
                         emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
                         wait_for_retry_or_control(&state, &job_id, delay_ms).await?;
                         continue;
@@ -2606,15 +2629,20 @@ async fn run_update_job(
                         },
                         item.title
                     );
-                    state
-                        .db
-                        .complete_update_job_item(item.id, "queued", Some(&message), None)?;
+                    state.jobs().complete_update_job_item(
+                        item.id,
+                        "queued",
+                        Some(&message),
+                        None,
+                    )?;
                     if !transition_running_worker_status(&app, &state, &job_id, "paused", &message)
                         .await?
                     {
                         break;
                     }
-                    state.db.append_update_job_log(&job_id, "warn", &message)?;
+                    state
+                        .jobs()
+                        .append_update_job_log(&job_id, "warn", &message)?;
                     emit_snapshot(&app, &state, &job_id).await;
                     break;
                 }
@@ -2636,10 +2664,13 @@ async fn run_update_job(
                         &format!("{}: {}", item.title, reason),
                     )?;
                 } else {
-                    state
-                        .db
-                        .complete_update_job_item(item.id, "failed", Some(&reason), None)?;
-                    state.db.append_update_job_log(
+                    state.jobs().complete_update_job_item(
+                        item.id,
+                        "failed",
+                        Some(&reason),
+                        None,
+                    )?;
+                    state.jobs().append_update_job_log(
                         &job_id,
                         "error",
                         &format!("{}: {}", item.title, reason),
@@ -2686,7 +2717,9 @@ async fn run_update_job(
                     {
                         break;
                     }
-                    state.db.append_update_job_log(&job_id, "warn", &message)?;
+                    state
+                        .jobs()
+                        .append_update_job_log(&job_id, "warn", &message)?;
                     emit_snapshot(&app, &state, &job_id).await;
                     break;
                 }
@@ -2701,7 +2734,10 @@ async fn run_update_job(
         processed_since_trim += 1;
         if processed_since_trim >= LOG_TRIM_INTERVAL {
             processed_since_trim = 0;
-            if let Err(error) = state.db.trim_update_job_logs(&job_id, MAX_UPDATE_JOB_LOGS) {
+            if let Err(error) = state
+                .jobs()
+                .trim_update_job_logs(&job_id, MAX_UPDATE_JOB_LOGS)
+            {
                 log::warn!("更新ジョブ {job_id} の古いログを整理できません: {error}");
             }
         }
@@ -2712,7 +2748,7 @@ async fn run_update_job(
             emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
             last_progress_emit = Instant::now();
         }
-        if state.db.update_job_status_value(&job_id)? == "canceling" {
+        if state.jobs().update_job_status_value(&job_id)? == "canceling" {
             finish_update_job_cancellation(&app, &state, &job_id).await?;
             break;
         }
@@ -2797,10 +2833,12 @@ async fn refresh_profiles_for_saved_downloads(
     }
     let total = targets.len();
     let initial_label = format!("作者・シリーズ情報を確認しています（0/{total}件完了）");
-    match state
-        .db
-        .transition_update_job_status(job_id, "running", "running", Some(&initial_label))
-    {
+    match state.jobs().transition_update_job_status(
+        job_id,
+        "running",
+        "running",
+        Some(&initial_label),
+    ) {
         Ok(true) => {}
         Ok(false) => return,
         Err(error) => {
@@ -2808,7 +2846,7 @@ async fn refresh_profiles_for_saved_downloads(
             return;
         }
     }
-    if let Err(error) = state.db.append_update_job_log(
+    if let Err(error) = state.jobs().append_update_job_log(
         job_id,
         "info",
         &format!("作者・シリーズ情報を確認しています（{}件）", targets.len()),
@@ -2817,7 +2855,10 @@ async fn refresh_profiles_for_saved_downloads(
     }
     emit_progress_delta(app, state, job_id, None).await;
     for (index, (entity_type, source, source_key)) in targets.into_iter().enumerate() {
-        let current_status = state.db.update_job_status_value(job_id).unwrap_or_default();
+        let current_status = state
+            .jobs()
+            .update_job_status_value(job_id)
+            .unwrap_or_default();
         if matches!(current_status.as_str(), "canceling" | "paused") {
             break;
         }
@@ -2834,7 +2875,7 @@ async fn refresh_profiles_for_saved_downloads(
             crate::commands::database::refresh_entity_profile(app.clone(), params).await
         {
             log::warn!("{entity_type}:{source}:{source_key} の情報を取れません: {error}");
-            let _ = state.db.append_update_job_log(
+            let _ = state.jobs().append_update_job_log(
                 job_id,
                 "warn",
                 &format!("{entity_type}:{source}:{source_key} の情報を取得できません: {error}"),
@@ -2845,7 +2886,7 @@ async fn refresh_profiles_for_saved_downloads(
             index + 1
         );
         match state
-            .db
+            .jobs()
             .transition_update_job_status(job_id, "running", "running", Some(&label))
         {
             Ok(true) => {}
@@ -2874,7 +2915,14 @@ impl SavedRef {
         }
     }
 
-    /// 旧棚の番号（ジョブの記録・横顔の取り直しは旧棚の番号で持つ）。
+    fn shelf(self) -> Option<crate::library::LibraryId> {
+        match self {
+            Self::Shelf(id) => Some(id),
+            Self::Legacy(_) => None,
+        }
+    }
+
+    /// 旧棚の番号（横顔の取り直しは旧棚の番号で持つ）。
     fn legacy(self) -> Option<i64> {
         match self {
             SavedRef::Legacy(id) => Some(id),
@@ -3105,7 +3153,7 @@ async fn wait_for_retry_or_control(
         tokio::time::sleep(std::time::Duration::from_millis(step_ms)).await;
         remaining_ms -= step_ms;
         if !matches!(
-            state.db.update_job_status_value(job_id)?.as_str(),
+            state.jobs().update_job_status_value(job_id)?.as_str(),
             "queued" | "running"
         ) {
             break;
@@ -3401,7 +3449,7 @@ async fn process_work_item(
     let fanbox_author_check =
         payload.get("fanboxAuthorCheck").and_then(Value::as_bool) == Some(true);
     let dl: DownloadEntry = serde_json::from_value(payload).map_err(|e| e.to_string())?;
-    let auto_save = state.db.update_job_mode_value(job_id)? == "auto_save";
+    let auto_save = state.jobs().update_job_mode_value(job_id)? == "auto_save";
     if dl.source == "pixiv" {
         let Some(token) = pixiv_token(credentials) else {
             return Ok(ItemOutcome::AuthRequired(
@@ -3816,7 +3864,7 @@ fn record_candidate(
             .candidates()
             .set_update_candidate_status(&source, &source_id, "held")?;
     }
-    state.db.insert_update_job_candidate(
+    state.jobs().insert_update_job_candidate(
         job_id,
         &item_from_payload(
             "candidate",
@@ -3965,7 +4013,7 @@ async fn scan_pixiv_revisions(
             .db
             .insert_update_job_unavailable_work(job_id, &work, &reason)?
         {
-            state.db.append_update_job_log(
+            state.jobs().append_update_job_log(
                 job_id,
                 "warn",
                 &format!("{}: {reason}", target.display_name),
@@ -3986,8 +4034,8 @@ async fn process_target_item(
 ) -> Result<ItemOutcome, String> {
     let target: crate::database::UpdateTarget =
         serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
-    let auto_save = state.db.update_job_mode_value(job_id)? == "auto_save";
-    let new_works_only = state.db.update_job_new_works_only(job_id)?;
+    let auto_save = state.jobs().update_job_mode_value(job_id)? == "auto_save";
+    let new_works_only = state.jobs().update_job_new_works_only(job_id)?;
     let library = shelf::switched_library(app);
     let mut fanbox_checkpoint = None;
     let full_fanbox = library.is_some()
@@ -4237,7 +4285,7 @@ async fn process_target_item(
                 target.source,
                 target.source_key
             );
-            let _ = state.db.append_update_job_log(
+            let _ = state.jobs().append_update_job_log(
                 job_id,
                 "warn",
                 &format!(
@@ -4770,7 +4818,7 @@ mod tests {
             .unwrap();
         let job_id = make_job_id();
         state
-            .db
+            .jobs()
             .create_update_job(
                 &job_id,
                 &StartUpdateJobRequest {
@@ -4816,13 +4864,13 @@ mod tests {
             .db
             .insert_update_job_unavailable_work(&job_id, &work, &reason)
             .unwrap());
-        let snapshot = state.db.update_job_snapshot(&job_id).unwrap();
+        let snapshot = state.jobs().update_job_snapshot(&job_id).unwrap();
         assert_eq!(snapshot.totals, 1);
         assert_eq!(snapshot.processed, 1);
         assert_eq!(snapshot.held_count, 1);
         assert_eq!(snapshot.error_count, 0);
         assert_eq!(
-            state.db.list_update_job_item_states(&job_id).unwrap()[0].status,
+            state.jobs().list_update_job_item_states(&job_id).unwrap()[0].status,
             "held"
         );
         assert!(state
@@ -4842,7 +4890,7 @@ mod tests {
         // 「保留あり」とは言わない。保留は要確認に残る。
         let next_job = make_job_id();
         state
-            .db
+            .jobs()
             .create_update_job(
                 &next_job,
                 &StartUpdateJobRequest {
@@ -4862,13 +4910,13 @@ mod tests {
             .db
             .insert_update_job_unavailable_work(&next_job, &work, &reason)
             .unwrap();
-        let again = state.db.update_job_snapshot(&next_job).unwrap();
+        let again = state.jobs().update_job_snapshot(&next_job).unwrap();
         assert_eq!(
             (again.processed, again.held_count, again.known_held_count),
             (1, 0, 1)
         );
         assert!(state
-            .db
+            .jobs()
             .list_update_job_held_item_states(&next_job)
             .unwrap()
             .is_empty());
@@ -5684,14 +5732,12 @@ mod tests {
     }
 
     #[test]
-    fn job_ids_are_fixed_width_random_values() {
+    fn job_ids_are_unique_library_uuids() {
         let ids = (0..10_000).map(|_| make_job_id()).collect::<HashSet<_>>();
         assert_eq!(ids.len(), 10_000);
-        assert!(ids.iter().all(|id| {
-            id.len() == 36
-                && id.starts_with("job-")
-                && id[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
-        }));
+        assert!(ids
+            .iter()
+            .all(|id| { id.parse::<crate::library::LibraryId>().is_ok() }));
     }
 
     /// 預かるのは、取得元とIDが揃っているものだけ。

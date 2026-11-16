@@ -742,7 +742,7 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
               <UpdateWorkMetadata metadata={item.metadata} />
             </Stack>
             <UpdateStatusBadge title={item.title || item.sourceId || "作品"} {...acquisitionStatusMeta(heldAcquisitionKind(reason))} detail={item.error || "確認を保留しました。保存済みの内容は保持されています。"} />
-            {item.source && item.sourceId && <UpdateWorkLinks source={item.source} sourceId={item.sourceId} downloadId={item.downloadId} title={item.title || item.sourceId} onOpenWork={onOpenWork} />}
+            {item.source && item.sourceId && <UpdateWorkLinks source={item.source} sourceId={item.sourceId} downloadId={item.downloadId} workId={item.workId} title={item.title || item.sourceId} onOpenWork={onOpenWork} />}
           </Group>
         </Paper>;
       })}
@@ -958,7 +958,7 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
                 <UpdateWorkMetadata metadata={candidate.metadata} fallback={[candidate.targetLabel, candidate.subtitle].filter(Boolean).join(" · ")} />
               </Stack>
               <UpdateStatusBadge title={candidate.title} {...candidateStatusMeta(candidate)} detail={candidate.error} />
-              <UpdateWorkLinks source={candidate.source} sourceId={candidate.sourceId} downloadId={candidate.downloadId} title={candidate.title} onOpenWork={onOpenWork} />
+              <UpdateWorkLinks source={candidate.source} sourceId={candidate.sourceId} downloadId={candidate.downloadId} workId={candidate.workId} title={candidate.title} onOpenWork={onOpenWork} />
               {isSavableCandidate(candidate) && (
                 <Tooltip label="候補から外す（保留・非表示の一覧から戻せます）">
                   <ActionIcon variant="subtle" color="gray" aria-label={`${candidate.title}を候補から外す`} onClick={() => onDismiss(candidate)}>

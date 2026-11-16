@@ -90,6 +90,7 @@ export interface UpdateJobCandidate {
   metadata?: UpdateWorkMetadata;
   id: number;
   downloadId?: number | null;
+  workId?: string | null;
   key: string;
   source: "pixiv" | "fanbox";
   sourceId: string;
@@ -222,6 +223,7 @@ export interface UpdateJobItemState {
   title?: string | null;
   /** Local saved work ID when this job item resolves to the library. */
   downloadId?: number | null;
+  workId?: string | null;
 }
 
 /** Small event emitted for one live job transition. Full pages stay on getUpdateJob. */

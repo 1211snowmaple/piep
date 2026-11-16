@@ -272,7 +272,7 @@ pub(super) fn apply_pixiv_listing(
                 .candidates()
                 .insert_update_job_unavailable_item(job_id, &item, &original, &reason)?
             {
-                state.db.append_update_job_log(
+                state.jobs().append_update_job_log(
                     job_id,
                     "warn",
                     &format!("{}: {reason}", target.display_name),
@@ -397,7 +397,7 @@ mod tests {
     fn job(state: &AppState) -> String {
         let id = make_job_id();
         state
-            .db
+            .jobs()
             .create_update_job(&id, &request("author"), &[])
             .unwrap();
         id
@@ -538,7 +538,7 @@ mod tests {
             .unwrap(),
             1
         );
-        let item = state.db.next_update_job_item(&second).unwrap().unwrap();
+        let item = state.jobs().next_update_job_item(&second).unwrap().unwrap();
         assert_eq!(item.source_id.as_deref(), Some("11"));
         let payload: Value = serde_json::from_str(&item.payload_json).unwrap();
         assert_eq!(payload["kind"], "revision");
@@ -657,7 +657,7 @@ mod tests {
             &missing,
         )
         .unwrap();
-        let snapshot = state.db.update_job_snapshot(&first).unwrap();
+        let snapshot = state.jobs().update_job_snapshot(&first).unwrap();
         assert_eq!(snapshot.totals, 1);
         assert_eq!(snapshot.held_count, 1);
         assert!(library
@@ -674,7 +674,7 @@ mod tests {
             &missing,
         )
         .unwrap();
-        let snapshot = state.db.update_job_snapshot(&next).unwrap();
+        let snapshot = state.jobs().update_job_snapshot(&next).unwrap();
         assert_eq!(snapshot.held_count, 0);
         assert_eq!(snapshot.known_held_count, 1);
         let recovered = listing(&card, card.saved_at - 1000);

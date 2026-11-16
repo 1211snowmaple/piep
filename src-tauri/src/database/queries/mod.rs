@@ -40,6 +40,7 @@ pub(crate) use reader::{reader_outline, search_reader_pages};
 mod work_inspection;
 pub(crate) use work_inspection::revision_metadata;
 pub use work_inspection::{RevisionMetadata, RevisionSnapshot, WorkAcquisitionDetails};
+pub(crate) mod queue_transfer;
 mod update_watch;
 mod watch_groups;
 pub(crate) use acquisition_audit::{
@@ -5480,15 +5481,6 @@ impl Database {
         .map_err(|e| format!("Failed to clear finished update jobs: {}", e))
     }
 
-    /// 棚へ移した原本の旧行は残し、このキューに属する完了記録だけを片付ける。
-    pub(crate) fn clear_finished_update_jobs_excluding(
-        &self,
-        excluded: &std::collections::HashSet<String>,
-    ) -> Result<usize, String> {
-        let keys = serde_json::to_string(excluded).map_err(|e| e.to_string())?;
-        self.conn.lock().map_err(|e|e.to_string())?.execute("DELETE FROM update_jobs WHERE status IN ('completed','failed','canceled') AND id NOT IN (SELECT value FROM json_each(?1))",[keys]).map_err(|e|e.to_string())
-    }
-
     /// 1ジョブあたりのログを頭から落として上限に収める。
     ///
     /// 長く走るジョブでは1件ごとに数行積まれるため、上限がないとスナップショット
@@ -5772,6 +5764,7 @@ impl Database {
                         .unwrap_or("new")
                         .to_string();
                     Ok(UpdateJobCandidate {
+                        work_id: None,
                         metadata: UpdateWorkMetadata::from_row(row, 9, &payload)?,
                         id,
                         download_id: row.get(8)?,
@@ -6117,6 +6110,7 @@ impl Database {
         let rows = stmt
             .query_map(params![job_id], |row| {
                 Ok(UpdateJobItemState {
+                    work_id: None,
                     metadata: UpdateWorkMetadata::from_row(
                         row,
                         8,
@@ -6176,6 +6170,7 @@ impl Database {
                     params![item_id, job_id],
                     |row| {
                         Ok(UpdateJobItemState {
+                            work_id: None,
                             metadata: Default::default(),
                             source: row.get(0)?,
                             source_id: row.get(1)?,

@@ -296,7 +296,7 @@ impl Library {
         self.read_job_payload(&conn, hash)
     }
 
-    fn read_job_payload(&self, conn: &Connection, hash: Fingerprint) -> Result<String> {
+    pub(crate) fn read_job_payload(&self, conn: &Connection, hash: Fingerprint) -> Result<String> {
         let file = Self::file_from_conn(conn, hash)?;
         if file.length > MAX_JOB_PAYLOAD_BYTES {
             return Err(Error::Unsupported(
@@ -320,7 +320,7 @@ impl Library {
         if pending {
             return Err(Error::Integrity("未確定のジョブ履歴があります".into()));
         }
-        let mut stmt = conn.prepare("SELECT DISTINCT payload_file_id FROM job_history_items")?;
+        let mut stmt = conn.prepare("SELECT payload_file_id FROM job_history_items UNION SELECT payload_file_id FROM execution_items")?;
         for hash in stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))? {
             let hash = Fingerprint(
                 hash?

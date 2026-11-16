@@ -89,12 +89,12 @@ fn new_shelf_candidates_drive_display_blocking_and_user_choices_without_old_cand
 }
 
 #[test]
-fn unavailable_holds_use_native_decisions_and_only_execution_rows_are_written_to_the_old_queue() {
+fn unavailable_holds_and_execution_rows_use_the_native_shelf_without_changing_the_old_queue() {
     let (_temp, state, library) = fixture();
     save(&library, "11");
     let job = LibraryId::now_v7().to_string();
     state
-        .db
+        .jobs()
         .create_update_job(
             &job,
             &crate::database::StartUpdateJobRequest {
@@ -134,12 +134,13 @@ fn unavailable_holds_use_native_decisions_and_only_execution_rows_are_written_to
         .unwrap());
     assert_eq!(ledger.count_saved_deferred_update_candidates().unwrap(), 1);
     assert_eq!(state.db.count_deferred_update_candidates().unwrap(), 0);
+    assert!(state.db.list_update_jobs().unwrap().is_empty());
     state
-        .db
+        .jobs()
         .set_update_job_status(&job, "completed", None)
         .unwrap();
-    state.db.clear_update_job(&job).unwrap();
-    assert!(state.db.list_update_jobs().unwrap().is_empty());
+    state.jobs().clear_update_job(&job).unwrap();
+    assert!(state.jobs().list_update_jobs().unwrap().is_empty());
     assert_eq!(ledger.count_saved_deferred_update_candidates().unwrap(), 1);
     ledger
         .clear_resolved_unavailable_candidates("pixiv", &["11".into()])

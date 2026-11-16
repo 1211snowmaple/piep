@@ -340,7 +340,7 @@ pub fn start_automatic_saved_asset_audit(app: tauri::AppHandle) {
         let mut marked = 0;
         let mut after_id = 0;
         loop {
-            match state.db.has_active_update_job() {
+            match state.jobs().has_active_update_job() {
                 Ok(true) => {
                     sleep(Duration::from_secs(2)).await;
                     continue;
@@ -416,7 +416,7 @@ pub fn start_automatic_cover_repair(app: tauri::AppHandle) {
         let state = app.state::<Arc<AppState>>().inner().clone();
         for (id, source_id, json_path, old_cover) in rows {
             loop {
-                match state.db.has_active_update_job() {
+                match state.jobs().has_active_update_job() {
                     Ok(false) => break,
                     Ok(true) => sleep(Duration::from_secs(2)).await,
                     Err(error) => {

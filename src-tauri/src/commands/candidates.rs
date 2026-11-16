@@ -420,7 +420,7 @@ impl Candidates<'_> {
         if self.update_candidate_status(source, key)?.is_some() {
             return Ok(());
         }
-        let (title, payload) = self.state.db.latest_job_candidate(source, key)?;
+        let (title, payload) = self.state.jobs().latest_job_candidate(source, key)?;
         let mut value: serde_json::Value =
             serde_json::from_str(&payload).map_err(|e| e.to_string())?;
         let kind = if self.saved(source, key)? {
@@ -454,7 +454,9 @@ impl Candidates<'_> {
                 .clear_discovery(LibraryId::now_v7(), source, key, true)
                 .map_err(|e| e.to_string())?;
         }
-        self.state.db.resolve_unavailable_job_items(source, keys)
+        self.state
+            .jobs()
+            .resolve_unavailable_job_items(source, keys)
     }
     pub(crate) fn insert_update_job_unavailable_item(
         &self,
@@ -479,7 +481,7 @@ impl Candidates<'_> {
             });
         self.hold(&UpdateCandidateInput {source:source.into(),source_id:key.into(),kind:"revision".into(),title:item.title.clone(),payload_json:serde_json::json!({"source":source,"sourceId":key,"title":item.title,"kind":"revision","holdKind":"unavailable","holdReason":reason,"originalData":original}).to_string(),target_type:Some("work".into())})?;
         self.state
-            .db
+            .jobs()
             .insert_unavailable_queue_item(job, item, reason, known)
     }
 }

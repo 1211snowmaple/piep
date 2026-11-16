@@ -172,11 +172,15 @@ fn prepare_library(
         }
         Err(error) => log::warn!("分割復元の記録を読めません: {error}"),
     }
-    if let Err(e) = state.db.recover_update_jobs_on_startup() {
+    state
+        .jobs()
+        .import_previous_queue()
+        .map_err(|e| format!("以前の実行キューを引き継げません: {e}"))?;
+    if let Err(e) = state.jobs().recover_update_jobs_on_startup() {
         log::warn!("Failed to recover update jobs: {}", e);
     }
     // 終わったジョブは放っておくと溜まり続ける。起動時に一度だけ整理する。
-    match state.db.prune_update_jobs(
+    match state.jobs().prune_update_jobs(
         commands::update_jobs::KEEP_UPDATE_JOBS,
         commands::update_jobs::KEEP_UPDATE_JOB_DAYS,
     ) {

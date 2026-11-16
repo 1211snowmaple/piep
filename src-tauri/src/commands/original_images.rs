@@ -271,7 +271,7 @@ pub async fn upgrade_pixiv_images_to_original(
             if CANCEL.load(Ordering::Acquire) {
                 break 'images;
             }
-            match state.db.has_active_update_job() {
+            match state.jobs().has_active_update_job() {
                 Ok(false) => break,
                 Ok(true) => tokio::time::sleep(Duration::from_secs(2)).await,
                 Err(error) => {

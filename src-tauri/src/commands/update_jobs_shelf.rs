@@ -450,7 +450,7 @@ pub(super) async fn process_work(
             item.title
         )));
     };
-    if state.db.update_job_status_value(job_id)? != "running" {
+    if state.jobs().update_job_status_value(job_id)? != "running" {
         return Err("更新確認を中断しました".into());
     }
     let changed = {
@@ -469,7 +469,7 @@ pub(super) async fn process_work(
         })
         .await?
     };
-    if state.db.update_job_mode_value(job_id)? != "auto_save" && changed {
+    if state.jobs().update_job_mode_value(job_id)? != "auto_save" && changed {
         let recorded = {
             let _guard = state.library_gate.write().await;
             record_revision(state, job_id, &card, &fetched)?
@@ -736,11 +736,11 @@ mod tests {
             assert!(content_changed(&library, &card, &changed).unwrap());
             let job = make_job_id();
             state
-                .db
+                .jobs()
                 .create_update_job(&job, &request("work"), &[])
                 .unwrap();
             assert!(record_revision(&state, &job, &card, &changed).unwrap());
-            let snapshot = state.db.update_job_snapshot(&job).unwrap();
+            let snapshot = state.jobs().update_job_snapshot(&job).unwrap();
             assert_eq!(snapshot.candidate_count, 1);
             let candidates = state
                 .candidates()
