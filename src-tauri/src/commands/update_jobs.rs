@@ -28,6 +28,10 @@ use tauri::{Emitter, Manager};
 #[path = "update_jobs_shelf.rs"]
 pub(super) mod shelf;
 
+#[cfg(test)]
+#[path = "update_jobs_history_tests.rs"]
+mod history_tests;
+
 const UPDATE_JOB_DELAY_MS: u64 = 2_000;
 /// 新作だけの確認で、作者の間にあける時間。
 ///
@@ -1532,7 +1536,38 @@ pub async fn list_update_job_held_item_states(
 #[tauri::command]
 pub async fn list_update_jobs(app: tauri::AppHandle) -> Result<Vec<UpdateJobSummary>, String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.list_update_jobs()
+    current_job_summaries(&state)
+}
+
+fn current_job_summaries(state: &AppState) -> Result<Vec<UpdateJobSummary>, String> {
+    let mut jobs = state.db.list_update_jobs()?;
+    if let Some(library) = state.library_v2.switched() {
+        let moved = library
+            .migrated_job_history_keys()
+            .map_err(|e| e.to_string())?;
+        jobs.retain(|job| !moved.contains(&job.job_id));
+    }
+    Ok(jobs)
+}
+
+fn clear_finished_jobs(state: &AppState, include_shelf: bool) -> Result<usize, String> {
+    if let Some(library) = state.library_v2.switched() {
+        let moved = library
+            .migrated_job_history_keys()
+            .map_err(|e| e.to_string())?;
+        let hidden = if include_shelf {
+            library
+                .set_job_history_hidden(crate::library::LibraryId::now_v7(), None, true)
+                .map_err(|e| e.to_string())?
+        } else {
+            0
+        };
+        return state
+            .db
+            .clear_finished_update_jobs_excluding(&moved)
+            .map(|count| count + hidden);
+    }
+    state.db.clear_finished_update_jobs()
 }
 
 /// 選んだ候補を保存キューへ積み、ジョブを動かし直す。
@@ -1597,14 +1632,28 @@ fn snapshot_credentials_missing() -> UpdateCredentials {
 #[tauri::command]
 pub async fn clear_update_job(app: tauri::AppHandle, job_id: String) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
+    if let Some(library) = state.library_v2.switched() {
+        if let Some(job) = library
+            .migrated_job_history_id(&job_id)
+            .map_err(|e| e.to_string())?
+        {
+            return library
+                .set_job_history_hidden(crate::library::LibraryId::now_v7(), Some(job), true)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+        }
+    }
     state.db.clear_update_job(&job_id)
 }
 
 /// 終わった更新ジョブをまとめて消す。操作履歴の「完了履歴を消去」から呼ぶ。
 #[tauri::command]
-pub async fn clear_finished_update_jobs(app: tauri::AppHandle) -> Result<usize, String> {
+pub async fn clear_finished_update_jobs(
+    app: tauri::AppHandle,
+    include_shelf: Option<bool>,
+) -> Result<usize, String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.clear_finished_update_jobs()
+    clear_finished_jobs(&state, include_shelf.unwrap_or(true))
 }
 
 /// この作品を今後の候補から外す（あるいは、その決定を取り消す）。

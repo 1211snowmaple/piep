@@ -5480,6 +5480,15 @@ impl Database {
         .map_err(|e| format!("Failed to clear finished update jobs: {}", e))
     }
 
+    /// 棚へ移した原本の旧行は残し、このキューに属する完了記録だけを片付ける。
+    pub(crate) fn clear_finished_update_jobs_excluding(
+        &self,
+        excluded: &std::collections::HashSet<String>,
+    ) -> Result<usize, String> {
+        let keys = serde_json::to_string(excluded).map_err(|e| e.to_string())?;
+        self.conn.lock().map_err(|e|e.to_string())?.execute("DELETE FROM update_jobs WHERE status IN ('completed','failed','canceled') AND id NOT IN (SELECT value FROM json_each(?1))",[keys]).map_err(|e|e.to_string())
+    }
+
     /// 1ジョブあたりのログを頭から落として上限に収める。
     ///
     /// 長く走るジョブでは1件ごとに数行積まれるため、上限がないとスナップショット

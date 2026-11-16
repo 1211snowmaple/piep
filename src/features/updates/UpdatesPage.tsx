@@ -35,6 +35,7 @@ import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
 import { updateJobStatusMeta, invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { DeferredCandidatesPanel } from "./DeferredCandidatesPanel";
+import { StoredJobHistoryPanel } from "./StoredJobHistoryPanel";
 import { UpdateWorkLinks } from "./UpdateWorkLinks";
 import { UpdateStatusBadge } from "./UpdateStatusBadge";
 import { heldAcquisitionKind, heldReason, summarizeUpdateJobItems, updateJobSubject } from "./updateJobOutcome";
@@ -311,7 +312,7 @@ export default function UpdatesPage() {
   const clearFinishedJobsMutation = useMutation({
     mutationFn: async () => {
       if (!runtime) return 0;
-      const removed = await clearFinishedUpdateJobsCommand();
+      const removed = await clearFinishedUpdateJobsCommand(false);
       await updateJobs.loadJobs();
       return removed;
     },
@@ -666,7 +667,7 @@ export default function UpdatesPage() {
         </Tabs.Panel>
 
         <Tabs.Panel value="history" pt="lg">
-          <JobHistoryPanel
+          <StoredJobHistoryPanel runtime={runtime} hasCurrent={jobs.length > 0} onShelfReady={updateJobs.loadJobs} current={<JobHistoryPanel
             jobs={jobs}
             activeJobId={activeSnapshot?.jobId ?? null}
             finishedCount={finishedJobCount}
@@ -680,7 +681,7 @@ export default function UpdatesPage() {
             }}
             onClear={(jobId) => clearJobMutation.mutate(jobId)}
             onClearFinished={confirmClearFinishedJobs}
-          />
+          />} />
         </Tabs.Panel>
 
         <Tabs.Panel value="schedule" pt="lg">

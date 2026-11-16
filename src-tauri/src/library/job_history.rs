@@ -137,7 +137,7 @@ impl Library {
         let (date, id) = before
             .map(|(date, id)| (Some(date), Some(id)))
             .unwrap_or((None, None));
-        let mut stmt = conn.prepare(&format!("SELECT {SUMMARY} FROM job_history WHERE sealed=1 AND (?2 IS NULL OR (started_at,id)<(?2,?3)) ORDER BY started_at DESC,id DESC LIMIT ?1"))?;
+        let mut stmt = conn.prepare(&format!("SELECT {SUMMARY} FROM job_history WHERE sealed=1 AND id NOT IN (SELECT job_id FROM job_history_visibility WHERE hidden=1) AND (?2 IS NULL OR (started_at,id)<(?2,?3)) ORDER BY started_at DESC,id DESC LIMIT ?1"))?;
         let rows = stmt
             .query_map(params![limit, date, id], summary)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -153,6 +153,72 @@ impl Library {
         )
         .optional()?
         .ok_or(Error::ResourceUnavailable)
+    }
+
+    /// 一覧から外した履歴も含め、旧実行キューの同じ記録を二重に表示しないための対応。
+    pub fn migrated_job_history_keys(&self) -> Result<std::collections::HashSet<String>> {
+        let conn = self.reader()?;
+        let mut statement=conn.prepare("SELECT m.source_key FROM migration_records m JOIN job_history j ON j.id=m.target_id WHERE m.source_table='update_jobs' AND m.status='imported' AND j.sealed=1")?;
+        let rows = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn migrated_job_history_id(&self, key: &str) -> Result<Option<LibraryId>> {
+        Ok(self.reader()?.query_row("SELECT j.id FROM migration_records m JOIN job_history j ON j.id=m.target_id WHERE m.source_table='update_jobs' AND m.source_key=?1 AND m.status='imported' AND j.sealed=1",[key],|r|id(r,0)).optional()?)
+    }
+
+    /// 封をした履歴の原本を保ち、一覧での表示だけを変更する。同じ要求の再送は一度だけ。
+    /// `job=None, hidden=true` は、現在ある完了履歴を一度に一覧から外す。
+    pub fn set_job_history_hidden(
+        &self,
+        request: LibraryId,
+        job: Option<LibraryId>,
+        hidden: bool,
+    ) -> Result<usize> {
+        if job.is_none() && !hidden {
+            return Err(Error::Integrity("戻す履歴を指定してください".into()));
+        }
+        let input = serde_json::json!({"job":job,"hidden":hidden});
+        let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let tx = conn.transaction()?;
+        let receipt: Option<(String, String)> = tx
+            .query_row(
+                "SELECT operation,payload_json FROM outbox WHERE request_id=?1",
+                [request.as_bytes().as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((operation, payload)) = receipt {
+            let payload: serde_json::Value = serde_json::from_str(&payload)?;
+            if operation != "job_history_visibility" || payload["request"] != input {
+                return Err(Error::Integrity(
+                    "要求 ID が別の履歴の操作に使われています".into(),
+                ));
+            }
+            return payload["changed"]
+                .as_u64()
+                .and_then(|v| usize::try_from(v).ok())
+                .ok_or_else(|| Error::Integrity("履歴の操作結果が不正です".into()));
+        }
+        if let Some(job) = job {
+            require_job(&tx, job)?;
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        let changed=tx.execute("INSERT INTO job_history_visibility(job_id,hidden,updated_at)
+            SELECT id,?2,?3 FROM job_history WHERE sealed=1 AND (?1 IS NULL OR id=?1)
+            ON CONFLICT(job_id) DO UPDATE SET hidden=excluded.hidden,updated_at=excluded.updated_at WHERE hidden IS NOT excluded.hidden",
+            params![job.map(|v|v.as_bytes().to_vec()),hidden,now])?;
+        if changed > 0 {
+            tx.execute(
+                "UPDATE library_meta SET generation=generation+1 WHERE singleton=1",
+                [],
+            )?;
+        }
+        tx.execute("INSERT INTO outbox(request_id,history_catalog_id,operation,payload_json,created_at) VALUES(?1,1,'job_history_visibility',?2,?3)",params![request.as_bytes().as_slice(),serde_json::json!({"request":input,"changed":changed}).to_string(),now])?;
+        tx.commit()?;
+        Ok(changed)
     }
 
     pub fn job_history_items(

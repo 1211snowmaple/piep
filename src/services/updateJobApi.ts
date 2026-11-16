@@ -257,8 +257,8 @@ export async function resumeUpdateJobCommand(
 
 /** Stops a work from being offered again, or takes that decision back. */
 /** Removes every finished update job from the history. Running ones stay. */
-export async function clearFinishedUpdateJobsCommand(): Promise<number> {
-  return invoke<number>("clear_finished_update_jobs");
+export async function clearFinishedUpdateJobsCommand(includeShelf = true): Promise<number> {
+  return invoke<number>("clear_finished_update_jobs", { includeShelf });
 }
 
 export async function dismissUpdateCandidateCommand(

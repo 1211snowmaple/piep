@@ -66,6 +66,23 @@ impl Drop for Fixture {
 fn payload() -> &'static str {
     "{ \"future\": {\"decimal\":0.07221960411257732,\"integer\":9007199254740993},\"knownHold\":true }\r\n"
 }
+
+/// ネイティブの履歴画面の確認用。旧 DB と新しい棚の両方を試験用の場所へ作る。
+#[test]
+#[ignore]
+fn native_history_fixture() {
+    let fixture = Fixture::new();
+    let source = LegacyImporter::open(&fixture.0.join("old")).unwrap();
+    let library = Library::create(&fixture.0.join("new")).unwrap();
+    let report = source
+        .import(&library, &AtomicBool::new(false), |_| {})
+        .unwrap();
+    assert!(report.unresolved.is_empty());
+    library.switch_over().unwrap();
+    println!("HISTORY_NATIVE_ROOT={}", fixture.0.display());
+    println!("HISTORY_NATIVE_FIXTURE={}", fixture.0.join("new").display());
+    std::mem::forget(fixture);
+}
 fn count(library: &Library, table: &str) -> i64 {
     assert!(matches!(
         table,
@@ -77,6 +94,94 @@ fn count(library: &Library, table: &str) -> i64 {
         .unwrap()
         .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
         .unwrap()
+}
+
+#[test]
+fn history_visibility_preserves_originals_aliases_and_retry_results_after_restore() {
+    let fixture = Fixture::new();
+    let source = LegacyImporter::open(&fixture.0.join("old")).unwrap();
+    let library = Library::create(&fixture.0.join("new")).unwrap();
+    source
+        .import(&library, &AtomicBool::new(false), |_| {})
+        .unwrap();
+    library.switch_over().unwrap();
+    let before = library.job_history(10).unwrap();
+    let job = before.iter().find(|j| j.scope == "author").unwrap().id;
+    assert_eq!(
+        library.migrated_job_history_keys().unwrap(),
+        std::collections::HashSet::from(["job-a".into(), "job-z".into()])
+    );
+    assert_eq!(library.migrated_job_history_id("job-z").unwrap(), Some(job));
+    assert!(library
+        .migrated_job_history_id("unknown")
+        .unwrap()
+        .is_none());
+    let items = library.job_history_items(job, None, 100).unwrap();
+    let logs = library.job_history_logs(job, None, 100).unwrap();
+    let raw = library.job_history_payload(job, items[0].id).unwrap();
+    let request = LibraryId::now_v7();
+    assert_eq!(
+        library
+            .set_job_history_hidden(request, Some(job), true)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        library
+            .set_job_history_hidden(request, Some(job), true)
+            .unwrap(),
+        1
+    );
+    assert_eq!(library.job_history(10).unwrap().len(), 1);
+    // 一覧から外したカーソルでも、その位置から続きを読める。
+    assert_eq!(
+        library
+            .job_history_page(Some(before[0].id), 10)
+            .unwrap()
+            .len(),
+        0
+    );
+    library
+        .set_job_history_hidden(LibraryId::now_v7(), Some(job), false)
+        .unwrap();
+    library
+        .set_job_history_hidden(request, Some(job), true)
+        .unwrap();
+    assert_eq!(library.job_history(10).unwrap(), before);
+    assert!(library
+        .set_job_history_hidden(request, Some(job), false)
+        .is_err());
+    assert!(library
+        .set_job_history_hidden(LibraryId::now_v7(), Some(LibraryId::now_v7()), true)
+        .is_err());
+    assert!(library
+        .set_job_history_hidden(LibraryId::now_v7(), None, false)
+        .is_err());
+    let all = LibraryId::now_v7();
+    assert_eq!(library.set_job_history_hidden(all, None, true).unwrap(), 2);
+    assert!(library.job_history(10).unwrap().is_empty());
+    library
+        .set_job_history_hidden(LibraryId::now_v7(), Some(job), false)
+        .unwrap();
+    // 全件を外す要求の再送も、後から戻した記録を外し直さない。
+    assert_eq!(library.set_job_history_hidden(all, None, true).unwrap(), 2);
+    assert_eq!(library.job_history(10).unwrap().len(), 1);
+    assert_eq!(
+        library.job_history_entry(job).unwrap(),
+        *before.iter().find(|j| j.id == job).unwrap()
+    );
+    assert_eq!(library.job_history_items(job, None, 100).unwrap(), items);
+    assert_eq!(library.job_history_logs(job, None, 100).unwrap(), logs);
+    assert_eq!(library.job_history_payload(job, items[0].id).unwrap(), raw);
+    assert_eq!(
+        Connection::open(fixture.0.join("old/piep.db"))
+            .unwrap()
+            .query_row("SELECT count(*) FROM update_jobs", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    library.verify().unwrap();
 }
 
 #[test]

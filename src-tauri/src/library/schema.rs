@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 20;
+pub(crate) const VERSION: i64 = 21;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -25,6 +25,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_018_edit_archive.sql"),
     include_str!("migration_019_watching.sql"),
     include_str!("migration_020_discovery_state.sql"),
+    include_str!("migration_021_history_visibility.sql"),
 ];
 
 fn migration_checksum(sql: &str) -> Fingerprint {
@@ -150,6 +151,53 @@ mod tests {
             .unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
         conn
+    }
+
+    #[test]
+    fn history_catalog_migration_preserves_receipts_sequence_and_rolls_back_on_failure() {
+        let id = LibraryId::now_v7();
+        let conn = version_one(id);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(19) {
+            conn.execute_batch(sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 20).unwrap();
+        conn.execute("INSERT INTO outbox(sequence,request_id,watch_catalog_id,operation,payload_json,created_at) VALUES(10,?1,1,'watch','{\"kept\":true}',11)",[LibraryId::now_v7().as_bytes().as_slice()]).unwrap();
+        conn.execute("UPDATE sqlite_sequence SET seq=900 WHERE name='outbox'", [])
+            .unwrap();
+        conn.execute_batch("CREATE TABLE history_outbox_sequence(collision INTEGER)")
+            .unwrap();
+        assert!(open(&conn, id).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            20
+        );
+        assert!(conn
+            .prepare("SELECT * FROM job_history_visibility")
+            .is_err());
+        assert_eq!(
+            conn.query_row("SELECT payload_json FROM outbox", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "{\"kept\":true}"
+        );
+        conn.execute_batch("DROP TABLE history_outbox_sequence")
+            .unwrap();
+        open(&conn, id).unwrap();
+        assert!(conn.execute("INSERT INTO outbox(request_id,operation,payload_json,created_at) VALUES(?1,'job_history_visibility','{}',0)",[LibraryId::now_v7().as_bytes().as_slice()]).is_err());
+        assert!(conn.execute("INSERT INTO outbox(request_id,history_catalog_id,watch_catalog_id,operation,payload_json,created_at) VALUES(?1,1,1,'job_history_visibility','{}',0)",[LibraryId::now_v7().as_bytes().as_slice()]).is_err());
+        assert!(conn.execute("INSERT INTO outbox(request_id,history_catalog_id,operation,payload_json,created_at) VALUES(?1,2,'job_history_visibility','{}',0)",[LibraryId::now_v7().as_bytes().as_slice()]).is_err());
+        conn.execute("INSERT INTO outbox(request_id,history_catalog_id,operation,payload_json,created_at) VALUES(?1,1,'job_history_visibility','{}',0)",[LibraryId::now_v7().as_bytes().as_slice()]).unwrap();
+        assert_eq!(conn.last_insert_rowid(), 901);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
     }
 
     #[test]
