@@ -48,7 +48,8 @@ import { loadSchedule, saveSchedule, type UpdateScheduleSettings } from "@/featu
 import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
 import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
 import { TargetsPanel, type GroupAction, type TargetAction } from "./WatchTargetsPanel";
-import type { UpdateTarget, WatchGroup } from "@/types/library";
+import type { UpdateTarget, WatchGroup, WatchId } from "@/types/library";
+import { watchGroupMatches } from "@/lib/watchIdentity";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 export { TargetHealthBadge } from "./WatchTargetsPanel";
@@ -221,7 +222,7 @@ export default function UpdatesPage() {
 
   const startMutation = useMutation({
     // `targetIds` は監視対象の一覧やグループから来た確認。その作者・シリーズだけを見る。
-    mutationFn: async (values: { scope: string; mode: string; depth: string; targetIds?: number[] }) => {
+    mutationFn: async (values: { scope: string; mode: string; depth: string; targetIds?: WatchId[] }) => {
       if (!runtime) { await new Promise((resolve) => setTimeout(resolve, 400)); setPreviewSnapshot({ ...demoSnapshot, jobId: `preview-${Date.now()}`, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }); return; }
       const group = values.scope.startsWith("group:") ? groupList.find((item) => `group:${item.id}` === values.scope) : null;
       if (values.scope.startsWith("group:") && !group) throw new Error("選んだ監視グループが見つかりません");
@@ -363,7 +364,7 @@ export default function UpdatesPage() {
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["update-targets"] }),
   });
   const groupMutation = useMutation({
-    mutationFn: async (input: GroupAction): Promise<number | null> => {
+    mutationFn: async (input: GroupAction): Promise<WatchId | null> => {
       if (!runtime) return null;
       if (input.action === "create") {
         const id = await createWatchGroup(input.name);
@@ -376,7 +377,7 @@ export default function UpdatesPage() {
         // 自動確認の範囲だったなら、すべてへ戻す。消えたグループを指したままだと、
         // 自動確認が黙って止まる。
         const current = await loadSchedule();
-        if (current.groupId === input.group.id) {
+        if (watchGroupMatches(input.group, current.groupId)) {
           await saveSchedule({ ...current, groupId: null });
           setScheduleRevision((value) => value + 1);
         }
@@ -389,7 +390,7 @@ export default function UpdatesPage() {
       queryClient.invalidateQueries({ queryKey: ["watch-groups"] });
       queryClient.invalidateQueries({ queryKey: ["update-targets"] });
       if (input.action === "members") {
-        const changed = result ?? 0;
+        const changed = Number(result ?? 0);
         const skipped = input.targetIds.length - changed;
         notifications.show({
           color: "gray",
@@ -406,7 +407,7 @@ export default function UpdatesPage() {
       notifications.show({ color: "red", title: "監視グループを変更できません", message: errorMessage(error) });
     },
   });
-  const checkTargets = (targetIds: number[], label: string) => startMutation.mutate(
+  const checkTargets = (targetIds: WatchId[], label: string) => startMutation.mutate(
     { scope: "targets", mode: form.values.mode, depth: form.values.depth, targetIds },
     { onSuccess: () => notifications.show({ color: "piep", title: "確認を開始しました", message: `${label}の${formatNumber(targetIds.length)}件を確認します` }) },
   );
@@ -1009,7 +1010,7 @@ function describeSchedule(schedule: UpdateScheduleSettings | undefined, groups: 
   if (!when.length) return "オフ";
   if (schedule.groupId === null) return `${when.join(" · ")}・${mode}`;
   if (!groups) return "…";
-  const group = groups.find((item) => item.id === schedule.groupId);
+  const group = groups.find((item) => watchGroupMatches(item, schedule.groupId));
   return group ? `${when.join(" · ")}・「${group.name}」を${mode}` : "グループが見つからず停止中";
 }
 

@@ -12,3 +12,4 @@ pub mod server;
 pub mod shell;
 pub mod startup;
 pub mod update_jobs;
+pub(crate) mod watching;

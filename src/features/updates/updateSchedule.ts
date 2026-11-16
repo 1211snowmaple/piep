@@ -1,5 +1,6 @@
 import { store } from "@/store";
 import { isTauriRuntime } from "@/services/dbApi";
+import type { WatchId } from "@/types/library";
 
 /**
  * When the update check runs on its own.
@@ -24,10 +25,10 @@ export interface UpdateScheduleSettings {
   /** Announce the result through the operating system. */
   notify: boolean;
   /**
-   * 確認する範囲。null はすべての監視対象（作品の監視も含む）。数は監視
-   * グループの ID で、そのグループの作者・シリーズだけを確認する。
+   * 確認する範囲。null はすべての監視対象（作品の監視も含む）。グループの
+   * UUID（旧棚では数値 ID）なら、そのグループの作者・シリーズだけを確認する。
    */
-  groupId: number | null;
+  groupId: WatchId | null;
 }
 
 export const updateScheduleDefaults: UpdateScheduleSettings = {
@@ -59,7 +60,8 @@ export function normalizeSchedule(raw: unknown): UpdateScheduleSettings {
     mode: value.mode === "auto_save" ? "auto_save" : "check_only",
     watchSaved: value.watchSaved === true,
     notify: value.notify !== false,
-    groupId: typeof value.groupId === "number" && Number.isSafeInteger(value.groupId) && value.groupId > 0 ? value.groupId : null,
+    groupId: typeof value.groupId === "string" && value.groupId.trim() ? value.groupId.toLowerCase()
+      : typeof value.groupId === "number" && Number.isSafeInteger(value.groupId) && value.groupId > 0 ? value.groupId : null,
   };
 }
 

@@ -7679,7 +7679,7 @@ mod tests {
             .id;
         source_state
             .db
-            .set_watch_group_members(group, &[author_id], true)
+            .set_watch_group_members(group, &[author_id.legacy().unwrap()], true)
             .unwrap();
         source_state
             .db

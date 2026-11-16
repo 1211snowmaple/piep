@@ -1679,7 +1679,41 @@ pub async fn db_set_flags_for_ids(
 pub async fn db_upsert_update_target(
     app: tauri::AppHandle,
     target: UpdateTargetInput,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
 ) -> Result<UpdateTarget, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let options = target
+                .metadata_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .unwrap_or_else(|| serde_json::json!({}));
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::Upsert {
+                    target_type: target.target_type.clone(),
+                    provider: target.source.clone(),
+                    key: target.source_key.clone(),
+                    name: target.display_name,
+                    enabled: target.enabled,
+                    options,
+                },
+            )?;
+            super::watching::find(
+                &library,
+                &target.target_type,
+                &target.source,
+                &target.source_key,
+            )?
+            .ok_or("監視対象が見つかりません".into())
+        })
+        .await;
+    }
     run_library_write_blocking(app, move |state| state.db.upsert_update_target(&target)).await
 }
 
@@ -1691,6 +1725,12 @@ pub async fn db_get_update_target(
     source: String,
     source_key: String,
 ) -> Result<Option<UpdateTarget>, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            super::watching::find(&library, &target_type, &source, &source_key)
+        })
+        .await;
+    }
     run_db_blocking(app, move |state| {
         state
             .db
@@ -1709,6 +1749,16 @@ pub async fn db_list_update_targets(
     target_type: Option<String>,
     enabled_only: Option<bool>,
 ) -> Result<Vec<UpdateTarget>, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            super::watching::targets(
+                &library,
+                target_type.as_deref(),
+                enabled_only.unwrap_or(false),
+            )
+        })
+        .await;
+    }
     let state = app.state::<Arc<AppState>>();
     state
         .db
@@ -1719,13 +1769,42 @@ pub async fn db_list_update_targets(
 ///
 /// **設定は消えない。** 消したいときは `db_delete_update_target`。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // 既存の IPC 引数に要求 ID・世代・棚の対象 ID を添える。
 pub async fn db_set_update_target_enabled(
     app: tauri::AppHandle,
     target_type: String,
     source: String,
     source_key: String,
     enabled: bool,
+    target_id: Option<crate::database::WatchId>,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
 ) -> Result<(), String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let key = target_id
+                .or(
+                    super::watching::find(&library, &target_type, &source, &source_key)?
+                        .map(|v| v.id),
+                )
+                .ok_or("監視対象が見つかりません")?;
+            let id = match key {
+                crate::database::WatchId::Shelf(id) => id,
+                key => super::watching::target_id(&library, key)?,
+            };
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::Enable {
+                    target: id,
+                    enabled,
+                },
+            )
+            .map(|_| ())
+        })
+        .await;
+    }
     run_library_write_blocking(app, move |state| {
         state
             .db
@@ -1743,7 +1822,32 @@ pub async fn db_delete_update_target(
     target_type: String,
     source: String,
     source_key: String,
+    target_id: Option<crate::database::WatchId>,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
 ) -> Result<(), String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let key = target_id
+                .or(
+                    super::watching::find(&library, &target_type, &source, &source_key)?
+                        .map(|v| v.id),
+                )
+                .ok_or("監視対象が見つかりません")?;
+            let id = match key {
+                crate::database::WatchId::Shelf(id) => id,
+                key => super::watching::target_id(&library, key)?,
+            };
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::RemoveTarget { target: id },
+            )
+            .map(|_| ())
+        })
+        .await;
+    }
     run_library_write_blocking(app, move |state| {
         state
             .db
@@ -1757,22 +1861,64 @@ pub async fn db_delete_update_target(
 pub async fn db_list_watch_groups(
     app: tauri::AppHandle,
 ) -> Result<Vec<crate::database::WatchGroup>, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || super::watching::groups(&library)).await;
+    }
     app.state::<Arc<AppState>>().db.list_watch_groups()
 }
 
 /// 監視グループを一番下に作り、その ID を返す。同じ名前があれば `Err`。
 #[tauri::command]
-pub async fn db_create_watch_group(app: tauri::AppHandle, name: String) -> Result<i64, String> {
-    run_library_write_blocking(app, move |state| state.db.create_watch_group(&name)).await
+pub async fn db_create_watch_group(
+    app: tauri::AppHandle,
+    name: String,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
+) -> Result<crate::database::WatchId, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::CreateGroup { name },
+            )
+            .map(|v| crate::database::WatchId::Shelf(v.id))
+        })
+        .await;
+    }
+    run_library_write_blocking(app, move |state| {
+        state.db.create_watch_group(&name).map(Into::into)
+    })
+    .await
 }
 
 /// 監視グループの名前を変える。
 #[tauri::command]
 pub async fn db_rename_watch_group(
     app: tauri::AppHandle,
-    group_id: i64,
+    group_id: crate::database::WatchId,
     name: String,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
 ) -> Result<(), String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let id = match group_id {
+                crate::database::WatchId::Shelf(id) => id,
+                key => super::watching::group_id(&library, key)?,
+            };
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::RenameGroup { group: id, name },
+            )
+            .map(|_| ())
+        })
+        .await;
+    }
+    let group_id = group_id.legacy()?;
     run_library_write_blocking(app, move |state| {
         state.db.rename_watch_group(group_id, &name)
     })
@@ -1781,7 +1927,29 @@ pub async fn db_rename_watch_group(
 
 /// 監視グループを消す。**中の監視対象は消えない。**
 #[tauri::command]
-pub async fn db_delete_watch_group(app: tauri::AppHandle, group_id: i64) -> Result<(), String> {
+pub async fn db_delete_watch_group(
+    app: tauri::AppHandle,
+    group_id: crate::database::WatchId,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
+) -> Result<(), String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let id = match group_id {
+                crate::database::WatchId::Shelf(id) => id,
+                key => super::watching::group_id(&library, key)?,
+            };
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::RemoveGroup { group: id },
+            )
+            .map(|_| ())
+        })
+        .await;
+    }
+    let group_id = group_id.legacy()?;
     run_library_write_blocking(app, move |state| state.db.delete_watch_group(group_id)).await
 }
 
@@ -1789,10 +1957,44 @@ pub async fn db_delete_watch_group(app: tauri::AppHandle, group_id: i64) -> Resu
 #[tauri::command]
 pub async fn db_set_watch_group_members(
     app: tauri::AppHandle,
-    group_id: i64,
-    target_ids: Vec<i64>,
+    group_id: crate::database::WatchId,
+    target_ids: Vec<crate::database::WatchId>,
     add: bool,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
 ) -> Result<usize, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let group = match group_id {
+                crate::database::WatchId::Shelf(id) => id,
+                key => super::watching::group_id(&library, key)?,
+            };
+            let targets = target_ids
+                .into_iter()
+                .map(|v| match v {
+                    crate::database::WatchId::Shelf(id) => Ok(id),
+                    key => super::watching::target_id(&library, key),
+                })
+                .collect::<Result<_, _>>()?;
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::Members {
+                    group,
+                    targets,
+                    add,
+                },
+            )
+            .map(|v| v.changed)
+        })
+        .await;
+    }
+    let group_id = group_id.legacy()?;
+    let target_ids = target_ids
+        .into_iter()
+        .map(crate::database::WatchId::legacy)
+        .collect::<Result<Vec<_>, _>>()?;
     run_library_write_blocking(app, move |state| {
         state.db.set_watch_group_members(group_id, &target_ids, add)
     })

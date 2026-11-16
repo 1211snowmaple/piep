@@ -695,15 +695,20 @@ fn item_from_payload(
 /// 判断し、分からなければ従来どおりシリーズも走査する（取りこぼさない側に倒す）。
 fn series_covered_by_watched_author(
     state: &Arc<AppState>,
+    library: Option<&crate::library::Library>,
     target: &crate::database::UpdateTarget,
     watched_authors: &HashSet<(String, String)>,
 ) -> Result<bool, String> {
     if watched_authors.is_empty() {
         return Ok(false);
     }
-    let authors = state
-        .db
-        .series_author_keys(&target.source, &target.source_key)?;
+    let authors = if let Some(library) = library {
+        super::watching::series_authors(library, &target.source, &target.source_key)?
+    } else {
+        state
+            .db
+            .series_author_keys(&target.source, &target.source_key)?
+    };
     Ok(authors
         .iter()
         .any(|author| watched_authors.contains(&(target.source.clone(), author.clone()))))
@@ -762,10 +767,21 @@ fn build_initial_items(
         .work_ids
         .as_ref()
         .map(|ids| ids.iter().copied().collect::<HashSet<_>>());
-    let target_filter = request
-        .target_ids
-        .as_ref()
-        .map(|ids| ids.iter().copied().collect::<HashSet<_>>());
+    let registered_targets = if let Some(library) = library {
+        super::watching::selected_targets(library, request.target_ids.as_deref())?
+    } else {
+        state.db.list_update_targets(None, true)?
+    };
+    let target_filter = request.target_ids.as_ref().map(|ids| {
+        if library.is_some() {
+            registered_targets
+                .iter()
+                .map(|t| t.id)
+                .collect::<HashSet<_>>()
+        } else {
+            ids.iter().copied().collect::<HashSet<_>>()
+        }
+    });
     // A one-off check from an entity page specifies its target by provider key.
     // Its scope names the kind, not every saved watch target of that kind.
     let include_registered_targets =
@@ -777,17 +793,21 @@ fn build_initial_items(
         .filter(|target| target.target_type == "author")
         .map(|target| (target.source.clone(), target.source_key.clone()))
         .collect();
-    let eligible_targets: HashSet<(String, String, String)> = state
-        .db
-        .list_update_targets(None, true)?
-        .into_iter()
+    let eligible_targets: HashSet<(String, String, String)> = registered_targets
+        .iter()
         .filter(|t| {
             include_registered_targets
                 && ((include_author && t.target_type == "author")
                     || (include_series && t.target_type == "series"))
                 && target_filter.as_ref().is_none_or(|ids| ids.contains(&t.id))
         })
-        .map(|t| (t.source, t.target_type, t.source_key))
+        .map(|t| {
+            (
+                t.source.clone(),
+                t.target_type.clone(),
+                t.source_key.clone(),
+            )
+        })
         .chain(request.adhoc_targets.iter().flatten().map(|t| {
             (
                 t.source.clone(),
@@ -876,12 +896,21 @@ fn build_initial_items(
         if adhoc.target_type != "author" && adhoc.target_type != "series" {
             continue;
         }
-        let registered =
+        let registered = if let Some(library) = library {
+            super::watching::find(
+                library,
+                &adhoc.target_type,
+                &adhoc.source,
+                &adhoc.source_key,
+            )?
+        } else {
             state
                 .db
-                .find_update_target(&adhoc.target_type, &adhoc.source, &adhoc.source_key)?;
+                .find_update_target(&adhoc.target_type, &adhoc.source, &adhoc.source_key)?
+        };
         let target = registered.unwrap_or_else(|| crate::database::UpdateTarget {
-            id: 0,
+            id: 0.into(),
+            watch_generation: None,
             target_type: adhoc.target_type.clone(),
             source: adhoc.source.clone(),
             source_key: adhoc.source_key.clone(),
@@ -971,7 +1000,7 @@ fn build_initial_items(
     }
 
     if include_registered_targets && (include_author || include_series) {
-        let targets = state.db.list_update_targets(None, true)?;
+        let targets = registered_targets;
         // 作者を監視しているなら、その人のシリーズはその一覧に出てくる。
         // 両方を走査すると同じものを二度取りに行くので、取得先への負荷になる。
         let watched_authors: HashSet<(String, String)> = targets
@@ -1002,7 +1031,7 @@ fn build_initial_items(
             }
             if target.target_type == "series"
                 && include_author
-                && series_covered_by_watched_author(state, &target, &watched_authors)?
+                && series_covered_by_watched_author(state, library, &target, &watched_authors)?
             {
                 continue;
             }
@@ -2559,11 +2588,20 @@ async fn run_update_job(
                         item.source_id.as_deref(),
                         item.target_type.as_deref(),
                     ) {
-                        if let Err(error) =
+                        let result = if let Some(library) = super::watching::active(&app) {
+                            serde_json::from_str::<crate::database::UpdateTarget>(
+                                &item.payload_json,
+                            )
+                            .map_err(|e| e.to_string())
+                            .and_then(|target| {
+                                super::watching::record(&library, &target, None, None, 0, true)
+                            })
+                        } else {
                             state
                                 .db
                                 .mark_update_target_failed(target_type, source, source_key)
-                        {
+                        };
+                        if let Err(error) = result {
                             log::warn!(
                                 "更新対象 {target_type}:{source}:{source_key} の失敗回数を記録できません: {error}"
                             );
@@ -3597,7 +3635,8 @@ async fn record_work_revision_candidate(
         "localSavedAt": download.downloaded_at,
     });
     let target = crate::database::UpdateTarget {
-        id: 0,
+        id: 0.into(),
+        watch_generation: None,
         target_type: "work".to_string(),
         source: download.source.clone(),
         source_key: download.source_id.clone(),
@@ -4083,14 +4122,25 @@ async fn process_target_item(
     });
     {
         let _library_write_guard = state.library_gate.write().await;
-        state.db.mark_update_target_checked(
-            &target.target_type,
-            &target.source,
-            &target.source_key,
-            first_id.as_deref(),
-            first_updated.as_deref(),
-            found,
-        )?;
+        if let Some(library) = &library {
+            super::watching::record(
+                library,
+                &target,
+                first_id.as_deref(),
+                first_updated.as_deref(),
+                found,
+                false,
+            )?;
+        } else {
+            state.db.mark_update_target_checked(
+                &target.target_type,
+                &target.source,
+                &target.source_key,
+                first_id.as_deref(),
+                first_updated.as_deref(),
+                found,
+            )?;
+        }
     }
 
     // 新作一覧とプロフィールは別の取得口を持つ。作者の作品を確認しただけでは、
@@ -5251,7 +5301,8 @@ mod tests {
         source_key: &str,
     ) -> crate::database::UpdateTarget {
         crate::database::UpdateTarget {
-            id: 1,
+            id: 1.into(),
+            watch_generation: None,
             target_type: target_type.into(),
             source: source.into(),
             source_key: source_key.into(),

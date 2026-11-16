@@ -28,6 +28,7 @@ mod source_state;
 mod store;
 mod suggestions;
 mod transfer;
+mod watching;
 mod work_capture;
 mod work_list;
 
@@ -67,6 +68,7 @@ pub use source_state::{SourceEntityState, WorkSourceState};
 pub use store::{ContentFile, FileChunk, ObjectStore, StorageStats};
 pub use suggestions::{CollectionSuggestion, SuggestedMember, SuggestionDecision, SuggestionJson};
 pub use transfer::reader_may_read;
+pub use watching::{WatchEdit, WatchGroup, WatchResult, WatchTarget};
 pub use work_capture::{asset_reference, StagedAsset, WorkSave};
 pub use work_list::{
     AcquisitionFilter, CountRange, DateField, DateRange, MediaFilter, NeighborKind, RevisionFilter,

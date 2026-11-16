@@ -239,7 +239,8 @@ fn record_revision(
         .ok_or("保存日時が不正です")?
         .to_rfc3339();
     let target = crate::database::UpdateTarget {
-        id: 0,
+        id: 0.into(),
+        watch_generation: None,
         target_type: "work".into(),
         source: card.provider.clone(),
         source_key: card.external_key.clone(),
@@ -865,5 +866,65 @@ mod tests {
         assert_eq!(restored.snapshot_id, card.snapshot_id);
         assert_eq!(restored.version_number, 1);
         library.verify().unwrap();
+    }
+
+    #[test]
+    fn registered_watch_scope_and_series_deduplication_use_only_the_authoritative_catalogue() {
+        let (_temp, state, library) = fixture();
+        state
+            .db
+            .upsert_update_target(&crate::database::UpdateTargetInput {
+                target_type: "author".into(),
+                source: "pixiv".into(),
+                source_key: "old-only".into(),
+                display_name: "旧棚だけ".into(),
+                enabled: true,
+                metadata_json: None,
+            })
+            .unwrap();
+        let mut response = data("pixiv", "本文", "77");
+        response["detail"]["series_id"] = json!(7);
+        save(&library, "pixiv", "11", &response, false);
+        let create = |kind: &str, key: &str| {
+            library
+                .edit_watch(
+                    LibraryId::now_v7(),
+                    library.watch_generation().unwrap(),
+                    crate::library::WatchEdit::Upsert {
+                        target_type: kind.into(),
+                        provider: "pixiv".into(),
+                        key: key.into(),
+                        name: key.into(),
+                        enabled: true,
+                        options: json!({}),
+                    },
+                )
+                .unwrap()
+                .id
+        };
+        let author = create("author", "77");
+        let series = create("series", "7");
+        let req = StartUpdateJobRequest {
+            target_ids: Some(vec![
+                crate::database::WatchId::Shelf(author),
+                crate::database::WatchId::Shelf(series),
+            ]),
+            ..request("targets")
+        };
+        let items = build_initial_items(&state, &req, Some(&library)).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source_id.as_deref(), Some("77"));
+        let payload: Value = serde_json::from_str(&items[0].payload_json).unwrap();
+        assert_eq!(payload["id"], author.to_string());
+        let req = StartUpdateJobRequest {
+            target_ids: Some(vec![crate::database::WatchId::Shelf(series)]),
+            ..request("targets")
+        };
+        let items = build_initial_items(&state, &req, Some(&library)).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source_id.as_deref(), Some("7"));
+        assert!(items
+            .iter()
+            .all(|i| i.source_id.as_deref() != Some("old-only")));
     }
 }

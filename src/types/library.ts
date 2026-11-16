@@ -421,8 +421,11 @@ export interface EntityVersion {
   changeSummary: string | null;
 }
 
+export type WatchId = number | string;
+
 export interface UpdateTarget {
-  id: number;
+  id: WatchId;
+  watchGeneration?: number;
   targetType: "work" | "author" | "series" | string;
   source: string;
   sourceKey: string;
@@ -446,13 +449,15 @@ export interface UpdateTarget {
 
 /** 利用者が作った監視グループ。監視対象を束ねて、その束だけを確認する。 */
 export interface WatchGroup {
-  id: number;
+  id: WatchId;
+  legacyId?: number;
+  watchGeneration?: number;
   name: string;
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
   /** 中の監視対象（UpdateTarget.id）。 */
-  targetIds: number[];
+  targetIds: WatchId[];
 }
 
 export interface DashboardTrendPoint {

@@ -301,11 +301,25 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
         )
         .unwrap();
     assert!(back.active.is_none());
-    // スキーマ 17 の棚に戻して開き直す。
+    // スキーマ 17 の棚に戻して開き直す。19 の監視カタログも取り除き、実際の旧 DDL を再現する。
     {
         let conn = library.conn.lock().unwrap();
         conn.execute_batch(
-            "DROP TABLE edit_archive; DELETE FROM schema_migrations WHERE version=18; PRAGMA user_version=17;",
+            "DROP TABLE edit_archive;
+             ALTER TABLE library_meta DROP COLUMN watch_generation;
+             CREATE TABLE outbox_v17 (
+                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                 request_id BLOB NOT NULL UNIQUE CHECK(length(request_id)=16),
+                 entity_id BLOB REFERENCES entities(id), operation TEXT NOT NULL,
+                 payload_json TEXT NOT NULL CHECK(json_valid(payload_json)), created_at INTEGER NOT NULL,
+                 saved_search_id BLOB, user_id BLOB,
+                 FOREIGN KEY(saved_search_id,user_id) REFERENCES saved_searches(id,user_id),
+                 CHECK((entity_id IS NOT NULL AND saved_search_id IS NULL AND user_id IS NULL AND operation<>'saved_search')
+                    OR (entity_id IS NULL AND saved_search_id IS NOT NULL AND user_id IS NOT NULL AND operation='saved_search'))
+             ) STRICT;
+             INSERT INTO outbox_v17 SELECT sequence,request_id,entity_id,operation,payload_json,created_at,saved_search_id,user_id FROM outbox;
+             DROP TABLE outbox; ALTER TABLE outbox_v17 RENAME TO outbox;
+             DELETE FROM schema_migrations WHERE version>=18; PRAGMA user_version=17;",
         )
         .unwrap();
     }

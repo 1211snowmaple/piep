@@ -7459,17 +7459,23 @@ fn watch_groups_bundle_targets_without_owning_them() {
         .contains("もうあります"));
     assert!(db.create_watch_group("   ").is_err());
     assert_eq!(
-        db.set_watch_group_members(daily, &[author, series], true)
-            .unwrap(),
+        db.set_watch_group_members(
+            daily,
+            &[author.legacy().unwrap(), series.legacy().unwrap()],
+            true
+        )
+        .unwrap(),
         2
     );
     // 入っているものを入れ直しても数えない。一つの対象は複数のグループに入れる。
     assert_eq!(
-        db.set_watch_group_members(daily, &[author], true).unwrap(),
+        db.set_watch_group_members(daily, &[author.legacy().unwrap()], true)
+            .unwrap(),
         0
     );
     assert_eq!(
-        db.set_watch_group_members(weekly, &[author], true).unwrap(),
+        db.set_watch_group_members(weekly, &[author.legacy().unwrap()], true)
+            .unwrap(),
         1
     );
     let groups = db.list_watch_groups().unwrap();
@@ -7493,7 +7499,8 @@ fn watch_groups_bundle_targets_without_owning_them() {
     db.rename_watch_group(weekly, "週末に見る").unwrap();
     assert!(db.rename_watch_group(weekly, "毎日見る").is_err());
     assert_eq!(
-        db.set_watch_group_members(daily, &[series], false).unwrap(),
+        db.set_watch_group_members(daily, &[series.legacy().unwrap()], false)
+            .unwrap(),
         1
     );
     // グループを消しても監視対象は残る。

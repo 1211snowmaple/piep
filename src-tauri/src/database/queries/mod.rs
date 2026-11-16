@@ -15796,6 +15796,7 @@ fn work_block_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkBlock> {
 
 fn update_target_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateTarget> {
     Ok(UpdateTarget {
+        watch_generation: None,
         id: row.get(0)?,
         target_type: row.get(1)?,
         source: row.get(2)?,

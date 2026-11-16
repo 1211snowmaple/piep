@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 18;
+pub(crate) const VERSION: i64 = 19;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -23,6 +23,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_016_migration_fingerprints.sql"),
     include_str!("migration_017_switched.sql"),
     include_str!("migration_018_edit_archive.sql"),
+    include_str!("migration_019_watching.sql"),
 ];
 
 fn migration_checksum(sql: &str) -> Fingerprint {
@@ -148,6 +149,105 @@ mod tests {
             .unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
         conn
+    }
+
+    #[test]
+    fn watching_migration_keeps_catalogue_receipts_and_sequence_and_rolls_back_failed_ddl() {
+        let library = LibraryId::now_v7();
+        let conn = version_one(library);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(17) {
+            conn.execute_batch(sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 18).unwrap();
+        let entity = LibraryId::now_v7();
+        let target = LibraryId::now_v7();
+        let group = LibraryId::now_v7();
+        let request = LibraryId::now_v7();
+        conn.execute(
+            "INSERT INTO entities(id,kind,created_at) VALUES(?1,'person',0)",
+            [entity.as_bytes().as_slice()],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO watch_targets(id,entity_id,display_name,enabled,created_at,updated_at) VALUES(?1,?2,'作者',1,11,12)",rusqlite::params![target.as_bytes().as_slice(),entity.as_bytes().as_slice()]).unwrap();
+        conn.execute(
+            "INSERT INTO watch_groups VALUES(?1,'毎日',3,21,22)",
+            [group.as_bytes().as_slice()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO watch_group_members VALUES(?1,?2)",
+            rusqlite::params![group.as_bytes().as_slice(), target.as_bytes().as_slice()],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO outbox(sequence,request_id,entity_id,operation,payload_json,created_at) VALUES(9,?1,?2,'test','{\"kept\":true}',123)",rusqlite::params![request.as_bytes().as_slice(),entity.as_bytes().as_slice()]).unwrap();
+        conn.execute("UPDATE sqlite_sequence SET seq=75 WHERE name='outbox'", [])
+            .unwrap();
+        conn.execute_batch("CREATE TABLE watch_outbox_sequence(collision INTEGER)")
+            .unwrap();
+        assert!(open(&conn, library).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            18
+        );
+        assert!(conn
+            .prepare("SELECT watch_generation FROM library_meta")
+            .is_err());
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM outbox", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        conn.execute_batch("DROP TABLE watch_outbox_sequence")
+            .unwrap();
+        open(&conn, library).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT watch_generation,generation FROM library_meta",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            )
+            .unwrap(),
+            (0, 42)
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT name,sort_order,created_at,updated_at FROM watch_groups",
+                [],
+                |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?
+                ))
+            )
+            .unwrap(),
+            ("毎日".into(), 3, 21, 22)
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM watch_group_members", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT payload_json FROM outbox", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "{\"kept\":true}"
+        );
+        assert!(conn.execute("INSERT INTO outbox(request_id,operation,payload_json,created_at) VALUES(?1,'watch','{}',0)",[LibraryId::now_v7().as_bytes().as_slice()]).is_err());
+        conn.execute("INSERT INTO outbox(request_id,watch_catalog_id,operation,payload_json,created_at) VALUES(?1,1,'watch','{}',0)",[LibraryId::now_v7().as_bytes().as_slice()]).unwrap();
+        assert_eq!(conn.last_insert_rowid(), 76);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
     }
 
     #[test]
