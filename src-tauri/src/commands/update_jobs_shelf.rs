@@ -3,6 +3,12 @@
 use super::*;
 use crate::library::{EntityKind, Library, WorkCard, WorkFilter, WorkListQuery};
 
+#[path = "update_jobs_shelf_listings.rs"]
+mod listings;
+pub(super) use listings::{
+    author_cards, fanbox_scan_posts, listed_candidate, scan_pixiv_revisions,
+};
+
 async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
@@ -58,11 +64,13 @@ fn cards(library: &Library, filter: WorkFilter) -> Result<Vec<WorkCard>, String>
 pub(super) fn work_items(
     library: &Library,
     request: &StartUpdateJobRequest,
+    eligible_targets: &HashSet<(String, String, String)>,
 ) -> Result<Vec<UpdateJobItemInput>, String> {
     if request.new_works_only.unwrap_or(false) {
         return Ok(Vec::new());
     }
     let mut selected = Vec::new();
+    let mut fanbox_author_checks = HashSet::new();
     if matches!(request.scope.as_str(), "all" | "work") {
         let filter = if let Some(ids) = &request.work_ids {
             // 以前の画面の番号も移行先の対応で解く。旧 DB の作品は読まない。
@@ -91,22 +99,23 @@ pub(super) fn work_items(
             .flatten()
             .filter(|t| t.target_type == "author")
         {
-            if let Some(person) = library
-                .entity_by_key(EntityKind::Person, &target.source, &target.source_key)
-                .map_err(|e| e.to_string())?
-            {
-                selected.extend(cards(
-                    library,
-                    WorkFilter {
-                        person: Some(person),
-                        provider: Some(target.source.clone()),
-                        ..Default::default()
-                    },
-                )?);
+            let matches = author_cards(library, &target.source, &target.source_key)?;
+            if target.source == "fanbox" {
+                fanbox_author_checks.extend(matches.iter().map(|card| card.id));
             }
+            selected.extend(matches);
         }
     }
     let mut seen = HashSet::new();
+    for card in selected.iter().filter(|card| card.provider == "fanbox") {
+        let author = library
+            .work_source_state(card.id, card.snapshot_id)
+            .map_err(|e| e.to_string())?
+            .author_key;
+        if eligible_targets.contains(&("fanbox".into(), "author".into(), author)) {
+            fanbox_author_checks.insert(card.id);
+        }
+    }
     selected
         .into_iter()
         .filter(|card| matches!(card.provider.as_str(), "pixiv" | "fanbox") && seen.insert(card.id))
@@ -118,7 +127,8 @@ pub(super) fn work_items(
                 Some(card.external_key.clone()),
                 Some("work".into()),
                 card.title,
-                serde_json::json!({ "source": card.provider, "sourceId": card.external_key }),
+                serde_json::json!({ "source": card.provider, "sourceId": card.external_key,
+                    "fanboxAuthorCheck": fanbox_author_checks.contains(&card.id) }),
             )
         })
         .collect()
@@ -267,7 +277,9 @@ pub(super) async fn process_work(
     job_id: &str,
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
+    indexes: (&mut WebUpdateIndex, &mut FanboxUpdateIndex),
 ) -> Result<ItemOutcome, String> {
+    let (web_index, fanbox_index) = indexes;
     let payload: Value = serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
     // 旧形式の項目も取得元の鍵で読む。旧版の内容やパスを保存の基準にしない。
     let source = item
@@ -286,6 +298,10 @@ pub(super) async fn process_work(
             item.title
         )));
     };
+    let context = library
+        .work_source_state(card.id, card.snapshot_id)
+        .map_err(|e| e.to_string())?;
+    let mut listed_update = None;
     let (fetched, cookie, user_agent) = match source {
         "pixiv" => {
             let Some(token) = pixiv_token(credentials) else {
@@ -293,6 +309,37 @@ pub(super) async fn process_work(
                     "設定でpixivに接続してください".into(),
                 ));
             };
+            let cached = web_index.asked_authors.contains(&context.author_key);
+            if !cached && web_index.api.is_some() && !context.author_key.is_empty() {
+                announce_author_listing(app, state, job_id, &card.author_name).await?;
+            }
+            match web_index
+                .lookup_key(state, &context.author_key, key, job_id)
+                .await
+            {
+                WebLookup::Failed(error) => return Err(error),
+                WebLookup::Unavailable => {
+                    return Ok(ItemOutcome::Held(unavailable_saved_pixiv_work_message(
+                        &card.title,
+                        key,
+                    )))
+                }
+                WebLookup::Found(entry) => listed_update = entry.update_date,
+                WebLookup::Unknown => (),
+            }
+            if let Some(listed) = listed_update.as_deref() {
+                let (library, check_card, listed) =
+                    (Arc::clone(library), card.clone(), listed.to_owned());
+                if blocking(move || listings::can_skip_listing(&library, &check_card, &listed))
+                    .await?
+                {
+                    return Ok(if cached {
+                        ItemOutcome::LocalSkipped(format!("最新: {}", card.title))
+                    } else {
+                        ItemOutcome::Skipped(format!("最新: {}", card.title))
+                    });
+                }
+            }
             let metadata = match super::super::downloader::fetch_pixiv_novel_metadata(
                 key.to_owned(),
                 token.clone(),
@@ -321,6 +368,7 @@ pub(super) async fn process_work(
                 .await?
             };
             if can_skip {
+                listings::remember_verified_listing(library, &card, listed_update.as_deref())?;
                 return Ok(ItemOutcome::Skipped(format!("最新: {}", card.title)));
             }
             let data =
@@ -341,6 +389,32 @@ pub(super) async fn process_work(
                 ));
             };
             let user_agent = fanbox_user_agent(credentials);
+            if payload.get("fanboxAuthorCheck").and_then(Value::as_bool) == Some(true)
+                && !context.author_key.is_empty()
+            {
+                if !fanbox_index.attempted_authors.contains(&context.author_key) {
+                    announce_author_listing(app, state, job_id, &card.author_name).await?;
+                }
+                if let Some(listed) = fanbox_index
+                    .lookup(&context.author_key, key, &cookie, &user_agent)
+                    .await?
+                {
+                    if !listed.is_restricted {
+                        let (library, check_card, date) = (
+                            Arc::clone(library),
+                            card.clone(),
+                            listed.updated_datetime.clone(),
+                        );
+                        if blocking(move || {
+                            listings::can_skip_listing(&library, &check_card, &date)
+                        })
+                        .await?
+                        {
+                            return Ok(ItemOutcome::LocalSkipped(format!("最新: {}", card.title)));
+                        }
+                    }
+                }
+            }
             let data =
                 match crate::downloader::fanbox::get_post_detail(key, &cookie, &user_agent).await {
                     Ok(data) => data,
@@ -405,6 +479,9 @@ pub(super) async fn process_work(
             ItemOutcome::Skipped(format!("確認済みの候補: {}", card.title))
         });
     }
+    if !changed {
+        listings::remember_verified_listing(library, &card, listed_update.as_deref())?;
+    }
     let saved = super::super::downloader::download_and_save(
         app.clone(),
         fetched,
@@ -459,14 +536,14 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
-    struct Temp(PathBuf);
+    pub(super) struct Temp(pub(super) PathBuf);
     impl Drop for Temp {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
-    fn fixture() -> (Temp, Arc<AppState>, Library) {
+    pub(super) fn fixture() -> (Temp, Arc<AppState>, Library) {
         let root = std::env::temp_dir().join(format!("piep-update-shelf-{}", LibraryId::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
         let state = Arc::new(AppState::new(
@@ -477,7 +554,7 @@ mod tests {
         (Temp(root), state, library)
     }
 
-    fn request(scope: &str) -> StartUpdateJobRequest {
+    pub(super) fn request(scope: &str) -> StartUpdateJobRequest {
         StartUpdateJobRequest {
             scope: scope.into(),
             mode: "check_only".into(),
@@ -490,7 +567,7 @@ mod tests {
         }
     }
 
-    fn data(source: &str, text: &str, author: &str) -> Value {
+    pub(super) fn data(source: &str, text: &str, author: &str) -> Value {
         if source == "fanbox" {
             json!({ "title": "投稿", "creatorId": author, "user": { "name": "作者" }, "type": "text",
                 "updatedDatetime": "2026-11-01T00:00:00Z", "body": { "text": text } })
@@ -500,7 +577,13 @@ mod tests {
         }
     }
 
-    fn save(library: &Library, source: &str, key: &str, data: &Value, watch: bool) -> WorkCard {
+    pub(super) fn save(
+        library: &Library,
+        source: &str,
+        key: &str,
+        data: &Value,
+        watch: bool,
+    ) -> WorkCard {
         let saved = library
             .save_work(WorkSave {
                 request: LibraryId::now_v7(),
@@ -570,6 +653,16 @@ mod tests {
             .filter_map(|i| i.source_id.as_deref())
             .collect();
         assert_eq!(keys, HashSet::from(["p", "f"]));
+        let registered = HashSet::from([("fanbox".into(), "author".into(), "creator".into())]);
+        let shared = work_items(&library, &request("all"), &registered).unwrap();
+        let fanbox = shared
+            .iter()
+            .find(|item| item.source_id.as_deref() == Some("f"))
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&fanbox.payload_json).unwrap()["fanboxAuthorCheck"],
+            true
+        );
         assert!(items
             .iter()
             .all(|i| serde_json::from_str::<Value>(&i.payload_json)
@@ -597,7 +690,8 @@ mod tests {
             &StartUpdateJobRequest {
                 work_ids: Some(vec![]),
                 ..request("work")
-            }
+            },
+            &HashSet::new(),
         )
         .unwrap()
         .is_empty());

@@ -80,7 +80,7 @@ enum WebLookup {
     Failed(String),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct CachedWebListing {
     entries: HashMap<String, crate::pixiv_api::web::NovelListEntryWeb>,
     unavailable_ids: HashSet<String>,
@@ -93,6 +93,7 @@ struct CachedWebListing {
 /// 分かる。セッションが無ければ作品単体は従来の経路へ進めるが、作者全体の
 /// 改稿確認を「変更なし」として完了させてはいけない。
 struct WebUpdateIndex {
+    library: Option<Arc<crate::library::Library>>,
     api: Option<crate::pixiv_api::web::WebPixivAPI>,
     asked_authors: HashSet<String>,
     /// 作者ID → 一覧と、個別取得でも 404 だった保存済み作品。
@@ -213,6 +214,7 @@ impl WebUpdateIndex {
             }
         };
         Self {
+            library: None,
             api,
             asked_authors: HashSet::new(),
             entries: HashMap::new(),
@@ -239,13 +241,25 @@ impl WebUpdateIndex {
             return Ok(None);
         }
         if !self.asked_authors.contains(author_id) {
-            let ids: Vec<String> = state
-                .db
-                .pixiv_works_for_author(author_id)
-                .map_err(|error| format!("保存済み作品の一覧を読めません: {error}"))?
+            let ids: Vec<String> = if let Some(library) = &self.library {
+                let (library, author) = (Arc::clone(library), author_id.to_string());
+                tauri::async_runtime::spawn_blocking(move || {
+                    shelf::author_cards(&library, "pixiv", &author)
+                })
+                .await
+                .map_err(|e| e.to_string())??
                 .into_iter()
-                .map(|work| work.source_id)
-                .collect();
+                .map(|card| card.external_key)
+                .collect()
+            } else {
+                state
+                    .db
+                    .pixiv_works_for_author(author_id)
+                    .map_err(|error| format!("保存済み作品の一覧を読めません: {error}"))?
+                    .into_iter()
+                    .map(|work| work.source_id)
+                    .collect()
+            };
             self.asked_authors.insert(author_id.to_string());
             if ids.is_empty() {
                 return Ok(Some(self.entries.entry(author_id.to_string()).or_default()));
@@ -300,13 +314,22 @@ impl WebUpdateIndex {
         dl: &DownloadEntry,
         job_id: &str,
     ) -> WebLookup {
-        match self.author_listing(state, &dl.author_id, job_id).await {
+        self.lookup_key(state, &dl.author_id, &dl.source_id, job_id)
+            .await
+    }
+
+    async fn lookup_key(
+        &mut self,
+        state: &Arc<AppState>,
+        author: &str,
+        key: &str,
+        job_id: &str,
+    ) -> WebLookup {
+        match self.author_listing(state, author, job_id).await {
             Err(error) => WebLookup::Failed(error),
             Ok(None) => WebLookup::Unknown,
-            Ok(Some(listing)) if listing.unavailable_ids.contains(&dl.source_id) => {
-                WebLookup::Unavailable
-            }
-            Ok(Some(listing)) => match listing.entries.get(&dl.source_id) {
+            Ok(Some(listing)) if listing.unavailable_ids.contains(key) => WebLookup::Unavailable,
+            Ok(Some(listing)) => match listing.entries.get(key) {
                 // 伏せられた作品はメタデータが当てにならない。判定に使わない。
                 Some(entry) if entry.is_masked => WebLookup::Unknown,
                 Some(entry) => WebLookup::Found(Box::new(entry.clone())),
@@ -802,7 +825,7 @@ fn build_initial_items(
     }
     let held_work_keys = state.db.held_update_candidate_keys()?;
     if let Some(library) = library {
-        for item in shelf::work_items(library, request)? {
+        for item in shelf::work_items(library, request, &eligible_targets)? {
             let key = (
                 item.source.clone().unwrap(),
                 item.source_id.clone().unwrap(),
@@ -2074,6 +2097,7 @@ async fn run_update_job(
     // web の一覧はジョブの間だけ覚えておく。セッションが無ければ空のまま、
     // 何もしない置物として振る舞う。
     let mut web_index = WebUpdateIndex::new(&credentials);
+    web_index.library = shelf::switched_library(&app);
     let mut fanbox_index = FanboxUpdateIndex::default();
     // 通常の失敗が続く場合も、取得元を続けて叩かず停止する。
     let mut consecutive_errors: u32 = 0;
@@ -3255,7 +3279,16 @@ async fn process_work_item(
     fanbox_index: &mut FanboxUpdateIndex,
 ) -> Result<ItemOutcome, String> {
     if let Some(library) = shelf::switched_library(app) {
-        return shelf::process_work(app, state, &library, job_id, item, credentials).await;
+        return shelf::process_work(
+            app,
+            state,
+            &library,
+            job_id,
+            item,
+            credentials,
+            (web_index, fanbox_index),
+        )
+        .await;
     }
     let payload: Value = serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
     let fanbox_author_check =
@@ -3710,6 +3743,10 @@ async fn scan_pixiv_revisions(
     auto_save: bool,
     web_index: &mut WebUpdateIndex,
 ) -> Result<i64, String> {
+    if let Some(library) = web_index.library.clone() {
+        return shelf::scan_pixiv_revisions(state, &library, job_id, target, auto_save, web_index)
+            .await;
+    }
     let saved = state.db.pixiv_works_for_author(&target.source_key)?;
     if saved.is_empty() {
         return Ok(0);
@@ -3833,12 +3870,18 @@ async fn process_target_item(
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
     web_index: &mut WebUpdateIndex,
-    fanbox_index: &FanboxUpdateIndex,
+    fanbox_index: &mut FanboxUpdateIndex,
 ) -> Result<ItemOutcome, String> {
     let target: crate::database::UpdateTarget =
         serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
     let auto_save = state.db.update_job_mode_value(job_id)? == "auto_save";
     let new_works_only = state.db.update_job_new_works_only(job_id)?;
+    let library = shelf::switched_library(app);
+    let mut fanbox_checkpoint = None;
+    let full_fanbox = library.is_some()
+        && !new_works_only
+        && target.source == "fanbox"
+        && target.target_type == "author";
 
     let items: Vec<Value> = if target.source == "pixiv" && target.target_type == "author" {
         let Some(token) = pixiv_token(credentials) else {
@@ -3877,6 +3920,14 @@ async fn process_target_item(
             ));
         };
         let user_agent = fanbox_user_agent(credentials);
+        if full_fanbox {
+            fanbox_index
+                .lookup(&target.source_key, "", &cookie, &user_agent)
+                .await?;
+            if !fanbox_index.posts.contains_key(&target.source_key) {
+                return Err("FANBOX の改稿一覧を完全に確認できません".into());
+            }
+        }
         let posts = match fanbox_index
             .posts_since(&target.source_key, target.last_seen_source_id.as_deref())
         {
@@ -3890,6 +3941,22 @@ async fn process_target_item(
                 )
                 .await?
             }
+        };
+        if full_fanbox {
+            fanbox_checkpoint = posts
+                .first()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+        }
+        let posts = if full_fanbox {
+            shelf::fanbox_scan_posts(
+                library.as_ref().unwrap(),
+                &fanbox_index.posts[&target.source_key],
+                &posts,
+            )?
+        } else {
+            posts
         };
         posts
             .into_iter()
@@ -3916,29 +3983,52 @@ async fn process_target_item(
         let Some(listed_id) = listed_id.filter(|id| !id.is_empty()) else {
             continue;
         };
-        let kind = match state
-            .db
-            .get_download_by_source(&target.source, &listed_id)?
-        {
-            None => default_kind,
-            Some(_) if new_works_only => continue,
-            Some(existing) => {
-                // すでに持っている作品。一覧が更新時刻を持っていて、それが
-                // 保存済みのものと違うときだけ「改稿」として拾う。
-                // pixiv の一覧は投稿日しか持たないので、そちらは監視オンの
-                // 作品を辿る経路（work 項目）に任せる。
-                let listed_updated =
-                    string_at(source_item, &[&["updatedDatetime"], &["updated_datetime"]]);
-                match (listed_updated, existing.source_updated_at.as_deref()) {
-                    (Some(listed), Some(stored))
-                        if !crate::source_time::same_instant(Some(&listed), Some(stored)) =>
-                    {
-                        CandidateKind::Revision
+        let shelf_candidate = if let Some(library) = &library {
+            match shelf::listed_candidate(
+                library,
+                &target.source,
+                &listed_id,
+                source_item,
+                default_kind,
+                new_works_only,
+            )? {
+                Some(candidate) => Some(candidate),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        let kind = if let Some((kind, _)) = &shelf_candidate {
+            *kind
+        } else {
+            match state
+                .db
+                .get_download_by_source(&target.source, &listed_id)?
+            {
+                None => default_kind,
+                Some(_) if new_works_only => continue,
+                Some(existing) => {
+                    // すでに持っている作品。一覧が更新時刻を持っていて、それが
+                    // 保存済みのものと違うときだけ「改稿」として拾う。
+                    // pixiv の一覧は投稿日しか持たないので、そちらは監視オンの
+                    // 作品を辿る経路（work 項目）に任せる。
+                    let listed_updated =
+                        string_at(source_item, &[&["updatedDatetime"], &["updated_datetime"]]);
+                    match (listed_updated, existing.source_updated_at.as_deref()) {
+                        (Some(listed), Some(stored))
+                            if !crate::source_time::same_instant(Some(&listed), Some(stored)) =>
+                        {
+                            CandidateKind::Revision
+                        }
+                        _ => continue,
                     }
-                    _ => continue,
                 }
             }
         };
+        let source_item = shelf_candidate
+            .as_ref()
+            .map(|(_, item)| item)
+            .unwrap_or(source_item);
 
         // 一度「今後は出さない」と決めた作品は、見つけても候補にしない。
         if state
@@ -3972,7 +4062,11 @@ async fn process_target_item(
         found += scan_pixiv_revisions(state, job_id, &target, auto_save, web_index).await?;
     }
 
-    let first = items.first();
+    let first = if full_fanbox {
+        fanbox_checkpoint.as_ref()
+    } else {
+        items.first()
+    };
     let first_id = first.and_then(|value| {
         if target.source == "pixiv" {
             normalize_pixiv_novel_id(value)
@@ -4567,6 +4661,7 @@ mod tests {
             .unwrap();
         let reason = super::unavailable_saved_pixiv_work_message(&work.title, &work.source_id);
         let mut web_index = super::WebUpdateIndex {
+            library: None,
             api: Some(crate::pixiv_api::web::WebPixivAPI::new().unwrap()),
             asked_authors: HashSet::from(["80000003".to_string()]),
             entries: std::collections::HashMap::from([(

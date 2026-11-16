@@ -63,7 +63,7 @@ pub use resources::{
     ResourceScope,
 };
 pub use searches::{SavedSearch, SavedSearchDefinition, SavedSearchUpdate};
-pub use source_state::SourceEntityState;
+pub use source_state::{SourceEntityState, WorkSourceState};
 pub use store::{ContentFile, FileChunk, ObjectStore, StorageStats};
 pub use suggestions::{CollectionSuggestion, SuggestedMember, SuggestionDecision, SuggestionJson};
 pub use transfer::reader_may_read;

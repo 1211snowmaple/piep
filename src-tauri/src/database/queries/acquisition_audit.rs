@@ -109,6 +109,7 @@ pub(crate) fn pixiv_missing_references_for_filenames(
 ) -> Vec<String> {
     let text = value
         .get("text")
+        .or_else(|| value.pointer("/detail/text"))
         .and_then(Value::as_str)
         .unwrap_or_default();
     missing_saved_references(text, &filenames.into_iter().collect())

@@ -6421,6 +6421,43 @@ impl Database {
         work: &DownloadEntry,
         reason: &str,
     ) -> Result<bool, String> {
+        self.insert_update_job_unavailable_item(
+            job_id,
+            &UpdateJobItemInput {
+                item_type: "work".into(),
+                source: Some(work.source.clone()),
+                source_id: Some(work.source_id.clone()),
+                target_type: Some("work".into()),
+                title: work.title.clone(),
+                payload_json: serde_json::to_string(work).map_err(|e| e.to_string())?,
+                status: "held".into(),
+            },
+            &serde_json::json!({"id": work.source_id, "title": work.title,
+            "user": {"id": work.author_id, "name": work.author_name},
+            "creatorId": work.author_id, "isRestricted": false,
+            "localVersion": work.current_version, "localSavedAt": work.downloaded_at}),
+            reason,
+        )
+    }
+
+    /// 旧棚の作品番号や保存パスを持たない作品も、同じ保留と件数の規則で記録する。
+    pub fn insert_update_job_unavailable_item(
+        &self,
+        job_id: &str,
+        item: &UpdateJobItemInput,
+        original: &serde_json::Value,
+        reason: &str,
+    ) -> Result<bool, String> {
+        let source = item
+            .source
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or("取得元がありません")?;
+        let source_id = item
+            .source_id
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or("作品 ID がありません")?;
         let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
         let tx = conn
             .transaction()
@@ -6431,13 +6468,14 @@ impl Database {
                 "SELECT status IN ('held','dismissed')
                         AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.holdKind') END='unavailable'
                  FROM update_candidates WHERE source=?1 AND source_id=?2",
-                params![work.source, work.source_id],
+                params![source, source_id],
                 |row| row.get(0),
             )
             .optional()
             .map_err(|error| format!("Failed to read unavailable work state: {error}"))?
             .unwrap_or(false);
-        let mut payload = serde_json::to_value(work).map_err(|error| error.to_string())?;
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&item.payload_json).map_err(|error| error.to_string())?;
         if known {
             payload["knownHold"] = serde_json::json!(true);
         }
@@ -6454,24 +6492,14 @@ impl Database {
                     WHERE job_id = ?1 AND item_type = 'work'
                       AND source = ?2 AND source_id = ?3
                  )",
-                params![
-                    job_id,
-                    work.source,
-                    work.source_id,
-                    work.title,
-                    payload_json,
-                    reason
-                ],
+                params![job_id, source, source_id, item.title, payload_json, reason],
             )
             .map_err(|error| format!("Failed to record unavailable work: {error}"))?;
         if changed > 0 {
             let candidate_payload = serde_json::json!({
-                "source": work.source, "sourceId": work.source_id, "title": work.title,
+                "source": source, "sourceId": source_id, "title": item.title,
                 "kind": "revision", "holdKind": "unavailable", "holdReason": reason,
-                "originalData": {"id": work.source_id, "title": work.title,
-                    "user": {"id": work.author_id, "name": work.author_name},
-                    "creatorId": work.author_id, "isRestricted": false,
-                    "localVersion": work.current_version, "localSavedAt": work.downloaded_at}
+                "originalData": original,
             });
             tx.execute(
                 "INSERT INTO update_candidates(source,source_id,kind,title,payload_json,target_type,status)
@@ -6480,7 +6508,7 @@ impl Database {
                     payload_json=excluded.payload_json,target_type='work',
                     status=CASE WHEN update_candidates.status='dismissed' THEN 'dismissed' ELSE 'held' END,
                     updated_at=CURRENT_TIMESTAMP",
-                params![work.source,work.source_id,work.title,candidate_payload.to_string()],
+                params![source,source_id,item.title,candidate_payload.to_string()],
             ).map_err(|error| format!("Failed to retain unavailable work state: {error}"))?;
             let contribution = update_job_item_counter_contribution("work", "held");
             tx.execute(
