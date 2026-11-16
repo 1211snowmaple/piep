@@ -306,6 +306,8 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
         let conn = library.conn.lock().unwrap();
         conn.execute_batch(
             "DROP TABLE edit_archive;
+             DROP TABLE discovery_state;
+             DROP TABLE discovery_summaries;
              ALTER TABLE library_meta DROP COLUMN watch_generation;
              CREATE TABLE outbox_v17 (
                  sequence INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -161,6 +161,7 @@ export interface SaveJobWork {
 }
 
 export interface DeferredUpdateCandidate {
+  workId?: string | null;
   metadata?: UpdateWorkMetadata;
   source: "pixiv" | "fanbox";
   sourceId: string;

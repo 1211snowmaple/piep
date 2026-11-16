@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
 #[path = "update_jobs_shelf.rs"]
-mod shelf;
+pub(super) mod shelf;
 
 const UPDATE_JOB_DELAY_MS: u64 = 2_000;
 /// 新作だけの確認で、作者の間にあける時間。
@@ -843,7 +843,7 @@ fn build_initial_items(
             }
         }
     }
-    let held_work_keys = state.db.held_update_candidate_keys()?;
+    let held_work_keys = state.candidates().held_update_candidate_keys()?;
     if let Some(library) = library {
         for item in shelf::work_items(library, request, &eligible_targets)? {
             let key = (
@@ -946,7 +946,7 @@ fn build_initial_items(
     if include_work || include_author || include_series {
         let mut cursor: Option<(String, String)> = None;
         loop {
-            let page = state.db.list_pending_update_candidates_after(
+            let page = state.candidates().list_pending_update_candidates_after(
                 cursor
                     .as_ref()
                     .map(|(source, source_id)| (source.as_str(), source_id.as_str())),
@@ -977,7 +977,7 @@ fn build_initial_items(
                 };
                 if saved && candidate.kind != CandidateKind::Revision.key() {
                     state
-                        .db
+                        .candidates()
                         .clear_update_candidate(&candidate.source, &candidate.source_id)?;
                     continue;
                 }
@@ -1620,8 +1620,10 @@ pub async fn dismiss_update_candidate(
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
     let _library_write_guard = state.library_gate.clone().write_owned().await;
-    state.db.remember_job_candidate(&source, &source_id)?;
-    state.db.set_update_candidate_status(
+    state
+        .candidates()
+        .remember_job_candidate(&source, &source_id)?;
+    state.candidates().set_update_candidate_status(
         &source,
         &source_id,
         if dismissed { "dismissed" } else { "pending" },
@@ -1634,16 +1636,20 @@ pub async fn list_deferred_update_candidates(
     app: tauri::AppHandle,
 ) -> Result<Vec<crate::database::UpdateCandidateRow>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    tokio::task::spawn_blocking(move || state.db.list_deferred_update_candidate_summaries(-1))
-        .await
-        .map_err(|error| format!("保留候補を読み取れません: {error}"))?
+    tokio::task::spawn_blocking(move || {
+        state
+            .candidates()
+            .list_deferred_update_candidate_summaries(-1)
+    })
+    .await
+    .map_err(|error| format!("保留候補を読み取れません: {error}"))?
 }
 
 /// ライブラリに保存済みで、取得状態の確認が必要な作品数を返す。
 #[tauri::command]
 pub async fn count_saved_deferred_update_candidates(app: tauri::AppHandle) -> Result<i64, String> {
     app.state::<Arc<AppState>>()
-        .db
+        .candidates()
         .count_saved_deferred_update_candidates()
 }
 
@@ -1711,7 +1717,10 @@ pub async fn recheck_deferred_update_candidates(
     }
     let keys: HashSet<_> = keys.into_iter().collect();
     let mut items = Vec::new();
-    for candidate in state.db.list_update_candidates_by_status("deferred", -1)? {
+    for candidate in state
+        .candidates()
+        .list_update_candidates_by_status("deferred", -1)?
+    {
         if !keys.contains(&format!("{}:{}", candidate.source, candidate.source_id)) {
             continue;
         }
@@ -1719,6 +1728,12 @@ pub async fn recheck_deferred_update_candidates(
             serde_json::from_str(&candidate.payload_json).map_err(|e| e.to_string())?;
         payload["kind"] = serde_json::json!("permission_check");
         payload["refreshPostAccess"] = serde_json::json!(refresh_post_access.unwrap_or(false));
+        if let Some(generation) = state
+            .candidates()
+            .generation(&candidate.source, &candidate.source_id)?
+        {
+            payload["discoveryGeneration"] = serde_json::json!(generation);
+        }
         items.push(item_from_payload(
             "candidate",
             "queued",
@@ -1799,12 +1814,18 @@ fn is_known_hold(state: &AppState, item: &UpdateJobItem, reason: &str) -> Result
     else {
         return Ok(false);
     };
-    Ok(match state.db.update_candidate_hold(source, source_id)? {
-        Some((status, kind)) if status == "held" || status == "dismissed" => {
-            reason == BLOCKED_CANDIDATE_MESSAGE || kind.as_deref() == Some(hold_kind_for(reason))
-        }
-        _ => false,
-    })
+    Ok(
+        match state
+            .candidates()
+            .update_candidate_hold(source, source_id)?
+        {
+            Some((status, kind)) if status == "held" || status == "dismissed" => {
+                reason == BLOCKED_CANDIDATE_MESSAGE
+                    || kind.as_deref() == Some(hold_kind_for(reason))
+            }
+            _ => false,
+        },
+    )
 }
 
 /// 保留を項目に書き、ログに残す。前の回と変わらない保留は数えず、警告にもしない。
@@ -1842,10 +1863,14 @@ async fn hold_candidate(
         .source_id
         .as_deref()
         .ok_or("保留する作品IDがありません")?;
-    let existing = state.db.get_download_by_source(source, source_id)?;
+    let existing = if state.library_v2.switched().is_none() {
+        state.db.get_download_by_source(source, source_id)?
+    } else {
+        None
+    };
     let mut payload: Value =
         serde_json::from_str(&item.payload_json).unwrap_or_else(|_| serde_json::json!({}));
-    let kind = if existing.is_some() {
+    let kind = if state.candidates().saved(source, source_id)? {
         "revision"
     } else {
         "new"
@@ -1871,7 +1896,7 @@ async fn hold_candidate(
     if hold_kind != "restricted" {
         payload["originalData"]["isRestricted"] = serde_json::json!(false);
     }
-    state.db.upsert_update_candidate(&UpdateCandidateInput {
+    state.candidates().hold(&UpdateCandidateInput {
         source: source.into(),
         source_id: source_id.into(),
         kind: kind.into(),
@@ -1879,16 +1904,6 @@ async fn hold_candidate(
         payload_json: payload.to_string(),
         target_type: item.target_type.clone(),
     })?;
-    if state
-        .db
-        .update_candidate_status(source, source_id)?
-        .as_deref()
-        != Some("dismissed")
-    {
-        state
-            .db
-            .set_update_candidate_status(source, source_id, "held")?;
-    }
     state
         .db
         .set_update_job_item_payload(item.id, &payload.to_string())
@@ -1900,6 +1915,7 @@ async fn recheck_deferred_item(
     credentials: &UpdateCredentials,
     mut payload: Value,
 ) -> Result<ItemOutcome, String> {
+    let expected = payload.get("discoveryGeneration").and_then(Value::as_i64);
     let source = item.source.as_deref().ok_or("取得元がありません")?;
     let id = item.source_id.as_deref().ok_or("作品IDがありません")?;
     if source == "fanbox" && payload.get("holdKind").and_then(Value::as_str) == Some("restricted") {
@@ -1941,7 +1957,7 @@ async fn recheck_deferred_item(
         }
     }
     let _library_write_guard = state.library_gate.write().await;
-    let kind = if state.db.get_download_by_source(source, id)?.is_some() {
+    let kind = if state.candidates().saved(source, id)? {
         "revision"
     } else {
         "new"
@@ -1951,6 +1967,7 @@ async fn recheck_deferred_item(
         object.remove("holdKind");
         object.remove("holdReason");
         object.remove("refreshPostAccess");
+        object.remove("discoveryGeneration");
     }
     if let Some(original) = payload
         .get_mut("originalData")
@@ -1965,17 +1982,17 @@ async fn recheck_deferred_item(
     if kind == "new" {
         payload["subtitle"] = serde_json::json!("未保存");
     }
-    state.db.upsert_update_candidate(&UpdateCandidateInput {
-        source: source.into(),
-        source_id: id.into(),
-        kind: kind.into(),
-        title: item.title.clone(),
-        payload_json: payload.to_string(),
-        target_type: item.target_type.clone(),
-    })?;
-    state
-        .db
-        .set_update_candidate_status(source, id, "pending")?;
+    state.candidates().recheck_available(
+        &UpdateCandidateInput {
+            source: source.into(),
+            source_id: id.into(),
+            kind: kind.into(),
+            title: item.title.clone(),
+            payload_json: payload.to_string(),
+            target_type: item.target_type.clone(),
+        },
+        expected,
+    )?;
     state
         .db
         .set_update_job_item_payload(item.id, &payload.to_string())?;
@@ -1992,7 +2009,7 @@ async fn recheck_deferred_item(
 #[tauri::command]
 pub async fn count_dismissed_update_candidates(app: tauri::AppHandle) -> Result<i64, String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.count_dismissed_update_candidates()
+    state.candidates().count_dismissed_update_candidates()
 }
 
 /// まだ取り込んでいない改稿がある作品の鍵（`{source}:{sourceId}`）。
@@ -2082,7 +2099,7 @@ pub async fn preview_pending_revision(
 pub async fn restore_dismissed_update_candidates(app: tauri::AppHandle) -> Result<usize, String> {
     let state = app.state::<Arc<AppState>>();
     let _library_write_guard = state.library_gate.clone().write_owned().await;
-    state.db.restore_dismissed_update_candidates()
+    state.candidates().restore_dismissed_update_candidates()
 }
 
 async fn run_update_job(
@@ -2287,7 +2304,7 @@ async fn run_update_job(
                 (item.source.as_deref(), item.source_id.as_ref())
             {
                 let _guard = state.library_gate.write().await;
-                state.db.clear_resolved_unavailable_candidates(
+                state.candidates().clear_resolved_unavailable_candidates(
                     source,
                     std::slice::from_ref(source_id),
                 )?;
@@ -2334,7 +2351,8 @@ async fn run_update_job(
                 if let (Some(source), Some(source_id)) =
                     (item.source.as_deref(), item.source_id.as_deref())
                 {
-                    if let Err(error) = state.db.clear_update_candidate(source, source_id) {
+                    if let Err(error) = state.candidates().clear_update_candidate(source, source_id)
+                    {
                         log::warn!(
                             "保存済み候補 {source}:{source_id} を候補一覧から外せません: {error}"
                         );
@@ -2380,7 +2398,9 @@ async fn run_update_job(
                     if let (Some(source), Some(source_id)) =
                         (item.source.as_deref(), item.source_id.as_deref())
                     {
-                        if let Err(error) = state.db.clear_update_candidate(source, source_id) {
+                        if let Err(error) =
+                            state.candidates().clear_update_candidate(source, source_id)
+                        {
                             log::warn!(
                                 "処理済み候補 {source}:{source_id} を候補一覧から外せません: {error}"
                             );
@@ -3063,7 +3083,7 @@ async fn process_update_job_item(
             let repair_save = item.item_type == "candidate"
                 && payload.get("kind").and_then(Value::as_str) == Some("save");
             if state
-                .db
+                .candidates()
                 .candidate_acquisition_blocked(source, id, repair_save)?
             {
                 return Ok(ItemOutcome::Held(BLOCKED_CANDIDATE_MESSAGE.into()));
@@ -3615,7 +3635,7 @@ async fn record_work_revision_candidate(
     auto_save: bool,
 ) -> Result<bool, String> {
     if state
-        .db
+        .candidates()
         .update_candidate_status(&download.source, &download.source_id)?
         .as_deref()
         == Some("dismissed")
@@ -3703,7 +3723,7 @@ fn record_candidate(
     }
     if matches!(
         state
-            .db
+            .candidates()
             .update_candidate_status(&source, &source_id)?
             .as_deref(),
         Some("held" | "dismissed")
@@ -3716,14 +3736,16 @@ fn record_candidate(
         .and_then(|v| v.as_str())
         .unwrap_or("無題")
         .to_string();
-    state.db.upsert_update_candidate(&UpdateCandidateInput {
-        source: source.clone(),
-        source_id: source_id.clone(),
-        kind: kind.key().to_string(),
-        title: title.clone(),
-        payload_json: serde_json::to_string(&payload).map_err(|e| e.to_string())?,
-        target_type: Some(target.target_type.clone()),
-    })?;
+    state
+        .candidates()
+        .upsert_update_candidate(&UpdateCandidateInput {
+            source: source.clone(),
+            source_id: source_id.clone(),
+            kind: kind.key().to_string(),
+            title: title.clone(),
+            payload_json: serde_json::to_string(&payload).map_err(|e| e.to_string())?,
+            target_type: Some(target.target_type.clone()),
+        })?;
     let restricted = source == "fanbox"
         && source_item.get("isRestricted").and_then(Value::as_bool) == Some(true);
     if restricted {
@@ -3731,16 +3753,18 @@ fn record_candidate(
         payload["holdReason"] = serde_json::json!(
             super::downloader::fanbox_missing_material_error(source_item)
         );
-        state.db.upsert_update_candidate(&UpdateCandidateInput {
-            source: source.clone(),
-            source_id: source_id.clone(),
-            kind: kind.key().into(),
-            title: title.clone(),
-            payload_json: payload.to_string(),
-            target_type: Some(target.target_type.clone()),
-        })?;
         state
-            .db
+            .candidates()
+            .upsert_update_candidate(&UpdateCandidateInput {
+                source: source.clone(),
+                source_id: source_id.clone(),
+                kind: kind.key().into(),
+                title: title.clone(),
+                payload_json: payload.to_string(),
+                target_type: Some(target.target_type.clone()),
+            })?;
+        state
+            .candidates()
             .set_update_candidate_status(&source, &source_id, "held")?;
     }
     state.db.insert_update_job_candidate(
@@ -3805,7 +3829,7 @@ async fn scan_pixiv_revisions(
             .collect();
         let _guard = state.library_gate.write().await;
         state
-            .db
+            .candidates()
             .clear_resolved_unavailable_candidates("pixiv", &available_ids)?;
     }
     let mut found = 0i64;
@@ -3846,7 +3870,7 @@ async fn scan_pixiv_revisions(
             None => {}
         }
         if state
-            .db
+            .candidates()
             .update_candidate_status("pixiv", &source_id)?
             .as_deref()
             == Some("dismissed")
@@ -4071,7 +4095,7 @@ async fn process_target_item(
 
         // 一度「今後は出さない」と決めた作品は、見つけても候補にしない。
         if state
-            .db
+            .candidates()
             .update_candidate_status(&target.source, &listed_id)?
             .as_deref()
             == Some("dismissed")
@@ -4198,7 +4222,9 @@ async fn process_candidate_item(
         let refetch = kind == Some("revision")
             || (kind == Some("save")
                 && (card.as_ref().is_some_and(|card| card.watching)
-                    || state.db.has_incomplete_save_candidate(source, source_id)?));
+                    || state
+                        .candidates()
+                        .has_incomplete_save_candidate(source, source_id)?));
         if card.is_some() && !refetch {
             return Ok(ItemOutcome::Skipped(format!(
                 "保存済みのためスキップ: {}",
@@ -4238,7 +4264,9 @@ async fn process_candidate_item(
             && (existing
                 .as_ref()
                 .is_some_and(|download| download.watch_updates)
-                || state.db.has_incomplete_save_candidate(source, source_id)?));
+                || state
+                    .candidates()
+                    .has_incomplete_save_candidate(source, source_id)?));
     if existing.is_some() && !refetch_existing {
         return Ok(ItemOutcome::Skipped(format!(
             "保存済みのためスキップ: {}",
@@ -4528,7 +4556,7 @@ mod tests {
         // 初めての保留は知らせる。
         assert!(!super::is_known_hold(&state, &item, &gone).unwrap());
         state
-            .db
+            .candidates()
             .upsert_update_candidate(&crate::database::UpdateCandidateInput {
                 source: "pixiv".into(),
                 source_id: "42".into(),
@@ -4541,7 +4569,7 @@ mod tests {
         // 候補があっても、保留でなければ前回の保留ではない。
         assert!(!super::is_known_hold(&state, &item, &gone).unwrap());
         state
-            .db
+            .candidates()
             .set_update_candidate_status("pixiv", "42", "held")
             .unwrap();
         assert!(super::is_known_hold(&state, &item, &gone).unwrap());
@@ -4597,7 +4625,7 @@ mod tests {
             })
             .unwrap();
         for (source_id, kind) in [("old", "revision"), ("new", "new")] {
-            state.db.upsert_update_candidate(&crate::database::UpdateCandidateInput {
+            state.candidates().upsert_update_candidate(&crate::database::UpdateCandidateInput {
                 source: "pixiv".into(), source_id: source_id.into(),
                 kind: kind.into(), title: source_id.into(),
                 payload_json: serde_json::json!({
@@ -4755,7 +4783,10 @@ mod tests {
             .is_some());
         assert!(json_path.is_file());
         assert_eq!(
-            state.db.count_saved_deferred_update_candidates().unwrap(),
+            state
+                .candidates()
+                .count_saved_deferred_update_candidates()
+                .unwrap(),
             1
         );
         // 次の確認でもまだ見つからない。確かめはするが、何も変わっていないので
@@ -4793,23 +4824,32 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(
-            state.db.count_saved_deferred_update_candidates().unwrap(),
+            state
+                .candidates()
+                .count_saved_deferred_update_candidates()
+                .unwrap(),
             1
         );
         state
-            .db
+            .candidates()
             .clear_resolved_unavailable_candidates("pixiv", &["different".into()])
             .unwrap();
         assert_eq!(
-            state.db.count_saved_deferred_update_candidates().unwrap(),
+            state
+                .candidates()
+                .count_saved_deferred_update_candidates()
+                .unwrap(),
             1
         );
         state
-            .db
+            .candidates()
             .clear_resolved_unavailable_candidates("pixiv", std::slice::from_ref(&work.source_id))
             .unwrap();
         assert_eq!(
-            state.db.count_saved_deferred_update_candidates().unwrap(),
+            state
+                .candidates()
+                .count_saved_deferred_update_candidates()
+                .unwrap(),
             0
         );
         web_index.gave_up = true;
@@ -4915,19 +4955,19 @@ mod tests {
             target_type: Some("author".into()),
         };
         state
-            .db
+            .candidates()
             .upsert_update_candidate(&candidate("a-requested".into(), "requested"))
             .unwrap();
         // More recent, unrelated candidates used to consume the entire global
         // 2,000-row allowance before the requested author's scope was applied.
         for index in 0..2_001 {
             state
-                .db
+                .candidates()
                 .upsert_update_candidate(&candidate(format!("noise-{index:04}"), "another-author"))
                 .unwrap();
         }
         state
-            .db
+            .candidates()
             .upsert_update_candidate(&candidate("z-requested".into(), "requested"))
             .unwrap();
         let request = StartUpdateJobRequest {
@@ -5345,6 +5385,7 @@ mod tests {
     #[test]
     fn durable_candidates_obey_exact_current_watch_scope() {
         let mut candidate = crate::database::UpdateCandidateRow {
+            work_id: None,
             metadata: Default::default(),
             source: "fanbox".into(), source_id: "11".into(), kind: "new".into(), title: "作品".into(),
             payload_json: serde_json::json!({"originSourceKey":"creator", "originalData":{"creatorId":"creator"}}).to_string(),

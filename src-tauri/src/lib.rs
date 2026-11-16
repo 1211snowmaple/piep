@@ -83,6 +83,8 @@ impl LibraryProcessLock {
 /// アプリ全体で共有されるDB状態
 pub struct AppState {
     pub db: Database,
+    /// 起動時に登録した棚の状態を、取得ワーカーも同じ口から参照する。
+    pub(crate) library_v2: Arc<commands::library_v2::LibraryV2>,
     /// Export holds a read guard while every library mutation holds a write
     /// guard, giving backups one coherent DB/filesystem generation.
     pub library_gate: Arc<tokio::sync::RwLock<()>>,
@@ -95,6 +97,7 @@ impl AppState {
     pub fn new(db: Database) -> Self {
         Self {
             db,
+            library_v2: Arc::new(commands::library_v2::LibraryV2::default()),
             library_gate: Arc::new(tokio::sync::RwLock::new(())),
             _library_process_lock: None,
         }
@@ -103,6 +106,7 @@ impl AppState {
     fn new_with_library_lock(db: Database, library_process_lock: LibraryProcessLock) -> Self {
         Self {
             db,
+            library_v2: Arc::new(commands::library_v2::LibraryV2::default()),
             library_gate: Arc::new(tokio::sync::RwLock::new(())),
             _library_process_lock: Some(library_process_lock),
         }
@@ -144,7 +148,12 @@ fn prepare_library(
 
     let db = Database::open(&db_path, &storage_dir)
         .map_err(|e| format!("Failed to open database: {e}"))?;
-    let state = Arc::new(AppState::new_with_library_lock(db, library_process_lock));
+    let mut state = AppState::new_with_library_lock(db, library_process_lock);
+    state.library_v2 = app
+        .state::<Arc<commands::library_v2::LibraryV2>>()
+        .inner()
+        .clone();
+    let state = Arc::new(state);
     // 中断した復元の後始末は、起動の条件にしない。片付かなかった分は
     // 控えを残したまま次の起動でもう一度試せる。ここで止めると、読める
     // 棚を持っている人が窓を開けられなくなる。

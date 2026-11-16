@@ -2,6 +2,7 @@ pub mod archive;
 pub mod assist;
 pub mod auth;
 pub mod browser;
+pub(crate) mod candidates;
 pub mod database;
 pub mod downloader;
 pub mod epub;

@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 19;
+pub(crate) const VERSION: i64 = 20;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -24,6 +24,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_017_switched.sql"),
     include_str!("migration_018_edit_archive.sql"),
     include_str!("migration_019_watching.sql"),
+    include_str!("migration_020_discovery_state.sql"),
 ];
 
 fn migration_checksum(sql: &str) -> Fingerprint {

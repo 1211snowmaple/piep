@@ -7,6 +7,7 @@ mod annotations;
 mod archive;
 mod body;
 mod catalogue;
+mod discovery;
 mod editing;
 mod identity;
 mod integrity;
@@ -29,6 +30,7 @@ mod store;
 mod suggestions;
 mod transfer;
 mod watching;
+pub use discovery::{Discovery, DiscoveryInput};
 mod work_capture;
 mod work_list;
 

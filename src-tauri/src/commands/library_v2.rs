@@ -96,6 +96,12 @@ impl Default for LibraryV2 {
 }
 
 impl LibraryV2 {
+    #[cfg(test)]
+    pub(crate) fn with_test_library(library: Arc<Library>) -> Self {
+        let state = Self::default();
+        assert!(state.library.set(library).is_ok());
+        state
+    }
     fn set(&self, status: LibraryV2Status) {
         if let Ok(mut slot) = self.status.lock() {
             *slot = status;

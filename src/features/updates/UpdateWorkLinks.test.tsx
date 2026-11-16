@@ -18,3 +18,11 @@ it("opens the saved work and its provider from the same row", () => {
   fireEvent.click(screen.getByRole("button", { name: "作品の取得元を開く" }));
   expect(window.location.hash).toContain("/save/pixiv?url=https%3A%2F%2Fwww.pixiv.net%2Fnovel%2Fshow.php%3Fid%3D123");
 });
+
+it("opens the saved UUID from the new shelf without an old database number", () => {
+  const id="019ad000-0000-7000-8000-000000000001";
+  window.location.hash="#/updates";
+  render(<MantineProvider><AppRouter><UpdateWorkLinks source="pixiv" sourceId="123" workId={id} title="新しい棚の作品" /></AppRouter></MantineProvider>);
+  fireEvent.click(screen.getByRole("button",{name:"新しい棚の作品の保存した詳細を開く"}));
+  expect(window.location.hash).toContain(`/works/${id}`);
+});

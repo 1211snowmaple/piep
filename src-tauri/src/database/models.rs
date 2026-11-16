@@ -1277,6 +1277,8 @@ pub struct UpdateCandidateInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCandidateRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<crate::library::LibraryId>,
     #[serde(default, skip_serializing_if = "UpdateWorkMetadata::is_empty")]
     pub metadata: UpdateWorkMetadata,
     pub source: String,
@@ -1310,7 +1312,7 @@ impl UpdateWorkMetadata {
             && self.updated_at.is_none()
             && self.saved_at.is_none()
     }
-    pub(super) fn from_payload(payload: &serde_json::Value) -> Self {
+    pub(crate) fn from_payload(payload: &serde_json::Value) -> Self {
         fn field(value: &serde_json::Value, paths: &[&str]) -> Option<String> {
             paths.iter().find_map(|path| {
                 value

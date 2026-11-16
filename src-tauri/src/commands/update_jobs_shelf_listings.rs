@@ -252,7 +252,7 @@ pub(super) fn apply_pixiv_listing(
         .map(|e| e.id.clone())
         .collect::<Vec<_>>();
     state
-        .db
+        .candidates()
         .clear_resolved_unavailable_candidates("pixiv", &available)?;
     let mut found = 0;
     for card in saved {
@@ -269,7 +269,7 @@ pub(super) fn apply_pixiv_listing(
                 serde_json::json!({"source":"pixiv","sourceId":card.external_key}),
             )?;
             if state
-                .db
+                .candidates()
                 .insert_update_job_unavailable_item(job_id, &item, &original, &reason)?
             {
                 state.db.append_update_job_log(
@@ -464,7 +464,6 @@ mod tests {
             &data("pixiv", "別の作者", "88"),
             true,
         );
-        let library = Arc::new(library);
         let old = card.saved_at - 1000;
         let cached = listing(&card, old);
         let mut index = WebUpdateIndex::new(&snapshot_credentials_missing());
@@ -552,7 +551,7 @@ mod tests {
             Some(old)
         );
         state
-            .db
+            .candidates()
             .set_update_candidate_status("pixiv", "11", "dismissed")
             .unwrap();
         assert_eq!(
@@ -689,7 +688,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            state.db.update_candidate_status("pixiv", "11").unwrap(),
+            state
+                .candidates()
+                .update_candidate_status("pixiv", "11")
+                .unwrap(),
             None
         );
     }

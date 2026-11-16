@@ -22,7 +22,7 @@ pub(super) fn switched_library(app: &tauri::AppHandle) -> Option<Arc<Library>> {
         .switched()
 }
 
-pub(super) fn saved_card(
+pub(crate) fn saved_card(
     library: &Library,
     source: &str,
     key: &str,
@@ -544,15 +544,17 @@ mod tests {
         }
     }
 
-    pub(super) fn fixture() -> (Temp, Arc<AppState>, Library) {
+    pub(super) fn fixture() -> (Temp, Arc<AppState>, Arc<Library>) {
         let root = std::env::temp_dir().join(format!("piep-update-shelf-{}", LibraryId::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let state = Arc::new(AppState::new(
-            Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap(),
-        ));
-        let library = Library::create(&root.join("shelf")).unwrap();
+        let mut state =
+            AppState::new(Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap());
+        let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
         library.switch_over().unwrap();
-        (Temp(root), state, library)
+        state.library_v2 = Arc::new(
+            super::super::super::library_v2::LibraryV2::with_test_library(library.clone()),
+        );
+        (Temp(root), Arc::new(state), library)
     }
 
     pub(super) fn request(scope: &str) -> StartUpdateJobRequest {
@@ -741,7 +743,7 @@ mod tests {
             let snapshot = state.db.update_job_snapshot(&job).unwrap();
             assert_eq!(snapshot.candidate_count, 1);
             let candidates = state
-                .db
+                .candidates()
                 .list_update_candidates_by_status("pending", -1)
                 .unwrap();
             let candidate = candidates.iter().find(|c| c.source == source).unwrap();

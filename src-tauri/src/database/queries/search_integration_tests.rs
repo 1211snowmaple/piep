@@ -10230,6 +10230,7 @@ fn restored_candidates_reject_untrusted_provider_fields() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
     let mut row = UpdateCandidateRow {
+        work_id: None,
         metadata: Default::default(),
         source: "pixiv".to_string(),
         source_id: "12345".to_string(),

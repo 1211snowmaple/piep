@@ -6448,6 +6448,28 @@ impl Database {
         original: &serde_json::Value,
         reason: &str,
     ) -> Result<bool, String> {
+        self.insert_unavailable_item(job_id, item, original, reason, None)
+    }
+
+    /// 候補の正本が棚にある場合、既存キューへは実行項目だけを書く。
+    pub(crate) fn insert_unavailable_queue_item(
+        &self,
+        job_id: &str,
+        item: &UpdateJobItemInput,
+        reason: &str,
+        known: bool,
+    ) -> Result<bool, String> {
+        self.insert_unavailable_item(job_id, item, &serde_json::Value::Null, reason, Some(known))
+    }
+
+    fn insert_unavailable_item(
+        &self,
+        job_id: &str,
+        item: &UpdateJobItemInput,
+        original: &serde_json::Value,
+        reason: &str,
+        native_known: Option<bool>,
+    ) -> Result<bool, String> {
         let source = item
             .source
             .as_deref()
@@ -6463,7 +6485,10 @@ impl Database {
             .transaction()
             .map_err(|error| format!("Failed to begin unavailable work insert: {error}"))?;
         // 前の回から見つからないままなら、確認はしても新しい保留としては数えない。
-        let known: bool = tx
+        let known: bool = if let Some(known) = native_known {
+            known
+        } else {
+            tx
             .query_row(
                 "SELECT status IN ('held','dismissed')
                         AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.holdKind') END='unavailable'
@@ -6473,7 +6498,8 @@ impl Database {
             )
             .optional()
             .map_err(|error| format!("Failed to read unavailable work state: {error}"))?
-            .unwrap_or(false);
+            .unwrap_or(false)
+        };
         let mut payload: serde_json::Value =
             serde_json::from_str(&item.payload_json).map_err(|error| error.to_string())?;
         if known {
@@ -6496,12 +6522,13 @@ impl Database {
             )
             .map_err(|error| format!("Failed to record unavailable work: {error}"))?;
         if changed > 0 {
-            let candidate_payload = serde_json::json!({
-                "source": source, "sourceId": source_id, "title": item.title,
-                "kind": "revision", "holdKind": "unavailable", "holdReason": reason,
-                "originalData": original,
-            });
-            tx.execute(
+            if native_known.is_none() {
+                let candidate_payload = serde_json::json!({
+                    "source": source, "sourceId": source_id, "title": item.title,
+                    "kind": "revision", "holdKind": "unavailable", "holdReason": reason,
+                    "originalData": original,
+                });
+                tx.execute(
                 "INSERT INTO update_candidates(source,source_id,kind,title,payload_json,target_type,status)
                  VALUES(?1,?2,'revision',?3,?4,'work','held')
                  ON CONFLICT(source,source_id) DO UPDATE SET kind='revision',title=excluded.title,
@@ -6510,6 +6537,7 @@ impl Database {
                     updated_at=CURRENT_TIMESTAMP",
                 params![source,source_id,item.title,candidate_payload.to_string()],
             ).map_err(|error| format!("Failed to retain unavailable work state: {error}"))?;
+            }
             let contribution = update_job_item_counter_contribution("work", "held");
             tx.execute(
                 "UPDATE update_jobs
