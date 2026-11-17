@@ -301,6 +301,44 @@ mod tests {
             {"id":"a","name":"alpha","url":"https://example.invalid/a.txt"},
             {"id":"b","name":"beta","url":"https://example.invalid/b.txt"}]}})
     }
+    #[test]
+    fn confirming_empty_pixiv_metadata_is_saved_even_when_body_and_assets_are_unchanged() {
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("piep-mask-confirm-{}", LibraryId::now_v7())),
+        );
+        let library = Library::create(&fixture.0.join("shelf")).unwrap();
+        let gate = "https://s.pximg.net/common/images/limit_r18.png";
+        let data = json!({"detail":{"title":"", "caption":"", "tags":[], "cover_url":gate}, "text":"本文"});
+        let path = fixture.0.join("limit_r18.png");
+        std::fs::write(&path, b"gate").unwrap();
+        let saved = library
+            .save_readable_work(
+                WorkSave {
+                    request: LibraryId::now_v7(),
+                    provider: "pixiv",
+                    key: "1",
+                    route: "save",
+                    data: &data,
+                    assets: vec![StagedAsset {
+                        role: "cover".into(),
+                        name: "limit_r18.png".into(),
+                        path,
+                        url: Some(gate.into()),
+                        mime_type: Some("image/png".into()),
+                    }],
+                },
+                None,
+            )
+            .unwrap();
+        assert!(unchanged_on_shelf(&library, saved.entity_id, &data, "pixiv").unwrap());
+        let mut confirmed = data.clone();
+        confirmed["web_detail"] = json!({});
+        assert!(!unchanged_on_shelf(&library, saved.entity_id, &confirmed, "pixiv").unwrap());
+        assert!(matches!(
+            save_plan(&library, saved.entity_id, &confirmed, "pixiv").unwrap(),
+            SavePlan::Save
+        ));
+    }
     fn save(
         library: &Library,
         data: &Value,

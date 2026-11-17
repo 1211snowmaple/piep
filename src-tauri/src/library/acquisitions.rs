@@ -66,6 +66,7 @@ pub(super) struct CompletionContext {
     pub reader_bindings: Option<Vec<ReaderBinding>>,
     pub profile_checked_at: Option<i64>,
     pub asset_repair: Option<super::asset_repairs::AssetRepairObservation>,
+    pub pixiv_interpretation: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,6 +81,8 @@ pub(super) struct AcquisitionManifest {
     pub profile_checked_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_repair: Option<super::asset_repairs::AssetRepairObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixiv_interpretation: Option<i64>,
 }
 
 fn sql_id(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<LibraryId> {
@@ -355,7 +358,7 @@ impl Library {
     }
 
     pub fn complete_acquisition(&self, id: LibraryId, capture: Capture) -> Result<CaptureResult> {
-        self.complete_with_reader(id, capture, None, None, None)
+        self.complete_with_reader(id, capture, None, None, None, None)
     }
 
     #[cfg(test)]
@@ -369,7 +372,7 @@ impl Library {
             return Err(Error::Integrity("添付の再取得の対象が不正です".into()));
         }
         observation.normalize();
-        self.complete_with_reader(id, capture, None, None, Some(observation))
+        self.complete_with_reader(id, capture, None, None, Some(observation), None)
     }
 
     /// プロフィールの保存と、その応答を確認・取得した時刻を一緒に確定する。
@@ -386,7 +389,7 @@ impl Library {
                 "プロフィールの確認日時・対象が不正です".into(),
             ));
         }
-        self.complete_with_reader(id, capture, None, Some(checked_at), None)
+        self.complete_with_reader(id, capture, None, Some(checked_at), None, None)
     }
 
     /// 保存版・現在版・読書用の対応・取得の完了をまとめて確定する。
@@ -402,7 +405,7 @@ impl Library {
             ));
         }
         super::reader::normalize_input_bindings(&mut bindings)?;
-        self.complete_with_reader(id, capture, Some(bindings), None, None)
+        self.complete_with_reader(id, capture, Some(bindings), None, None, None)
     }
 
     pub(crate) fn complete_acquisition_with_reader_and_asset_repair(
@@ -417,7 +420,21 @@ impl Library {
         }
         super::reader::normalize_input_bindings(&mut bindings)?;
         observation.normalize();
-        self.complete_with_reader(id, capture, Some(bindings), None, Some(observation))
+        self.complete_with_reader(id, capture, Some(bindings), None, Some(observation), None)
+    }
+
+    /// 新規の pixiv 保存だけに適用する取得解釈。旧形式の再送の結果は変えない。
+    pub(crate) fn complete_pixiv_work_acquisition(
+        &self,
+        id: LibraryId,
+        capture: Capture,
+        mut bindings: Vec<ReaderBinding>,
+    ) -> Result<CaptureResult> {
+        if capture.kind != EntityKind::Work || capture.provider != "pixiv" {
+            return Err(Error::Integrity("pixiv の作品保存の対象が不正です".into()));
+        }
+        super::reader::normalize_input_bindings(&mut bindings)?;
+        self.complete_with_reader(id, capture, Some(bindings), None, None, Some(1))
     }
 
     fn complete_with_reader(
@@ -427,6 +444,7 @@ impl Library {
         reader_bindings: Option<Vec<ReaderBinding>>,
         profile_checked_at: Option<i64>,
         asset_repair: Option<super::asset_repairs::AssetRepairObservation>,
+        pixiv_interpretation: Option<i64>,
     ) -> Result<CaptureResult> {
         let context = {
             let conn = self.conn.lock().map_err(|_| Error::Busy)?;
@@ -450,6 +468,7 @@ impl Library {
                 reader_bindings,
                 profile_checked_at,
                 asset_repair,
+                pixiv_interpretation,
             }
         };
         self.capture_prepared(capture, None, Some(context))
@@ -485,7 +504,9 @@ pub(super) fn encode_manifest(context: &CompletionContext, request: Vec<u8>) -> 
             .map_err(|_| Error::Integrity("取得入力が UTF-8 ではありません".into()))?,
     )?;
     let bytes = serde_json::to_vec(&AcquisitionManifest {
-        format: if context.asset_repair.is_some() && context.reader_bindings.is_some() {
+        format: if context.pixiv_interpretation.is_some() {
+            "capture-request-v7"
+        } else if context.asset_repair.is_some() && context.reader_bindings.is_some() {
             "capture-request-v6"
         } else if context.asset_repair.is_some() {
             "capture-request-v5"
@@ -503,6 +524,7 @@ pub(super) fn encode_manifest(context: &CompletionContext, request: Vec<u8>) -> 
         reader_bindings: context.reader_bindings.clone(),
         profile_checked_at: context.profile_checked_at,
         asset_repair: context.asset_repair.clone(),
+        pixiv_interpretation: context.pixiv_interpretation,
     })?;
     if bytes.len() as u64 > MAX_ACQUISITION_MANIFEST_BYTES {
         return Err(Error::Unsupported(
@@ -573,6 +595,9 @@ fn manifest_files(
         .filter(|v| v.len() == 13)
         .ok_or_else(invalid_manifest)?;
     let ticket = &manifest.ticket;
+    if manifest.pixiv_interpretation.is_some() && manifest.format != "capture-request-v7" {
+        return Err(invalid_manifest());
+    }
     if manifest.asset_repair.is_some()
         && !matches!(
             manifest.format.as_str(),
@@ -582,6 +607,17 @@ fn manifest_files(
         return Err(invalid_manifest());
     }
     let reader_format = match (manifest.format.as_str(), &manifest.reader_bindings) {
+        ("capture-request-v7", Some(bindings))
+            if ticket.kind == EntityKind::Work
+                && ticket.provider == "pixiv"
+                && manifest.profile_checked_at.is_none()
+                && manifest.asset_repair.is_none()
+                && manifest.pixiv_interpretation == Some(1) =>
+        {
+            let mut normalized = bindings.clone();
+            super::reader::normalize_input_bindings(&mut normalized)?;
+            &normalized == bindings
+        }
         ("capture-request-v2", None) if manifest.profile_checked_at.is_none() => true,
         ("capture-request-v3", Some(bindings))
             if ticket.kind == EntityKind::Work && manifest.profile_checked_at.is_none() =>

@@ -8,6 +8,30 @@ pub(crate) fn is_pixiv_placeholder_image(url: &str) -> bool {
     url.contains("/common/images/limit_")
 }
 
+/// 閲覧制限の表紙があり、web 詳細で確認していない空欄だけを未取得とする。
+pub(crate) fn masked_pixiv_metadata(value: &serde_json::Value) -> Vec<&'static str> {
+    use serde_json::Value;
+    let gated = [value.get("cover_url"), value.pointer("/detail/cover_url")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(is_pixiv_placeholder_image);
+    if !gated || value.get("web_detail").is_some_and(Value::is_object) {
+        return Vec::new();
+    }
+    let detail = value.get("detail").unwrap_or(&Value::Null);
+    ["title", "caption", "tags"]
+        .into_iter()
+        .filter(|key| {
+            detail.get(*key).is_none_or(|field| {
+                field.is_null()
+                    || field.as_str().is_some_and(|text| text.trim().is_empty())
+                    || field.as_array().is_some_and(Vec::is_empty)
+            })
+        })
+        .collect()
+}
+
 /// pixiv の既知の表紙・挿絵形式だけ、品質によらない識別子を作る。
 /// 未知の URL は厳密比較へ戻し、他の画像を同じものと推測しない。
 pub fn cover_identity(provider: &str, url: &str) -> String {

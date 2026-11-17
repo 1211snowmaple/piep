@@ -113,6 +113,9 @@ fn skip_save_on_shelf(
     let (old_hash, _, old_updated) = compute_content_details(&previous, source);
     let (new_hash, _, new_updated) = compute_content_details(data, source);
     if (source == "fanbox" && !repairs::same_source(&previous, data)?)
+        || (source == "pixiv"
+            && crate::library::masked_pixiv_metadata(&previous)
+                != crate::library::masked_pixiv_metadata(data))
         || old_hash != new_hash
         || (source == "fanbox"
             && !crate::source_time::same_instant(old_updated.as_deref(), new_updated.as_deref()))

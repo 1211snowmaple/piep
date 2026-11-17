@@ -513,6 +513,7 @@ fn legacy_v2_request_encoding_keeps_the_exact_json_and_has_no_reader_field() {
         reader_bindings: None,
         profile_checked_at: None,
         asset_repair: None,
+        pixiv_interpretation: None,
     };
     let raw = r#"[ "opaque", {"number":0.07221960411257732,"integer":9007199254740993} ]"#;
     let expected = serde_json::to_vec(&Legacy {

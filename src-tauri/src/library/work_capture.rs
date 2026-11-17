@@ -321,7 +321,18 @@ impl Library {
             data,
             assets,
         } = save;
-        self.begin_acquisition(request, provider, EntityKind::Work, key, route)?;
+        let started = self.begin_acquisition(request, provider, EntityKind::Work, key, route)?;
+        // 完了済み要求の再送は、当時の解釈で同じ入力記録を作り直す。
+        let pixiv_interpretation = readable
+            && provider == "pixiv"
+            && match started.input_manifest {
+                Some(file) => {
+                    let conn = self.reader()?;
+                    super::acquisitions::read_manifest(self, &conn, file)?.pixiv_interpretation
+                        == Some(1)
+                }
+                None => true,
+            };
         let result = (|| {
             let raw = serde_json::to_vec_pretty(data)?;
             if readable {
@@ -331,7 +342,14 @@ impl Library {
                     &CaptureSource::Bytes(raw.clone()),
                 )?;
             }
-            let fields = work_fields(provider, data);
+            let mut fields = work_fields(provider, data);
+            if pixiv_interpretation {
+                fields.field_states.remove("caption");
+                fields.field_states.remove("tags");
+                for key in super::masked_pixiv_metadata(data) {
+                    fields.field_states.insert(key.into(), "unknown".into());
+                }
+            }
             let bindings = readable
                 .then(|| work_reader_bindings(provider, fields.body.as_ref(), &assets))
                 .transpose()?;
@@ -351,6 +369,9 @@ impl Library {
                 attachments,
             };
             match (bindings, observation) {
+                (Some(bindings), None) if pixiv_interpretation => {
+                    self.complete_pixiv_work_acquisition(request, capture, bindings)
+                }
                 (Some(bindings), Some(observation)) => self
                     .complete_acquisition_with_reader_and_asset_repair(
                         request,

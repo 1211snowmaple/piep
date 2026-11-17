@@ -41,6 +41,134 @@ fn format(library: &Library, request: LibraryId) -> String {
 }
 
 #[test]
+fn only_gate_masked_fields_are_unknown_and_confirmed_empty_fields_are_real_changes() {
+    let temp = Temp::new();
+    let library = Library::create(&temp.0.join("shelf")).unwrap();
+    let data = json!({"detail":{"title":"", "caption":"", "tags":[],
+        "cover_url":"https://s.pximg.net/common/images/limit_r18.png"}, "text":"同じ本文"});
+    let save = |key: &str, data: &Value| {
+        library
+            .save_readable_work(
+                WorkSave {
+                    request: LibraryId::now_v7(),
+                    provider: "pixiv",
+                    key,
+                    route: "save",
+                    data,
+                    assets: vec![],
+                },
+                None,
+            )
+            .unwrap()
+    };
+    let first = save("gated", &data);
+    let first_info = library.snapshots(first.entity_id).unwrap();
+    assert_eq!(
+        first_info[0].field_states.get("title").map(String::as_str),
+        Some("unknown")
+    );
+    let mut filled = data.clone();
+    filled["web_detail"] = json!({});
+    filled["detail"]["title"] = json!("題");
+    filled["detail"]["caption"] = json!("説明");
+    filled["detail"]["tags"] = json!(["タグ"]);
+    let supplemented = save("gated", &filled);
+    assert!(!supplemented.created_revision);
+    assert_ne!(first.snapshot_id, supplemented.snapshot_id);
+    // 再び伏せられた空欄を受けても既知の情報を空へ戻さない。
+    let masked_again = save("gated", &data);
+    assert_eq!(masked_again.snapshot_id, supplemented.snapshot_id);
+    assert_eq!(library.work_card(first.entity_id).unwrap().title, "題");
+    // web 詳細で確認した空欄は作者の内容。既知の情報からの変更を補完に混ぜない。
+    let mut cleared = data.clone();
+    cleared["web_detail"] = json!({});
+    assert!(save("gated", &cleared).created_revision);
+    let current = library.current_snapshot(first.entity_id).unwrap();
+    let empty = library
+        .snapshots(first.entity_id)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == current)
+        .unwrap();
+    assert_eq!(empty.metadata["caption"], json!(""));
+    assert_eq!(empty.metadata["tags"], json!([]));
+    let mut ordinary = data.clone();
+    ordinary["detail"]["cover_url"] = json!("https://example.com/cover.png");
+    let original_empty = save("ordinary", &ordinary);
+    assert!(
+        save("ordinary", &filled).created_revision,
+        "confirmed empty values must not become unknown"
+    );
+    assert_ne!(original_empty.entity_id, first.entity_id);
+    library.backup(&temp.0.join("backup")).unwrap();
+    Library::open(&temp.0.join("backup"))
+        .unwrap()
+        .verify()
+        .unwrap();
+}
+
+#[test]
+fn replaying_an_old_native_request_keeps_its_original_interpretation_and_bytes() {
+    let temp = Temp::new();
+    let library = Library::create(&temp.0.join("shelf")).unwrap();
+    let request = LibraryId::now_v7();
+    let data = json!({"detail":{"title":"題", "caption":"", "tags":[]}, "text":"本文"});
+    let raw = serde_json::to_vec_pretty(&data).unwrap();
+    library
+        .begin_acquisition(request, "pixiv", EntityKind::Work, "1", "save")
+        .unwrap();
+    library
+        .record_acquisition_payload(
+            request,
+            "work-save-input",
+            &CaptureSource::Bytes(raw.clone()),
+        )
+        .unwrap();
+    let fields = work_fields("pixiv", &data);
+    let first = library
+        .complete_acquisition_with_reader(
+            request,
+            Capture {
+                request_id: request,
+                acquired_at: None,
+                provider: "pixiv".into(),
+                external_key: "1".into(),
+                kind: EntityKind::Work,
+                route: "save".into(),
+                raw: raw.into(),
+                metadata: fields.metadata,
+                field_states: fields.field_states,
+                body: fields.body,
+                media: vec![],
+                attachments: vec![],
+            },
+            vec![],
+        )
+        .unwrap();
+    let manifest = library.acquisition_status(request).unwrap().input_manifest;
+    let replay = library
+        .save_readable_work(
+            WorkSave {
+                request,
+                provider: "pixiv",
+                key: "1",
+                route: "save",
+                data: &data,
+                assets: vec![],
+            },
+            None,
+        )
+        .unwrap();
+    assert_eq!(replay.snapshot_id, first.snapshot_id);
+    assert_eq!(format(&library, request), "capture-request-v3");
+    assert_eq!(
+        library.acquisition_status(request).unwrap().input_manifest,
+        manifest
+    );
+    library.verify().unwrap();
+}
+
+#[test]
 fn a_native_pixiv_save_publishes_exact_bindings_and_keeps_missing_images_explicit() {
     let temp = Temp::new();
     let library = Library::create(&temp.0.join("shelf")).unwrap();
@@ -75,7 +203,7 @@ fn a_native_pixiv_save_publishes_exact_bindings_and_keeps_missing_images_explici
     let first = save();
     let info = library.acquisition_status(request).unwrap();
     assert_eq!(info.reader.unwrap().snapshot, first.snapshot_id);
-    assert_eq!(format(&library, request), "capture-request-v3");
+    assert_eq!(format(&library, request), "capture-request-v7");
     let document = library
         .reader_document(first.entity_id, ResourceScope::Snapshot(first.snapshot_id))
         .unwrap();
