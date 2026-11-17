@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 mod annotations;
+mod asset_repairs;
 mod catalogue;
 mod current;
 mod edits;
@@ -484,6 +485,13 @@ impl LegacyImporter {
             "work_check_state",
             "作品の詳細確認日時の移行",
             self.normalize_work_check_state(target, cancel),
+            &mut report,
+        )?;
+        self.finish_normalization(
+            target,
+            "asset_repair_state",
+            "添付の再取得の覚え書きの移行",
+            self.normalize_asset_repairs(target, cancel),
             &mut report,
         )?;
         self.finish_normalization(

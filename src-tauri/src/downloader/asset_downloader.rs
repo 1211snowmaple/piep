@@ -885,7 +885,6 @@ async fn copy_saved_asset(source: &Path, destination: &Path) -> Result<(), Strin
 
 /// 全てのアセットを一括並行ダウンロードし、ローカルリンクをバインドする
 pub async fn download_and_link_assets(
-    _app: &tauri::AppHandle,
     json_data: &mut Value,
     json_path: &Path,
     is_fanbox: bool,

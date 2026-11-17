@@ -65,6 +65,7 @@ pub(super) struct CompletionContext {
     pub parts: Vec<RawPart>,
     pub reader_bindings: Option<Vec<ReaderBinding>>,
     pub profile_checked_at: Option<i64>,
+    pub asset_repair: Option<super::asset_repairs::AssetRepairObservation>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,6 +78,8 @@ pub(super) struct AcquisitionManifest {
     pub reader_bindings: Option<Vec<ReaderBinding>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_checked_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_repair: Option<super::asset_repairs::AssetRepairObservation>,
 }
 
 fn sql_id(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<LibraryId> {
@@ -352,7 +355,20 @@ impl Library {
     }
 
     pub fn complete_acquisition(&self, id: LibraryId, capture: Capture) -> Result<CaptureResult> {
-        self.complete_with_reader(id, capture, None, None)
+        self.complete_with_reader(id, capture, None, None, None)
+    }
+
+    pub(crate) fn complete_acquisition_with_asset_repair(
+        &self,
+        id: LibraryId,
+        capture: Capture,
+        mut observation: super::asset_repairs::AssetRepairObservation,
+    ) -> Result<CaptureResult> {
+        if capture.kind != EntityKind::Work || capture.provider != "fanbox" {
+            return Err(Error::Integrity("添付の再取得の対象が不正です".into()));
+        }
+        observation.normalize();
+        self.complete_with_reader(id, capture, None, None, Some(observation))
     }
 
     /// プロフィールの保存と、その応答を確認・取得した時刻を一緒に確定する。
@@ -369,7 +385,7 @@ impl Library {
                 "プロフィールの確認日時・対象が不正です".into(),
             ));
         }
-        self.complete_with_reader(id, capture, None, Some(checked_at))
+        self.complete_with_reader(id, capture, None, Some(checked_at), None)
     }
 
     /// 保存版・現在版・読書用の対応・取得の完了をまとめて確定する。
@@ -385,7 +401,7 @@ impl Library {
             ));
         }
         super::reader::normalize_input_bindings(&mut bindings)?;
-        self.complete_with_reader(id, capture, Some(bindings), None)
+        self.complete_with_reader(id, capture, Some(bindings), None, None)
     }
 
     fn complete_with_reader(
@@ -394,6 +410,7 @@ impl Library {
         capture: Capture,
         reader_bindings: Option<Vec<ReaderBinding>>,
         profile_checked_at: Option<i64>,
+        asset_repair: Option<super::asset_repairs::AssetRepairObservation>,
     ) -> Result<CaptureResult> {
         let context = {
             let conn = self.conn.lock().map_err(|_| Error::Busy)?;
@@ -416,6 +433,7 @@ impl Library {
                 parts: info.payloads,
                 reader_bindings,
                 profile_checked_at,
+                asset_repair,
             }
         };
         self.capture_prepared(capture, None, Some(context))
@@ -451,7 +469,9 @@ pub(super) fn encode_manifest(context: &CompletionContext, request: Vec<u8>) -> 
             .map_err(|_| Error::Integrity("取得入力が UTF-8 ではありません".into()))?,
     )?;
     let bytes = serde_json::to_vec(&AcquisitionManifest {
-        format: if context.profile_checked_at.is_some() {
+        format: if context.asset_repair.is_some() {
+            "capture-request-v5"
+        } else if context.profile_checked_at.is_some() {
             "capture-request-v4"
         } else if context.reader_bindings.is_some() {
             "capture-request-v3"
@@ -464,6 +484,7 @@ pub(super) fn encode_manifest(context: &CompletionContext, request: Vec<u8>) -> 
         capture,
         reader_bindings: context.reader_bindings.clone(),
         profile_checked_at: context.profile_checked_at,
+        asset_repair: context.asset_repair.clone(),
     })?;
     if bytes.len() as u64 > MAX_ACQUISITION_MANIFEST_BYTES {
         return Err(Error::Unsupported(
@@ -534,6 +555,9 @@ fn manifest_files(
         .filter(|v| v.len() == 13)
         .ok_or_else(invalid_manifest)?;
     let ticket = &manifest.ticket;
+    if manifest.asset_repair.is_some() && manifest.format != "capture-request-v5" {
+        return Err(invalid_manifest());
+    }
     let reader_format = match (manifest.format.as_str(), &manifest.reader_bindings) {
         ("capture-request-v2", None) if manifest.profile_checked_at.is_none() => true,
         ("capture-request-v3", Some(bindings))
@@ -549,6 +573,17 @@ fn manifest_files(
             manifest
                 .profile_checked_at
                 .is_some_and(|v| chrono::DateTime::from_timestamp_millis(v).is_some())
+        }
+        ("capture-request-v5", None)
+            if ticket.kind == EntityKind::Work
+                && ticket.provider == "fanbox"
+                && manifest.profile_checked_at.is_none() =>
+        {
+            manifest.asset_repair.as_ref().is_some_and(|observation| {
+                let mut canonical = observation.clone();
+                canonical.normalize();
+                &canonical == observation
+            })
         }
         _ => false,
     };

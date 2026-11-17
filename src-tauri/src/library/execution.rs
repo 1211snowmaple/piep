@@ -39,7 +39,7 @@ pub(crate) struct ExecutionMetadata {
     pub saved_at: Option<String>,
 }
 // 表示用の解釈はここに固定し、取得 API やデスクトップのモデルへ依存させない。
-fn metadata_post(value: &serde_json::Value) -> &serde_json::Value {
+pub(super) fn metadata_post(value: &serde_json::Value) -> &serde_json::Value {
     let mut current = value;
     for _ in 0..=8 {
         if current.get("id").is_some()

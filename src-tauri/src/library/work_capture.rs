@@ -240,6 +240,20 @@ impl Library {
     /// 取得を始めた記録を作ってから、応答と手元の画像・添付を保存する。中身が今の版と同じなら
     /// 版を増やさない（`created_revision` が偽）。
     pub fn save_work(&self, save: WorkSave<'_>) -> Result<CaptureResult> {
+        self.save_work_inner(save, None)
+    }
+    pub(crate) fn save_work_with_asset_repair(
+        &self,
+        save: WorkSave<'_>,
+        observation: super::asset_repairs::AssetRepairObservation,
+    ) -> Result<CaptureResult> {
+        self.save_work_inner(save, Some(observation))
+    }
+    fn save_work_inner(
+        &self,
+        save: WorkSave<'_>,
+        observation: Option<super::asset_repairs::AssetRepairObservation>,
+    ) -> Result<CaptureResult> {
         let WorkSave {
             request,
             provider,
@@ -252,23 +266,26 @@ impl Library {
         let raw = serde_json::to_vec_pretty(data)?;
         let fields = work_fields(provider, data);
         let (media, attachments, _) = staged_assets(provider, data, assets)?;
-        let result = self.complete_acquisition(
-            request,
-            Capture {
-                request_id: request,
-                acquired_at: None,
-                provider: provider.into(),
-                external_key: key.into(),
-                kind: EntityKind::Work,
-                route: route.into(),
-                raw: CaptureSource::Bytes(raw),
-                metadata: fields.metadata,
-                field_states: fields.field_states,
-                body: fields.body,
-                media,
-                attachments,
-            },
-        );
+        let capture = Capture {
+            request_id: request,
+            acquired_at: None,
+            provider: provider.into(),
+            external_key: key.into(),
+            kind: EntityKind::Work,
+            route: route.into(),
+            raw: CaptureSource::Bytes(raw),
+            metadata: fields.metadata,
+            field_states: fields.field_states,
+            body: fields.body,
+            media,
+            attachments,
+        };
+        let result = match observation {
+            Some(observation) => {
+                self.complete_acquisition_with_asset_repair(request, capture, observation)
+            }
+            None => self.complete_acquisition(request, capture),
+        };
         if result.is_err() {
             let _ = self.cancel_acquisition(request);
         }

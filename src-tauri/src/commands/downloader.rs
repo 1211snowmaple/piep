@@ -1505,35 +1505,9 @@ fn fanbox_has_material_content(data: &serde_json::Value) -> bool {
 ///
 /// 1回では足りない（通信の瞬断で永久に諦めることになる）。無制限も駄目で、
 /// 失効したURLを持つ投稿が更新確認のたびに版を増やし続ける。数回で止める。
-pub(crate) const FANBOX_ASSET_REPAIR_ATTEMPTS: u32 = 3;
-
-/// 添付の取り直しについて、前回どこまで試したか。
-///
-/// 覚え書きは `"<指紋>|<試した回数>"`。回数の無い古い記録は0回として読む。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AssetRepairMemo {
-    pub fingerprint: String,
-    pub attempts: u32,
-}
-
-impl AssetRepairMemo {
-    pub fn parse(raw: &str) -> Self {
-        match raw.rsplit_once('|') {
-            Some((fingerprint, attempts)) => Self {
-                fingerprint: fingerprint.to_string(),
-                attempts: attempts.parse().unwrap_or(0),
-            },
-            None => Self {
-                fingerprint: raw.to_string(),
-                attempts: 0,
-            },
-        }
-    }
-
-    pub fn encode(&self) -> String {
-        format!("{}|{}", self.fingerprint, self.attempts)
-    }
-}
+pub(crate) const FANBOX_ASSET_REPAIR_ATTEMPTS: u32 =
+    crate::library::asset_repairs::MAX_REPAIR_ATTEMPTS;
+use crate::library::asset_repairs::LegacyAssetRepairMemo as AssetRepairMemo;
 
 /// この投稿の添付を、いま取り直すべきか。
 ///
@@ -1595,24 +1569,17 @@ pub(crate) fn fanbox_asset_state_fingerprint(
     data: &serde_json::Value,
     assets: &[crate::database::models::AssetEntry],
 ) -> String {
-    use sha2::{Digest, Sha256};
     let mut targets = Vec::new();
     crate::downloader::asset_downloader::extract_download_targets(data, true, &mut targets);
-    let mut expected = targets
+    let expected = targets
         .iter()
         .map(|target| target.url.clone())
         .collect::<Vec<_>>();
-    expected.sort_unstable();
-    expected.dedup();
-
-    // 持ち物は「どの添付か」と「本当に読めるか」の両方で数える。行はあるのに
-    // 中身が0バイトのファイルは、持っていないのと同じである。
-    let mut held = assets
+    let held = assets
         .iter()
         .map(|asset| {
             let usable = std::fs::metadata(&asset.local_path)
-                .map(|metadata| metadata.is_file() && metadata.len() > 0)
-                .unwrap_or(false);
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
             format!(
                 "{}|{}|{}",
                 asset.original_url.as_deref().unwrap_or(""),
@@ -1621,26 +1588,7 @@ pub(crate) fn fanbox_asset_state_fingerprint(
             )
         })
         .collect::<Vec<_>>();
-    held.sort_unstable();
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"fanbox-assets/v1\n");
-    for url in &expected {
-        hasher.update(url.as_bytes());
-        hasher.update(b"\n");
-    }
-    hasher.update(b"--\n");
-    for entry in &held {
-        hasher.update(entry.as_bytes());
-        hasher.update(b"\n");
-    }
-    // 16進にするのは棚の他の指紋と同じ書き方で。`{:x}` は sha2 の出力型には
-    // 効かない（`Array` は `LowerHex` を持たない）。
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    crate::library::asset_repairs::legacy_fingerprint(&expected, &held)
 }
 
 pub(crate) fn json_string_at<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
@@ -2543,7 +2491,6 @@ async fn save_to_legacy(
     let dummy_json_path = item_dir.join("data.json");
 
     crate::downloader::asset_downloader::download_and_link_assets(
-        &app,
         &mut modified_data,
         &dummy_json_path,
         is_fanbox,

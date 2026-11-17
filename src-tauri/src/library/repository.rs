@@ -1420,6 +1420,15 @@ impl Library {
             if let Some(checked_at) = context.profile_checked_at {
                 tx.execute("INSERT INTO source_entity_state(entity_id,last_checked_at,last_fetched_at) VALUES(?1,?2,?2) ON CONFLICT(entity_id) DO UPDATE SET last_checked_at=max(coalesce(last_checked_at,excluded.last_checked_at),excluded.last_checked_at),last_fetched_at=max(coalesce(last_fetched_at,excluded.last_fetched_at),excluded.last_fetched_at)",params![result.entity_id.as_bytes().as_slice(),checked_at])?;
             }
+            if let Some(observation) = &context.asset_repair {
+                super::asset_repairs::record(
+                    tx,
+                    result,
+                    request,
+                    context.ticket.base_snapshot,
+                    observation,
+                )?;
+            }
         }
         tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'capture',?3,?4)",params![request.as_bytes().as_slice(),result.entity_id.as_bytes().as_slice(),serde_json::to_string(result)?,now])?;
         Ok(())
@@ -1619,6 +1628,7 @@ impl Library {
         self.verify_work_list(&conn)?;
         self.verify_reading_positions(&conn)?;
         self.verify_acquisitions(&conn)?;
+        self.verify_asset_repairs(&conn)?;
         super::source_state::verify_source_state(&conn)?;
         super::searches::verify_searches(&conn)?;
         self.verify_reader_bindings(&conn)?;

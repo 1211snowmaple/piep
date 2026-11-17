@@ -18,6 +18,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[path = "downloader_shelf_assets.rs"]
+mod repairs;
+
 /// 切り替えた棚へ保存した結果。
 #[derive(Clone, Debug)]
 pub struct ShelfSaved {
@@ -82,6 +85,16 @@ pub(in crate::commands) fn unchanged_on_shelf(
     data: &Value,
     source: &str,
 ) -> Result<bool, String> {
+    skip_save_on_shelf(library, work, data, source, false)
+}
+
+fn skip_save_on_shelf(
+    library: &Library,
+    work: LibraryId,
+    data: &Value,
+    source: &str,
+    respect_repair_limit: bool,
+) -> Result<bool, String> {
     let fail = |e: crate::library::Error| e.to_string();
     if library
         .library_item_generation(work)
@@ -99,7 +112,8 @@ pub(in crate::commands) fn unchanged_on_shelf(
     };
     let (old_hash, _, old_updated) = compute_content_details(&previous, source);
     let (new_hash, _, new_updated) = compute_content_details(data, source);
-    if old_hash != new_hash
+    if (source == "fanbox" && !repairs::same_source(&previous, data)?)
+        || old_hash != new_hash
         || (source == "fanbox"
             && !crate::source_time::same_instant(old_updated.as_deref(), new_updated.as_deref()))
     {
@@ -143,6 +157,7 @@ pub(in crate::commands) fn unchanged_on_shelf(
     } else {
         HashMap::new()
     };
+    let mut complete = true;
     for target in &targets {
         let role = target_role(target.sub_folder);
         let mut names = vec![target.filename.as_str()];
@@ -155,10 +170,32 @@ pub(in crate::commands) fn unchanged_on_shelf(
             held_here |= slot_of(&reference).is_some_and(|slot| held.contains(slot));
         }
         if !held_here {
-            return Ok(false);
+            complete = false;
         }
     }
-    Ok(true)
+    if complete {
+        return Ok(true);
+    }
+    if source == "fanbox" && respect_repair_limit {
+        let urls = targets.iter().map(|t| t.url.clone()).collect::<Vec<_>>();
+        let exhausted = library
+            .asset_repair_plan(work, snapshot, &urls)
+            .map_err(fail)?
+            .attempts
+            >= crate::library::asset_repairs::MAX_REPAIR_ATTEMPTS;
+        if exhausted {
+            for info in &resources {
+                if let Some(file) = &info.file {
+                    library
+                        .objects
+                        .verify(&library.file(file.id).map_err(fail)?)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        return Ok(exhausted);
+    }
+    Ok(false)
 }
 
 /// 落とした画像・添付を、保存の入力へ。取得元の URL は応答の指定から引く。
@@ -197,7 +234,7 @@ fn staged_from(dir: &Path, data: &Value, source: &str) -> Result<Vec<StagedAsset
 /// 取り寄せた応答を切り替えた棚へ保存する。
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn save_to_shelf(
-    app: &tauri::AppHandle,
+    _app: &tauri::AppHandle,
     shelf: Arc<LibraryV2>,
     library: Arc<Library>,
     data: Value,
@@ -240,7 +277,7 @@ pub(super) async fn save_to_shelf(
     if let Some(work) = existing {
         let unchanged = {
             let (library, data, source) = (Arc::clone(&library), data.clone(), source.clone());
-            blocking(move || unchanged_on_shelf(&library, work, &data, &source)).await?
+            blocking(move || skip_save_on_shelf(&library, work, &data, &source, true)).await?
         };
         if unchanged {
             if super::shelf_profiles::save(Arc::clone(&library), &source, &data).await {
@@ -284,6 +321,12 @@ pub(super) async fn save_to_shelf(
     }
 
     // 画像を落とす前に取得を始めた記録を作る（同じ作品の後から始まった取得に負けない）。
+    let repair = if source == "fanbox" {
+        let (library, data) = (Arc::clone(&library), data.clone());
+        blocking(move || repairs::can_record_attempt(&library, existing, &data)).await?
+    } else {
+        false
+    };
     let request = LibraryId::now_v7();
     {
         let (library, source, key) = (Arc::clone(&library), source.clone(), source_id.clone());
@@ -300,20 +343,37 @@ pub(super) async fn save_to_shelf(
         tokio::fs::create_dir_all(&staging)
             .await
             .map_err(|e| e.to_string())?;
+        let aliases = if source == "fanbox" {
+            let (library, data, dir) = (
+                Arc::clone(&library),
+                data.clone(),
+                staging.join("data_assets"),
+            );
+            blocking(move || repairs::restore_held(&library, existing, &data, &dir)).await?
+        } else {
+            HashMap::new()
+        };
         let mut linked = data.clone();
-        crate::downloader::asset_downloader::download_and_link_assets(
-            app,
+        let download = crate::downloader::asset_downloader::download_and_link_assets(
             &mut linked,
             &staging.join("data.json"),
             source == "fanbox",
             cookie,
             user_agent,
         )
-        .await?;
-        let assets = {
+        .await;
+        let asset_failure = repairs::download_result(download, repair)?;
+        let mut assets = {
             let (dir, data, source) = (staging.join("data_assets"), data.clone(), source.clone());
             blocking(move || staged_from(&dir, &data, &source)).await?
         };
+        let observation = (source == "fanbox").then(|| repairs::observation(&data, &assets));
+        for asset in &mut assets {
+            if let Some(held) = aliases.get(&(asset.role.clone(), asset.name.clone())) {
+                asset.name.clone_from(&held.name);
+                asset.mime_type.clone_from(&held.mime_type);
+            }
+        }
         let present: Vec<(String, Option<String>)> = assets
             .iter()
             .filter(|a| a.role == "illustration")
@@ -331,19 +391,22 @@ pub(super) async fn save_to_shelf(
             source_id.clone(),
         );
         let result = blocking(move || {
-            library
-                .save_work(WorkSave {
-                    request,
-                    provider: &source,
-                    key: &key,
-                    route: "save",
-                    data: &data,
-                    assets,
-                })
-                .map_err(|e| e.to_string())
+            let save = WorkSave {
+                request,
+                provider: &source,
+                key: &key,
+                route: "save",
+                data: &data,
+                assets,
+            };
+            match observation {
+                Some(observation) => library.save_work_with_asset_repair(save, observation),
+                None => library.save_work(save),
+            }
+            .map_err(|e| e.to_string())
         })
         .await?;
-        Ok::<_, String>((result, missing))
+        Ok::<_, String>((result, missing, asset_failure))
     }
     .await;
     if let Err(error) = tokio::fs::remove_dir_all(&staging).await {
@@ -354,7 +417,7 @@ pub(super) async fn save_to_shelf(
             );
         }
     }
-    let (result, missing) = match saved {
+    let (result, missing, asset_failure) = match saved {
         Ok(saved) => saved,
         Err(error) => {
             // 画像を落とせなかったなど、棚へ渡す前に止まった取得を閉じる（渡した後は棚が閉じている）。
@@ -380,6 +443,9 @@ pub(super) async fn save_to_shelf(
             Ok(())
         })
         .await?;
+    }
+    if let Some(error) = asset_failure {
+        return Err(error);
     }
     let card = card(Arc::clone(&library), result.entity_id).await?;
     Ok(ShelfSaved {

@@ -5,6 +5,7 @@
 mod acquisitions;
 mod annotations;
 mod archive;
+pub(crate) mod asset_repairs;
 mod body;
 mod catalogue;
 mod discovery;

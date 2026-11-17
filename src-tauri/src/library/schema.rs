@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 23;
+pub(crate) const VERSION: i64 = 24;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -28,6 +28,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_021_history_visibility.sql"),
     include_str!("migration_022_execution_queue.sql"),
     include_str!("migration_023_job_import.sql"),
+    include_str!("migration_024_asset_repairs.sql"),
 ];
 
 fn migration_checksum(sql: &str) -> Fingerprint {
@@ -153,6 +154,56 @@ mod tests {
             .unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
         conn
+    }
+
+    #[test]
+    fn asset_repairs_upgrade_rolls_back_index_and_version_on_failure() {
+        let id = LibraryId::now_v7();
+        let conn = version_one(id);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(22) {
+            conn.execute_batch(sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 23).unwrap();
+        conn.execute_batch("CREATE TABLE asset_repair_state(collision INTEGER)")
+            .unwrap();
+        assert!(open(&conn, id).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            23
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='acquisition_attempt_entity'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM schema_migrations", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            23
+        );
+        conn.execute_batch("DROP TABLE asset_repair_state").unwrap();
+        open(&conn, id).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM asset_repair_state", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
     }
 
     #[test]

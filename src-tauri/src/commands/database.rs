@@ -443,7 +443,6 @@ pub fn start_automatic_cover_repair(app: tauri::AppHandle) {
                 let parent = Path::new(&json_path).parent().ok_or("保存先がありません")?;
                 let mut cover_data = serde_json::json!({ "cover_url": url });
                 crate::downloader::asset_downloader::download_and_link_assets(
-                    &app,
                     &mut cover_data,
                     &parent.join("data.json"),
                     false,
