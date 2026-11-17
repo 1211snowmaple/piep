@@ -1054,6 +1054,14 @@ impl Library {
             .get("attachments")
             .is_some_and(|s| s == "known")
         {
+            // FANBOX の本文には添付の宣言も含まれる。同じ本文のまま増えた実体は補完。
+            // 既存ファイルの差し替え・削除や、本文と既知の項目の変更は通常どおり改稿にする。
+            let filling_declared_files = context.as_ref().is_some_and(|c| c.asset_repair.is_some())
+                && capture.kind == EntityKind::Work
+                && capture.provider == "fanbox"
+                && previous_body.zip(body).is_some_and(|(old, next)| {
+                    next.format == BodyFormat::FanboxBody && old == next.semantic.0
+                });
             let previously_complete = previous
                 .as_ref()
                 .map(|p| serde_json::from_str::<BTreeMap<String, String>>(&p.4))
@@ -1065,7 +1073,8 @@ impl Library {
                     .any(|slot| !attachment_slots.contains(slot.as_str()))
                     || attachment_slots
                         .iter()
-                        .any(|slot| !attachment_identity.contains_key(*slot)))
+                        .any(|slot| !attachment_identity.contains_key(*slot))
+                        && !filling_declared_files)
             {
                 changed = true;
             }

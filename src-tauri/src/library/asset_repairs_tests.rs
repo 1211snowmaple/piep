@@ -116,6 +116,11 @@ fn attempts_are_atomic_idempotent_state_bound_and_survive_backup() {
         3
     );
     let filled = save(&copy, &fixture.0.join("staged"), LibraryId::now_v7(), true).unwrap();
+    assert!(!filled.created_revision);
+    assert_ne!(filled.snapshot_id, first.snapshot_id);
+    let snapshots = copy.snapshots(filled.entity_id).unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert!(snapshots.iter().all(|s| s.revision == 1));
     assert_eq!(
         copy.asset_repair_plan(filled.entity_id, filled.snapshot_id, &urls)
             .unwrap()
@@ -123,7 +128,79 @@ fn attempts_are_atomic_idempotent_state_bound_and_survive_backup() {
         0
     );
     copy.verify().unwrap();
+    copy.backup(&fixture.0.join("filled-backup")).unwrap();
+    let restored = Library::open(&fixture.0.join("filled-backup")).unwrap();
+    assert_eq!(restored.snapshots(filled.entity_id).unwrap().len(), 2);
+    assert!(restored
+        .snapshots(filled.entity_id)
+        .unwrap()
+        .iter()
+        .all(|s| s.revision == 1));
+    restored.verify().unwrap();
 }
+#[test]
+fn replacing_or_removing_files_and_changing_declared_content_still_creates_author_revisions() {
+    let fixture = Fixture::new();
+    let library = Library::create(&fixture.0.join("shelf")).unwrap();
+    let first = save(
+        &library,
+        &fixture.0.join("staged"),
+        LibraryId::now_v7(),
+        true,
+    )
+    .unwrap();
+    let changed_assets = assets(&fixture.0.join("staged"), true);
+    fs::write(&changed_assets[1].path, b"replaced at the same URL").unwrap();
+    let replacement = library
+        .save_work_with_asset_repair(
+            WorkSave {
+                request: LibraryId::now_v7(),
+                provider: "fanbox",
+                key: "1",
+                route: "save",
+                data: &data(),
+                assets: changed_assets,
+            },
+            observation(true),
+        )
+        .unwrap();
+    assert!(replacement.created_revision);
+    let removed = save(
+        &library,
+        &fixture.0.join("staged"),
+        LibraryId::now_v7(),
+        false,
+    )
+    .unwrap();
+    assert!(removed.created_revision);
+    let mut changed = data();
+    changed["body"]["files"][1]["name"] = json!("作者が変えた名前");
+    let observation = AssetRepairObservation {
+        expected_urls: fanbox_expected_urls(&changed),
+        complete: true,
+    };
+    let revised = library
+        .save_work_with_asset_repair(
+            WorkSave {
+                request: LibraryId::now_v7(),
+                provider: "fanbox",
+                key: "1",
+                route: "save",
+                data: &changed,
+                assets: assets(&fixture.0.join("staged"), true),
+            },
+            observation,
+        )
+        .unwrap();
+    assert!(revised.created_revision);
+    let snapshots = library.snapshots(first.entity_id).unwrap();
+    assert_eq!(
+        snapshots.iter().map(|s| s.revision).collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    library.verify().unwrap();
+}
+
 #[test]
 fn a_new_source_revision_starts_the_count_again_even_with_the_same_assets() {
     let fixture = Fixture::new();
