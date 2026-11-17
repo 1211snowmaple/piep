@@ -389,44 +389,8 @@ impl LegacyImporter {
                 "プロフィール {old} の取得元が履歴行と違います"
             )));
         }
-        let mut metadata = BTreeMap::new();
-        let mut states = BTreeMap::from([
-            ("media".into(), "known".into()),
-            ("attachments".into(), "known".into()),
-        ]);
-        for (field, name) in [
-            ("displayName", "display_name"),
-            ("title", "title"),
-            ("description", "description"),
-            ("links", "links"),
-            ("profileItems", "profile_items"),
-            ("isConcluded", "is_concluded"),
-            ("publishedContentCount", "published_content_count"),
-            ("sampleNovelCount", "sample_novel_count"),
-        ] {
-            match data.get(field) {
-                Some(value) if !value.is_null() => {
-                    let valid = match name {
-                        "display_name" | "title" | "description" => value.is_string(),
-                        "links" | "profile_items" => value.is_array(),
-                        "is_concluded" => value.is_boolean(),
-                        "published_content_count" | "sample_novel_count" => {
-                            value.as_u64().is_some()
-                        }
-                        _ => false,
-                    };
-                    if !valid {
-                        return Err(Error::Integrity(format!(
-                            "プロフィール {old} の {field} の型が不正です"
-                        )));
-                    }
-                    metadata.insert(name.into(), value.clone());
-                }
-                _ => {
-                    states.insert(name.into(), "unknown".into());
-                }
-            }
-        }
+        let super::super::work_profiles::ProfileFields { metadata, states } =
+            super::super::work_profiles::profile_fields(&data)?;
         let dir = path
             .parent()
             .ok_or_else(|| Error::UnsafePath(path.clone()))?

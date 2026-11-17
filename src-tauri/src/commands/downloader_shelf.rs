@@ -2,7 +2,7 @@
 //!
 //! 版を増やすかどうかは棚が決める（応答から作った項目・本文・画像と添付を今の版と比べる）。
 //! ここで決めるのは、画像と添付を落とし直さなくてよいか（応答の中身が今の版の原本と同じで、
-//! 取得元の画像・添付が今の版に全部ある）だけ。落とし直さなければ棚へは何も書かない。
+//! 取得元の画像・添付が今の版に全部ある）だけ。同じ作品でも、未作成のプロフィールの控えは補う。
 
 use super::{
     collect_assets_recursive, compute_content_details, fanbox_missing_material_error,
@@ -34,7 +34,7 @@ pub struct ShelfSaved {
     pub missing_references: Vec<String>,
 }
 
-async fn blocking<T: Send + 'static>(
+pub(super) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(work)
@@ -243,6 +243,9 @@ pub(super) async fn save_to_shelf(
             blocking(move || unchanged_on_shelf(&library, work, &data, &source)).await?
         };
         if unchanged {
+            if super::shelf_profiles::save(Arc::clone(&library), &source, &data).await {
+                shelf.forget_derived();
+            }
             let card = card(Arc::clone(&library), work).await?;
             let mut targets = Vec::new();
             crate::downloader::asset_downloader::extract_download_targets(
@@ -366,6 +369,7 @@ pub(super) async fn save_to_shelf(
             return Err(error);
         }
     };
+    super::shelf_profiles::save(Arc::clone(&library), &source, &data).await;
     shelf.forget_derived();
     {
         let library = Arc::clone(&library);

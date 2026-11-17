@@ -22,6 +22,8 @@ use tauri::Manager;
 #[path = "downloader_shelf.rs"]
 pub(super) mod shelf;
 pub use shelf::ShelfSaved;
+#[path = "downloader_shelf_profiles.rs"]
+mod shelf_profiles;
 
 type WorkSaveMutex = tokio::sync::Mutex<()>;
 static WORK_SAVE_LOCKS: OnceLock<Mutex<HashMap<String, Weak<WorkSaveMutex>>>> = OnceLock::new();

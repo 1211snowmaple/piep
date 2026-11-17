@@ -35,6 +35,7 @@ mod watching;
 pub use discovery::{Discovery, DiscoveryInput};
 mod work_capture;
 mod work_list;
+pub(crate) mod work_profiles;
 
 pub use piep_library_protocol as protocol;
 
