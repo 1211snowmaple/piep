@@ -81,7 +81,7 @@ export const SHELF_NOT_YET = "新しい棚ではまだ使えません";
 
 /** 棚を正本に切り替えたか。切り替えた棚だけ、画面から書き込める。 */
 export function shelfWritable(status: LibraryV2Status | undefined): boolean {
-  return status?.state === "ready" && status.switched;
+  return status?.state === "ready" && status.switched === true;
 }
 
 /** 新しい棚へ書き込めるか（好み・棚の状態・切り替え）。 */

@@ -17,6 +17,7 @@ import {
   Select,
   SimpleGrid,
   Stack,
+  Switch,
   Text,
   ThemeIcon,
   Title,
@@ -128,6 +129,17 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   const editLabel = writable ? "編集" : `編集（${READ_ONLY}）`;
   const checkLabel = writable ? "更新を確認" : `更新を確認（${READ_ONLY}）`;
   const [checking, setChecking] = useState(false);
+  const [watchingChange, setWatchingChange] = useState<boolean | null>(null);
+  const changeWatching = async (watching: boolean) => {
+    if (!writable || watchingChange !== null) return;
+    setWatchingChange(watching);
+    try {
+      await libraryV2SetUserState(workId, { watching });
+      await invalidateShelf(queryClient);
+    } catch (error) {
+      notifications.show({ color: "red", title: "更新監視を変更できません", message: errorMessage(error) });
+    } finally { setWatchingChange(null); }
+  };
   const checkWork = async () => {
     if (!writable || checking || !work) return;
     setChecking(true);
@@ -362,11 +374,12 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
             </Grid.Col>
             <Grid.Col span={{ base: 12, md: 4 }}>
               <Stack gap="lg">
+                <Card p="lg"><Group justify="space-between"><Box><Text fw={700}>更新監視</Text><Text size="xs" c="dimmed" mt={3}>保存元の変更をチェック</Text></Box><Switch checked={watchingChange ?? work.watching} disabled={!writable || watchingChange !== null} onChange={(event) => { void changeWatching(event.currentTarget.checked); }} aria-label={writable ? "更新監視" : `更新監視（${READ_ONLY}）`} /></Group></Card>
                 {writable && edited ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は編集版です</Text></Box><Badge color="gray" variant="light">反映中</Badge></Group><Text size="xs" c="dimmed" mb="sm">取り込んだ本文はそのまま残っています。戻しても、編集した版は履歴から選び直せます。</Text>{editHistory?.draft && <Text size="xs" c="yellow.8" mb="sm">このほかに、反映していない下書きがあります（{revisionDate(editHistory.draft)}保存）。</Text>}<ActionRow><Button variant="default" size="xs" leftSection={<Icons.undo size={IconSize.menu} />} loading={changing === "revert"} onClick={() => modals.openConfirmModal({ title: "取り込んだ本文に戻しますか？", children: <Text size="sm">リーダーとEPUBは取り込んだままの本文を使うようになります。編集した版は履歴に残ります。</Text>, labels: { confirm: "元に戻す", cancel: "キャンセル" }, onConfirm: () => { void revertEdit(); } })}>取り込んだ本文に戻す</Button></ActionRow></Card>
                   : writable && editHistory?.draft ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は取り込んだままです</Text></Box><Badge color="yellow" variant="light">下書きのみ</Badge></Group><Text size="xs" c="dimmed" mb="sm">{revisionDate(editHistory.draft)}に保存した下書きは、編集画面で「反映」を押すまで読書画面とEPUBに使われません。</Text><ActionRow><Button variant="default" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${workId}`)}>編集画面で開く</Button></ActionRow></Card>
                   : null}
                 <Note title="新しい棚（試験中）">{writable
-                  ? `正本に切り替えた棚です。お気に入りと編集はここで変えられます。${archived.length ? "以前に反映した編集版は、履歴タブからもう一度反映できます。" : ""}`
+                  ? `正本に切り替えた棚です。お気に入り・更新監視・編集はここで変えられます。${archived.length ? "以前に反映した編集版は、履歴タブからもう一度反映できます。" : ""}`
                   : "旧棚から移行した時点の写しを、読むだけで開いています。お気に入り・更新監視・編集・削除・コレクションは、旧棚の作品の画面で変えてください。"}</Note>
               </Stack>
             </Grid.Col>

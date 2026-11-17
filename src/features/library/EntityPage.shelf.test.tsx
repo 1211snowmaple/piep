@@ -24,6 +24,8 @@ const api = vi.hoisted(() => ({
   libraryV2Decorations: vi.fn(),
 }));
 const refresh = vi.hoisted(() => vi.fn());
+const watching = vi.hoisted(() => ({ get: vi.fn(), upsert: vi.fn(), check: vi.fn() }));
+vi.mock("@/features/updates/startSingleCheck", () => ({ runSingleCheck: watching.check }));
 vi.mock("@/store", () => ({ store: { get: vi.fn().mockResolvedValue("test-connection") } }));
 vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
@@ -36,7 +38,6 @@ const legacy = vi.hoisted(() => ({
   searchDownloadsV2: vi.fn(),
   listEntityVersions: vi.fn(),
   getLatestEntityProfileJson: vi.fn(),
-  getUpdateTarget: vi.fn(),
   listEntitySeriesPage: vi.fn(),
   listEntityTags: vi.fn(),
   listCollectionsForPerson: vi.fn(),
@@ -50,7 +51,8 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
   searchDownloadsV2: legacy.searchDownloadsV2,
   listEntityVersions: legacy.listEntityVersions,
   getLatestEntityProfileJson: legacy.getLatestEntityProfileJson,
-  getUpdateTarget: legacy.getUpdateTarget,
+  getUpdateTarget: watching.get,
+  upsertUpdateTarget: watching.upsert,
   refreshEntityProfile: refresh,
 }));
 vi.mock("@/services/shelfApi", async (importOriginal) => ({
@@ -145,9 +147,8 @@ const card: ShelfCard = {
   legacyId: null,
 };
 
-function renderEntity(kind: "person" | "series", hash: string) {
+function renderEntity(kind: "person" | "series", hash: string, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   window.location.hash = hash;
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <MantineProvider>
       <QueryClientProvider client={client}>
@@ -166,6 +167,9 @@ describe("author and series pages on the new shelf", () => {
     window.localStorage.clear();
     window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
     vi.clearAllMocks();
+    watching.get.mockReset().mockResolvedValue(null);
+    watching.upsert.mockReset().mockResolvedValue(undefined);
+    watching.check.mockReset().mockResolvedValue(undefined);
     api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [] });
     api.libraryV2Entity.mockResolvedValue(head());
     api.libraryV2EntityTags.mockResolvedValue([{ name: "雨", count: 2 }]);
@@ -201,11 +205,56 @@ describe("author and series pages on the new shelf", () => {
     expect(screen.getByRole("button", { name: "アーカイブ（新しい棚では変えられません）" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "新作と改稿の監視（新しい棚では変えられません）" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "いま新作・改稿を確認（新しい棚では変えられません）" })).toBeDisabled();
+    expect(watching.get).not.toHaveBeenCalled();
+    expect(watching.upsert).not.toHaveBeenCalled();
+    expect(watching.check).not.toHaveBeenCalled();
     // 開く操作は取得元へ行くだけなので残す。
     expect(screen.getByRole("button", { name: "ブラウザで開く" })).toBeEnabled();
     // コレクションに入っていなければ、旧棚と同じくタブを出さない。
     await waitFor(() => expect(api.libraryV2EntityCollections).toHaveBeenCalledWith("person", PERSON));
     expect(screen.queryByRole("tab", { name: /コレクション/ })).toBeNull();
+  });
+
+  it.each(["person", "series"] as const)("changes watching and starts a one-off %s check on the switched shelf", async (kind) => {
+    const sourceKey = kind === "person" ? "77" : "55";
+    const name = kind === "person" ? "作者一" : "シリーズ";
+    const targetType = kind === "person" ? "author" : "series";
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    api.libraryV2Entity.mockResolvedValue(head({ id: kind === "person" ? PERSON : SERIES, kind, name, external_key: sourceKey }));
+    watching.get.mockResolvedValue({ id: PERSON, enabled: true, watchGeneration: 1 });
+    watching.upsert.mockImplementation(async () => { watching.get.mockResolvedValue({ id: PERSON, enabled: false, watchGeneration: 2 }); });
+    renderEntity(kind, kind === "person" ? "#/people/pixiv/77" : "#/series/pixiv/55");
+    const toggle = await screen.findByRole("switch", { name: "新作と改稿の監視" });
+    await waitFor(() => expect(toggle).toBeChecked());
+    expect(watching.get).toHaveBeenCalledWith(targetType, "pixiv", sourceKey);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(watching.upsert).toHaveBeenCalledWith({ targetType, source: "pixiv", sourceKey, displayName: name, enabled: false, metadataJson: null }));
+    await waitFor(() => { expect(toggle).toBeEnabled(); expect(toggle).not.toBeChecked(); });
+    fireEvent.click(screen.getByRole("button", { name: kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認" }));
+    await waitFor(() => expect(watching.check).toHaveBeenCalledWith({ kind: targetType, source: "pixiv", sourceKey, label: name }, expect.any(Function)));
+    for (const call of Object.values(legacy)) expect(call).not.toHaveBeenCalled();
+  });
+
+  it("reads the switched shelf's watch state even if the old shelf's state is cached", async () => {
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    watching.get.mockResolvedValue({ id: PERSON, enabled: true, watchGeneration: 1 });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    client.setQueryData(["update-targets", "person", "pixiv", "77", "legacy"], { id: 7, enabled: false });
+    renderEntity("person", "#/people/pixiv/77", client);
+    await waitFor(() => expect(screen.getByRole("switch", { name: "新作と改稿の監視" })).toBeChecked());
+    expect(watching.get).toHaveBeenCalledWith("author", "pixiv", "77");
+  });
+
+  it("keeps the saved watch state when the switched shelf refuses a change", async () => {
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    watching.get.mockResolvedValue({ id: PERSON, enabled: true, watchGeneration: 1 });
+    watching.upsert.mockRejectedValue(new Error("競合"));
+    renderEntity("person", "#/people/pixiv/77");
+    const toggle = await screen.findByRole("switch", { name: "新作と改稿の監視" });
+    await waitFor(() => expect(toggle).toBeChecked());
+    fireEvent.click(toggle);
+    await waitFor(() => expect(watching.upsert).toHaveBeenCalled());
+    await waitFor(() => { expect(toggle).toBeEnabled(); expect(toggle).toBeChecked(); });
   });
 
   it("refreshes the switched shelf and reloads its head and saved response", async () => {
@@ -303,7 +352,7 @@ describe("author and series pages on the new shelf", () => {
     legacy.listEntitySeriesPage.mockResolvedValue({ items: [], nextCursor: null, total: 0 });
     legacy.listEntityTags.mockResolvedValue([]);
     legacy.listCollectionsForPerson.mockResolvedValue([]);
-    legacy.getUpdateTarget.mockResolvedValue(null);
+    watching.get.mockResolvedValue(null);
     legacy.getLatestEntityProfileJson.mockResolvedValue({});
     renderEntity("person", "#/people/pixiv/77");
     expect(await screen.findByRole("heading", { name: "旧棚の作者" })).toBeInTheDocument();

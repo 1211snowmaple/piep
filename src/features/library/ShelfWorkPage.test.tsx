@@ -24,6 +24,7 @@ const api = vi.hoisted(() => ({
   libraryV2Status: vi.fn(),
   libraryV2EditHistory: vi.fn(),
   libraryV2EditPointer: vi.fn(),
+  libraryV2SetUserState: vi.fn(),
 }));
 vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
@@ -137,6 +138,44 @@ describe("ShelfWorkPage", () => {
     await waitFor(() => expect(button).toBeEnabled());
     fireEvent.click(button);
     await waitFor(() => expect(runSingleCheck).toHaveBeenCalledWith({ kind: "work", workId: WORK, label: work.title }, expect.any(Function)));
+  });
+
+  it("changes this work's watching flag on the switched shelf and reloads the saved state", async () => {
+    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    api.libraryV2SetUserState.mockImplementation(async (_id: string, { watching }: { watching: boolean }) => {
+      api.libraryV2Work.mockResolvedValue({ ...work, watching });
+      return { watching, favorite: false, generation: 1 };
+    });
+    renderPage(`#/works/${WORK}`);
+    const toggle = await screen.findByRole("switch", { name: "更新監視" });
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+    await waitFor(() => expect(api.libraryV2SetUserState).toHaveBeenCalledWith(WORK, { watching: true }));
+    await waitFor(() => { expect(toggle).toBeEnabled(); expect(toggle).toBeChecked(); });
+    expect(api.libraryV2Work.mock.calls.length).toBeGreaterThan(1);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(api.libraryV2SetUserState).toHaveBeenCalledWith(WORK, { watching: false }));
+    await waitFor(() => { expect(toggle).toBeEnabled(); expect(toggle).not.toBeChecked(); });
+  });
+
+  it("prevents watching changes on a read-only copy", async () => {
+    renderPage(`#/works/${WORK}`);
+    const readonly = await screen.findByRole("switch", { name: "更新監視（新しい棚では変えられません）" });
+    expect(readonly).toBeDisabled();
+    fireEvent.click(readonly);
+    expect(api.libraryV2SetUserState).not.toHaveBeenCalled();
+  });
+
+  it("restores the current watching flag if a write fails", async () => {
+    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    api.libraryV2SetUserState.mockRejectedValue(new Error("競合"));
+    renderPage(`#/works/${WORK}`);
+    const toggle = await screen.findByRole("switch", { name: "更新監視" });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(api.libraryV2SetUserState).toHaveBeenCalledWith(WORK, { watching: true }));
+    await waitFor(() => { expect(toggle).toBeEnabled(); expect(toggle).not.toBeChecked(); });
   });
 
   it("says which version an edit was made on and that a later one is not shown", async () => {

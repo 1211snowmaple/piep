@@ -139,6 +139,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const canRefreshProfile = !shelfMode || shelfWritable(shelfV2Status.data);
   const shelfDeciding = runtime && shelfV2Preferred && !shelfV2Status.data;
   const legacyMode = !shelfMode && !shelfDeciding;
+  const canManageWatching = legacyMode || (shelfMode && shelfWritable(shelfV2Status.data));
   const { pathname, search, navigationId } = useAppRouter();
   const [urlParams, setUrlParams] = useAppSearchParams();
   const tab = parseEntityTab(urlParams.get("tab"), kind);
@@ -592,9 +593,9 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     // Same namespace as the shelf and the update centre. A singular key looked
     // tidier but shares no prefix with ["update-targets"], so turning watching
     // on here left those screens showing the old state, and vice versa.
-    queryKey: ["update-targets", kind, source, key],
+    queryKey: ["update-targets", kind, source, key, shelfMode ? shelfId : "legacy"],
     queryFn: () => runtime ? getUpdateTarget<UpdateTarget>(kind === "person" ? "author" : "series", source, key) : Promise.resolve(null),
-    enabled: legacyMode,
+    enabled: legacyMode || (canManageWatching && Boolean(shelfId)),
   });
   const displayName = useMemo(() => entity.data ? (kind === "person" ? (entity.data as PersonEntry).displayName : (entity.data as SeriesEntry).title) : "", [entity.data, kind]);
   const refreshMutation = useMutation({
@@ -607,12 +608,21 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   });
   const targetMutation = useMutation({
     mutationFn: async (enabled: boolean) => {
+      if (!canManageWatching) throw new Error(READ_ONLY);
       if (!runtime) return;
       await upsertUpdateTarget({ targetType: kind === "person" ? "author" : "series", source, sourceKey: key, displayName, enabled, metadataJson: null });
     },
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["update-targets"] }); notifications.show({ color: "green", message: "更新監視を変更しました" }); },
+    onSuccess: () => { invalidateShelf(queryClient); notifications.show({ color: "green", message: "更新監視を変更しました" }); },
     onError: (error) => notifications.show({ color: "red", title: "更新監視を変更できません", message: errorMessage(error) }),
   });
+  const [checkingSource, setCheckingSource] = useState(false);
+  const checkSource = async () => {
+    if (!canManageWatching || checkingSource) return;
+    setCheckingSource(true);
+    try {
+      await runSingleCheck({ kind: kind === "person" ? "author" : "series", source, sourceKey: key, label: displayName }, () => navigate("/updates"));
+    } finally { setCheckingSource(false); }
+  };
   const workItems = useMemo(() => {
     const seen = new Set<number | string>();
     return works.data?.pages.flatMap((page) => page.items.filter((work) => {
@@ -1016,7 +1026,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
         </Grid.Col>
         <Grid.Col span={{ base: 12, lg: 3 }}>
           <Stack gap="lg">
-            <Card p="lg"><Stack gap="md"><Group justify="space-between"><Box><Text fw={700}>新作・改稿を監視</Text><Text size="xs" c="dimmed" mt={4}>{kind === "person" ? "新しい作品を検出" : "シリーズの続編を検出"}</Text></Box><Switch checked={targetMutation.isPending ? targetMutation.variables : target.data?.enabled ?? false} disabled={shelfMode || targetMutation.isPending || target.isLoading} onChange={(event) => targetMutation.mutate(event.currentTarget.checked)} aria-label={shelfMode ? `新作と改稿の監視（${READ_ONLY}）` : "新作と改稿の監視"} /></Group>{/* 監視に入れなくても、その場で一度だけ見に行ける。 */}<Button variant="light" disabled={shelfMode} aria-label={shelfMode ? `${kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}（${READ_ONLY}）` : undefined} leftSection={<Icons.updates size={IconSize.menu} />} onClick={() => runSingleCheck({ kind: kind === "person" ? "author" : "series", source, sourceKey: key, label: displayName }, () => navigate("/updates"))}>{kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}</Button></Stack></Card>
+            <Card p="lg"><Stack gap="md"><Group justify="space-between"><Box><Text fw={700}>新作・改稿を監視</Text><Text size="xs" c="dimmed" mt={4}>{kind === "person" ? "新しい作品を検出" : "シリーズの続編を検出"}</Text></Box><Switch checked={targetMutation.isPending ? targetMutation.variables : target.data?.enabled ?? false} disabled={!canManageWatching || targetMutation.isPending || target.isLoading} onChange={(event) => targetMutation.mutate(event.currentTarget.checked)} aria-label={!canManageWatching ? `新作と改稿の監視（${READ_ONLY}）` : "新作と改稿の監視"} /></Group>{/* 監視に入れなくても、その場で一度だけ見に行ける。 */}<Button variant="light" disabled={!canManageWatching} loading={checkingSource} aria-label={!canManageWatching ? `${kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}（${READ_ONLY}）` : undefined} leftSection={<Icons.updates size={IconSize.menu} />} onClick={() => { void checkSource(); }}>{kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}</Button></Stack></Card>
             <Card p="lg"><Text fw={700} mb="md">プロフィール情報</Text><Stack gap="sm">{profileData.account && <Meta label="アカウント" value={`@${profileData.account}`} />}{profileStats && <><Meta label="小説" value={typeof profileStats.totalNovels === "number" ? `${formatNumber(profileStats.totalNovels)}作品` : "未確認"} /><Meta label="小説シリーズ" value={typeof profileStats.totalNovelSeries === "number" ? `${formatNumber(profileStats.totalNovelSeries)}件` : "未確認"} /></>}{typeof profileData.sampleNovelCount === "number" && <Meta label="取得済み構成作品" value={`${formatNumber(profileData.sampleNovelCount)}件`} />}<Meta label="現在のバージョン" value={entry.currentVersion > 0 ? `v${entry.currentVersion}` : "なし"} /><Meta label="最終取得" value={formatDate(entry.lastFetchedAt, true)} /><Meta label="最終確認" value={formatDate(entry.lastCheckedAt, true)} /></Stack></Card>
             {shelfMode && !shelfWritable(shelfV2Status.data) && <Note title="新しい棚（試験中）">旧棚から移行した時点の写しを、読むだけで開いています。更新監視・情報の更新・書き出しは、設定で新しい棚を切ると使えます。コレクションの中身は旧棚で開きます。</Note>}
             {!runtime && <Note>プレビューではデモプロフィールを表示しています。</Note>}
