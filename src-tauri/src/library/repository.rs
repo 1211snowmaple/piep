@@ -970,6 +970,52 @@ impl Library {
             ));
         }
         let previous_body = previous.as_ref().and_then(|p| p.3.semantic.as_deref());
+        let filling_pixiv_images = context
+            .as_ref()
+            .is_some_and(|c| c.pixiv_interpretation == Some(1))
+            && previous_body.zip(body).is_some_and(|(old, next)| {
+                next.format == BodyFormat::PixivText && old == next.semantic.0
+            });
+        // 同じ本文が宣言していた画像の追加だけを補完にする。保存名だけの余分な画像は含めない。
+        let mut filled_image_slots = context
+            .as_ref()
+            .filter(|_| filling_pixiv_images)
+            .and_then(|c| c.reader_bindings.as_ref())
+            .into_iter()
+            .flatten()
+            .filter_map(|b| match &b.resource {
+                Some(super::ResourceReference::Media { slot }) => Some(slot.as_str()),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if filling_pixiv_images {
+            let references = capture
+                .body
+                .as_ref()
+                .map(SourceBody::asset_references)
+                .transpose()?
+                .unwrap_or_default();
+            for next in &media {
+                if next
+                    .source_url
+                    .as_deref()
+                    .is_some_and(super::is_pixiv_placeholder_image)
+                    && (next.role == "cover"
+                        || references.iter().any(|reference| {
+                            reference.is_image()
+                                && super::source_bindings::source_matches(
+                                    capture.body.as_ref().unwrap(),
+                                    reference,
+                                    next.original_name,
+                                    next.source_url.as_deref(),
+                                )
+                        }))
+                {
+                    // 案内画像を新しく保持しても、作者が画像を追加したことにはならない。
+                    filled_image_slots.insert(next.slot);
+                }
+            }
+        }
         if let (Some(old), Some(next)) = (previous_body, body.as_ref()) {
             if old != next.semantic.0 {
                 changed = true;
@@ -1002,7 +1048,13 @@ impl Library {
             for next in &media {
                 if let Some(key) = next.source_key.as_ref() {
                     let old: Option<Option<String>> = tx.query_row("SELECT m.source_key FROM snapshot_media s JOIN source_media m ON m.id=s.media_id WHERE s.snapshot_id=?1 AND s.slot=?2",params![old_snapshot,next.slot],|r|r.get(0)).optional()?;
-                    if old.flatten().is_some_and(|old| old != *key) {
+                    if old.flatten().is_some_and(|old| {
+                        old != *key
+                            && !(filling_pixiv_images
+                                && old
+                                    .strip_prefix("url:v1:pixiv:")
+                                    .is_some_and(super::is_pixiv_placeholder_image))
+                    }) {
                         changed = true;
                     }
                 }
@@ -1020,7 +1072,9 @@ impl Library {
                 .is_some_and(|s| s.get("media").is_some_and(|v| v == "known"));
             if previously_complete
                 && (identities.keys().any(|slot| !slots.contains(slot.as_str()))
-                    || slots.iter().any(|slot| !identities.contains_key(*slot)))
+                    || slots.iter().any(|slot| {
+                        !identities.contains_key(*slot) && !filled_image_slots.contains(slot)
+                    }))
             {
                 changed = true;
             }

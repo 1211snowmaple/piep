@@ -407,3 +407,7 @@ mod tests;
 #[cfg(test)]
 #[path = "work_capture_reader_tests.rs"]
 mod reader_tests;
+
+#[cfg(test)]
+#[path = "work_capture_pixiv_tests.rs"]
+mod pixiv_tests;
