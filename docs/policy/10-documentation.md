@@ -210,7 +210,7 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 |---|---:|
 | コマンド | <!--stat:commands.total-->238<!--/stat--> |
 | `///` があるもの | <!--stat:commands.documented-->238<!--/stat--> |
-| 節の前書き（`//!`）があるモジュール | <!--stat:modules.documented-->29<!--/stat--> / <!--stat:modules.total-->33<!--/stat--> |
+| 節の前書き（`//!`）があるモジュール | <!--stat:modules.documented-->30<!--/stat--> / <!--stat:modules.total-->34<!--/stat--> |
 
 **全部埋まっている。** ラチェット検査（[品質](09-quality.md#境界のドリフト検査)）は
 この数字を守るので、`///` の無いコマンドを足すと CI が落ちる。数を戻すのではなく、

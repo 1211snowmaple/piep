@@ -368,7 +368,7 @@ pub(super) async fn save_to_shelf(
         tokio::fs::create_dir_all(&staging)
             .await
             .map_err(|e| e.to_string())?;
-        let aliases = if source == "fanbox" || reader_only {
+        let aliases = if matches!(source.as_str(), "fanbox" | "pixiv") || reader_only {
             let (library, data, dir) = (
                 Arc::clone(&library),
                 data.clone(),
@@ -404,6 +404,9 @@ pub(super) async fn save_to_shelf(
             if let Some(held) = aliases.get(&(asset.role.clone(), asset.name.clone())) {
                 asset.name.clone_from(&held.name);
                 asset.mime_type.clone_from(&held.mime_type);
+                if let Some(url) = &held.url_override {
+                    asset.url = Some(url.clone());
+                }
             }
         }
         if reader_only {

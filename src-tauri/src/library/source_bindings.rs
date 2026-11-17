@@ -25,7 +25,7 @@ fn sanitized(name: &str) -> String {
         .to_owned()
 }
 
-pub(super) fn source_matches(
+pub(crate) fn source_matches(
     body: &SourceBody,
     reference: &BodyAssetReference,
     name: &str,

@@ -150,7 +150,7 @@ fn intended_as_image(path: &Path) -> bool {
     )
 }
 
-fn validate_asset_file(
+pub(crate) fn validate_asset_file(
     path: &Path,
     intended_path: &Path,
     max_bytes: u64,

@@ -3,6 +3,9 @@ use super::*;
 use crate::downloader::asset_downloader::{extract_download_targets, fanbox_former_file_names};
 use crate::library::asset_repairs::AssetRepairObservation;
 
+#[path = "downloader_shelf_pixiv.rs"]
+mod pixiv;
+
 pub(super) enum SavePlan {
     Save,
     Unchanged,
@@ -126,6 +129,7 @@ pub(super) fn download_result(
 pub(super) struct RestoredAsset {
     pub name: String,
     pub mime_type: Option<String>,
+    pub url_override: Option<String>,
 }
 type Aliases = HashMap<(String, String), RestoredAsset>;
 
@@ -160,22 +164,39 @@ pub(super) fn restore_held(
         .resources;
     let mut restored = HashSet::new();
     let mut reused_slots = std::collections::BTreeSet::new();
+    let protected = if source == "pixiv" {
+        pixiv::protected_gate_assets(
+            library,
+            work,
+            snapshot,
+            &previous,
+            data,
+            &resources,
+            (&old_targets, &targets),
+        )?
+    } else {
+        HashMap::new()
+    };
     for target in targets {
         let role = target_role(target.sub_folder);
+        let gate = protected.get(&(role.to_owned(), target.filename.clone()));
         // 名前が同じでも URL が変わった資産は、以前の実体で埋めない。
-        if !old_targets.iter().any(|old| {
-            old.sub_folder == target.sub_folder
-                && old.filename == target.filename
-                && old.url == target.url
-        }) {
+        if gate.is_none()
+            && !old_targets.iter().any(|old| {
+                old.sub_folder == target.sub_folder
+                    && old.filename == target.filename
+                    && old.url == target.url
+            })
+        {
             continue;
         }
         let mut names = vec![target.filename.as_str()];
         if role == "file" {
             names.extend(former.get(&target.filename).map(String::as_str));
         }
-        let mut held = None;
-        for name in names {
+        let mut held =
+            gate.and_then(|(reference, _)| resources.iter().find(|r| &r.reference == reference));
+        for name in names.into_iter().filter(|_| gate.is_none()) {
             let reference = asset_reference(role, name).map_err(fail)?;
             if let Some(info) = resources
                 .iter()
@@ -219,6 +240,17 @@ pub(super) fn restore_held(
                 &destination,
             )
             .map_err(fail)?;
+        if gate.is_some() {
+            crate::downloader::asset_downloader::validate_asset_file(
+                &destination,
+                &destination,
+                crate::downloader::asset_downloader::MAX_ASSET_DOWNLOAD_BYTES,
+                true,
+            )
+            .map_err(|error| {
+                format!("保存済みの画像を確認できないため、今回の保存を止めました: {error}")
+            })?;
+        }
         if let Some(name) = &held.original_name {
             let preserve =
                 role == "file" || asset_reference(role, name).map_err(fail)? == held.reference;
@@ -228,6 +260,7 @@ pub(super) fn restore_held(
                     RestoredAsset {
                         name: name.clone(),
                         mime_type: held.mime_type.clone(),
+                        url_override: gate.map(|(_, url)| url.clone()),
                     },
                 );
             }
