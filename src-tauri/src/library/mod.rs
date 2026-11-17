@@ -17,6 +17,8 @@ mod job_history;
 mod legacy;
 mod maintenance;
 mod operations;
+mod profile_capture;
+pub use profile_capture::{ProfileSave, PROFILE_REFRESH_ROUTE};
 mod reader;
 mod reader_references;
 mod reading;

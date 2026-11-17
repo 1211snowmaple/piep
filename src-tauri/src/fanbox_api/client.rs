@@ -64,7 +64,9 @@ async fn read_response_text_limited(
         body.reserve(next_len - body.len());
         body.extend_from_slice(&chunk);
     }
-    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+    let body = String::from_utf8(body)
+        .map_err(|_| FanboxError::Other("FANBOX の応答が UTF-8 ではありません".into()))?;
+    Ok((status, body))
 }
 
 /// Fanbox API クライアント
@@ -125,6 +127,10 @@ impl FanboxAPI {
     }
 
     async fn api_get_once<T: DeserializeOwned>(&self, url: &str) -> Result<T, FanboxError> {
+        let body = self.api_get_body(url).await?;
+        serde_json::from_str(&body).map_err(|error| FanboxError::Serde { error })
+    }
+    async fn api_get_body(&self, url: &str) -> Result<String, FanboxError> {
         let url = allowed_api_url(url)?;
         let headers = self.headers()?;
         crate::downloader::pacing::FANBOX.wait().await;
@@ -173,13 +179,7 @@ impl FanboxAPI {
                     });
                 }
 
-                serde_json::from_str::<T>(&body).map_err(|e| {
-                    log::error!(
-                        "Fanbox deserialization error: {e}, response bytes: {}",
-                        body.len()
-                    );
-                    FanboxError::Serde { error: e }
-                })
+                Ok(body)
             }
         }
     }
@@ -219,9 +219,17 @@ impl FanboxAPI {
 
     /// 2. クリエイター情報取得
     pub async fn get_creator(&self, creator_id: &str) -> Result<FanboxCreator, FanboxError> {
-        let url = format!("https://api.fanbox.cc/creator.get?creatorId={}", creator_id);
-        let resp: FanboxResponse<FanboxCreator> = self.api_get(&url).await?;
+        let raw = self.get_creator_raw(creator_id).await?;
+        let resp: FanboxResponse<FanboxCreator> =
+            serde_json::from_str(&raw).map_err(|error| FanboxError::Serde { error })?;
         Ok(resp.body)
+    }
+
+    pub async fn get_creator_raw(&self, creator_id: &str) -> Result<String, FanboxError> {
+        let mut url =
+            reqwest::Url::parse("https://api.fanbox.cc/creator.get").expect("fixed API URL");
+        url.query_pairs_mut().append_pair("creatorId", creator_id);
+        self.api_get_body(url.as_str()).await
     }
 
     /// 投稿APIは追加フィールドや投稿種別ごとの差が大きいため、保存経路では
@@ -439,6 +447,22 @@ mod tests {
             .unwrap();
         server.await.unwrap();
         response
+    }
+
+    #[tokio::test]
+    async fn stored_json_keeps_outer_whitespace_and_rejects_invalid_utf8() {
+        let response = response_from_wire(
+            b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n \n{\"future\":9007199254740993}\n ",
+        )
+        .await;
+        assert_eq!(
+            read_response_text_limited(response, 100).await.unwrap().1,
+            " \n{\"future\":9007199254740993}\n "
+        );
+        let response =
+            response_from_wire(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"name\":\"\xff\"}")
+                .await;
+        assert!(read_response_text_limited(response, 100).await.is_err());
     }
 
     fn listed_post(id: &str) -> serde_json::Value {

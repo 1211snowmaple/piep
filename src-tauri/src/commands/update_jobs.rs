@@ -2260,8 +2260,10 @@ async fn run_update_job(
                     log::warn!("更新ジョブ {job_id} の保存済み作品を復元できません: {error}");
                     saved_download_ids.clone()
                 });
-            if !profile_download_ids.is_empty() {
-                refresh_profiles_for_saved_downloads(
+            if !profile_download_ids.is_empty()
+                || (state.library_v2.switched().is_some() && snapshot.saved_count > 0)
+            {
+                refresh_profiles_for_saved_works(
                     &app,
                     &state,
                     &job_id,
@@ -2774,57 +2776,96 @@ async fn run_update_job(
 /// 取得元は作品と同じ相手。`refresh_entity_profile` が自前で 3 秒の間隔を
 /// 持っているので、ここでは待たない。1 件ごとの失敗は記録だけに留める -
 /// 本文はもう手元にあり、横顔は次の機会にも埋められる。
-async fn refresh_profiles_for_saved_downloads(
+async fn refresh_profiles_for_saved_works(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
     job_id: &str,
     download_ids: &[i64],
     credentials: &UpdateCredentials,
 ) {
-    if download_ids.is_empty() {
-        return;
-    }
     // 同じ作者の作品を 10 件保存しても、取りに行くのは 1 回でいい。
     let mut targets: Vec<(&'static str, String, String)> = Vec::new();
     let mut seen: HashSet<(&'static str, String, String)> = HashSet::new();
-    for id in download_ids {
-        let Ok(entry) = state.db.get_download(*id) else {
-            continue;
-        };
-        // person_id が無い作品もある。その場合は作者IDが同じ役をする。
-        let person = entry
-            .person_id
-            .clone()
-            .filter(|key| !key.trim().is_empty())
-            .unwrap_or_else(|| entry.author_id.clone());
-        if !person.trim().is_empty() {
-            let key = ("person", entry.source.clone(), person);
-            let incomplete = state
-                .db
-                .get_person(&key.1, &key.2)
-                .map(|profile| {
-                    profile.current_version <= 0
-                        || profile.content_hash.is_none()
-                        || profile.last_fetched_at.is_none()
-                })
-                .unwrap_or(true);
-            if incomplete && seen.insert(key.clone()) {
-                targets.push(key);
+    if let Some(library) = state.library_v2.switched() {
+        let profile_state = state.clone();
+        let profile_job = job_id.to_owned();
+        let profiles = tauri::async_runtime::spawn_blocking(move || {
+            let works = profile_state
+                .jobs()
+                .list_update_job_item_states(&profile_job)?
+                .into_iter()
+                .filter(|i| i.status == "saved")
+                .filter_map(|i| i.work_id)
+                .collect::<Vec<_>>();
+            library
+                .missing_profiles_for_works(&works)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        match profiles {
+            Ok(profiles) => {
+                targets = profiles
+                    .into_iter()
+                    .map(|(kind, provider, key)| {
+                        (
+                            if kind == crate::library::EntityKind::Person {
+                                "person"
+                            } else {
+                                "series"
+                            },
+                            provider,
+                            key,
+                        )
+                    })
+                    .collect()
+            }
+            Err(error) => {
+                log::warn!("保存した作品のプロフィールを照合できません: {error}");
+                return;
             }
         }
-        if let Some(series) = entry.series_id.clone().filter(|key| !key.trim().is_empty()) {
-            let key = ("series", entry.source.clone(), series);
-            let incomplete = state
-                .db
-                .get_series(&key.1, &key.2)
-                .map(|profile| {
-                    profile.current_version <= 0
-                        || profile.content_hash.is_none()
-                        || profile.last_fetched_at.is_none()
-                })
-                .unwrap_or(true);
-            if incomplete && seen.insert(key.clone()) {
-                targets.push(key);
+    } else {
+        for id in download_ids {
+            let Ok(entry) = state.db.get_download(*id) else {
+                continue;
+            };
+            // person_id が無い作品もある。その場合は作者IDが同じ役をする。
+            let person = entry
+                .person_id
+                .clone()
+                .filter(|key| !key.trim().is_empty())
+                .unwrap_or_else(|| entry.author_id.clone());
+            if !person.trim().is_empty() {
+                let key = ("person", entry.source.clone(), person);
+                let incomplete = state
+                    .db
+                    .get_person(&key.1, &key.2)
+                    .map(|profile| {
+                        profile.current_version <= 0
+                            || profile.content_hash.is_none()
+                            || profile.last_fetched_at.is_none()
+                    })
+                    .unwrap_or(true);
+                if incomplete && seen.insert(key.clone()) {
+                    targets.push(key);
+                }
+            }
+            if let Some(series) = entry.series_id.clone().filter(|key| !key.trim().is_empty()) {
+                let key = ("series", entry.source.clone(), series);
+                let incomplete = state
+                    .db
+                    .get_series(&key.1, &key.2)
+                    .map(|profile| {
+                        profile.current_version <= 0
+                            || profile.content_hash.is_none()
+                            || profile.last_fetched_at.is_none()
+                    })
+                    .unwrap_or(true);
+                if incomplete && seen.insert(key.clone()) {
+                    targets.push(key);
+                }
             }
         }
     }
@@ -2859,7 +2900,7 @@ async fn refresh_profiles_for_saved_downloads(
             .jobs()
             .update_job_status_value(job_id)
             .unwrap_or_default();
-        if matches!(current_status.as_str(), "canceling" | "paused") {
+        if current_status != "running" {
             break;
         }
         let params = crate::commands::database::RefreshEntityProfileParams {

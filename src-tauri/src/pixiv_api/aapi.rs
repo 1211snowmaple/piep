@@ -192,6 +192,17 @@ impl AppPixivAPI {
         filter: Option<Filter>,
         with_auth: bool,
     ) -> Result<UserInfoDetailed, crate::pixiv_api::error::PixivError> {
+        let raw = self.user_detail_raw(user_id, filter, with_auth).await?;
+        crate::pixiv_api::models::parse_into(raw)
+    }
+
+    /// 未知の項目と数の字句も含む、プロフィールの原応答。
+    pub async fn user_detail_raw(
+        &self,
+        user_id: u64,
+        filter: Option<Filter>,
+        with_auth: bool,
+    ) -> Result<String, PixivError> {
         let url = format!("{}{}", self.hosts, "/v1/user/detail");
         let mut params: kv_pairs::KVPairs<'_> = kv_pairs::kv_pairs![];
         {
@@ -216,7 +227,7 @@ impl AppPixivAPI {
                 with_auth,
             )
             .await?;
-        crate::pixiv_api::models::parse_response_into::<UserInfoDetailed>(r).await
+        crate::pixiv_api::models::parse_response_raw(r).await
     }
     pub async fn user_illusts<'a0, 'a1>(
         &'a0 self,
@@ -1328,6 +1339,19 @@ impl AppPixivAPI {
         last_order: Option<&'a1 str>,
         with_auth: bool,
     ) -> Result<ParsedJson, crate::pixiv_api::error::PixivError> {
+        let raw = self
+            .novel_series_raw(series_id, filter, last_order, with_auth)
+            .await?;
+        crate::pixiv_api::models::parse_into(raw)
+    }
+
+    pub async fn novel_series_raw(
+        &self,
+        series_id: u64,
+        filter: Option<Filter>,
+        last_order: Option<&str>,
+        with_auth: bool,
+    ) -> Result<String, PixivError> {
         let url = format!("{}{}", self.hosts, "/v2/novel/series");
         let mut params: kv_pairs::KVPairs<'_> = kv_pairs::kv_pairs![];
         {
@@ -1355,7 +1379,7 @@ impl AppPixivAPI {
                 with_auth,
             )
             .await?;
-        crate::pixiv_api::models::parse_response_into::<ParsedJson>(r).await
+        crate::pixiv_api::models::parse_response_raw(r).await
     }
     pub async fn novel_detail<'a0>(
         &'a0 self,

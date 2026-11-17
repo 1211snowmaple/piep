@@ -516,6 +516,13 @@ impl WebPixivAPI {
 
     /// シリーズ1件を読む。
     pub async fn novel_series(&self, series_id: &str) -> Result<NovelSeriesWeb, PixivError> {
+        let raw = self.novel_series_raw(series_id).await?;
+        parse_novel_series(
+            &serde_json::from_str(&raw).map_err(|error| PixivError::Serde { error, body: raw })?,
+        )
+    }
+
+    pub async fn novel_series_raw(&self, series_id: &str) -> Result<String, PixivError> {
         let series_id = series_id.trim();
         if series_id.is_empty() || !series_id.chars().all(|c| c.is_ascii_digit()) {
             return Err(PixivError::NotFound {
@@ -525,8 +532,7 @@ impl WebPixivAPI {
         let response = self
             .send(self.get(format!("{}/ajax/novel/series/{series_id}", self.host)))
             .await?;
-        let payload: Value = parse_response_into(response).await?;
-        parse_novel_series(&payload)
+        crate::pixiv_api::models::parse_response_raw(response).await
     }
 
     /// 作品1件を読む。本文まで返る。

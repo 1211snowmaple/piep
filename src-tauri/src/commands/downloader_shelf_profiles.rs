@@ -3,7 +3,6 @@ use crate::library::work_profiles::{work_profile_seeds, WorkProfileSeed};
 use crate::library::{Library, LibraryId, StagedAsset};
 use serde_json::Value;
 use std::{path::Path, sync::Arc};
-static ICON_DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 async fn icon(seed: &WorkProfileSeed, staging: &Path) -> Result<Vec<StagedAsset>, String> {
     let Some(url) = seed
@@ -14,52 +13,9 @@ async fn icon(seed: &WorkProfileSeed, staging: &Path) -> Result<Vec<StagedAsset>
     else {
         return Ok(vec![]);
     };
-    let _permit = ICON_DOWNLOADS.acquire().await.map_err(|e| e.to_string())?;
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-    tokio::fs::create_dir_all(staging)
+    crate::commands::profile_images::download(&seed.provider, "icon", url, staging)
         .await
-        .map_err(|e| e.to_string())?;
-    let ext = crate::downloader::asset_downloader::extract_extension(url, "jpg");
-    let name = format!("icon.{ext}");
-    let path = staging.join(&name);
-    let response = client
-        .get(url)
-        .header(
-            "referer",
-            if seed.provider == "fanbox" {
-                "https://www.fanbox.cc/"
-            } else {
-                "https://www.pixiv.net/"
-            },
-        )
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
-    let mime = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-    crate::downloader::asset_downloader::save_response_atomically(
-        response,
-        &path,
-        crate::downloader::asset_downloader::MAX_PROFILE_IMAGE_BYTES,
-        true,
-    )
-    .await?;
-    Ok(vec![StagedAsset {
-        role: "icon".into(),
-        name,
-        path,
-        url: Some(url.into()),
-        mime_type: mime,
-    }])
+        .map(|asset| vec![asset])
 }
 
 /// 控えが作れなくても作品の保存は成功として返す。詳しい取得の失敗とは分けて記録する。

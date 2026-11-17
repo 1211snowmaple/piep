@@ -1269,6 +1269,13 @@ impl Library {
             };
             let (rendition, name) = match preferred {
                 Some((id, name)) => (Some(id), name),
+                None if legacy_kind.is_none() && next.file.is_none() && rendition.is_some() => {
+                    let name:Option<String>=tx.query_row("SELECT original_name FROM snapshot_media WHERE snapshot_id=?1 AND slot=?2 AND media_id=?3",params![snapshot.as_bytes().as_slice(),next.slot,media_id.as_bytes().as_slice()],|r|r.get(0)).optional()?;
+                    (
+                        rendition,
+                        name.unwrap_or_else(|| next.original_name.to_owned()),
+                    )
+                }
                 None => (rendition, next.original_name.to_owned()),
             };
             tx.execute("INSERT INTO snapshot_media VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(snapshot_id,slot) DO UPDATE SET role=excluded.role,media_id=excluded.media_id,rendition_id=excluded.rendition_id,original_name=excluded.original_name",params![snapshot.as_bytes().as_slice(),next.slot,next.role,media_id.as_bytes().as_slice(),rendition,name])?;
@@ -1410,6 +1417,9 @@ impl Library {
                 ));
             }
             tx.execute("UPDATE acquisition_attempts SET state='complete',input_manifest_file_id=?2,observation_id=?3,result_snapshot_id=?4,finished_at=?5 WHERE id=?1",params![context.ticket.id.as_bytes().as_slice(),request_hash.0.as_slice(),observation.as_bytes().as_slice(),result.snapshot_id.as_bytes().as_slice(),now])?;
+            if let Some(checked_at) = context.profile_checked_at {
+                tx.execute("INSERT INTO source_entity_state(entity_id,last_checked_at,last_fetched_at) VALUES(?1,?2,?2) ON CONFLICT(entity_id) DO UPDATE SET last_checked_at=max(coalesce(last_checked_at,excluded.last_checked_at),excluded.last_checked_at),last_fetched_at=max(coalesce(last_fetched_at,excluded.last_fetched_at),excluded.last_fetched_at)",params![result.entity_id.as_bytes().as_slice(),checked_at])?;
+            }
         }
         tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'capture',?3,?4)",params![request.as_bytes().as_slice(),result.entity_id.as_bytes().as_slice(),serde_json::to_string(result)?,now])?;
         Ok(())

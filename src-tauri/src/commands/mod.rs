@@ -10,6 +10,7 @@ pub(crate) mod job_queue;
 pub mod library_v2;
 pub mod original_images;
 pub mod pdf;
+pub(crate) mod profile_images;
 pub mod server;
 pub mod shell;
 pub mod startup;

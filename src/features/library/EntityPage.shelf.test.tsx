@@ -23,6 +23,8 @@ const api = vi.hoisted(() => ({
   libraryV2Search: vi.fn(),
   libraryV2Decorations: vi.fn(),
 }));
+const refresh = vi.hoisted(() => vi.fn());
+vi.mock("@/store", () => ({ store: { get: vi.fn().mockResolvedValue("test-connection") } }));
 vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
   ...api,
@@ -49,6 +51,7 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
   listEntityVersions: legacy.listEntityVersions,
   getLatestEntityProfileJson: legacy.getLatestEntityProfileJson,
   getUpdateTarget: legacy.getUpdateTarget,
+  refreshEntityProfile: refresh,
 }));
 vi.mock("@/services/shelfApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfApi")>()),
@@ -203,6 +206,24 @@ describe("author and series pages on the new shelf", () => {
     // コレクションに入っていなければ、旧棚と同じくタブを出さない。
     await waitFor(() => expect(api.libraryV2EntityCollections).toHaveBeenCalledWith("person", PERSON));
     expect(screen.queryByRole("tab", { name: /コレクション/ })).toBeNull();
+  });
+
+  it("refreshes the switched shelf and reloads its head and saved response", async () => {
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    refresh.mockImplementation(async () => {
+      api.libraryV2Entity.mockResolvedValue(head({ name: "更新した作者", last_checked_at: Date.UTC(2026, 0, 3) }));
+      api.libraryV2EntityOriginal.mockResolvedValue(JSON.stringify({ displayName: "更新した作者" }));
+      return {};
+    });
+    renderEntity("person", "#/people/pixiv/77");
+    await screen.findByRole("heading", { name: "作者一" });
+    const button = screen.getByRole("button", { name: "情報を更新" });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    await waitFor(() => expect(refresh).toHaveBeenCalledWith(expect.objectContaining({ entityType: "person", source: "pixiv", sourceKey: "77", force: true })));
+    expect(await screen.findByRole("heading", { name: "更新した作者" })).toBeInTheDocument();
+    await waitFor(() => expect(api.libraryV2EntityOriginal.mock.calls.length).toBeGreaterThan(1));
+    for (const call of Object.values(legacy)) expect(call).not.toHaveBeenCalled();
   });
 
   it("lists the collections holding the author's works and opens them by their old id", async () => {

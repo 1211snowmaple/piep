@@ -64,6 +64,7 @@ pub(super) struct CompletionContext {
     pub ticket: AcquisitionTicket,
     pub parts: Vec<RawPart>,
     pub reader_bindings: Option<Vec<ReaderBinding>>,
+    pub profile_checked_at: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -74,6 +75,8 @@ pub(super) struct AcquisitionManifest {
     pub capture: Box<serde_json::value::RawValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reader_bindings: Option<Vec<ReaderBinding>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_checked_at: Option<i64>,
 }
 
 fn sql_id(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<LibraryId> {
@@ -349,7 +352,24 @@ impl Library {
     }
 
     pub fn complete_acquisition(&self, id: LibraryId, capture: Capture) -> Result<CaptureResult> {
-        self.complete_with_reader(id, capture, None)
+        self.complete_with_reader(id, capture, None, None)
+    }
+
+    /// プロフィールの保存と、その応答を確認・取得した時刻を一緒に確定する。
+    pub fn complete_profile_acquisition(
+        &self,
+        id: LibraryId,
+        capture: Capture,
+        checked_at: i64,
+    ) -> Result<CaptureResult> {
+        if !matches!(capture.kind, EntityKind::Person | EntityKind::Series)
+            || chrono::DateTime::from_timestamp_millis(checked_at).is_none()
+        {
+            return Err(Error::Integrity(
+                "プロフィールの確認日時・対象が不正です".into(),
+            ));
+        }
+        self.complete_with_reader(id, capture, None, Some(checked_at))
     }
 
     /// 保存版・現在版・読書用の対応・取得の完了をまとめて確定する。
@@ -365,7 +385,7 @@ impl Library {
             ));
         }
         super::reader::normalize_input_bindings(&mut bindings)?;
-        self.complete_with_reader(id, capture, Some(bindings))
+        self.complete_with_reader(id, capture, Some(bindings), None)
     }
 
     fn complete_with_reader(
@@ -373,6 +393,7 @@ impl Library {
         id: LibraryId,
         capture: Capture,
         reader_bindings: Option<Vec<ReaderBinding>>,
+        profile_checked_at: Option<i64>,
     ) -> Result<CaptureResult> {
         let context = {
             let conn = self.conn.lock().map_err(|_| Error::Busy)?;
@@ -394,6 +415,7 @@ impl Library {
                 ticket: info.ticket,
                 parts: info.payloads,
                 reader_bindings,
+                profile_checked_at,
             }
         };
         self.capture_prepared(capture, None, Some(context))
@@ -429,7 +451,9 @@ pub(super) fn encode_manifest(context: &CompletionContext, request: Vec<u8>) -> 
             .map_err(|_| Error::Integrity("取得入力が UTF-8 ではありません".into()))?,
     )?;
     let bytes = serde_json::to_vec(&AcquisitionManifest {
-        format: if context.reader_bindings.is_some() {
+        format: if context.profile_checked_at.is_some() {
+            "capture-request-v4"
+        } else if context.reader_bindings.is_some() {
             "capture-request-v3"
         } else {
             "capture-request-v2"
@@ -439,6 +463,7 @@ pub(super) fn encode_manifest(context: &CompletionContext, request: Vec<u8>) -> 
         parts: context.parts.clone(),
         capture,
         reader_bindings: context.reader_bindings.clone(),
+        profile_checked_at: context.profile_checked_at,
     })?;
     if bytes.len() as u64 > MAX_ACQUISITION_MANIFEST_BYTES {
         return Err(Error::Unsupported(
@@ -510,11 +535,20 @@ fn manifest_files(
         .ok_or_else(invalid_manifest)?;
     let ticket = &manifest.ticket;
     let reader_format = match (manifest.format.as_str(), &manifest.reader_bindings) {
-        ("capture-request-v2", None) => true,
-        ("capture-request-v3", Some(bindings)) if ticket.kind == EntityKind::Work => {
+        ("capture-request-v2", None) if manifest.profile_checked_at.is_none() => true,
+        ("capture-request-v3", Some(bindings))
+            if ticket.kind == EntityKind::Work && manifest.profile_checked_at.is_none() =>
+        {
             let mut normalized = bindings.clone();
             super::reader::normalize_input_bindings(&mut normalized)?;
             &normalized == bindings
+        }
+        ("capture-request-v4", None)
+            if matches!(ticket.kind, EntityKind::Person | EntityKind::Series) =>
+        {
+            manifest
+                .profile_checked_at
+                .is_some_and(|v| chrono::DateTime::from_timestamp_millis(v).is_some())
         }
         _ => false,
     };
@@ -603,6 +637,17 @@ impl Library {
                         || manifest_files(conn, &manifest, request)? != stored
                     {
                         return Err(invalid_manifest());
+                    }
+                    if info.state == AcquisitionState::Complete {
+                        if let Some(checked_at) = manifest.profile_checked_at {
+                            let dates:Option<(Option<i64>,Option<i64>)>=conn.query_row("SELECT last_checked_at,last_fetched_at FROM source_entity_state WHERE entity_id=?1",[info.ticket.entity.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+                            if !dates.is_some_and(|(checked, fetched)| {
+                                checked.is_some_and(|v| v >= checked_at)
+                                    && fetched.is_some_and(|v| v >= checked_at)
+                            }) {
+                                return Err(invalid_manifest());
+                            }
+                        }
                     }
                     reader_bindings = manifest.reader_bindings;
                 }

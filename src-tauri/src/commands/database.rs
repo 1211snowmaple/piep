@@ -43,6 +43,8 @@ use tokio::time::{sleep, Duration};
 
 static ENTITY_REFRESH_LOCK: LazyLock<AsyncMutex<Option<Instant>>> =
     LazyLock::new(|| AsyncMutex::new(None));
+#[path = "database_profile_shelf.rs"]
+mod profile_shelf;
 static ENTITY_PROFILE_REPAIR_RUNNING: AtomicBool = AtomicBool::new(false);
 static ENTITY_PROFILE_REPAIR_CANCEL: AtomicBool = AtomicBool::new(false);
 static SEARCH_REBUILD_JOBS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
@@ -77,7 +79,7 @@ where
     .map_err(|e| format!("Database task failed: {e}"))?
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshEntityProfileParams {
     pub entity_type: String,
@@ -2490,16 +2492,6 @@ pub async fn refresh_entity_profile(
     app: tauri::AppHandle,
     params: RefreshEntityProfileParams,
 ) -> Result<serde_json::Value, String> {
-    let RefreshEntityProfileParams {
-        entity_type,
-        source,
-        source_key,
-        force,
-        refresh_token,
-        cookie,
-        user_agent,
-    } = params;
-
     let mut last_refresh = ENTITY_REFRESH_LOCK.lock().await;
     if let Some(last) = *last_refresh {
         let elapsed = last.elapsed();
@@ -2510,6 +2502,18 @@ pub async fn refresh_entity_profile(
     *last_refresh = Some(Instant::now());
 
     let state = app.state::<Arc<AppState>>().inner().clone();
+    if let Some(library) = state.library_v2.switched() {
+        return profile_shelf::refresh(state, library, params).await;
+    }
+    let RefreshEntityProfileParams {
+        entity_type,
+        source,
+        source_key,
+        force,
+        refresh_token,
+        cookie,
+        user_agent,
+    } = params;
     let force = force.unwrap_or(false);
     let app_data = state
         .db

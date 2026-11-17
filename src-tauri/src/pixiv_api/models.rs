@@ -617,8 +617,15 @@ pub fn parse_into<T: DeserializeOwned, S: AsRef<str> + Into<String>>(
 
 /// Content-Length と実際に受信した（展開後の）バイト数の両方を検査して読み込む。
 pub(crate) async fn read_response_text_limited(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<(StatusCode, String), PixivError> {
+    read_response_text_mode(response, max_bytes, false).await
+}
+async fn read_response_text_mode(
     mut response: reqwest::Response,
     max_bytes: usize,
+    strict: bool,
 ) -> Result<(StatusCode, String), PixivError> {
     let status = response.status();
     if response
@@ -651,7 +658,35 @@ pub(crate) async fn read_response_text_limited(
 
     // Pixiv の JSON/HTML は UTF-8。従来の reqwest::Response::text と同様、
     // 不正バイトだけを置換して後段の構造検証に委ねる。
-    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+    let text = if strict {
+        String::from_utf8(body).map_err(|_| PixivError::UnintelligibleResponse {
+            body: "原応答が UTF-8 ではありません".into(),
+        })?
+    } else {
+        String::from_utf8_lossy(&body).into_owned()
+    };
+    Ok((status, text))
+}
+
+/// 保管用の原応答。前後の空白と数の字句を保ち、不正な文字を置き換えない。
+pub(crate) async fn parse_response_raw(response: reqwest::Response) -> Result<String, PixivError> {
+    let (status, body) =
+        read_response_text_mode(response, MAX_PIXIV_JSON_RESPONSE_BYTES, true).await?;
+    if status == StatusCode::TOO_MANY_REQUESTS || pixiv_body_is_rate_limited(&body) {
+        return Err(PixivError::RateLimited { body });
+    }
+    if status == StatusCode::NOT_FOUND {
+        return Err(PixivError::NotFound { body });
+    }
+    let parsed: serde_json::Value = parse_into(body.as_str())?;
+    if !status.is_success()
+        || parsed
+            .get("error")
+            .is_some_and(|v| !v.is_null() && v != false)
+    {
+        return Err(PixivError::ErrResponse { body });
+    }
+    Ok(body)
 }
 
 /// レスポンスボディを読み込み、`T` にデシリアライズします。
@@ -766,6 +801,23 @@ mod tests {
             error,
             PixivError::ResponseTooLarge { limit_bytes: 4 }
         ));
+    }
+
+    #[tokio::test]
+    async fn raw_responses_preserve_outer_whitespace_and_numeric_lexemes_and_reject_invalid_utf8() {
+        let response=response_from_wire(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"error\":false,\"body\":{\"id\":\"88\"}}").await;
+        assert!(parse_response_raw(response).await.is_ok());
+        let response=response_from_wire(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n \n{\"future\":9007199254740993,\"decimal\":0.07221960411257732}\n ").await;
+        assert_eq!(
+            parse_response_raw(response).await.unwrap(),
+            " \n{\"future\":9007199254740993,\"decimal\":0.07221960411257732}\n "
+        );
+        let response =
+            response_from_wire(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"name\":\"\xff\"}")
+                .await;
+        assert!(parse_response_raw(response).await.is_err());
+        let response=response_from_wire(b"HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n{\"user\":{\"id\":77}}").await;
+        assert!(parse_response_raw(response).await.is_err());
     }
 
     #[tokio::test]

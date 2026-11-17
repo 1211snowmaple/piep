@@ -74,6 +74,9 @@ import {
   shelfEntityCollections,
   shelfEntityVersions,
   shelfListable,
+  shelfWritable,
+  invalidateShelf,
+  SHELF_NOT_YET,
   shelfPersonEntry,
   shelfSeriesEntry,
   shelfSeriesFacet,
@@ -133,6 +136,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const [shelfV2Preferred] = useShelfV2Preference();
   const shelfV2Status = useLibraryV2Status(runtime && shelfV2Preferred);
   const shelfMode = runtime && shelfV2Preferred && shelfListable(shelfV2Status.data);
+  const canRefreshProfile = !shelfMode || shelfWritable(shelfV2Status.data);
   const shelfDeciding = runtime && shelfV2Preferred && !shelfV2Status.data;
   const legacyMode = !shelfMode && !shelfDeciding;
   const { pathname, search, navigationId } = useAppRouter();
@@ -598,7 +602,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       if (!runtime) return {};
       return refreshEntityProfile({ entityType: kind, source, sourceKey: key, force: true, refreshToken: await store.get<string>("pixiv_refresh_token"), cookie: await store.get<string>("fanbox_session_id"), userAgent: await store.get<string>("fanbox_user_agent") || "Mozilla/5.0" });
     },
-    onSuccess: () => { notifications.show({ color: "green", message: "プロフィールを更新しました" }); queryClient.invalidateQueries({ queryKey: ["entity", kind, source, key] }); queryClient.invalidateQueries({ queryKey: ["entity-versions", kind, source, key] }); queryClient.invalidateQueries({ queryKey: ["entity-json", kind, source, key] }); },
+    onSuccess: () => { notifications.show({ color: "green", message: "プロフィールを更新しました" }); invalidateShelf(queryClient); },
     onError: (error) => notifications.show({ color: "red", title: "更新できません", message: errorMessage(error) }),
   });
   const targetMutation = useMutation({
@@ -691,7 +695,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const localCount = entry.workCount ?? 0;
   const missingCount = publishedCount === null ? 0 : Math.max(0, publishedCount - localCount);
   const profileData = (profileJson.data ?? {}) as Record<string, any>;
-  const profileStats = profileData.stats as Record<string, number> | undefined;
+  const profileStats = profileData.stats as Record<string, unknown> | undefined;
   const coverPath = entry.coverPath;
   const avatarPath = kind === "person" ? (entry as PersonEntry).iconPath : coverPath;
   // 保存元が画像を持ちうるのに置かれていない場合は、保存元と同じく一枚の絵で
@@ -725,9 +729,8 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const entityActions = [
     { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
     { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSourceExternally },
-    // 新しい棚は読むだけ。書き出しと情報の更新は旧棚へ書くので、押せなくして理由を添える。
-    { key: "archive", label: "アーカイブ", icon: Icons.archive, onClick: exportZip, disabled: shelfMode, hint: shelfMode ? `アーカイブ（${READ_ONLY}）` : undefined },
-    { key: "refresh", label: "情報を更新", icon: Icons.watch, primary: true, loading: refreshMutation.isPending, onClick: () => refreshMutation.mutate(), disabled: shelfMode, hint: shelfMode ? `情報を更新（${READ_ONLY}）` : undefined },
+    { key: "archive", label: "アーカイブ", icon: Icons.archive, onClick: exportZip, disabled: shelfMode, hint: shelfMode ? `アーカイブ（${shelfWritable(shelfV2Status.data) ? SHELF_NOT_YET : READ_ONLY}）` : undefined },
+    { key: "refresh", label: "情報を更新", icon: Icons.watch, primary: true, loading: refreshMutation.isPending, onClick: () => refreshMutation.mutate(), disabled: !canRefreshProfile, hint: !canRefreshProfile ? `情報を更新（${READ_ONLY}）` : undefined },
   ];
 
   return (
@@ -756,7 +759,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                 <Title order={1} className="entity-hero__title">{displayName}</Title>{/* かつてここには「更新 …」と出ていたが、指していたのは取得元での更新では
                     なく piep の行が書き換わった日だった。読む側には区別がつかない。
                     取得元の話をしないなら、手元の言葉で言う。確認していなければ何も出さない。 */}
-                <Group gap="xs">{seriesEntry ? <><Badge variant="light" color="gray">{missingCount > 0 ? `手元 ${formatNumber(localCount)}話 / 取得元 ${formatNumber(publishedCount ?? 0)}話` : `${formatNumber(localCount)}話`}</Badge>{missingCount > 0 && <Badge variant="light" color="yellow">{formatNumber(missingCount)}話 未取得</Badge>}{seriesEntry.isConcluded && <Badge variant="light" color="gray">完結</Badge>}</> : <Badge variant="light" color="gray">{formatNumber(localCount)}作品</Badge>}{shelfMode && <Tooltip label="新しい棚（試験中）から読んでいます。読むだけで、ここからは何も書き換えません。"><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}{entry.lastCheckedAt && <Text size="xs" c="dimmed">{formatFreshness(entry.lastCheckedAt)}に確認</Text>}</Group>
+                <Group gap="xs">{seriesEntry ? <><Badge variant="light" color="gray">{missingCount > 0 ? `手元 ${formatNumber(localCount)}話 / 取得元 ${formatNumber(publishedCount ?? 0)}話` : `${formatNumber(localCount)}話`}</Badge>{missingCount > 0 && <Badge variant="light" color="yellow">{formatNumber(missingCount)}話 未取得</Badge>}{seriesEntry.isConcluded && <Badge variant="light" color="gray">完結</Badge>}</> : <Badge variant="light" color="gray">{formatNumber(localCount)}作品</Badge>}{shelfMode && <Tooltip label={shelfWritable(shelfV2Status.data) ? "切り替えた新しい棚から読んでいます。" : "新しい棚（試験中）から読んでいます。読むだけで、ここからは何も書き換えません。"}><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}{entry.lastCheckedAt && <Text size="xs" c="dimmed">{formatFreshness(entry.lastCheckedAt)}に確認</Text>}</Group>
               </Stack>
             </Group>
           </Box>
@@ -1014,8 +1017,8 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
         <Grid.Col span={{ base: 12, lg: 3 }}>
           <Stack gap="lg">
             <Card p="lg"><Stack gap="md"><Group justify="space-between"><Box><Text fw={700}>新作・改稿を監視</Text><Text size="xs" c="dimmed" mt={4}>{kind === "person" ? "新しい作品を検出" : "シリーズの続編を検出"}</Text></Box><Switch checked={targetMutation.isPending ? targetMutation.variables : target.data?.enabled ?? false} disabled={shelfMode || targetMutation.isPending || target.isLoading} onChange={(event) => targetMutation.mutate(event.currentTarget.checked)} aria-label={shelfMode ? `新作と改稿の監視（${READ_ONLY}）` : "新作と改稿の監視"} /></Group>{/* 監視に入れなくても、その場で一度だけ見に行ける。 */}<Button variant="light" disabled={shelfMode} aria-label={shelfMode ? `${kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}（${READ_ONLY}）` : undefined} leftSection={<Icons.updates size={IconSize.menu} />} onClick={() => runSingleCheck({ kind: kind === "person" ? "author" : "series", source, sourceKey: key, label: displayName }, () => navigate("/updates"))}>{kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}</Button></Stack></Card>
-            <Card p="lg"><Text fw={700} mb="md">プロフィール情報</Text><Stack gap="sm">{profileData.account && <Meta label="アカウント" value={`@${profileData.account}`} />}{profileStats && <><Meta label="小説" value={`${formatNumber(profileStats.totalNovels ?? 0)}作品`} /><Meta label="小説シリーズ" value={`${formatNumber(profileStats.totalNovelSeries ?? 0)}件`} /></>}{typeof profileData.sampleNovelCount === "number" && <Meta label="取得済み構成作品" value={`${formatNumber(profileData.sampleNovelCount)}件`} />}<Meta label="現在のバージョン" value={entry.currentVersion > 0 ? `v${entry.currentVersion}` : "なし"} /><Meta label="最終取得" value={formatDate(entry.lastFetchedAt, true)} /><Meta label="最終確認" value={formatDate(entry.lastCheckedAt, true)} /></Stack></Card>
-            {shelfMode && <Note title="新しい棚（試験中）">旧棚から移行した時点の写しを、読むだけで開いています。更新監視・情報の更新・書き出しは、設定で新しい棚を切ると使えます。コレクションの中身は旧棚で開きます。</Note>}
+            <Card p="lg"><Text fw={700} mb="md">プロフィール情報</Text><Stack gap="sm">{profileData.account && <Meta label="アカウント" value={`@${profileData.account}`} />}{profileStats && <><Meta label="小説" value={typeof profileStats.totalNovels === "number" ? `${formatNumber(profileStats.totalNovels)}作品` : "未確認"} /><Meta label="小説シリーズ" value={typeof profileStats.totalNovelSeries === "number" ? `${formatNumber(profileStats.totalNovelSeries)}件` : "未確認"} /></>}{typeof profileData.sampleNovelCount === "number" && <Meta label="取得済み構成作品" value={`${formatNumber(profileData.sampleNovelCount)}件`} />}<Meta label="現在のバージョン" value={entry.currentVersion > 0 ? `v${entry.currentVersion}` : "なし"} /><Meta label="最終取得" value={formatDate(entry.lastFetchedAt, true)} /><Meta label="最終確認" value={formatDate(entry.lastCheckedAt, true)} /></Stack></Card>
+            {shelfMode && !shelfWritable(shelfV2Status.data) && <Note title="新しい棚（試験中）">旧棚から移行した時点の写しを、読むだけで開いています。更新監視・情報の更新・書き出しは、設定で新しい棚を切ると使えます。コレクションの中身は旧棚で開きます。</Note>}
             {!runtime && <Note>プレビューではデモプロフィールを表示しています。</Note>}
           </Stack>
         </Grid.Col>
