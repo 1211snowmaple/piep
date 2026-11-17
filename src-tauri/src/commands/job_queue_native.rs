@@ -85,6 +85,24 @@ impl NativeQueue<'_> {
         conn: &Connection,
         row: &rusqlite::Row<'_>,
     ) -> rusqlite::Result<UpdateJobItem> {
+        let mut payload = self.payload(conn, row.get(7)?)?;
+        if let Some(generation) = row.get::<_, Option<i64>>(11)? {
+            let mut value: serde_json::Value = serde_json::from_str(&payload).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Blob,
+                    Box::new(e),
+                )
+            })?;
+            if value.get("kind").and_then(serde_json::Value::as_str) != Some("permission_check") {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            value
+                .as_object_mut()
+                .ok_or(rusqlite::Error::InvalidQuery)?
+                .insert("discoveryGeneration".into(), serde_json::json!(generation));
+            payload = value.to_string();
+        }
         Ok(UpdateJobItem {
             id: row.get(0)?,
             job_id: uuid_text(row, 1)?,
@@ -93,7 +111,7 @@ impl NativeQueue<'_> {
             source_id: row.get(4)?,
             target_type: row.get(5)?,
             title: row.get(6)?,
-            payload_json: self.payload(conn, row.get(7)?)?,
+            payload_json: payload,
             status: row.get(8)?,
             error: row.get(9)?,
             result_download_id: None,
@@ -713,7 +731,7 @@ impl NativeQueue<'_> {
         let item = tx
             .query_row(
                 "SELECT id, job_id, item_type, source, source_id, target_type, title,
-                        payload_file_id, status, error, NULL
+                        payload_file_id, status, error, NULL, resume_generation
                  FROM execution_items i
                  WHERE i.job_id = ?1 AND i.status = 'queued'
                    AND EXISTS (

@@ -1310,6 +1310,10 @@ pub struct UpdateWorkMetadata {
 }
 
 impl UpdateWorkMetadata {
+    /// 実行キューの表示用の写し。本文を含めず、移行と通常の作成で同じ形にする。
+    pub(crate) fn execution_display(payload: &str) -> serde_json::Result<String> {
+        crate::library::ExecutionMetadata::execution_display(payload)
+    }
     fn is_empty(&self) -> bool {
         self.author_name.is_none()
             && self.published_at.is_none()
@@ -1317,54 +1321,14 @@ impl UpdateWorkMetadata {
             && self.saved_at.is_none()
     }
     pub(crate) fn from_payload(payload: &serde_json::Value) -> Self {
-        fn field(value: &serde_json::Value, paths: &[&str]) -> Option<String> {
-            paths.iter().find_map(|path| {
-                value
-                    .pointer(path)
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|s| !s.trim().is_empty())
-                    .map(str::to_string)
-            })
-        }
-        let value = payload.get("originalData").unwrap_or(payload);
-        let value = crate::fanbox_api::payload::post_or_self(value);
+        let m = crate::library::ExecutionMetadata::from_payload(payload);
         Self {
-            author_name: field(
-                value,
-                &[
-                    "/user/name",
-                    "/creator/name",
-                    "/authorName",
-                    "/userName",
-                    "/author_name",
-                    "/detail/user/name",
-                    "/detail/authorName",
-                ],
-            ),
-            published_at: field(
-                value,
-                &[
-                    "/create_date",
-                    "/createDate",
-                    "/publishedDatetime",
-                    "/cdate",
-                    "/detail/createDate",
-                    "/detail/cdate",
-                ],
-            ),
-            updated_at: field(
-                value,
-                &[
-                    "/uploadDate",
-                    "/updateDate",
-                    "/updatedDatetime",
-                    "/detail/uploadDate",
-                ],
-            ),
-            saved_at: None,
+            author_name: m.author_name,
+            published_at: m.published_at,
+            updated_at: m.updated_at,
+            saved_at: m.saved_at,
         }
     }
-
     pub(super) fn from_row(
         row: &rusqlite::Row<'_>,
         start: usize,

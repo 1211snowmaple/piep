@@ -10,8 +10,7 @@ fn known_hold(payload: &str) -> Result<bool, String> {
     )
 }
 fn display(payload: &str) -> Result<String, String> {
-    let v: serde_json::Value = serde_json::from_str(payload).map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({"metadata":UpdateWorkMetadata::from_payload(&v),"kind":v.get("kind"),"subtitle":v.get("subtitle"),"targetLabel":v.get("targetLabel"),"holdReason":v.get("holdReason")}).to_string())
+    UpdateWorkMetadata::execution_display(payload).map_err(|e| e.to_string())
 }
 fn insert_item(
     tx: &Transaction<'_>,
@@ -134,7 +133,7 @@ impl NativeQueue<'_> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         Library::register_file(&tx, &file).map_err(|e| e.to_string())?;
-        if tx.execute("UPDATE execution_items SET payload_file_id=?2,known_hold=?3,display_json=?4 WHERE id=?1",params![item,file.file.id.0.as_slice(),known,display(payload)?]).map_err(|e|e.to_string())?!=1 {return Err("実行項目が見つかりません".into());}
+        if tx.execute("UPDATE execution_items SET payload_file_id=?2,known_hold=?3,display_json=?4,resume_generation=NULL WHERE id=?1",params![item,file.file.id.0.as_slice(),known,display(payload)?]).map_err(|e|e.to_string())?!=1 {return Err("実行項目が見つかりません".into());}
         tx.commit().map_err(|e| e.to_string())
     }
     pub(crate) fn mark_update_job_item_known_hold(&self, item: i64) -> Result<(), String> {

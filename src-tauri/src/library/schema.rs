@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 22;
+pub(crate) const VERSION: i64 = 23;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -27,6 +27,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_020_discovery_state.sql"),
     include_str!("migration_021_history_visibility.sql"),
     include_str!("migration_022_execution_queue.sql"),
+    include_str!("migration_023_job_import.sql"),
 ];
 
 fn migration_checksum(sql: &str) -> Fingerprint {
@@ -152,6 +153,49 @@ mod tests {
             .unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
         conn
+    }
+
+    #[test]
+    fn job_import_migration_keeps_existing_jobs_and_rolls_back_the_added_column() {
+        let id = LibraryId::now_v7();
+        let conn = version_one(id);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(21) {
+            conn.execute_batch(sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 22).unwrap();
+        conn.execute("INSERT INTO execution_jobs(id,scope,mode,status,watch_saved,new_works_only,started_at,updated_at) VALUES(?1,'all','check_only','paused',0,0,'2025-01-01','2025-01-02')",[LibraryId::now_v7().as_bytes().as_slice()]).unwrap();
+        conn.execute_batch("CREATE TABLE job_import_evidence(collision INTEGER)")
+            .unwrap();
+        assert!(open(&conn, id).is_err());
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            22
+        );
+        assert!(conn
+            .prepare("SELECT resume_generation FROM execution_items")
+            .is_err());
+        assert_eq!(
+            conn.query_row("SELECT status FROM execution_jobs", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "paused"
+        );
+        conn.execute_batch("DROP TABLE job_import_evidence")
+            .unwrap();
+        open(&conn, id).unwrap();
+        conn.prepare("SELECT resume_generation FROM execution_items")
+            .unwrap();
+        assert_eq!(conn.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('execution_item_origin','execution_log_origin')",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
     }
 
     #[test]

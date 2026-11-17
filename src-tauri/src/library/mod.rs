@@ -9,6 +9,8 @@ mod body;
 mod catalogue;
 mod discovery;
 mod editing;
+mod execution;
+pub(crate) use execution::{legacy_recheck_generation, ExecutionMetadata};
 mod identity;
 mod integrity;
 mod job_history;
@@ -118,3 +120,7 @@ impl From<piep_storage::Error> for Error {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "legacy/job_fixture.rs"]
+pub(crate) mod job_fixture;

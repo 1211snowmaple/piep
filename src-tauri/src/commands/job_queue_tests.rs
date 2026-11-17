@@ -515,3 +515,6 @@ fn previous_queue_import_is_atomic_idempotent_and_does_not_resurrect_cleared_job
     );
     library.verify().unwrap();
 }
+
+#[path = "job_queue_migration_tests.rs"]
+mod migration;

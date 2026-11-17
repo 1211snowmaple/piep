@@ -296,6 +296,7 @@ impl LegacyImporter {
             lap: Some(Instant::now()),
             ..Default::default()
         };
+        self.prepare_job_refresh(target, cancel)?;
         self.preserve_tables(target, &mut report)?;
         report.lap("preserve_tables");
         let profiles = self
@@ -495,7 +496,7 @@ impl LegacyImporter {
         self.finish_normalization(
             target,
             "job_history",
-            "更新ジョブの履歴と項目・操作記録の移行",
+            "更新ジョブのキュー・履歴と項目・操作記録の移行",
             self.normalize_job_history(target, cancel),
             &mut report,
         )?;

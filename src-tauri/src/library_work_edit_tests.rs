@@ -310,6 +310,7 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
              DROP TABLE discovery_summaries;
              DROP TABLE job_history_visibility;
              DROP TABLE execution_logs;
+             DROP TABLE job_import_evidence;
              DROP TABLE execution_items;
              DROP TABLE execution_jobs;
              ALTER TABLE library_meta DROP COLUMN watch_generation;
