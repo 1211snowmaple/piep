@@ -74,14 +74,31 @@ pub(super) fn work_items(
     if matches!(request.scope.as_str(), "all" | "work") {
         let filter = if let Some(ids) = &request.work_ids {
             // 以前の画面の番号も移行先の対応で解く。旧 DB の作品は読まない。
-            let numbers = library.legacy_work_numbers().map_err(|e| e.to_string())?;
-            WorkFilter {
-                works: Some(
-                    numbers
+            let mut works = ids
+                .iter()
+                .filter_map(|id| match id {
+                    crate::database::WorkId::Shelf(work) => Some(*work),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            let legacy = ids
+                .iter()
+                .filter_map(|id| match id {
+                    crate::database::WorkId::Legacy(number) => Some(*number),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            if !legacy.is_empty() {
+                works.extend(
+                    library
+                        .legacy_work_numbers()
+                        .map_err(|e| e.to_string())?
                         .into_iter()
-                        .filter_map(|(work, number)| ids.contains(&number).then_some(work))
-                        .collect(),
-                ),
+                        .filter_map(|(work, number)| legacy.contains(&number).then_some(work)),
+                );
+            }
+            WorkFilter {
+                works: Some(works.into_iter().collect()),
                 ..Default::default()
             }
         } else {
@@ -698,6 +715,61 @@ mod tests {
         )
         .unwrap()
         .is_empty());
+    }
+
+    #[test]
+    fn explicit_work_uuids_select_only_saved_members_and_never_expand_an_empty_range() {
+        let (_temp, state, library) = fixture();
+        let wanted = save(
+            &library,
+            "pixiv",
+            "wanted",
+            &data("pixiv", "本文", "77"),
+            false,
+        );
+        let other = save(
+            &library,
+            "pixiv",
+            "other",
+            &data("pixiv", "本文", "88"),
+            true,
+        );
+        let person = library
+            .entity_by_key(EntityKind::Person, "pixiv", "77")
+            .unwrap()
+            .unwrap();
+        let request: StartUpdateJobRequest = serde_json::from_value(serde_json::json!({
+            "scope":"work","mode":"check_only","workIds":[wanted.id,wanted.id,person,LibraryId::now_v7()]
+        })).unwrap();
+        let items = build_initial_items(&state, &request, Some(&library)).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source_id.as_deref(), Some("wanted"));
+        assert!(state.db.get_watched_downloads().unwrap().is_empty());
+        assert!(build_initial_items(&state, &request, None)
+            .unwrap_err()
+            .contains("UUID"));
+        for id in [person, LibraryId::now_v7(), other.id] {
+            if id == other.id {
+                library
+                    .remove_work(
+                        LibraryId::now_v7(),
+                        id,
+                        library.library_item_generation(id).unwrap().unwrap(),
+                    )
+                    .unwrap();
+            }
+            let request = StartUpdateJobRequest {
+                work_ids: Some(vec![crate::database::WorkId::Shelf(id)]),
+                ..request.clone()
+            };
+            assert!(build_initial_items(&state, &request, Some(&library))
+                .unwrap()
+                .is_empty());
+        }
+        assert!(serde_json::from_value::<StartUpdateJobRequest>(
+            serde_json::json!({"scope":"work","mode":"check_only","workIds":["invalid-id"]})
+        )
+        .is_err());
     }
 
     #[test]

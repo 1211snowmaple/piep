@@ -33,6 +33,8 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
 }));
+const runSingleCheck = vi.hoisted(() => vi.fn());
+vi.mock("@/features/updates/startSingleCheck", () => ({ runSingleCheck }));
 
 const WORK = "0195f1c2-0000-7000-8000-000000000001";
 const FIRST = "0195f1c2-0000-7000-8000-000000000011";
@@ -87,6 +89,7 @@ describe("ShelfWorkPage", () => {
   beforeEach(() => {
     for (const fn of Object.values(api)) fn.mockReset();
     window.localStorage.clear();
+    runSingleCheck.mockReset().mockResolvedValue(undefined);
     api.libraryV2Work.mockResolvedValue(work);
     api.libraryV2EditHistory.mockResolvedValue({ generation: 0, active: null, draft: null, archived: [] });
     api.libraryV2Content.mockImplementation(async (_work: string, _snapshot: string | null, page: number) => ({
@@ -105,6 +108,7 @@ describe("ShelfWorkPage", () => {
     expect(screen.getByAltText("挿絵")).toHaveAttribute("src", `http://piep-library.localhost/${IMAGE}`);
     // 読むだけ。変える操作は押せない。
     expect(screen.getByRole("button", { name: "お気に入り（新しい棚では変えられません）" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "更新を確認（新しい棚では変えられません）" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "2" }));
     expect(await screen.findByText("2ページ本文")).toBeInTheDocument();
@@ -123,6 +127,16 @@ describe("ShelfWorkPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "この版の本文を見る" }));
     await waitFor(() => expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, FIRST, 0));
     expect(await screen.findByText("保存済み v1")).toBeInTheDocument();
+  });
+
+  it("checks just this work by its shelf UUID after switching over", async () => {
+    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    renderPage(`#/works/${WORK}`);
+    const button = await screen.findByRole("button", { name: "更新を確認" });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(runSingleCheck).toHaveBeenCalledWith({ kind: "work", workId: WORK, label: work.title }, expect.any(Function)));
   });
 
   it("says which version an edit was made on and that a later one is not shown", async () => {

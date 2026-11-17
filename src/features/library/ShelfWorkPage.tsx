@@ -66,6 +66,7 @@ import { ActionRow } from "@/components/ActionRow";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import { EditStatusStrip } from "@/features/library/EditStatusStrip";
 import type { WorkEditRevision } from "@/types/library";
+import { runSingleCheck } from "@/features/updates/startSingleCheck";
 
 const READ_ONLY = "新しい棚では変えられません";
 
@@ -125,6 +126,15 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   const writable = useShelfWritable(runtime);
   const favoriteLabel = !writable ? `お気に入り（${READ_ONLY}）` : work?.favorite ? "お気に入りを解除" : "お気に入りに追加";
   const editLabel = writable ? "編集" : `編集（${READ_ONLY}）`;
+  const checkLabel = writable ? "更新を確認" : `更新を確認（${READ_ONLY}）`;
+  const [checking, setChecking] = useState(false);
+  const checkWork = async () => {
+    if (!writable || checking || !work) return;
+    setChecking(true);
+    try {
+      await runSingleCheck({ kind: "work", workId, label: work.title }, () => navigate("/updates"));
+    } finally { setChecking(false); }
+  };
   // 下書き・反映中の版・以前の編集版。
   const historyQuery = useQuery({
     queryKey: ["library-v2-edit-history", workId],
@@ -323,6 +333,9 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
                   <Group gap={6} wrap="nowrap" role="group" aria-label="中身へ進む">
                     <Button className="work-hero__action work-hero__read" leftSection={<Icons.read size={IconSize.action} />} onClick={() => navigate(`/reader/${workId}`)}>読む</Button>
                     <Tooltip label={editLabel}><ActionIcon className="work-hero__action" variant="default" size={38} aria-label={editLabel} disabled={!writable} onClick={() => navigate(`/editor/${workId}`)}><Icons.edit size={IconSize.action} /></ActionIcon></Tooltip>
+                  </Group>
+                  <Group gap={6} wrap="nowrap" role="group" aria-label="取得元を確認">
+                    <Tooltip label={checkLabel}><ActionIcon className="work-hero__action" size={38} variant="default" aria-label={checkLabel} disabled={!writable} loading={checking} onClick={() => { void checkWork(); }}><Icons.watch size={IconSize.action} /></ActionIcon></Tooltip>
                   </Group>
                   <Group gap={6} wrap="nowrap" role="group" aria-label="手元の印">
                     <Tooltip label={favoriteLabel}><ActionIcon className="work-hero__action" size={38} variant="default" style={work.favorite ? { "--ai-color": "var(--flag-favorite)", "--ai-bg": "var(--flag-favorite-bg)" } : undefined} aria-label={favoriteLabel} aria-pressed={work.favorite} disabled={!writable} onClick={toggleFavorite}><Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>

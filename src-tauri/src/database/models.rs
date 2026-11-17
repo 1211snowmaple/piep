@@ -924,6 +924,9 @@ pub enum WatchId {
     Shelf(crate::library::LibraryId),
 }
 
+/// 作品の明示的な範囲。切り替え後は UUID、移行前の画面は旧番号で指定する。
+pub type WorkId = WatchId;
+
 impl From<i64> for WatchId {
     fn from(value: i64) -> Self {
         Self::Legacy(value)
@@ -1082,7 +1085,7 @@ pub struct UpdateCredentials {
 pub struct StartUpdateJobRequest {
     pub scope: String,
     pub mode: String,
-    pub work_ids: Option<Vec<i64>>,
+    pub work_ids: Option<Vec<WorkId>>,
     pub target_ids: Option<Vec<WatchId>>,
     pub credentials: Option<UpdateCredentials>,
     /// このジョブが保存した作品を、そのまま更新監視に載せるか。

@@ -422,6 +422,8 @@ export interface EntityVersion {
 }
 
 export type WatchId = number | string;
+/** 旧棚の番号か、新しい棚の作品 UUID。 */
+export type WorkId = number | string;
 
 export interface UpdateTarget {
   id: WatchId;

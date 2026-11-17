@@ -825,7 +825,7 @@ fn build_initial_items(
         if let Some(filter) = &work_filter {
             let mut entries = Vec::new();
             for id in filter {
-                entries.push(state.db.get_download(*id)?);
+                entries.push(state.db.get_download(id.legacy()?)?);
             }
             entries
         } else {
@@ -1258,7 +1258,7 @@ async fn transition_running_worker_status(
 
 /// 更新の確認を始める。返るのは開始直後の姿。
 ///
-/// 監視対象が一つも無ければ `Err`。**空のジョブを作らない**のは、進みも終わりも
+/// 確認する対象が一つも無ければ `Err`。**空のジョブを作らない**のは、進みも終わりも
 /// 無いものが一覧に並ぶと、失敗したのか終わったのか見分けが付かないためである。
 ///
 /// 作ったあとは背景で走る。進み具合は `update-job-progress` で流れるので、

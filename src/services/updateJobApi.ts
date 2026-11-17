@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { store } from "@/store";
-import type { WatchId } from "@/types/library";
+import type { WatchId, WorkId } from "@/types/library";
 
 export type UpdateJobStatus =
   | "queued"
@@ -30,7 +30,7 @@ export interface UpdateJobCredentials {
 export interface StartUpdateJobRequest {
   scope: UpdateJobScope;
   mode: UpdateJobMode;
-  workIds?: number[] | null;
+  workIds?: WorkId[] | null;
   targetIds?: WatchId[] | null;
   /** Put every work this job saves under update watching. */
   watchSaved?: boolean | null;
