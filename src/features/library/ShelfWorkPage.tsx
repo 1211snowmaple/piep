@@ -34,6 +34,7 @@ import { ExpandableText } from "@/components/ExpandableText";
 import { WorkCover } from "@/components/WorkCover";
 import { BoundedJsonView } from "@/components/BoundedJsonView";
 import { RevisionDiff } from "@/components/RevisionDiff";
+import { RevisionMetadataDiff } from "@/components/RevisionMetadataDiff";
 import { Note } from "@/components/Note";
 import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { Icons, IconSize } from "@/lib/icons";
@@ -50,7 +51,7 @@ import {
   libraryV2EditPointer,
   libraryV2Media,
   libraryV2Original,
-  libraryV2VersionText,
+  libraryV2RevisionSnapshot,
   libraryV2SetUserState,
   libraryV2Work,
   shelfBodyUrl,
@@ -111,6 +112,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   const [contentSnapshot, setContentSnapshot] = useState<string | null>(null);
   const [assetSnapshot, setAssetSnapshot] = useState<string | null>(null);
   const [selectedSnapshot, setSelectedSnapshot] = useState<string | null>(null);
+  const [originalSnapshot, setOriginalSnapshot] = useState<string | null>(null);
   const [visibleAssetCount, setVisibleAssetCount] = useState(80);
   const [pdfOriginal, setPdfOriginal] = useState<PdfOriginalTarget | null>(null);
   const contentFrameRef = useRef<HTMLDivElement>(null);
@@ -211,21 +213,21 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
     enabled: runtime && tab === "assets",
   });
   const originalQuery = useQuery({
-    queryKey: ["library-v2-original", workId],
-    queryFn: () => libraryV2Original(workId, null),
+    queryKey: ["library-v2-original", workId, originalSnapshot],
+    queryFn: () => libraryV2Original(workId, originalSnapshot),
     enabled: runtime && tab === "json",
   });
   // 履歴は、選んだ版と一つ前の版を比べる。何も選んでいなければ現在の版。
   const selected = versions.find((version) => version.snapshot === selectedSnapshot) ?? versions[0] ?? null;
   const previous = selected ? versions.find((version) => version.version < selected.version) ?? null : null;
   const selectedText = useQuery({
-    queryKey: ["library-v2-version-text", workId, selected?.snapshot],
-    queryFn: () => libraryV2VersionText(workId, selected!.snapshot),
+    queryKey: ["library-v2-revision-snapshot", workId, selected?.snapshot],
+    queryFn: () => libraryV2RevisionSnapshot(workId, selected!.snapshot),
     enabled: runtime && tab === "history" && Boolean(selected),
   });
   const previousText = useQuery({
-    queryKey: ["library-v2-version-text", workId, previous?.snapshot],
-    queryFn: () => libraryV2VersionText(workId, previous!.snapshot),
+    queryKey: ["library-v2-revision-snapshot", workId, previous?.snapshot],
+    queryFn: () => libraryV2RevisionSnapshot(workId, previous!.snapshot),
     enabled: runtime && tab === "history" && Boolean(previous),
   });
 
@@ -247,6 +249,14 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
     goToContentPage(1);
     setTab("content");
   };
+  const showVersionOriginal = (snapshot: string | null) => {
+    setOriginalSnapshot(snapshot);
+    setTab("json");
+  };
+  const versionActions = selected ? <Group gap="xs">
+    <Button size="xs" variant="light" disabled={selectedText.data?.text == null} onClick={() => showVersionContent(selected.snapshot === current?.snapshot && !edited ? null : selected.snapshot)}>この版の本文を見る</Button>
+    <Button size="xs" variant="default" onClick={() => showVersionOriginal(selected.snapshot)}>この版の保存データを見る</Button>
+  </Group> : undefined;
   const handleContentClick = (event: React.MouseEvent<HTMLElement>) => {
     // 取り込んだ本文の頭の「原本を見る」。印はファイルの識別子を持つ。
     const original = (event.target as HTMLElement).closest<HTMLElement>("button.attachment-original");
@@ -461,17 +471,24 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
                   ? <LoadingState label="変更内容を読み込んでいます" />
                   : selectedText.error || previousText.error
                     ? <ErrorState error={selectedText.error ?? previousText.error} retry={() => { selectedText.refetch(); previousText.refetch(); }} />
-                    : <RevisionDiff
+                    : selectedText.data?.text === null || (previous && previousText.data?.text === null)
+                      ? <Stack gap="md"><Alert color="gray">一方の版に本文が保存されていないため、本文の差分は比較できません。</Alert>{previousText.data?.metadata && selectedText.data?.metadata && <RevisionMetadataDiff before={previousText.data.metadata} after={selectedText.data.metadata} />}{versionActions}</Stack>
+                      : <RevisionDiff
                         beforeVersion={previous?.version ?? null}
                         afterVersion={selected.version}
-                        beforeText={previous ? previousText.data ?? "" : null}
-                        afterText={selectedText.data ?? ""}
-                        actions={<Button size="xs" variant="light" onClick={() => showVersionContent(selected.snapshot === current?.snapshot && !edited ? null : selected.snapshot)}>この版の本文を見る</Button>}
+                        beforeText={previous ? previousText.data?.text ?? null : null}
+                        afterText={selectedText.data?.text ?? ""}
+                        beforeMetadata={previous ? previousText.data?.metadata : undefined}
+                        afterMetadata={selectedText.data?.metadata}
+                        actions={versionActions}
                       />}
             </Card>
           </div>
         </Tabs.Panel>
-        <Tabs.Panel value="json" pt="lg">{originalQuery.isLoading ? <LoadingState /> : originalQuery.error ? <ErrorState error={originalQuery.error} retry={() => originalQuery.refetch()} /> : originalQuery.data ? <BoundedJsonView jsonText={originalQuery.data} description="現在の版を作ったときに取得元から受け取ったデータを表示します（JSON形式）" /> : <Alert color="gray">この版には取得元から受け取ったデータが残っていません。</Alert>}</Tabs.Panel>
+        <Tabs.Panel value="json" pt="lg"><Stack gap="sm">
+          {originalSnapshot !== null && <Group justify="space-between"><Text size="xs" c="dimmed">保存済み v{versions.find((version) => version.snapshot === originalSnapshot)?.version ?? "?"} の保存データ</Text><Button size="xs" variant="subtle" onClick={() => showVersionOriginal(null)}>現在の保存データへ</Button></Group>}
+          {originalQuery.isLoading ? <LoadingState /> : originalQuery.error ? <ErrorState error={originalQuery.error} retry={() => originalQuery.refetch()} /> : originalQuery.data ? <BoundedJsonView jsonText={originalQuery.data} description={originalSnapshot === null ? "現在の版を作ったときに取得元から受け取ったデータを表示します（JSON形式）" : "選んだ版の取得元のデータを表示します（JSON形式）"} /> : <Alert color="gray">この版には取得元から受け取ったデータが残っていません。</Alert>}
+        </Stack></Tabs.Panel>
       </Tabs>
       <PdfOriginalViewer target={pdfOriginal} onClose={() => setPdfOriginal(null)} />
     </div>

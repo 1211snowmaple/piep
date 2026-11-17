@@ -30,7 +30,7 @@ mod resources;
 mod saved_state;
 mod schema;
 mod searches;
-mod source_bindings;
+pub(crate) mod source_bindings;
 mod source_state;
 mod store;
 mod suggestions;

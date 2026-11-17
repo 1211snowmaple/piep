@@ -32,3 +32,9 @@ it("shows removed files, tag order and FANBOX formatting changes", () => {
   expect(changes.assets[0].change).toBe("removed");
   expect(changes.fields.map((field) => field.label)).toEqual(["本文の構成・リンク・書式", "タグの並び順"]);
 });
+
+it("does not call unknown historical asset bindings additions or removals", () => {
+  const changes = compareRevisionMetadata({ ...metadata, assetsKnown: false, assets: [] }, { ...metadata, assetsKnown: true, assets: [image] });
+  expect(changes.assets).toEqual([]);
+  expect(changes.unknown).toEqual(["画像・添付"]);
+});

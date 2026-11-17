@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type { ReaderOutlineEntry, ReaderSearchHit, ScoreReason, SearchHighlight, WorkBlock, WorkBlockInput } from "@/types/library";
 import type { PdfPageImage } from "@/services/dbApi";
+import type { RevisionMetadata } from "@/services/workInspectionApi";
 
 /**
  * 新しい棚（読み取り専用の写し）の命令。`src-tauri/src/commands/library_v2.rs` と対になる。
@@ -334,6 +335,16 @@ export function isShelfPdf(item: ShelfMedia): item is ShelfMedia & { file: strin
 
 export function libraryV2VersionText(work: string, snapshot: string): Promise<string> {
   return invoke<string>("library_v2_version_text", { work, snapshot });
+}
+
+export interface ShelfRevisionSnapshot {
+  /** null は未取得。空文字は保存した空の本文。 */
+  text: string | null;
+  metadata: RevisionMetadata;
+}
+
+export function libraryV2RevisionSnapshot(work: string, snapshot: string): Promise<ShelfRevisionSnapshot> {
+  return invoke<ShelfRevisionSnapshot>("library_v2_revision_snapshot", { work, snapshot });
 }
 
 export function libraryV2Original(work: string, snapshot: string | null): Promise<string | null> {

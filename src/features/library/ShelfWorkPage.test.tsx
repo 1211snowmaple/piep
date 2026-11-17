@@ -2,7 +2,7 @@ import { MantineProvider } from "@mantine/core";
 import { ModalsProvider } from "@mantine/modals";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import type { ShelfWork } from "@/services/libraryV2Api";
@@ -18,7 +18,7 @@ const api = vi.hoisted(() => ({
   libraryV2Work: vi.fn(),
   libraryV2Content: vi.fn(),
   libraryV2Media: vi.fn(),
-  libraryV2VersionText: vi.fn(),
+  libraryV2RevisionSnapshot: vi.fn(),
   libraryV2Original: vi.fn(),
   libraryV2RenderPdfPage: vi.fn(),
   libraryV2Status: vi.fn(),
@@ -87,6 +87,7 @@ function renderPage(hash: string) {
 }
 
 describe("ShelfWorkPage", () => {
+  afterEach(() => { Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); });
   beforeEach(() => {
     for (const fn of Object.values(api)) fn.mockReset();
     window.localStorage.clear();
@@ -98,7 +99,10 @@ describe("ShelfWorkPage", () => {
       pageCount: 2,
       html: `<p>${page + 1}ページ本文</p><img class="novel-image" data-local-path="${IMAGE}" alt="挿絵" />`,
     }));
-    api.libraryV2VersionText.mockImplementation(async (_work: string, snapshot: string) => snapshot === FIRST ? "一行目" : "二行目");
+    api.libraryV2RevisionSnapshot.mockImplementation(async (_work: string, snapshot: string) => ({
+      text: snapshot === FIRST ? "一行目" : "二行目",
+      metadata: { title: "題", caption: "説明", tags: [], publishedAt: null, updatedAt: null, assets: [], assetsKnown: true },
+    }));
   });
 
   it("opens a work of the new shelf by its id and reads the body's images by their fingerprint", async () => {
@@ -122,12 +126,57 @@ describe("ShelfWorkPage", () => {
 
   it("compares a version with the one before it and shows that version's body", async () => {
     renderPage(`#/works/${WORK}?tab=history`);
-    await waitFor(() => expect(api.libraryV2VersionText).toHaveBeenCalledWith(WORK, SECOND));
-    expect(api.libraryV2VersionText).toHaveBeenCalledWith(WORK, FIRST);
+    await waitFor(() => expect(api.libraryV2RevisionSnapshot).toHaveBeenCalledWith(WORK, SECOND));
+    expect(api.libraryV2RevisionSnapshot).toHaveBeenCalledWith(WORK, FIRST);
     fireEvent.click(await screen.findByRole("button", { name: /^v1/ }));
     fireEvent.click(await screen.findByRole("button", { name: "この版の本文を見る" }));
     await waitFor(() => expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, FIRST, 0));
     expect(await screen.findByText("保存済み v1")).toBeInTheDocument();
+  });
+
+  it("shows metadata and saved image changes even when source text is identical", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+    const oldImage = "cd".repeat(32);
+    api.libraryV2RevisionSnapshot.mockImplementation(async (_work: string, snapshot: string) => ({
+      text: "同じ本文",
+      metadata: {
+        title: "題", caption: snapshot === FIRST ? "古い説明" : "新しい説明", tags: [snapshot === FIRST ? "古いタグ" : "新しいタグ"],
+        publishedAt: null, updatedAt: null, assetsKnown: true,
+        assets: [{ key: "pixiv-uploaded:1", kind: "illustrations", label: "1.jpg", source: "", available: true,
+          contentHash: snapshot === FIRST ? oldImage : IMAGE, localPath: `shelf:${snapshot === FIRST ? oldImage : IMAGE}` }],
+      },
+    }));
+    renderPage(`#/works/${WORK}?tab=history`);
+    expect(await screen.findByText("本文の変更はありません。")).toBeInTheDocument();
+    const metadata = screen.getByLabelText("作品情報の差分");
+    expect(metadata).toHaveTextContent("古い説明");
+    expect(metadata).toHaveTextContent("新しい説明");
+    expect(metadata).toHaveTextContent("古いタグ");
+    expect(metadata).toHaveTextContent("新しいタグ");
+    expect(screen.getByAltText("変更前の挿絵")).toHaveAttribute("src", `http://piep-library.localhost/${oldImage}`);
+    expect(screen.getByAltText("変更後の挿絵")).toHaveAttribute("src", `http://piep-library.localhost/${IMAGE}`);
+  });
+
+  it("does not compare an unacquired body as a deletion and keeps that version's source JSON selectable", async () => {
+    api.libraryV2RevisionSnapshot.mockImplementation(async (_work: string, snapshot: string) => ({
+      text: snapshot === FIRST ? null : "取得した本文",
+      metadata: { title: snapshot === FIRST ? "旧題" : "新題", caption: null, tags: null, publishedAt: null, updatedAt: null, assets: [], assetsKnown: false },
+    }));
+    api.libraryV2Original.mockImplementation(async (_work: string, snapshot: string | null) => JSON.stringify({ title: snapshot === FIRST ? "選んだ原本" : "現在の原本" }));
+    renderPage(`#/works/${WORK}?tab=history`);
+    expect(await screen.findByText("一方の版に本文が保存されていないため、本文の差分は比較できません。")).toBeInTheDocument();
+    expect(screen.getByLabelText("作品情報の差分")).toHaveTextContent("旧題");
+    expect(screen.getByLabelText("作品情報の差分")).toHaveTextContent("新題");
+    expect(screen.queryByText("本文の変更はありません。")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^v1/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "この版の本文を見る" })).toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: "この版の保存データを見る" }));
+    expect(await screen.findByText("保存済み v1 の保存データ")).toBeInTheDocument();
+    await waitFor(() => expect(api.libraryV2Original).toHaveBeenCalledWith(WORK, FIRST));
+    expect(await screen.findByText(/選んだ原本/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "現在の保存データへ" }));
+    await waitFor(() => expect(api.libraryV2Original).toHaveBeenCalledWith(WORK, null));
+    expect(await screen.findByText(/現在の原本/)).toBeInTheDocument();
   });
 
   it("checks just this work by its shelf UUID after switching over", async () => {

@@ -41,7 +41,7 @@ pub enum BodyAssetReference {
     },
 }
 impl BodyAssetReference {
-    pub(super) fn is_image(&self) -> bool {
+    pub(crate) fn is_image(&self) -> bool {
         !matches!(self, Self::ArticleFile { .. } | Self::ArticleFileAt { .. })
     }
 }

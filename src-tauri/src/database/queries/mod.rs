@@ -39,6 +39,7 @@ mod reader;
 pub(crate) use reader::{reader_outline, search_reader_pages};
 mod work_inspection;
 pub(crate) use work_inspection::revision_metadata;
+pub(crate) use work_inspection::RevisionAsset;
 pub use work_inspection::{RevisionMetadata, RevisionSnapshot, WorkAcquisitionDetails};
 pub(crate) mod queue_transfer;
 mod update_watch;

@@ -3,7 +3,7 @@ use super::{BodyAssetReference, SourceBody};
 use serde_json::Value;
 use std::path::Path;
 
-pub(super) fn entry<'a>(body: &'a SourceBody, reference: &BodyAssetReference) -> Option<&'a Value> {
+pub(crate) fn entry<'a>(body: &'a SourceBody, reference: &BodyAssetReference) -> Option<&'a Value> {
     let SourceBody::FanboxBody(body) = body else {
         return None;
     };

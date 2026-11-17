@@ -18,6 +18,10 @@ use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 
+#[path = "library_view_snapshot.rs"]
+mod snapshot;
+pub use snapshot::RevisionSnapshotView;
+
 /// 一冊を画面のページに分けたもの。
 #[derive(Clone, Debug, Default)]
 pub struct RenderedDocument {

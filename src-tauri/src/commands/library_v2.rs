@@ -988,6 +988,25 @@ pub async fn library_v2_version_text(
     .map_err(|e| e.to_string())?
 }
 
+/// 選んだ保存状態の本文と作品情報・画像・添付を比較する。別作品の保存状態や編集 ID は拒否する。
+/// 本文の未取得は null、保存済みの空の本文は空文字。画像は保存時の指紋と棚の URI 用の識別子で返す。
+#[tauri::command]
+pub async fn library_v2_revision_snapshot(
+    state: State<'_, Arc<LibraryV2>>,
+    work: LibraryId,
+    snapshot: LibraryId,
+) -> Result<crate::library_view::RevisionSnapshotView, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        state
+            .library()?
+            .work_revision_snapshot(work, snapshot)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 版（省くと現在の版）を作った取得元の応答。なければ None。
 #[tauri::command]
 pub async fn library_v2_original(

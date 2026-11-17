@@ -12,27 +12,29 @@ use std::{collections::BTreeMap, io::Read, path::Path, sync::LazyLock};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevisionAsset {
-    key: String,
-    kind: String,
-    label: String,
-    source: String,
-    local_path: Option<String>,
-    available: Option<bool>,
-    content_hash: Option<String>,
+    pub(crate) key: String,
+    pub(crate) kind: String,
+    pub(crate) label: String,
+    pub(crate) source: String,
+    pub(crate) local_path: Option<String>,
+    pub(crate) available: Option<bool>,
+    pub(crate) content_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevisionMetadata {
-    title: Option<String>,
-    caption: Option<String>,
-    author: Option<String>,
-    series: Option<String>,
-    body_structure: Option<String>,
-    tags: Option<Vec<String>>,
-    published_at: Option<String>,
-    updated_at: Option<String>,
-    assets: Vec<RevisionAsset>,
+    pub(crate) title: Option<String>,
+    pub(crate) caption: Option<String>,
+    pub(crate) author: Option<String>,
+    pub(crate) series: Option<String>,
+    pub(crate) body_structure: Option<String>,
+    pub(crate) tags: Option<Vec<String>>,
+    pub(crate) published_at: Option<String>,
+    pub(crate) updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) assets_known: Option<bool>,
+    pub(crate) assets: Vec<RevisionAsset>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -312,6 +314,7 @@ pub(crate) fn revision_metadata(
                 "/detail/uploadDate",
             ],
         ),
+        assets_known: None,
         assets: items.into_values().collect(),
     }
 }
