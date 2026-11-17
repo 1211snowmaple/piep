@@ -232,9 +232,7 @@ fn staged_from(dir: &Path, data: &Value, source: &str) -> Result<Vec<StagedAsset
 }
 
 /// 取り寄せた応答を切り替えた棚へ保存する。
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn save_to_shelf(
-    _app: &tauri::AppHandle,
     shelf: Arc<LibraryV2>,
     library: Arc<Library>,
     data: Value,
@@ -274,10 +272,20 @@ pub(super) async fn save_to_shelf(
     let card = |library: Arc<Library>, work: LibraryId| async move {
         blocking(move || library.work_card(work).map_err(|e| e.to_string())).await
     };
+    let mut reader_only = false;
     if let Some(work) = existing {
-        let unchanged = {
+        let plan = {
             let (library, data, source) = (Arc::clone(&library), data.clone(), source.clone());
-            blocking(move || skip_save_on_shelf(&library, work, &data, &source, true)).await?
+            blocking(move || repairs::save_plan(&library, work, &data, &source)).await?
+        };
+        let unchanged = match plan {
+            repairs::SavePlan::Unchanged => true,
+            repairs::SavePlan::Save => false,
+            repairs::SavePlan::ReaderOnly(previous) => {
+                data = previous;
+                reader_only = true;
+                false
+            }
         };
         if unchanged {
             if super::shelf_profiles::save(Arc::clone(&library), &source, &data).await {
@@ -311,7 +319,7 @@ pub(super) async fn save_to_shelf(
     }
 
     // 原寸は、実際に保存すると決まったここで探す（旧棚の保存と同じ）。
-    if source == "pixiv" {
+    if source == "pixiv" && !reader_only {
         match crate::downloader::pixiv_originals::cdn_client() {
             Ok(client) => {
                 crate::downloader::pixiv_originals::add_original_urls(&client, &mut data).await
@@ -328,13 +336,27 @@ pub(super) async fn save_to_shelf(
         false
     };
     let request = LibraryId::now_v7();
+    let route = if reader_only {
+        "prepare-reader"
+    } else {
+        "save"
+    };
     {
         let (library, source, key) = (Arc::clone(&library), source.clone(), source_id.clone());
+        let input = serde_json::to_vec_pretty(&data).map_err(|e| e.to_string())?;
         blocking(move || {
             library
-                .begin_acquisition(request, &source, EntityKind::Work, &key, "save")
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+                .begin_acquisition(request, &source, EntityKind::Work, &key, route)
+                .map_err(|e| e.to_string())?;
+            if let Err(error) = library.record_acquisition_payload(
+                request,
+                "work-save-input",
+                &crate::library::CaptureSource::Bytes(input),
+            ) {
+                let _ = library.cancel_acquisition(request);
+                return Err(error.to_string());
+            }
+            Ok(())
         })
         .await?;
     }
@@ -343,36 +365,48 @@ pub(super) async fn save_to_shelf(
         tokio::fs::create_dir_all(&staging)
             .await
             .map_err(|e| e.to_string())?;
-        let aliases = if source == "fanbox" {
+        let aliases = if source == "fanbox" || reader_only {
             let (library, data, dir) = (
                 Arc::clone(&library),
                 data.clone(),
                 staging.join("data_assets"),
             );
-            blocking(move || repairs::restore_held(&library, existing, &data, &dir)).await?
+            let provider = source.clone();
+            blocking(move || repairs::restore_held(&library, existing, &data, &dir, &provider))
+                .await?
         } else {
             HashMap::new()
         };
         let mut linked = data.clone();
-        let download = crate::downloader::asset_downloader::download_and_link_assets(
-            &mut linked,
-            &staging.join("data.json"),
-            source == "fanbox",
-            cookie,
-            user_agent,
-        )
-        .await;
+        let download = if reader_only {
+            Ok(())
+        } else {
+            crate::downloader::asset_downloader::download_and_link_assets(
+                &mut linked,
+                &staging.join("data.json"),
+                source == "fanbox",
+                cookie,
+                user_agent,
+            )
+            .await
+        };
         let asset_failure = repairs::download_result(download, repair)?;
         let mut assets = {
             let (dir, data, source) = (staging.join("data_assets"), data.clone(), source.clone());
             blocking(move || staged_from(&dir, &data, &source)).await?
         };
-        let observation = (source == "fanbox").then(|| repairs::observation(&data, &assets));
+        let observation =
+            (source == "fanbox" && !reader_only).then(|| repairs::observation(&data, &assets));
         for asset in &mut assets {
             if let Some(held) = aliases.get(&(asset.role.clone(), asset.name.clone())) {
                 asset.name.clone_from(&held.name);
                 asset.mime_type.clone_from(&held.mime_type);
             }
+        }
+        if reader_only {
+            let (library, held) = (Arc::clone(&library), assets.clone());
+            let work = existing.ok_or("読書の対応を補う対象がありません")?;
+            blocking(move || repairs::require_all_held(&library, work, &held)).await?;
         }
         let present: Vec<(String, Option<String>)> = assets
             .iter()
@@ -395,15 +429,13 @@ pub(super) async fn save_to_shelf(
                 request,
                 provider: &source,
                 key: &key,
-                route: "save",
+                route,
                 data: &data,
                 assets,
             };
-            match observation {
-                Some(observation) => library.save_work_with_asset_repair(save, observation),
-                None => library.save_work(save),
-            }
-            .map_err(|e| e.to_string())
+            library
+                .save_readable_work(save, observation)
+                .map_err(|e| e.to_string())
         })
         .await?;
         Ok::<_, String>((result, missing, asset_failure))

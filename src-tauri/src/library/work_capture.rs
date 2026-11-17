@@ -149,6 +149,54 @@ pub(crate) fn work_fields(provider: &str, data: &Value) -> WorkFields {
     }
 }
 
+fn work_reader_bindings(
+    provider: &str,
+    body: Option<&SourceBody>,
+    assets: &[StagedAsset],
+) -> Result<Vec<super::ReaderBinding>> {
+    let body = body.ok_or(Error::ResourceUnavailable)?;
+    let assets = assets
+        .iter()
+        .filter(|a| {
+            a.role != "cover"
+                && !(provider == "pixiv"
+                    && a.url
+                        .as_deref()
+                        .is_some_and(super::is_pixiv_placeholder_image))
+        })
+        .map(|a| Ok((asset_reference(&a.role, &a.name)?, a)))
+        .collect::<Result<Vec<_>>>()?;
+    body.asset_references()?
+        .into_iter()
+        .map(|reference| {
+            let mut candidates = assets
+                .iter()
+                .filter(|(resource, asset)| {
+                    matches!(resource, ResourceReference::Media { .. }) == reference.is_image()
+                        && super::source_bindings::source_matches(
+                            body,
+                            &reference,
+                            &asset.name,
+                            asset.url.as_deref(),
+                        )
+                })
+                .map(|(resource, _)| resource.clone())
+                .collect::<Vec<_>>();
+            candidates.sort();
+            candidates.dedup();
+            if candidates.len() > 1 {
+                return Err(Error::Integrity(
+                    "本文の画像・添付を一意に対応付けられません".into(),
+                ));
+            }
+            Ok(super::ReaderBinding {
+                reference,
+                resource: candidates.pop(),
+            })
+        })
+        .collect()
+}
+
 /// 画像を pixiv の品質の印から分ける（縮小版・原寸・不明）。
 fn quality(url: Option<&str>) -> &'static str {
     if url.is_some_and(|u| u.contains("/c/")) {
@@ -239,20 +287,31 @@ pub struct WorkSave<'a> {
 impl Library {
     /// 取得を始めた記録を作ってから、応答と手元の画像・添付を保存する。中身が今の版と同じなら
     /// 版を増やさない（`created_revision` が偽）。
+    /// 旧入力の照合用の形式を保つ。アプリの新規保存には読書の対応も確定する `save_readable_work` を使う。
     pub fn save_work(&self, save: WorkSave<'_>) -> Result<CaptureResult> {
-        self.save_work_inner(save, None)
+        self.save_work_inner(save, None, false)
     }
+    #[cfg(test)]
     pub(crate) fn save_work_with_asset_repair(
         &self,
         save: WorkSave<'_>,
         observation: super::asset_repairs::AssetRepairObservation,
     ) -> Result<CaptureResult> {
-        self.save_work_inner(save, Some(observation))
+        self.save_work_inner(save, Some(observation), false)
+    }
+    /// 本文と画像・添付の対応を含め、読めることまで同じ取得で確定する。
+    pub(crate) fn save_readable_work(
+        &self,
+        save: WorkSave<'_>,
+        observation: Option<super::asset_repairs::AssetRepairObservation>,
+    ) -> Result<CaptureResult> {
+        self.save_work_inner(save, observation, true)
     }
     fn save_work_inner(
         &self,
         save: WorkSave<'_>,
         observation: Option<super::asset_repairs::AssetRepairObservation>,
+        readable: bool,
     ) -> Result<CaptureResult> {
         let WorkSave {
             request,
@@ -263,29 +322,56 @@ impl Library {
             assets,
         } = save;
         self.begin_acquisition(request, provider, EntityKind::Work, key, route)?;
-        let raw = serde_json::to_vec_pretty(data)?;
-        let fields = work_fields(provider, data);
-        let (media, attachments, _) = staged_assets(provider, data, assets)?;
-        let capture = Capture {
-            request_id: request,
-            acquired_at: None,
-            provider: provider.into(),
-            external_key: key.into(),
-            kind: EntityKind::Work,
-            route: route.into(),
-            raw: CaptureSource::Bytes(raw),
-            metadata: fields.metadata,
-            field_states: fields.field_states,
-            body: fields.body,
-            media,
-            attachments,
-        };
-        let result = match observation {
-            Some(observation) => {
-                self.complete_acquisition_with_asset_repair(request, capture, observation)
+        let result = (|| {
+            let raw = serde_json::to_vec_pretty(data)?;
+            if readable {
+                self.record_acquisition_payload(
+                    request,
+                    "work-save-input",
+                    &CaptureSource::Bytes(raw.clone()),
+                )?;
             }
-            None => self.complete_acquisition(request, capture),
-        };
+            let fields = work_fields(provider, data);
+            let bindings = readable
+                .then(|| work_reader_bindings(provider, fields.body.as_ref(), &assets))
+                .transpose()?;
+            let (media, attachments, _) = staged_assets(provider, data, assets)?;
+            let capture = Capture {
+                request_id: request,
+                acquired_at: None,
+                provider: provider.into(),
+                external_key: key.into(),
+                kind: EntityKind::Work,
+                route: route.into(),
+                raw: CaptureSource::Bytes(raw),
+                metadata: fields.metadata,
+                field_states: fields.field_states,
+                body: fields.body,
+                media,
+                attachments,
+            };
+            match (bindings, observation) {
+                (Some(bindings), Some(observation)) => self
+                    .complete_acquisition_with_reader_and_asset_repair(
+                        request,
+                        capture,
+                        bindings,
+                        observation,
+                    ),
+                (Some(bindings), None) => {
+                    self.complete_acquisition_with_reader(request, capture, bindings)
+                }
+                #[cfg(test)]
+                (None, Some(observation)) => {
+                    self.complete_acquisition_with_asset_repair(request, capture, observation)
+                }
+                (None, None) => self.complete_acquisition(request, capture),
+                #[cfg(not(test))]
+                (None, Some(_)) => Err(Error::Integrity(
+                    "添付の再取得には読書用の対応が必要です".into(),
+                )),
+            }
+        })();
         if result.is_err() {
             let _ = self.cancel_acquisition(request);
         }
@@ -296,3 +382,7 @@ impl Library {
 #[cfg(test)]
 #[path = "work_capture_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "work_capture_reader_tests.rs"]
+mod reader_tests;

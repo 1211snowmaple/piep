@@ -1,5 +1,6 @@
 use super::{rows::mark_row, LegacyImporter};
 use crate::library::{
+    source_bindings::{entry, source_matches},
     BodyAssetReference, Error, Library, LibraryId, ReaderBinding, ResourceReference, Result,
     SourceBody,
 };
@@ -49,26 +50,6 @@ fn spelling(base: &Path, stored: &str) -> Result<PathBuf> {
     // 本文内のパス自体は開かず、所属を照合済みの資産記録とだけ比較する。
     Ok(path)
 }
-fn sanitized(name: &str) -> String {
-    let name = name.replace("..", "__");
-    name.chars()
-        .map(|c| if "<>:\"/\\|?*".contains(c) { '_' } else { c })
-        .collect::<String>()
-        .trim()
-        .to_owned()
-}
-fn entry<'a>(body: &'a SourceBody, reference: &BodyAssetReference) -> Option<&'a Value> {
-    let SourceBody::FanboxBody(body) = body else {
-        return None;
-    };
-    match reference {
-        BodyAssetReference::ArticleImage { key } => body.get("imageMap")?.get(key),
-        BodyAssetReference::ArticleFile { key } => body.get("fileMap")?.get(key),
-        BodyAssetReference::ArticleImageAt { index } => body.get("images")?.get(*index as usize),
-        BodyAssetReference::ArticleFileAt { index } => body.get("files")?.get(*index as usize),
-        _ => None,
-    }
-}
 fn choose(
     root: &Path,
     json: &Path,
@@ -104,59 +85,22 @@ fn choose(
             return Err(Error::UnsafePath(local.clone()));
         }
     }
-    let mut stems = Vec::new();
-    match reference {
-        BodyAssetReference::PixivUploaded { image_id } => stems.extend([
-            format!("inline_{image_id}"),
-            image_id.clone(),
-            format!("illust_inline_{image_id}"),
-        ]),
-        BodyAssetReference::PixivIllustration {
-            illustration_id,
-            page,
-        } => stems.extend([
-            format!("{illustration_id}_p{}", page - 1),
-            format!("illust_{illustration_id}_p{}", page - 1),
-            format!("{illustration_id}-{page}_p{}", page - 1),
-        ]),
-        _ => {
-            let id = data.and_then(|v| v.get("id")).and_then(|id| {
-                id.as_str()
-                    .map(str::to_owned)
-                    .or_else(|| id.as_i64().map(|id| id.to_string()))
-            });
-            if let Some(id) = id {
-                if reference.is_image() {
-                    stems.push(sanitized(&id));
-                } else if let Some(name) = data.and_then(|v| v.get("name")).and_then(Value::as_str)
-                {
-                    stems.push(sanitized(&format!("{name}_{id}")));
-                }
-            }
-        }
-    }
     let mut candidates = Vec::new();
     for asset in assets {
         if matches!(asset.reference, ResourceReference::Media { .. }) != reference.is_image() {
             continue;
         }
-        let exact_url = url.is_some_and(|url| asset.url.as_deref() == Some(url));
         let exact_path = local
             .as_ref()
             .is_some_and(|local| asset.paths.contains(local));
-        let stem = Path::new(&asset.name)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
         // 取得元が別だと分かる画像を、似た名前だけで代用しない。
-        let compatible = url.is_none() || asset.url.is_none() || exact_url;
+        let compatible = url.is_none() || asset.url.is_none() || url == asset.url.as_deref();
         if exact_path && !compatible {
             return Err(Error::Integrity(
                 "本文の保存先と取得 URL の記録が食い違います".into(),
             ));
         }
-        let named = compatible && stems.iter().any(|name| name == stem);
-        if exact_url || exact_path || named {
+        if exact_path || source_matches(body, reference, &asset.name, asset.url.as_deref()) {
             candidates.push(asset.reference.clone());
         }
     }

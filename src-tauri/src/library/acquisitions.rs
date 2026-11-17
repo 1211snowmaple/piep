@@ -358,6 +358,7 @@ impl Library {
         self.complete_with_reader(id, capture, None, None, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn complete_acquisition_with_asset_repair(
         &self,
         id: LibraryId,
@@ -402,6 +403,21 @@ impl Library {
         }
         super::reader::normalize_input_bindings(&mut bindings)?;
         self.complete_with_reader(id, capture, Some(bindings), None, None)
+    }
+
+    pub(crate) fn complete_acquisition_with_reader_and_asset_repair(
+        &self,
+        id: LibraryId,
+        capture: Capture,
+        mut bindings: Vec<ReaderBinding>,
+        mut observation: super::asset_repairs::AssetRepairObservation,
+    ) -> Result<CaptureResult> {
+        if capture.kind != EntityKind::Work || capture.provider != "fanbox" {
+            return Err(Error::Integrity("添付の再取得の対象が不正です".into()));
+        }
+        super::reader::normalize_input_bindings(&mut bindings)?;
+        observation.normalize();
+        self.complete_with_reader(id, capture, Some(bindings), None, Some(observation))
     }
 
     fn complete_with_reader(
@@ -469,7 +485,9 @@ pub(super) fn encode_manifest(context: &CompletionContext, request: Vec<u8>) -> 
             .map_err(|_| Error::Integrity("取得入力が UTF-8 ではありません".into()))?,
     )?;
     let bytes = serde_json::to_vec(&AcquisitionManifest {
-        format: if context.asset_repair.is_some() {
+        format: if context.asset_repair.is_some() && context.reader_bindings.is_some() {
+            "capture-request-v6"
+        } else if context.asset_repair.is_some() {
             "capture-request-v5"
         } else if context.profile_checked_at.is_some() {
             "capture-request-v4"
@@ -555,7 +573,12 @@ fn manifest_files(
         .filter(|v| v.len() == 13)
         .ok_or_else(invalid_manifest)?;
     let ticket = &manifest.ticket;
-    if manifest.asset_repair.is_some() && manifest.format != "capture-request-v5" {
+    if manifest.asset_repair.is_some()
+        && !matches!(
+            manifest.format.as_str(),
+            "capture-request-v5" | "capture-request-v6"
+        )
+    {
         return Err(invalid_manifest());
     }
     let reader_format = match (manifest.format.as_str(), &manifest.reader_bindings) {
@@ -584,6 +607,20 @@ fn manifest_files(
                 canonical.normalize();
                 &canonical == observation
             })
+        }
+        ("capture-request-v6", Some(bindings))
+            if ticket.kind == EntityKind::Work
+                && ticket.provider == "fanbox"
+                && manifest.profile_checked_at.is_none() =>
+        {
+            let mut normalized = bindings.clone();
+            super::reader::normalize_input_bindings(&mut normalized)?;
+            &normalized == bindings
+                && manifest.asset_repair.as_ref().is_some_and(|observation| {
+                    let mut canonical = observation.clone();
+                    canonical.normalize();
+                    &canonical == observation
+                })
         }
         _ => false,
     };

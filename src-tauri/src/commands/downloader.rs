@@ -2219,11 +2219,9 @@ pub async fn download_and_save(
         let library = shelf.switched()?;
         Some((shelf, library))
     }) {
-        return shelf::save_to_shelf(
-            &app, shelf, library, data, source, source_id, cookie, user_agent,
-        )
-        .await
-        .map(SavedWork::Shelf);
+        return shelf::save_to_shelf(shelf, library, data, source, source_id, cookie, user_agent)
+            .await
+            .map(SavedWork::Shelf);
     }
     save_to_legacy(
         app,

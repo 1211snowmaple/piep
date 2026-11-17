@@ -3,6 +3,11 @@ pub use piep_storage::Fingerprint;
 /// 棚のコピーや端末間の送受信でも変わらない識別子。
 pub type LibraryId = uuid::Uuid;
 
+/// 閲覧制限の案内画像は、作者が投稿した画像の代わりに使わない。
+pub(crate) fn is_pixiv_placeholder_image(url: &str) -> bool {
+    url.contains("/common/images/limit_")
+}
+
 /// pixiv の既知の表紙・挿絵形式だけ、品質によらない識別子を作る。
 /// 未知の URL は厳密比較へ戻し、他の画像を同じものと推測しない。
 pub fn cover_identity(provider: &str, url: &str) -> String {

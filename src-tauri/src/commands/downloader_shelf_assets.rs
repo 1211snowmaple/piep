@@ -3,6 +3,37 @@ use super::*;
 use crate::downloader::asset_downloader::{extract_download_targets, fanbox_former_file_names};
 use crate::library::asset_repairs::AssetRepairObservation;
 
+pub(super) enum SavePlan {
+    Save,
+    Unchanged,
+    ReaderOnly(Value),
+}
+
+pub(super) fn save_plan(
+    library: &Library,
+    work: LibraryId,
+    data: &Value,
+    source: &str,
+) -> Result<SavePlan, String> {
+    if !skip_save_on_shelf(library, work, data, source, true)? {
+        return Ok(SavePlan::Save);
+    }
+    let snapshot = library.current_snapshot(work).map_err(|e| e.to_string())?;
+    match library.reader_document(work, ResourceScope::Snapshot(snapshot)) {
+        Ok(_) => Ok(SavePlan::Unchanged),
+        Err(crate::library::Error::ResourceUnavailable) => {
+            let original = library
+                .work_original(work, snapshot)
+                .map_err(|e| e.to_string())?
+                .ok_or("読書の対応を補う原本がありません")?;
+            Ok(SavePlan::ReaderOnly(
+                serde_json::from_str(&original).map_err(|e| e.to_string())?,
+            ))
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 pub(super) fn same_source(previous: &Value, next: &Value) -> Result<bool, String> {
     let previous = crate::fanbox_api::payload::post_or_self(previous);
     let next = crate::fanbox_api::payload::post_or_self(next);
@@ -103,6 +134,7 @@ pub(super) fn restore_held(
     work: Option<LibraryId>,
     data: &Value,
     dir: &Path,
+    source: &str,
 ) -> Result<Aliases, String> {
     let mut aliases = HashMap::new();
     let Some(work) = work else {
@@ -115,9 +147,13 @@ pub(super) fn restore_held(
     };
     let previous: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     let (mut old_targets, mut targets) = (Vec::new(), Vec::new());
-    extract_download_targets(&previous, true, &mut old_targets);
-    extract_download_targets(data, true, &mut targets);
-    let former = fanbox_former_file_names(&previous);
+    extract_download_targets(&previous, source == "fanbox", &mut old_targets);
+    extract_download_targets(data, source == "fanbox", &mut targets);
+    let former = if source == "fanbox" {
+        fanbox_former_file_names(&previous)
+    } else {
+        HashMap::new()
+    };
     let resources = library
         .resource_manifest(work, ResourceScope::Snapshot(snapshot))
         .map_err(fail)?
@@ -200,6 +236,38 @@ pub(super) fn restore_held(
     Ok(aliases)
 }
 
+pub(super) fn require_all_held(
+    library: &Library,
+    work: LibraryId,
+    assets: &[StagedAsset],
+) -> Result<(), String> {
+    let fail = |e: crate::library::Error| e.to_string();
+    let snapshot = library.current_snapshot(work).map_err(fail)?;
+    let expected = library
+        .resource_manifest(work, ResourceScope::Snapshot(snapshot))
+        .map_err(fail)?
+        .resources
+        .into_iter()
+        .filter(|r| {
+            r.file.is_some()
+                && matches!(
+                    r.reference,
+                    ResourceReference::Media { .. } | ResourceReference::File { .. }
+                )
+        })
+        .map(|r| r.reference)
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = assets
+        .iter()
+        .map(|a| asset_reference(&a.role, &a.name))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(fail)?;
+    if expected != actual {
+        return Err("読書の対応を補う前に、取得済みの画像・添付をすべて復元できませんでした。手元の版は変更しません".into());
+    }
+    Ok(())
+}
+
 pub(super) fn observation(data: &Value, assets: &[StagedAsset]) -> AssetRepairObservation {
     let mut targets = Vec::new();
     extract_download_targets(data, true, &mut targets);
@@ -242,7 +310,7 @@ mod tests {
         let mut observed = observation(data, &assets);
         observed.complete = complete;
         library
-            .save_work_with_asset_repair(
+            .save_readable_work(
                 WorkSave {
                     request: LibraryId::now_v7(),
                     provider: "fanbox",
@@ -251,7 +319,7 @@ mod tests {
                     data,
                     assets,
                 },
-                observed,
+                Some(observed),
             )
             .unwrap()
     }
@@ -279,7 +347,8 @@ mod tests {
         );
         for attempt in 2..=MAX_REPAIR_ATTEMPTS {
             let dir = fixture.0.join(format!("retry{attempt}"));
-            let aliases = restore_held(&library, Some(first.entity_id), &data, &dir).unwrap();
+            let aliases =
+                restore_held(&library, Some(first.entity_id), &data, &dir, "fanbox").unwrap();
             assert!(download_result(
                 Err("1 asset downloads failed (1 succeeded): HTTP 404".into()),
                 can_record_attempt(&library, Some(first.entity_id), &data).unwrap()
@@ -309,7 +378,7 @@ mod tests {
         changed["body"]["files"][0]["url"] = json!("https://example.invalid/changed.txt");
         let dir = fixture.0.join("changed");
         assert!(
-            restore_held(&library, Some(first.entity_id), &changed, &dir)
+            restore_held(&library, Some(first.entity_id), &changed, &dir, "fanbox")
                 .unwrap()
                 .is_empty()
         );
@@ -349,7 +418,8 @@ mod tests {
             &library,
             Some(first.entity_id),
             &data,
-            &fixture.0.join("broken")
+            &fixture.0.join("broken"),
+            "fanbox"
         )
         .is_err());
     }
@@ -378,9 +448,11 @@ mod tests {
             false,
         );
         let dir = fixture.0.join("retry");
-        assert!(restore_held(&library, Some(first.entity_id), &data, &dir)
-            .unwrap()
-            .is_empty());
+        assert!(
+            restore_held(&library, Some(first.entity_id), &data, &dir, "fanbox")
+                .unwrap()
+                .is_empty()
+        );
         assert!(!dir.exists());
         let mut targets = Vec::new();
         extract_download_targets(&data, true, &mut targets);
@@ -481,6 +553,7 @@ mod tests {
                 Some(first.entity_id),
                 &data,
                 &dir.join("data_assets"),
+                "fanbox",
             )
             .unwrap();
             let mut linked = data.clone();
@@ -522,6 +595,358 @@ mod tests {
                 .attempts,
             3
         );
+        library.verify().unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[test]
+    fn preparing_an_old_fanbox_reading_copy_does_not_download_or_spend_an_exhausted_attempt() {
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("piep-reader-preparation-{}", LibraryId::now_v7())),
+        );
+        std::fs::create_dir_all(&fixture.0).unwrap();
+        let library = Library::create(&fixture.0.join("shelf")).unwrap();
+        let data = data();
+        let path = fixture.0.join("alpha.txt");
+        std::fs::write(&path, b"held").unwrap();
+        let asset = StagedAsset {
+            role: "file".into(),
+            name: "alpha.txt".into(),
+            path,
+            url: Some("https://example.invalid/a.txt".into()),
+            mime_type: Some("text/plain".into()),
+        };
+        let mut first = None;
+        for _ in 0..3 {
+            first = Some(
+                library
+                    .save_work_with_asset_repair(
+                        WorkSave {
+                            request: LibraryId::now_v7(),
+                            provider: "fanbox",
+                            key: "1",
+                            route: "save",
+                            data: &data,
+                            assets: vec![asset.clone()],
+                        },
+                        observation(&data, std::slice::from_ref(&asset)),
+                    )
+                    .unwrap(),
+            );
+        }
+        let first = first.unwrap();
+        assert!(library
+            .reader_document(first.entity_id, ResourceScope::Snapshot(first.snapshot_id))
+            .is_err());
+        let SavePlan::ReaderOnly(previous) =
+            save_plan(&library, first.entity_id, &data, "fanbox").unwrap()
+        else {
+            panic!("only reader preparation is needed")
+        };
+        let dir = fixture.0.join("prepare");
+        let aliases =
+            restore_held(&library, Some(first.entity_id), &previous, &dir, "fanbox").unwrap();
+        let mut assets = staged_from(&dir, &previous, "fanbox").unwrap();
+        for asset in &mut assets {
+            let held = &aliases[&(asset.role.clone(), asset.name.clone())];
+            asset.name.clone_from(&held.name);
+            asset.mime_type.clone_from(&held.mime_type);
+        }
+        require_all_held(&library, first.entity_id, &assets).unwrap();
+        let result = library
+            .save_readable_work(
+                WorkSave {
+                    request: LibraryId::now_v7(),
+                    provider: "fanbox",
+                    key: "1",
+                    route: "save",
+                    data: &previous,
+                    assets,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.snapshot_id, first.snapshot_id);
+        assert!(!result.created_revision);
+        assert_eq!(
+            library
+                .asset_repair_plan(
+                    first.entity_id,
+                    first.snapshot_id,
+                    &observation(&data, &[]).expected_urls
+                )
+                .unwrap()
+                .attempts,
+            3
+        );
+        library
+            .reader_document(first.entity_id, ResourceScope::Snapshot(first.snapshot_id))
+            .unwrap();
+        assert!(matches!(
+            save_plan(&library, first.entity_id, &data, "fanbox").unwrap(),
+            SavePlan::Unchanged
+        ));
+        library.verify().unwrap();
+    }
+
+    #[test]
+    fn preparing_an_old_pixiv_copy_restores_its_own_images_and_rejects_a_missing_held_asset() {
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("piep-reader-preparation-{}", LibraryId::now_v7())),
+        );
+        std::fs::create_dir_all(&fixture.0).unwrap();
+        let library = Library::create(&fixture.0.join("shelf")).unwrap();
+        let url = "https://i.pximg.net/original/inline.jpg";
+        let data = json!({"detail":{"title":"題","user":{"id":"77","name":"保存時の作者"}},"text":"[uploadedimage:1]","images":{"1":{"urls":{"original":url}}}});
+        let path = fixture.0.join("inline_1.jpg");
+        std::fs::write(&path, b"held image bytes").unwrap();
+        let first = library
+            .save_work(WorkSave {
+                request: LibraryId::now_v7(),
+                provider: "pixiv",
+                key: "1",
+                route: "save",
+                data: &data,
+                assets: vec![StagedAsset {
+                    role: "illustration".into(),
+                    name: "inline_1.jpg".into(),
+                    path,
+                    url: Some(url.into()),
+                    mime_type: None,
+                }],
+            })
+            .unwrap();
+        let mut received = data.clone();
+        received["detail"]["user"]["name"] = json!("現在の作者");
+        let SavePlan::ReaderOnly(previous) =
+            save_plan(&library, first.entity_id, &received, "pixiv").unwrap()
+        else {
+            panic!("only reader preparation is needed")
+        };
+        assert_eq!(previous, data);
+        assert!(require_all_held(&library, first.entity_id, &[]).is_err());
+        let dir = fixture.0.join("prepare");
+        let aliases =
+            restore_held(&library, Some(first.entity_id), &previous, &dir, "pixiv").unwrap();
+        let mut assets = staged_from(&dir, &previous, "pixiv").unwrap();
+        for asset in &mut assets {
+            let held = &aliases[&(asset.role.clone(), asset.name.clone())];
+            asset.name.clone_from(&held.name);
+            asset.mime_type.clone_from(&held.mime_type);
+        }
+        require_all_held(&library, first.entity_id, &assets).unwrap();
+        let result = library
+            .save_readable_work(
+                WorkSave {
+                    request: LibraryId::now_v7(),
+                    provider: "pixiv",
+                    key: "1",
+                    route: "save",
+                    data: &previous,
+                    assets,
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(result.snapshot_id, first.snapshot_id);
+        let document = library
+            .reader_document(first.entity_id, ResourceScope::Snapshot(first.snapshot_id))
+            .unwrap();
+        assert!(document.bindings[0].resource.is_some());
+        library.verify().unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_app_save_publishes_a_readable_work_and_keeps_the_old_copy_and_input_on_asset_failure(
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0u8; 4096];
+                let count = socket.read(&mut bytes).await.unwrap();
+                seen.fetch_add(1, Ordering::SeqCst);
+                let response =
+                    if String::from_utf8_lossy(&bytes[..count]).starts_with("GET /a.txt ") {
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nheld"
+                            .as_slice()
+                    } else {
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .as_slice()
+                    };
+                socket.write_all(response).await.unwrap();
+            }
+        });
+        let fixture =
+            Fixture(std::env::temp_dir().join(format!("piep-app-save-{}", LibraryId::now_v7())));
+        let library = Arc::new(Library::create(&fixture.0.join("shelf")).unwrap());
+        library.switch_over().unwrap();
+        let shelf = Arc::new(LibraryV2::with_test_library(Arc::clone(&library)));
+        let mut data = json!({"title":"投稿","type":"file","body":{"files":[{"id":"a","name":"alpha","url":format!("http://{address}/a.txt")}]}});
+        let saved = save_to_shelf(
+            Arc::clone(&shelf),
+            Arc::clone(&library),
+            data.clone(),
+            "fanbox".into(),
+            "1".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(saved.created);
+        let snapshot = library.current_snapshot(saved.work).unwrap();
+        let document = library
+            .reader_document(saved.work, ResourceScope::Snapshot(snapshot))
+            .unwrap();
+        let held = document.bindings[0].resource.as_ref().unwrap();
+        let mut bytes = Vec::new();
+        library
+            .read_resource(
+                saved.work,
+                ResourceScope::Snapshot(snapshot),
+                &held.reference,
+                None,
+                &mut bytes,
+            )
+            .unwrap();
+        assert_eq!(bytes, b"held");
+        data["title"] = json!("取得に失敗した新しい題");
+        data["body"]["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"b","name":"beta","url":format!("http://{address}/b.txt")}));
+        let error = save_to_shelf(
+            Arc::clone(&shelf),
+            Arc::clone(&library),
+            data,
+            "fanbox".into(),
+            "1".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("404"));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(library.current_snapshot(saved.work).unwrap(), snapshot);
+        assert_eq!(library.work_card(saved.work).unwrap().title, "投稿");
+        let id:Vec<u8>=library.reader().unwrap().query_row("SELECT id FROM acquisition_attempts WHERE entity_id=?1 ORDER BY epoch DESC LIMIT 1",[saved.work.as_bytes().as_slice()],|r|r.get(0)).unwrap();
+        let info = library
+            .acquisition_status(LibraryId::from_slice(&id).unwrap())
+            .unwrap();
+        assert_eq!(info.state, crate::library::AcquisitionState::Cancelled);
+        assert!(info.reader.is_none());
+        assert_eq!(info.payloads.len(), 1);
+        let mut bytes = Vec::new();
+        library
+            .objects
+            .export(&library.file(info.payloads[0].file).unwrap(), &mut bytes)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["title"],
+            json!("取得に失敗した新しい題")
+        );
+        library.verify().unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn the_app_prepares_existing_reading_bindings_without_http_or_spending_asset_attempts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let _ = socket.read(&mut request).await;
+                seen.fetch_add(1, Ordering::SeqCst);
+                socket
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let fixture =
+            Fixture(std::env::temp_dir().join(format!("piep-app-reader-{}", LibraryId::now_v7())));
+        std::fs::create_dir_all(&fixture.0).unwrap();
+        let library = Arc::new(Library::create(&fixture.0.join("shelf")).unwrap());
+        library.switch_over().unwrap();
+        let data = json!({"title":"投稿","type":"file","body":{"files":[{"id":"a","name":"alpha","url":format!("http://{address}/a.txt")},{"id":"b","name":"beta","url":format!("http://{address}/b.txt")}]}});
+        let path = fixture.0.join("alpha.txt");
+        std::fs::write(&path, b"held").unwrap();
+        let held = StagedAsset {
+            role: "file".into(),
+            name: "alpha.txt".into(),
+            path,
+            url: Some(format!("http://{address}/a.txt")),
+            mime_type: None,
+        };
+        let mut first = None;
+        for _ in 0..3 {
+            first = Some(
+                library
+                    .save_work_with_asset_repair(
+                        WorkSave {
+                            request: LibraryId::now_v7(),
+                            provider: "fanbox",
+                            key: "1",
+                            route: "save",
+                            data: &data,
+                            assets: vec![held.clone()],
+                        },
+                        observation(&data, std::slice::from_ref(&held)),
+                    )
+                    .unwrap(),
+            );
+        }
+        let first = first.unwrap();
+        let shelf = Arc::new(LibraryV2::with_test_library(Arc::clone(&library)));
+        let saved = save_to_shelf(
+            shelf,
+            Arc::clone(&library),
+            data.clone(),
+            "fanbox".into(),
+            "1".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!saved.created);
+        assert!(!saved.revised);
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            library.current_snapshot(first.entity_id).unwrap(),
+            first.snapshot_id
+        );
+        assert_eq!(
+            library
+                .asset_repair_plan(
+                    first.entity_id,
+                    first.snapshot_id,
+                    &observation(&data, &[]).expected_urls
+                )
+                .unwrap()
+                .attempts,
+            3
+        );
+        library
+            .reader_document(first.entity_id, ResourceScope::Snapshot(first.snapshot_id))
+            .unwrap();
         library.verify().unwrap();
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
