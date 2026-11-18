@@ -77,6 +77,32 @@ fn missing_references<'a>(
     crate::database::queries::pixiv_missing_references_for_filenames(data, names)
 }
 
+async fn references_left_by_edit(
+    library: Arc<Library>,
+    work: LibraryId,
+    snapshot: LibraryId,
+    missing: Vec<String>,
+) -> Vec<String> {
+    if missing.is_empty() {
+        return missing;
+    }
+    let original = missing.clone();
+    match blocking(move || {
+        library
+            .pixiv_references_left_by_active_edit(work, snapshot, missing)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    {
+        Ok(missing) => missing,
+        Err(error) => {
+            // 原本の保存は済んでいる。編集を確認できなければ不足を残し、完了へ読み替えない。
+            log::warn!("編集で挿絵の欠けが埋まったか確認できません: {error}");
+            original
+        }
+    }
+}
+
 /// 応答の中身が今の版の原本と同じで、取得元の画像・添付が今の版に全部あるか。棚から外した作品は
 /// 保存し直して戻すので、同じとは見なさない。
 pub(in crate::commands) fn unchanged_on_shelf(
@@ -309,6 +335,11 @@ pub(super) async fn save_to_shelf(
                     .filter(|t| t.sub_folder == "illustrations")
                     .map(|t| (t.filename.as_str(), Some(t.url.as_str()))),
             );
+            let missing = if source == "pixiv" {
+                references_left_by_edit(Arc::clone(&library), work, card.snapshot_id, missing).await
+            } else {
+                missing
+            };
             return Ok(ShelfSaved {
                 work,
                 title: card.title,
@@ -455,7 +486,7 @@ pub(super) async fn save_to_shelf(
             );
         }
     }
-    let (result, missing, asset_failure) = match saved {
+    let (result, mut missing, asset_failure) = match saved {
         Ok(saved) => saved,
         Err(error) => {
             // 画像を落とせなかったなど、棚へ渡す前に止まった取得を閉じる（渡した後は棚が閉じている）。
@@ -484,6 +515,15 @@ pub(super) async fn save_to_shelf(
     }
     if let Some(error) = asset_failure {
         return Err(error);
+    }
+    if source == "pixiv" {
+        missing = references_left_by_edit(
+            Arc::clone(&library),
+            result.entity_id,
+            result.snapshot_id,
+            missing,
+        )
+        .await;
     }
     let card = card(Arc::clone(&library), result.entity_id).await?;
     Ok(ShelfSaved {

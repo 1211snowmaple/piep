@@ -349,4 +349,147 @@ mod tests {
         library.verify().unwrap();
         server.abort();
     }
+
+    #[tokio::test]
+    async fn both_unchanged_and_saved_results_respect_the_active_edit_without_rewriting_the_source()
+    {
+        use crate::library::{
+            CaptureSource, EditBlock, EditContent, EditMedia, EditPointerChange, EditRequest,
+        };
+        let temp =
+            Temp(std::env::temp_dir().join(format!("piep-edited-save-{}", LibraryId::now_v7())));
+        let library = Arc::new(Library::create(&temp.0.join("shelf")).unwrap());
+        library.switch_over().unwrap();
+        let shelf = Arc::new(LibraryV2::with_test_library(Arc::clone(&library)));
+        let original = json!({"detail":{"title":"題", "caption":"説明", "tags":["a","b"]}, "text":"本文[uploadedimage:1]"});
+        let first = library
+            .save_readable_work(
+                WorkSave {
+                    request: LibraryId::now_v7(),
+                    provider: "pixiv",
+                    key: "1",
+                    route: "save",
+                    data: &original,
+                    assets: vec![],
+                },
+                None,
+            )
+            .unwrap();
+        let path = temp.0.join("replacement.png");
+        image::RgbImage::from_pixel(1, 1, image::Rgb([12, 34, 56]))
+            .save(&path)
+            .unwrap();
+        let file = library.store_original(&CaptureSource::File(path)).unwrap();
+        let content = EditContent {
+            format: "piep-edit-v1".into(),
+            title: None,
+            provenance: None,
+            blocks: vec![EditBlock {
+                id: LibraryId::now_v7(),
+                ordinal: 0,
+                kind: "image".into(),
+                text: None,
+                attrs: json!({"sourceRef":"[uploadedimage:1]"}),
+                media_slot: Some("replacement".into()),
+            }],
+            media: vec![EditMedia {
+                slot: "replacement".into(),
+                file: file.id,
+                original_name: "replacement.png".into(),
+                mime_type: Some("image/png".into()),
+            }],
+        };
+        library
+            .save_edit(EditRequest {
+                request_id: LibraryId::now_v7(),
+                work: first.entity_id,
+                user: library.id,
+                base: first.snapshot_id,
+                parent: None,
+                expected: 0,
+                content: &content,
+                activate: true,
+            })
+            .unwrap();
+        let saved = save_to_shelf(
+            Arc::clone(&shelf),
+            Arc::clone(&library),
+            original.clone(),
+            "pixiv".into(),
+            "1".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(saved.missing_references.is_empty());
+        let before: i64 = library
+            .reader()
+            .unwrap()
+            .query_row("SELECT count(*) FROM acquisition_attempts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        // 取得前の比較では並びが違い、保存の正規化では同じ内容になる入力を通す。
+        let mut reordered = original.clone();
+        reordered["detail"]["tags"] = json!(["b", "a"]);
+        assert_ne!(
+            super::super::super::compute_content_details(&original, "pixiv").0,
+            super::super::super::compute_content_details(&reordered, "pixiv").0
+        );
+        let saved = save_to_shelf(
+            Arc::clone(&shelf),
+            Arc::clone(&library),
+            reordered.clone(),
+            "pixiv".into(),
+            "1".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(saved.missing_references.is_empty());
+        assert!(!saved.revised);
+        let after: i64 = library
+            .reader()
+            .unwrap()
+            .query_row("SELECT count(*) FROM acquisition_attempts", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(after > before, "the regular save path must also run");
+        let state = library.edit_state(first.entity_id, library.id).unwrap();
+        library
+            .change_edit_pointers(
+                LibraryId::now_v7(),
+                first.entity_id,
+                library.id,
+                state.generation,
+                EditPointerChange::Unpublish,
+            )
+            .unwrap();
+        let saved = save_to_shelf(
+            shelf,
+            Arc::clone(&library),
+            reordered,
+            "pixiv".into(),
+            "1".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.missing_references, ["[uploadedimage:1]"]);
+        assert_eq!(
+            library.current_snapshot(first.entity_id).unwrap(),
+            first.snapshot_id
+        );
+        assert!(library
+            .reader_document(first.entity_id, ResourceScope::Snapshot(first.snapshot_id))
+            .unwrap()
+            .bindings[0]
+            .resource
+            .is_none());
+        library.verify().unwrap();
+    }
 }
