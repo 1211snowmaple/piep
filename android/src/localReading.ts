@@ -220,7 +220,7 @@ export function rememberReading(work: PcWork, editHash: string | null, progress:
   // 頭へ戻した作品は棚から降ろす。読み進めればまた並ぶ。
   const shelved = finished || partRead(progress);
   const joined = shelved !== row.shelved || finished !== row.finished;
-  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, serverUrl: currentServer ?? row.serverUrl, workId: work.id, work }, shelved || row.shelved, joined);
+  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, serverUrl: currentServer ?? row.serverUrl, workId: typeof work.id === "number" ? work.id : null, work }, shelved || row.shelved, joined);
 }
 
 /** 接続先が変わったら呼ぶ。接続先を記録していない古い履歴は、最初に分かった接続先のものとして扱う。 */
@@ -358,7 +358,7 @@ async function migrateLegacyShelf(server: string): Promise<void> {
       shelved: Boolean(entry.finished) || partRead(entry.progress),
       readAt: Math.max(base.readAt, Math.round(entry.at)),
       serverUrl: entry.server ?? server,
-      workId: entry.work.id,
+      workId: typeof entry.work.id === "number" ? entry.work.id : null,
       work: entry.work,
     });
   }

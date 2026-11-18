@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
-import type { PcConnectionStatus, PcOutlineEntry, PcPage, PcWork } from "./pcApi";
+import type { MobileShelfPage, MobileShelfWork, MobileShelfWorkDetail } from "@shared/mobileApi";
+import type { PcConnectionStatus, PcMetadata, PcOutlineEntry, PcPage, PcSearchPage, PcWork, PcWorkSearch } from "./pcApi";
 
 type NativeScope = NonNullable<PcConnectionStatus["nativeLibrary"]>["scope"];
 
@@ -16,7 +17,12 @@ export interface NativeOpened {
 }
 
 let scope: NativeScope | null = null;
+/** 一覧・作品の画面・表紙も新しい棚から出せる接続か。 */
+let listable = false;
 const opened = new Map<string, Promise<NativeOpened | null>>();
+
+/** 新しい棚の作品ではまだ使えない操作の理由。押せない形にして添える。 */
+export const SHELF_NOT_YET = "新しい棚の作品ではまだ使えません";
 
 /**
  * 接続先が新しい棚の読書用の一式を出せるときだけ、本文をそこから読む。
@@ -29,9 +35,81 @@ export function adoptNativeLibrary(status: PcConnectionStatus | null): void {
     && next.subjectId === scope.subjectId
     && next.syncEpoch === scope.syncEpoch
     && next.connectionGeneration === scope.connectionGeneration;
+  listable = Boolean(next && status?.nativeLibrary?.worksSearch);
   if (same) return;
   scope = next;
   opened.clear();
+}
+
+/** 一覧・作品の画面・表紙を出す新しい棚。出せない接続では null（旧 API の一覧のまま）。 */
+export function nativeShelf(): NativeScope | null {
+  return scope && listable && isTauri() ? scope : null;
+}
+
+/** 一覧の問い合わせの鍵に足す。棚や接続が変われば、一覧も取り直す。 */
+export function nativeShelfKey(): string | null {
+  const shelf = nativeShelf();
+  return shelf ? `${shelf.libraryId}/${shelf.subjectId}/${shelf.syncEpoch}/${shelf.connectionGeneration}` : null;
+}
+
+/** 新しい棚の一件を、カードと画面が読む形にする。作品は棚の UUID のまま。 */
+export function shelfWork(work: MobileShelfWork): PcWork {
+  return {
+    id: work.id,
+    shelf: { snapshotId: work.snapshotId, edited: work.edited },
+    source: work.source,
+    sourceId: work.sourceId,
+    title: work.title,
+    authorName: work.authorName,
+    authorId: work.authorId,
+    contentType: work.contentType,
+    tags: work.tags,
+    excerpt: work.excerpt,
+    textLength: work.textLength,
+    assetCount: work.assetCount,
+    hasCover: work.hasCover,
+    currentVersion: work.currentVersion,
+    // 旧 API の内容の印（ハッシュ）は新しい棚にない。作りものの値で埋めない。
+    contentHash: null,
+    favorite: work.favorite,
+    seriesTitle: work.seriesTitle,
+    seriesId: work.seriesId,
+    sourceCreatedAt: work.sourceCreatedAt,
+    downloadedAt: work.downloadedAt,
+  };
+}
+
+/** 一覧の一ページを新しい棚から引く。条件は旧 API の検索と同じ形で渡す。 */
+export async function searchShelf(library: NativeScope, criteria: PcWorkSearch, cursor: string | null, entity: { kind: string; source: string; key: string } | null, offset: number | null, limit: number | null): Promise<PcSearchPage> {
+  const page = await invoke<MobileShelfPage>("pc_native_search", { library, criteria, cursor, offset, limit, scope: entity });
+  return { items: page.items.map(shelfWork), nextCursor: page.nextCursor, totalEstimate: page.totalEstimate, indexComplete: page.indexComplete };
+}
+
+/**
+ * 作品の画面を新しい棚から引き、旧 API の作品の情報の形にする。以前の版を選んで読むのは
+ * まだ旧 API だけなので、版の一覧は渡さない（読む画面は今の版を棚から開く）。
+ */
+export async function shelfMetadata(workId: string): Promise<PcMetadata> {
+  const library = nativeShelf();
+  if (!library) throw { code: "library_changed", message: "接続先の本棚が変わりました。一覧を開き直してください" };
+  const detail = await invoke<MobileShelfWorkDetail>("pc_native_work", { library, work: workId });
+  return {
+    work: shelfWork(detail.work),
+    people: detail.people,
+    series: detail.series,
+    versions: [],
+    isEdited: detail.work.edited,
+    activeEditId: null,
+    // 編集の中身の印は渡らない。編集した版の UUID で読書位置を分ける（編集し直せば別の本文）。
+    activeEditHash: detail.work.edited ? `edit:${detail.work.snapshotId}` : null,
+  };
+}
+
+/** 新しい棚の作品の表紙。版の UUID を鍵にして、版が変われば取り直す。 */
+export function shelfCoverPath(work: PcWork, large: boolean): string | null {
+  const shelf = nativeShelf();
+  if (!shelf || !work.shelf) return null;
+  return `shelf/${shelf.libraryId}/${work.id}/${work.shelf.snapshotId}${large ? "/large" : ""}`;
 }
 
 /**

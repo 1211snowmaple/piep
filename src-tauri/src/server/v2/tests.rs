@@ -647,6 +647,275 @@ async fn the_works_list_pages_tied_dates_and_keeps_cursors_with_the_reader_and_e
     );
 }
 
+fn png() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::RgbImage::from_pixel(8, 12, image::Rgb([200, 40, 40]))
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    bytes
+}
+
+impl Server {
+    fn search(&self, body: serde_json::Value) -> reqwest::RequestBuilder {
+        self.search_as(body, "fixture")
+    }
+    fn search_as(&self, body: serde_json::Value, token: &str) -> reqwest::RequestBuilder {
+        self.client
+            .post(format!(
+                "{}/api/v2/libraries/{}/works/search",
+                self.base, self.library.id
+            ))
+            .bearer_auth(token)
+            .json(&body)
+    }
+}
+
+async fn shelf_page(response: reqwest::Response) -> piep_mobile_api::MobileShelfPage {
+    response.error_for_status().unwrap().json().await.unwrap()
+}
+
+#[tokio::test]
+async fn the_phone_list_sorts_filters_and_pages_the_shelf_with_the_v1_conditions() {
+    let server = Server::start().await;
+    let north = save(&server.library, capture("north", None));
+    let south = save(&server.library, capture("south", None));
+    let removed = save(&server.library, capture("removed", None));
+    server
+        .library
+        .remove_work(uuid::Uuid::now_v7(), removed.entity_id, 1)
+        .unwrap();
+
+    // 題の順に一件ずつ。旧 API と同じ条件の形で、作品は棚の UUID で返る。
+    let first = shelf_page(
+        server
+            .search(json!({"text": "", "limit": 1, "sortBy": "title", "sortOrder": "asc"}))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(first.total_estimate, Some(2));
+    assert_eq!(first.items.len(), 1);
+    let item = &first.items[0];
+    assert_eq!(item.id, north.entity_id.to_string());
+    assert_eq!(item.snapshot_id, north.snapshot_id.to_string());
+    assert_eq!(
+        (item.source.as_str(), item.source_id.as_str()),
+        ("pixiv", "north")
+    );
+    assert!(!item.has_cover && !item.edited);
+    let cursor = first.next_cursor.clone().unwrap();
+    let second = shelf_page(
+        server
+            .search(json!({"text": "", "limit": 1, "sortBy": "title", "sortOrder": "asc", "cursor": cursor}))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(second.items[0].id, south.entity_id.to_string());
+    assert!(second.next_cursor.is_none());
+    // 続きは数え直さない。
+    assert_eq!(second.total_estimate, None);
+
+    // 続きの位置は、同じ棚の同じ利用者だけが使える。
+    let stale = cursor.replace(
+        &server.context.sync_epoch.get().to_string(),
+        &uuid::Uuid::now_v7().to_string(),
+    );
+    for (body, token) in [
+        (
+            json!({"limit": 1, "sortBy": "title", "sortOrder": "asc", "cursor": stale}),
+            "fixture",
+        ),
+        (
+            json!({"limit": 1, "sortBy": "title", "sortOrder": "asc", "cursor": cursor}),
+            "second",
+        ),
+    ] {
+        assert_eq!(
+            server.search_as(body, token).send().await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    // ページ番号で開いたページには続きの位置がない。
+    let numbered = shelf_page(
+        server
+            .search(json!({"offset": 1, "limit": 1, "sortBy": "title", "sortOrder": "asc"}))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(numbered.items[0].id, south.entity_id.to_string());
+    assert!(numbered.next_cursor.is_none());
+
+    // 絞り込みは新しい棚の一覧の意味で効く。
+    let none = shelf_page(
+        server
+            .search(json!({"source": "fanbox"}))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(none.items.is_empty());
+    let unknown_person = shelf_page(
+        server
+            .search(json!({"personSource": "pixiv", "personKey": "nobody"}))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert!(unknown_person.items.is_empty());
+
+    // 旧 API で断る条件は、ここでも断る（黙って外さない）。
+    for body in [
+        json!({"sortBy": "relevance"}),
+        json!({"source": "elsewhere"}),
+        json!({"unknown": true}),
+        json!({"cursor": "broken"}),
+        json!({"offset": 1, "cursor": "x"}),
+    ] {
+        assert_eq!(
+            server.search(body).send().await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    // 語の検索は索引が棚に追いつくまで答えない。追いついたら題で引ける。
+    assert_eq!(
+        server
+            .search(json!({"text": "north"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    server.library.sync_search_index(&mut |_, _| {}).unwrap();
+    server.context.search_ready.store(true, Ordering::SeqCst);
+    let found = shelf_page(
+        server
+            .search(json!({"text": "north"}))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        found
+            .items
+            .iter()
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>(),
+        vec![north.entity_id.to_string()]
+    );
+
+    server.authority.active.store(false, Ordering::SeqCst);
+    assert_eq!(
+        server.search(json!({})).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn the_work_screen_and_cover_come_from_the_current_version_of_a_shelved_work() {
+    let server = Server::start().await;
+    let covered = save(&server.library, capture("covered", Some(&png())));
+    let bare = save(&server.library, capture("bare", None));
+    let work = |id: uuid::Uuid| format!("/api/v2/libraries/{}/works/{id}", server.library.id);
+
+    let detail: piep_mobile_api::MobileShelfWorkDetail = server
+        .get(&work(covered.entity_id))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail.work.id, covered.entity_id.to_string());
+    assert!(detail.work.has_cover);
+    assert_eq!(detail.versions.len(), 1);
+    assert_eq!(detail.versions[0].version, 1);
+    assert_eq!(detail.edit_base_version, None);
+
+    for size in ["", "?size=card", "?size=large"] {
+        let response = server
+            .get(&format!("{}/cover{size}", work(covered.entity_id)))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/webp");
+        assert_eq!(response.headers()[header::VARY], "Authorization");
+        let bytes = response.bytes().await.unwrap();
+        assert_eq!(
+            image::load_from_memory(&bytes)
+                .unwrap()
+                .into_rgb8()
+                .dimensions(),
+            (8, 12)
+        );
+    }
+    for (path, status) in [
+        (
+            format!("{}/cover", work(bare.entity_id)),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("{}/cover", work(uuid::Uuid::now_v7())),
+            StatusCode::NOT_FOUND,
+        ),
+        (work(uuid::Uuid::now_v7()), StatusCode::NOT_FOUND),
+        (
+            format!("{}/cover?size=huge", work(covered.entity_id)),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!("{}?extra=1", work(covered.entity_id)),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!(
+                "/api/v2/libraries/{}/works/{}",
+                uuid::Uuid::now_v7(),
+                covered.entity_id
+            ),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            server.get(&path).send().await.unwrap().status(),
+            status,
+            "{path}"
+        );
+    }
+
+    // 棚から外した作品は、作品の画面も表紙も出さない。
+    server
+        .library
+        .remove_work(uuid::Uuid::now_v7(), covered.entity_id, 1)
+        .unwrap();
+    for path in [
+        work(covered.entity_id),
+        format!("{}/cover", work(covered.entity_id)),
+    ] {
+        assert_eq!(
+            server.get(&path).send().await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+}
+
 #[tokio::test]
 async fn edit_reads_are_limited_to_the_subjects_published_and_archived_views() {
     let server = Server::start().await;

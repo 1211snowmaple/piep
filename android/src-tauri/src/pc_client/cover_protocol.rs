@@ -331,6 +331,17 @@ fn parse_route(path: &str) -> Option<Route> {
             endpoint: format!("/api/v1/collections/{id}/cover/{slot}"),
             refreshes: false,
         }),
+        // 新しい棚の作品の表紙。版の UUID は端末の覚えの鍵で、版が変わると取り直す。
+        ["shelf", library, work, snapshot, rest @ ..] if rest.is_empty() || rest == ["large"] => {
+            let library = uuid::Uuid::parse_str(library).ok()?;
+            let work = uuid::Uuid::parse_str(work).ok()?;
+            uuid::Uuid::parse_str(snapshot).ok()?;
+            let size = if rest.is_empty() { "" } else { "?size=large" };
+            Some(Route::Remote {
+                endpoint: format!("/api/v2/libraries/{library}/works/{work}/cover{size}"),
+                refreshes: false,
+            })
+        }
         ["native", entity, kind @ ("snapshot" | "edit"), view, asset] => {
             let entity = uuid::Uuid::parse_str(entity).ok()?;
             let view = uuid::Uuid::parse_str(view).ok()?;
@@ -746,6 +757,32 @@ mod tests {
                 refreshes: false
             })
         );
+        let (library, work, snapshot) = (
+            "01a1eeaa-0000-7000-8000-000000000001",
+            "01a1eeaa-0000-7000-8000-000000000002",
+            "01a1eeaa-0000-7000-8000-000000000003",
+        );
+        assert_eq!(
+            parse_route(&format!("/shelf%2F{library}%2F{work}%2F{snapshot}")),
+            Some(Route::Remote {
+                endpoint: format!("/api/v2/libraries/{library}/works/{work}/cover"),
+                refreshes: false
+            })
+        );
+        assert_eq!(
+            parse_route(&format!("/shelf%2F{library}%2F{work}%2F{snapshot}%2Flarge")),
+            Some(Route::Remote {
+                endpoint: format!("/api/v2/libraries/{library}/works/{work}/cover?size=large"),
+                refreshes: false
+            })
+        );
+        for bad in [
+            format!("/shelf%2F{library}%2F{work}%2F{snapshot}%2Fhuge"),
+            format!("/shelf%2F{library}%2F..%2F{snapshot}"),
+            format!("/shelf%2F{library}%2F{work}"),
+        ] {
+            assert_eq!(parse_route(&bad), None, "{bad}");
+        }
         assert_eq!(parse_route("/asset%2F12%2F5%2F99999%2F3%2Fabc"), None);
         assert_eq!(parse_route("/asset%2F12%2F-5%2F1080%2F3%2Fabc"), None);
         assert_eq!(

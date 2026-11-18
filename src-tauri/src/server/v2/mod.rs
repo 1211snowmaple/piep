@@ -1,5 +1,6 @@
 //! 新ライブラリ用の認証付き読取 API。旧 API の意味や本番の保存先を変更しない。
 mod auth;
+mod list;
 pub use auth::{Authority, DeviceAuthority, Grant};
 
 use crate::library::{
@@ -12,14 +13,17 @@ use axum::{
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Extension, Json, Router,
 };
 use headers::{authorization::Bearer, Authorization, HeaderMapExt};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -37,6 +41,9 @@ pub struct Context {
     sync_epoch: Id,
     readers: Arc<tokio::sync::Semaphore>,
     devices: Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
+    /// 本文の検索の索引が棚に追いついたか。追いつくまで語の検索には答えない。
+    search_ready: AtomicBool,
+    covers: Mutex<list::Covers>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -62,7 +69,26 @@ impl Context {
             sync_epoch,
             readers: Arc::new(tokio::sync::Semaphore::new(READERS)),
             devices: Mutex::new(HashMap::new()),
+            search_ready: AtomicBool::new(false),
+            covers: Mutex::new(list::Covers::default()),
         })
+    }
+
+    /// 本文の検索の索引を棚に合わせる（初めては数分かかる）。済むまで語の検索は 503 で断り、
+    /// 絞り込みだけの一覧は先に答える。配信する棚の写しの索引は、写しの `derived/` に作る。
+    pub fn prepare_search(self: &Arc<Self>) {
+        let ctx = Arc::clone(self);
+        let spawned = std::thread::Builder::new()
+            .name("piep-v2-search-index".into())
+            .spawn(
+                move || match ctx.library.sync_search_index(&mut |_, _| {}) {
+                    Ok(_) => ctx.search_ready.store(true, Ordering::Release),
+                    Err(error) => log::error!("新しい棚の検索の索引を作れません: {error}"),
+                },
+            );
+        if let Err(error) = spawned {
+            log::error!("新しい棚の検索の索引を作るスレッドを作れません: {error}");
+        }
     }
 
     pub(super) fn shelf_status(&self) -> crate::library::Result<ShelfStatus> {
@@ -261,6 +287,9 @@ pub fn router(ctx: Arc<Context>) -> Router {
         .route("/api/v2/identity",get(identity))
         .route("/api/v2/libraries/{library}/works",get(works))
         .route("/api/v2/libraries/{library}/works/lookup",get(work_lookup))
+        .route("/api/v2/libraries/{library}/works/search",post(list::search))
+        .route("/api/v2/libraries/{library}/works/{work}",get(list::work))
+        .route("/api/v2/libraries/{library}/works/{work}/cover",get(list::cover))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/bundle",get(bundle))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/manifest",get(manifest))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/files/{file}/chunks/{ordinal}",get(chunk))
@@ -284,6 +313,10 @@ async fn identity(
     response
         .headers_mut()
         .insert("x-piep-works-list", header::HeaderValue::from_static("1"));
+    // 携帯の一覧（絞り込み・並べ替え・語の検索）・作品の画面・表紙を新しい棚から出せる。
+    response
+        .headers_mut()
+        .insert("x-piep-works-search", header::HeaderValue::from_static("1"));
     response
 }
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
-import type { PcWork } from "./pcApi";
+import { v1WorkId, type PcWork } from "./pcApi";
 import { coverSigil, titleScale } from "@shared/coverSigil";
 import { imageRecentlyFailed, savedCoverUrl, SmoothImage, workCoverUrl } from "./images";
 
@@ -12,7 +12,7 @@ import { imageRecentlyFailed, savedCoverUrl, SmoothImage, workCoverUrl } from ".
  * - 表紙のない作品は、作者の色と作品ごとの紋で見分けられるようにする。
  */
 export function WorkThumbnail({ work, offline = false, snapshotGeneration, variant = "card" }: { work: PcWork; offline?: boolean; snapshotGeneration?: number; variant?: "card" | "detail" }) {
-  const src = !work.hasCover ? null : offline ? savedCoverUrl(work.id, snapshotGeneration ?? 0) : workCoverUrl(work, variant === "detail");
+  const src = !work.hasCover ? null : offline ? savedCoverUrl(v1WorkId(work), snapshotGeneration ?? 0) : workCoverUrl(work, variant === "detail");
   const [failed, setFailed] = useState(() => imageRecentlyFailed(src));
   const [shape, setShape] = useState<string | null>(null);
   const sigil = useMemo(() => coverSigil(work), [work.source, work.sourceId, work.authorName]);

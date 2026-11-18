@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactEventHandler } from "react";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import type { PcWork } from "./pcApi";
+import { shelfCoverPath } from "./nativeReading";
 
 // WebView の HTTP キャッシュも接続ごとに分ける。Rust 側のディスクキャッシュ
 // だけを分けても、同じ作品番号の URL が先に WebView から返されてしまう。
@@ -19,7 +20,13 @@ export function forgetServerImages(): void {
   failed.clear();
 }
 
-export const workCoverUrl = (work: PcWork, large = false) => imageUrl(`work/${work.id}/${work.currentVersion}/${work.contentHash ?? ""}${large ? "/large" : ""}`);
+export function workCoverUrl(work: PcWork, large = false): string | null {
+  if (work.shelf) {
+    const path = shelfCoverPath(work, large);
+    return path ? imageUrl(path) : null;
+  }
+  return imageUrl(`work/${work.id}/${work.currentVersion}/${work.contentHash ?? ""}${large ? "/large" : ""}`);
+}
 /** 本文の挿絵。認証は Rust 側で済ませ、JavaScript には鍵も画像の中身も渡らない。 */
 export const illustrationUrl = (workId: number, assetId: number, width: number, version: number, contentHash: string | null) => imageUrl(`asset/${workId}/${assetId}/${width}/${version}/${contentHash ?? ""}`);
 export const workCoverUrlById = (workId: number, revision: number) => imageUrl(`work/${workId}/c${revision}/`);

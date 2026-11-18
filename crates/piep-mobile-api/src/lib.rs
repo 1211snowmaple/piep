@@ -227,6 +227,71 @@ impl From<&MobileMetadata> for MobileRevision {
     }
 }
 
+/// 新しい棚の作品の一件（棚の UUID で指し、旧棚の番号を持たない）。項目は `MobileWork` に揃える。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfWork {
+    /// 作品の UUID。
+    pub id: String,
+    /// 今の保存版の UUID。版が変わると変わるので、表紙を取り直す目印になる。
+    pub snapshot_id: String,
+    pub source: String,
+    pub source_id: String,
+    pub title: String,
+    pub author_name: String,
+    /// 取得元の作者の ID。分からなければ空。
+    pub author_id: String,
+    pub content_type: String,
+    pub tags: Vec<String>,
+    pub excerpt: Option<String>,
+    pub text_length: i64,
+    pub asset_count: i64,
+    pub has_cover: bool,
+    pub current_version: i64,
+    /// 反映中の編集があるか。
+    pub edited: bool,
+    pub favorite: bool,
+    pub series_title: Option<String>,
+    pub series_id: Option<String>,
+    /// 公開日（ISO 8601）。
+    pub source_created_at: Option<String>,
+    /// 保存日（ISO 8601）。
+    pub downloaded_at: String,
+}
+
+/// 新しい棚の一覧の一ページ。続きは `next_cursor` を変えずに次の要求へ渡す。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfPage {
+    pub items: Vec<MobileShelfWork>,
+    pub next_cursor: Option<String>,
+    pub total_estimate: Option<i64>,
+    pub index_complete: bool,
+}
+
+/// 新しい棚の作品の保存した版の一つ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfVersion {
+    pub version: i64,
+    pub text_length: Option<i64>,
+    /// 保存日（ISO 8601）。
+    pub saved_at: String,
+}
+
+/// 新しい棚の作品の画面。`work.excerpt` は取得元の説明。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfWorkDetail {
+    pub work: MobileShelfWork,
+    pub people: Vec<MobilePerson>,
+    pub series: Vec<MobileSeriesMembership>,
+    /// 古い順。
+    pub versions: Vec<MobileShelfVersion>,
+    /// 反映中の編集の基準の版。編集がなければ空。
+    pub edit_base_version: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

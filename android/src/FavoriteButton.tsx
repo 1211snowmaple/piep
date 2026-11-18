@@ -1,11 +1,12 @@
 import { Icons } from "./icons";
 import { useFavorite } from "./favorites";
-import type { PcWork } from "./pcApi";
+import { isShelfWork, type PcWork } from "./pcApi";
 
 /** 作品のお気に入りを、端末の付け外しを含めた今の値で出す。押せるかどうかもここで決まる。 */
 export function WorkFavoriteButton({ work, className, readOnly = false }: { work: PcWork; className: string; readOnly?: boolean }) {
   const { favorite, busy, onToggle } = useFavorite(work);
-  return <FavoriteButton favorite={favorite} className={className} busy={busy} onToggle={readOnly ? undefined : onToggle} />;
+  // 新しい棚はまだ書き込めない（旧 API へ書くと、新しい棚の印と食い違う）。印だけ出す。
+  return <FavoriteButton favorite={favorite} className={className} busy={busy} onToggle={readOnly || isShelfWork(work) ? undefined : onToggle} />;
 }
 
 /**

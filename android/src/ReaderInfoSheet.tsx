@@ -5,7 +5,8 @@ import { ProviderMark } from "./ProviderMark";
 import { WorkThumbnail } from "./WorkThumbnail";
 import { WorkFacts, workFacts } from "./WorkFacts";
 import { AuthorAvatar } from "./WorkCard";
-import type { PcMetadata, PcCollection, PcOutlineEntry, PcWork } from "./pcApi";
+import { isShelfWork, type PcMetadata, type PcCollection, type PcOutlineEntry, type PcWork } from "./pcApi";
+import { SHELF_NOT_YET } from "./nativeReading";
 import { useAppNavigation } from "./appHistory";
 import { plainText, progressLabel, readingPercent } from "./workText";
 
@@ -108,7 +109,10 @@ export function ReaderInfoSheet({ versions, selectedVersion, latestEdited, onVer
       </div>
       {/* 保存は読むボタンと同じく、面のいちばん下に横いっぱいで置く。 */}
       {activeTab === "info" && !offline && <footer className="reader-info-footer">
-        {saveMessage === "端末に保存しました"
+        {isShelfWork(work)
+          // 新しい棚の作品は、まだ端末に保存できない。場所はそのまま、押せない形で理由を添える。
+          ? <button type="button" className="reader-info-save" data-locked="true" disabled aria-label={`端末に保存（${SHELF_NOT_YET}）`} title={SHELF_NOT_YET}><Icons.saveOffline aria-hidden="true" />端末に保存</button>
+          : saveMessage === "端末に保存しました"
           ? <span className="reader-info-save" data-done="true" role="status"><Icons.confirm aria-hidden="true" />端末に保存しました</span>
           : <button type="button" className="reader-info-save" data-busy={saving || undefined} disabled={saving} onClick={onSave}>{saving ? <Icons.busy aria-hidden="true" /> : <Icons.saveOffline aria-hidden="true" />}{saving ? "保存しています…" : selectedVersion !== null ? "最新版を端末に保存" : "端末に保存"}</button>}
       </footer>}

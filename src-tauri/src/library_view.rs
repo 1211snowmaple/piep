@@ -10,7 +10,7 @@
 use crate::database::models::AssetEntry;
 use crate::library::{
     ContentFile, EditContent, Fingerprint, Library, LibraryId, ReaderBody, ReaderDocument,
-    ResourceReference, ResourceScope, Result,
+    ResourceReference, ResourceScope, Result, WorkCard,
 };
 use piep_reader_render::document::ReaderView;
 use rusqlite::OptionalExtension;
@@ -44,6 +44,38 @@ pub struct VersionView {
     pub text_length: Option<i64>,
 }
 
+/// 作品の画面の頭。一覧の一件に、説明・作者とシリーズの取得元の ID・保存した版を足したもの。
+/// デスクトップの作品の画面と、携帯へ返す作品の情報で同じものを使う。
+#[derive(Clone, Debug, PartialEq)]
+pub struct WorkHead {
+    pub card: WorkCard,
+    /// 取得元の説明（HTML のこともある）。なければ抜粋。
+    pub caption: Option<String>,
+    /// 取得元の作者の ID。作者の画面へのリンクに使う。
+    pub author_key: Option<String>,
+    /// 取得元のシリーズの ID。
+    pub series_key: Option<String>,
+    /// 保存した版（古い順）。
+    pub versions: Vec<VersionView>,
+    /// 有効な編集の基準の版の番号。編集が無ければ None。
+    pub edit_base_version: Option<i64>,
+}
+
+/// 一覧の一件の作者・シリーズの、取得元での ID。カードから作者・シリーズの画面へ行くため。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CardKeys {
+    pub author: Option<String>,
+    pub series: Option<String>,
+}
+
+fn text_of(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
 /// 作品の画像・添付の一件。
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct MediaView {
@@ -58,6 +90,61 @@ pub struct MediaView {
 }
 
 impl Library {
+    /// 作品の画面の頭。説明・作者とシリーズの ID は今の版の取得元の情報から取る。
+    pub fn work_head(&self, work: LibraryId) -> Result<WorkHead> {
+        let card = self.work_card(work)?;
+        let snapshots = self.snapshots(work)?;
+        let metadata = snapshots
+            .iter()
+            .find(|snapshot| snapshot.id == card.snapshot_id)
+            .or(snapshots.last())
+            .map(|snapshot| snapshot.metadata.clone())
+            .unwrap_or_default();
+        let versions = self.work_versions(work)?;
+        let edit_base_version = card
+            .edit_id
+            .map(|edit| self.edit_base_version(work, edit))
+            .transpose()?;
+        Ok(WorkHead {
+            caption: text_of(metadata.get("caption")).or_else(|| card.excerpt.clone()),
+            author_key: text_of(metadata.get("author_key")),
+            series_key: text_of(metadata.get("series_id")),
+            card,
+            versions,
+            edit_base_version,
+        })
+    }
+
+    /// 一覧の各件の作者・シリーズの取得元の ID（`work_head` と同じ取り方、版の情報から）。
+    pub fn card_keys(&self, cards: &[WorkCard]) -> Result<Vec<CardKeys>> {
+        let conn = self.reader()?;
+        let mut statement = conn.prepare_cached(
+            "SELECT json_extract(metadata_json,'$.author_key'),json_extract(metadata_json,'$.series_id') FROM revision_snapshots WHERE id=?1",
+        )?;
+        let key = |value: rusqlite::types::Value| match value {
+            rusqlite::types::Value::Text(text) if !text.trim().is_empty() => Some(text),
+            rusqlite::types::Value::Integer(number) => Some(number.to_string()),
+            _ => None,
+        };
+        cards
+            .iter()
+            .map(|card| {
+                let found = statement
+                    .query_row([card.snapshot_id.as_bytes().as_slice()], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })
+                    .optional()?;
+                Ok(match found {
+                    Some((author, series)) => CardKeys {
+                        author: key(author),
+                        series: key(series),
+                    },
+                    None => CardKeys::default(),
+                })
+            })
+            .collect()
+    }
+
     /// 保存した版（新しい順ではなく古い順）。
     pub fn work_versions(&self, work: LibraryId) -> Result<Vec<VersionView>> {
         let mut versions: BTreeMap<i64, VersionView> = BTreeMap::new();

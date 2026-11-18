@@ -61,6 +61,9 @@ piep-server activate-library --data <サーバーの置き場> --generation <準
 | `/api/v2/identity` | 棚・利用者・同期 epoch・形式・上限・対応能力 |
 | `/api/v2/libraries/{library}/works` | 保存日の新しい順に、棚にある作品と現在の読書用の版を一ページ返す |
 | `/api/v2/libraries/{library}/works/lookup?provider={provider}&key={key}` | 取得元の作品 ID から、棚の作品と現在の読書用の版を照合 |
+| `/api/v2/libraries/{library}/works/{work}` | 携帯の作品の画面：今の版のカード・説明・作者とシリーズ・版の一覧 |
+| `/api/v2/libraries/{library}/works/{work}/cover?size={card\|large}` | 今の版の表紙を携帯向けの WebP（320×480 / 640×960 に収める）で |
+| `POST /api/v2/libraries/{library}/works/search` | 携帯の一覧：旧 API と同じ条件の形で、絞り込み・並べ替え・語の検索・ページ送り |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/bundle` | 読書 bundle：読書用文書（`piep-reader-v1`）と、渡せる全資産の file 記述を一回で |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/resources/{body\|media\|file}/manifest` | 所属と表示版を固定した一ファイルの descriptor |
 | 同じ資産パスの `/files/{file}/chunks/{ordinal}` | 指定した元ファイルの一部分を保存形式のまま転送 |
@@ -81,6 +84,14 @@ file は利用者向けの attachment / document に限る。管理用原本の�
 `provider`、`key`、`title`、`authorName`、`contentType` が入る。同じ保存日の作品は作品 UUID の降順。
 `next` があれば変更せず次の要求の `after` に渡し、`null` なら終わり。
 同期 epoch または利用者が変わった場合は 409（`stale_cursor`）を返すので、最初のページから読み直す。
+
+携帯の一覧は `identity` の応答ヘッダー `X-Piep-Works-Search: 1` で分かる。本文は旧 API の
+`MobileSearchRequest` と同じ JSON で、同じ検査を通す（知らない項目・範囲外・重なる指定は 400）。
+作品は棚の UUID（`id`）と今の版の UUID（`snapshotId`）で返す。続きの位置は棚・同期 epoch・利用者に
+結び付け、違えば 409（`stale_cursor`）。ページ番号で開いたページには続きの位置を付けない。
+件数は最初のページだけ数える。語の検索は、配信する写しの索引が棚に追いつくまで 503
+（`search_indexing`）で断り、絞り込みだけの一覧は先に答える。表紙は作品のカードから引くので、
+ハッシュだけでは取れない。棚から外した作品は、作品の画面も表紙も 404。
 
 `identity` は `piep-library-api-v2` 形式を厳密に検査する。旧 `/api/about` に
 `apiVersion: 2` があっても新ライブラリ対応とは解釈しない。

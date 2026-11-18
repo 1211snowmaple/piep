@@ -1,12 +1,13 @@
 //! 新しい棚の接続情報と読書用の応答を、登録した端末の認証で受け取る。
 use super::{
-    ClientError, PROBE_TIMEOUT, PcClientState, REQUEST_TIMEOUT, SavedConnection,
-    bounded_response_bytes, check_response,
+    ClientError, PROBE_TIMEOUT, PcClientState, PcSearchCriteria, PcWorkScope, REQUEST_TIMEOUT,
+    SavedConnection, bounded_response_bytes, check_response,
 };
 use piep_library_protocol::{
     Id, LibraryIdentity, MAX_IDENTITY_BYTES, MAX_MANIFEST_BYTES, ReaderBundle, ReaderWorkPage,
     ResourceReference, ResourceScope, WorkReadingView,
 };
+use piep_mobile_api::{MobileShelfPage, MobileShelfWork, MobileShelfWorkDetail};
 use piep_storage::Fingerprint;
 use reqwest::{Response, StatusCode, header::HeaderMap};
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,8 @@ pub struct NativeLibraryScope {
 pub struct NativeLibraryStatus {
     scope: NativeLibraryScope,
     works_list: bool,
+    /// 一覧（絞り込み・並べ替え・語の検索）・作品の画面・表紙を新しい棚から出せるか。
+    works_search: bool,
     reader_bundle: bool,
 }
 
@@ -112,6 +115,7 @@ async fn parse_identity(
     Ok(NativeLibraryStatus {
         scope,
         works_list: header_is(&headers, "x-piep-works-list", "1"),
+        works_search: header_is(&headers, "x-piep-works-search", "1"),
         reader_bundle: identity.capabilities.reader_bundle,
     })
 }
@@ -187,6 +191,111 @@ async fn read_bounded<T>(
     let bytes = bounded_response_bytes(check_scope(response, scope)?, maximum).await?;
     let result = parse(&bytes)?;
     state.with_connection(generation, || Ok(result))
+}
+
+/// 本文つきで問い合わせる（一覧の条件は長いので GET の query に載せない）。
+async fn post_bounded<T>(
+    state: &PcClientState,
+    scope: NativeLibraryScope,
+    endpoint: &str,
+    body: &serde_json::Value,
+    parse: impl FnOnce(&[u8]) -> Result<T, ClientError>,
+) -> Result<T, ClientError> {
+    let (generation, saved) = state.connection_snapshot()?;
+    if generation != scope.connection_generation {
+        return Err(library_changed());
+    }
+    let saved = saved.ok_or_else(ClientError::invalid_pairing)?;
+    let client = state.client(&saved)?;
+    let response = client
+        .post(format!("{}{endpoint}", saved.url))
+        .bearer_auth(&saved.token)
+        .timeout(REQUEST_TIMEOUT)
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
+    if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+        return Err(ClientError {
+            code: "search_indexing",
+            message: "サーバーは本文の検索の準備中です。しばらくしてからもう一度検索してください",
+        });
+    }
+    let bytes = bounded_response_bytes(check_scope(response, scope)?, MAX_MANIFEST_BYTES).await?;
+    let result = parse(&bytes)?;
+    state.with_connection(generation, || Ok(result))
+}
+
+/// 一件が棚の作品として読めるか（UUID と取得元の鍵）。
+fn valid_shelf_work(work: &MobileShelfWork) -> bool {
+    uuid::Uuid::parse_str(&work.id).is_ok()
+        && uuid::Uuid::parse_str(&work.snapshot_id).is_ok()
+        && !work.source.is_empty()
+        && work.source.len() <= 128
+        && !work.source_id.is_empty()
+        && work.source_id.len() <= 4096
+}
+
+/// 作品の一覧を新しい棚から引く。条件は旧 API の検索と同じ形に組んで送る（検査も同じ）。
+#[tauri::command]
+pub async fn pc_native_search(
+    state: State<'_, PcClientState>,
+    library: NativeLibraryScope,
+    criteria: PcSearchCriteria,
+    cursor: Option<String>,
+    offset: Option<i64>,
+    scope: Option<PcWorkScope>,
+    limit: Option<i64>,
+) -> Result<MobileShelfPage, ClientError> {
+    if limit.is_some_and(|value| !(1..=50).contains(&value)) {
+        return Err(ClientError::remote());
+    }
+    let mut payload = super::search_payload(&criteria, cursor, offset, scope)?;
+    if let Some(limit) = limit {
+        payload["limit"] = serde_json::json!(limit);
+    }
+    let endpoint = format!(
+        "/api/v2/libraries/{}/works/search",
+        library.library_id.get()
+    );
+    post_bounded(&state, library, &endpoint, &payload, |bytes| {
+        let page: MobileShelfPage =
+            serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
+        if page.items.len() > 50
+            || !page.items.iter().all(valid_shelf_work)
+            || page
+                .next_cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.is_empty() || cursor.len() > 4096)
+        {
+            return Err(ClientError::protocol());
+        }
+        Ok(page)
+    })
+    .await
+}
+
+/// 作品の画面（説明・作者とシリーズ・版）を新しい棚から引く。
+#[tauri::command]
+pub async fn pc_native_work(
+    state: State<'_, PcClientState>,
+    library: NativeLibraryScope,
+    work: Id,
+) -> Result<MobileShelfWorkDetail, ClientError> {
+    let endpoint = format!(
+        "/api/v2/libraries/{}/works/{}",
+        library.library_id.get(),
+        work.get()
+    );
+    read(&state, library, &endpoint, |bytes| {
+        let detail: MobileShelfWorkDetail =
+            serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
+        if detail.work.id != work.get().to_string() || !valid_shelf_work(&detail.work) {
+            return Err(ClientError::protocol());
+        }
+        Ok(detail)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -355,7 +464,8 @@ mod tests {
             let shelf = identity();
             let wire_headers = headers(&shelf);
             let body = serde_json::to_string(&shelf).unwrap();
-            let advertised = format!("{wire_headers}X-Piep-Works-List: 1\r\n");
+            let advertised =
+                format!("{wire_headers}X-Piep-Works-List: 1\r\nX-Piep-Works-Search: 1\r\n");
             let connected = parse_identity(response("200 OK", &advertised, &body).await, 7)
                 .await
                 .unwrap();
@@ -363,11 +473,11 @@ mod tests {
             assert_eq!(connected.scope.subject_id, shelf.subject_id);
             assert_eq!(connected.scope.sync_epoch, shelf.sync_epoch);
             assert_eq!(connected.scope.connection_generation, 7);
-            assert!(connected.works_list && connected.reader_bundle);
+            assert!(connected.works_list && connected.works_search && connected.reader_bundle);
             let older = parse_identity(response("200 OK", &wire_headers, &body).await, 7)
                 .await
                 .unwrap();
-            assert!(!older.works_list);
+            assert!(!older.works_list && !older.works_search);
             let duplicate = format!(
                 "{wire_headers}X-Piep-Sync-Epoch: {}\r\n",
                 shelf.sync_epoch.get()

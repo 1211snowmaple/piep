@@ -4,6 +4,7 @@ import type {
 } from "@shared/mobileApi";
 import { invoke } from "@tauri-apps/api/core";
 import { markFavoriteRead, nextFavoriteRevision } from "./favoriteFreshness";
+import { nativeShelf, searchShelf, shelfMetadata, SHELF_NOT_YET } from "./nativeReading";
 
 export interface PcConnectionStatus {
   paired: boolean;
@@ -20,6 +21,8 @@ export interface PcConnectionStatus {
       connectionGeneration: number;
     };
     worksList: boolean;
+    /** 一覧・作品の画面・表紙を新しい棚から出せる。 */
+    worksSearch?: boolean;
     readerBundle: boolean;
   };
 }
@@ -45,10 +48,31 @@ export function pcConnectionIssue(status: PcConnectionStatus): string | null {
 
 type Older<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
 
-export type PcWork = Older<MobileWork, "sourceCreatedAt" | "downloadedAt"> & {
+export type PcWork = Omit<Older<MobileWork, "sourceCreatedAt" | "downloadedAt">, "id"> & {
+  /** 旧 API の作品は数の ID、新しい棚の作品は棚の UUID（文字列）。 */
+  id: number | string;
+  /** 新しい棚の作品だけが持つ。 */
+  shelf?: { snapshotId: string; edited: boolean };
   /** フロント側だけの取得順。お気に入りの書き込みより新しい応答を見分ける。 */
   favoriteReadSequence?: number;
 };
+
+/** 端末に保存した作品。保存は旧 API の作品だけなので、番号で指す。 */
+export type SavedPcWork = PcWork & { id: number };
+
+/** 新しい棚の作品か（UUID で指す）。旧 API の番号を使う操作には渡さない。 */
+export function isShelfWork(work: Pick<PcWork, "id">): boolean {
+  return typeof work.id === "string";
+}
+
+/** 旧 API の番号。端末に保存した作品など、番号でしか指せない操作の前に使う。 */
+export function v1WorkId(work: Pick<PcWork, "id">): number {
+  if (typeof work.id !== "number") throw new Error(SHELF_NOT_YET);
+  return work.id;
+}
+
+/** 新しい棚の作品ではまだ使えない操作。 */
+const notYet = () => Promise.reject({ code: "shelf_not_yet", message: SHELF_NOT_YET });
 
 export type PcEntity = MobileEntity;
 
@@ -138,7 +162,7 @@ export interface PcAsset {
 }
 
 export interface OfflineWork {
-  work: PcWork;
+  work: SavedPcWork;
   people?: PcPerson[];
   series?: PcSeriesMembership[];
   savedAtMs: number;
@@ -175,14 +199,14 @@ export const disconnectPc = () => invoke<PcConnectionStatus>("pc_disconnect");
 export const setPcFavorite = (source: string, sourceId: string, favorite: boolean) => invoke<{ source: string; sourceId: string; favorite: boolean }>("pc_set_favorite", { source, sourceId, favorite });
 export const searchPcWorks = (criteria: PcWorkSearch, cursor: string | null = null, scope: PcWorkScope | null = null, offset: number | null = null, limit: number | null = null) => {
   const revision = nextFavoriteRevision();
-  return invoke<PcSearchPage>("pc_search_works", {
-  criteria,
-  cursor,
-  offset,
-  limit,
   // 画面表示用の名前などを Rust コマンドへ渡さない。入力は三つの識別子だけ。
-  scope: scope ? { kind: scope.kind, source: scope.source, key: scope.key } : null,
-  }).then((page) => {
+  const entity = scope ? { kind: scope.kind, source: scope.source, key: scope.key } : null;
+  // 接続先が新しい棚の一覧を出せるなら、同じ条件でそこから引く。
+  const library = nativeShelf();
+  const request = library
+    ? searchShelf(library, criteria, cursor, entity, offset, limit)
+    : invoke<PcSearchPage>("pc_search_works", { criteria, cursor, offset, limit, scope: entity });
+  return request.then((page) => {
     for (const work of page.items) markFavoriteRead(work, revision);
     return page;
   });
@@ -191,7 +215,8 @@ export const listPcEntities = (kind: "people" | "series", text = "", offset = 0,
 export const getPcEntityDetail = (kind: "people" | "series", source: string, key: string) => invoke<PcEntityDetail>("pc_get_entity_detail", { kind, source, key });
 export const listPcEntitySeries = (source: string, key: string, text: string, cursor: string | null, sort?: { sort: string; order: string }) => invoke<PcEntitySeriesPage>("pc_list_entity_series", { source, key, text, cursor, sort: sort?.sort ?? null, order: sort?.order ?? null });
 export const listPcCollections = () => invoke<PcCollection[]>("pc_list_collections");
-export const getPcWorkCollections = (workId: number) => invoke<PcCollection[]>("pc_get_work_collections", { workId });
+/** 新しい棚の作品のコレクションはまだ出さない（コレクションの画面が旧 API の番号で動く）。 */
+export const getPcWorkCollections = (workId: number | string) => typeof workId === "string" ? Promise.resolve<PcCollection[]>([]) : invoke<PcCollection[]>("pc_get_work_collections", { workId });
 export const getPcCollection = (collectionId: string) => {
   const revision = nextFavoriteRevision();
   return invoke<PcCollectionDetail>("pc_get_collection", { collectionId }).then((collection) => {
@@ -199,15 +224,17 @@ export const getPcCollection = (collectionId: string) => {
     return collection;
   });
 };
-export const getPcMetadata = (workId: number) => {
+export const getPcMetadata = (workId: number | string) => {
   const revision = nextFavoriteRevision();
-  return invoke<PcMetadata>("pc_get_metadata", { workId }).then((metadata) => {
+  const request = typeof workId === "string" ? shelfMetadata(workId) : invoke<PcMetadata>("pc_get_metadata", { workId });
+  return request.then((metadata) => {
     markFavoriteRead(metadata.work, revision);
     return metadata;
   });
 };
-export const getPcPage = (workId: number, page: number, version: number | null = null) => invoke<PcPage>("pc_get_page", { workId, page, version });
-export const getPcOutline = (workId: number, version: number | null = null) => invoke<PcOutlineEntry[]>("pc_get_outline", { workId, version });
+// 新しい棚の作品の本文・目次は読む画面が棚から組む（`nativeReading.ts`）。旧 API では引けない。
+export const getPcPage = (workId: number | string, page: number, version: number | null = null) => typeof workId === "string" ? notYet() : invoke<PcPage>("pc_get_page", { workId, page, version });
+export const getPcOutline = (workId: number | string, version: number | null = null) => typeof workId === "string" ? notYet() : invoke<PcOutlineEntry[]>("pc_get_outline", { workId, version });
 export interface SearchSuggestion {
   kind: string;
   label: string;
@@ -219,7 +246,7 @@ export interface SearchSuggestion {
 export const searchPcSuggestions = (text: string) => invoke<{ items: SearchSuggestion[] }>("pc_search_suggest", { text }).then((result) => result.items);
 export const lookupPcWork = (source: string, key: string) => invoke<PcWork | null>("pc_lookup_work", { source, key });
 export const listOfflineWorks = () => invoke<OfflineWork[]>("offline_list_works");
-export const saveOfflineWork = (workId: number) => invoke<OfflineWork>("offline_save_work", { workId });
+export const saveOfflineWork = (workId: number | string) => typeof workId === "string" ? notYet() : invoke<OfflineWork>("offline_save_work", { workId });
 export const getOfflinePage = (workId: number, page: number) => invoke<OfflinePage>("offline_get_page", { workId, page });
 export const getOfflineOutline = (workId: number, generation: string) => invoke<PcOutlineEntry[]>("offline_get_outline", { workId, generation });
 export const getOfflineAsset = (workId: number, assetId: number, generation: string) => invoke<PcAsset>("offline_get_asset", { workId, assetId, generation });

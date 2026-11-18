@@ -3,7 +3,7 @@ import { getPcPage, type PcPage } from "./pcApi";
 const maxPages = 16;
 const maxAgeMs = 10 * 60_000;
 
-type Entry = { workId: number; at: number; page: Promise<PcPage> };
+type Entry = { workId: number | string; at: number; page: Promise<PcPage> };
 
 const entries = new Map<string, Entry>();
 
@@ -12,7 +12,7 @@ const entries = new Map<string, Entry>();
  * 通信を待たない。作品を端末へ残す「保存」とは別の、メモリ上だけの短い控えである。
  * 版の違いは本文に添えられた版で呼び出し側が確かめる。
  */
-export function fetchPage(workId: number, page: number, version: number | null = null): Promise<PcPage> {
+export function fetchPage(workId: number | string, page: number, version: number | null = null): Promise<PcPage> {
   const key = `${workId}:${version ?? "latest"}:${page}`;
   const found = entries.get(key);
   if (found && Date.now() - found.at < maxAgeMs) {
@@ -29,11 +29,11 @@ export function fetchPage(workId: number, page: number, version: number | null =
   return entry.page;
 }
 
-export function prefetchPage(workId: number, page: number, version: number | null = null): void {
+export function prefetchPage(workId: number | string, page: number, version: number | null = null): void {
   fetchPage(workId, page, version).catch(() => { /* 読みに来たときにもう一度試す */ });
 }
 
-export function forgetWorkPages(workId: number): void {
+export function forgetWorkPages(workId: number | string): void {
   for (const [key, entry] of entries) if (entry.workId === workId) entries.delete(key);
 }
 

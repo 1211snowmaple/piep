@@ -71,6 +71,8 @@ pub fn run() {
             pc_client::pc_get_metadata,
             pc_client::pc_get_page,
             pc_client::native_library::pc_native_works,
+            pc_client::native_library::pc_native_search,
+            pc_client::native_library::pc_native_work,
             pc_client::native_library::pc_native_bundle,
             pc_client::native_reader::pc_native_open,
             pc_client::native_reader::pc_native_page,

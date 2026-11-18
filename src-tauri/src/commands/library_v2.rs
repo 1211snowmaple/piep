@@ -727,14 +727,6 @@ pub struct WorkView {
     pub edit_base_version: Option<i64>,
 }
 
-fn text_of(value: Option<&serde_json::Value>) -> Option<String> {
-    match value? {
-        serde_json::Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
-        serde_json::Value::Number(number) => Some(number.to_string()),
-        _ => None,
-    }
-}
-
 /// 作品の画面の頭（一覧の項目・説明・作者とシリーズの ID）と、保存した版。
 #[tauri::command]
 pub async fn library_v2_work(
@@ -744,27 +736,14 @@ pub async fn library_v2_work(
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let library = state.library()?;
-        let card = library.work_card(work).map_err(|e| e.to_string())?;
-        let snapshots = library.snapshots(work).map_err(|e| e.to_string())?;
-        let metadata = snapshots
-            .iter()
-            .find(|snapshot| snapshot.id == card.snapshot_id)
-            .or(snapshots.last())
-            .map(|snapshot| snapshot.metadata.clone())
-            .unwrap_or_default();
-        let versions = library.work_versions(work).map_err(|e| e.to_string())?;
-        let edit_base_version = card
-            .edit_id
-            .map(|edit| library.edit_base_version(work, edit))
-            .transpose()
-            .map_err(|e| e.to_string())?;
+        let head = library.work_head(work).map_err(|e| e.to_string())?;
         Ok(WorkView {
-            edit_base_version,
-            caption: text_of(metadata.get("caption")).or_else(|| card.excerpt.clone()),
-            author_key: text_of(metadata.get("author_key")),
-            series_key: text_of(metadata.get("series_id")),
-            card: state.card_view(&library, &card)?,
-            versions,
+            edit_base_version: head.edit_base_version,
+            caption: head.caption,
+            author_key: head.author_key,
+            series_key: head.series_key,
+            card: state.card_view(&library, &head.card)?,
+            versions: head.versions,
         })
     })
     .await

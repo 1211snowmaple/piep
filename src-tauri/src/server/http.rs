@@ -225,10 +225,14 @@ impl ServerContext {
         let _ = self.update.set(controller);
     }
 
+    /// 配信する新しい棚を決め、本文の検索の索引を棚に合わせ始める。索引を作るあいだは棚を
+    /// 開いたままにするので、開いただけの棚（確かめて閉じるもの）では始めない。
     pub(super) fn set_reader_shelf(&self, shelf: Arc<super::v2::Context>) -> Result<(), String> {
         self.reader_shelf
-            .set(shelf)
-            .map_err(|_| "新しい棚は既に設定されています".into())
+            .set(Arc::clone(&shelf))
+            .map_err(|_| "新しい棚は既に設定されています".to_owned())?;
+        shelf.prepare_search();
+        Ok(())
     }
 
     pub fn set_admin_web(&self, web: AdminWeb) {
