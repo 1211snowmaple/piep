@@ -127,37 +127,9 @@ pub(super) fn can_skip_listing(
         return Ok(false);
     }
     if card.provider == "pixiv" {
-        if original
-            .get("missing_illustrations")
-            .and_then(Value::as_array)
-            .is_some_and(|v| !v.is_empty())
-        {
-            return Ok(false);
-        }
-        let cover = original
-            .get("cover_url")
-            .or_else(|| original.pointer("/detail/cover_url"))
-            .and_then(Value::as_str);
-        if cover.is_some_and(crate::source_assets::is_pixiv_placeholder_image) {
-            return Ok(false);
-        }
-        let resources = library
-            .resource_manifest(
-                card.id,
-                crate::library::ResourceScope::Snapshot(card.snapshot_id),
-            )
-            .map_err(|e| e.to_string())?;
-        let names = resources
-            .resources
-            .iter()
-            .filter(|r| r.role == "illustration" && r.file.is_some())
-            .filter_map(|r| r.original_name.clone());
-        if !crate::database::queries::pixiv_missing_references_for_filenames(&original, names)
-            .is_empty()
-        {
-            return Ok(false);
-        }
-    } else if original.get("isRestricted").and_then(Value::as_bool) == Some(true) {
+        return pixiv_copy_ready_for_shortcut(library, card, &original);
+    }
+    if original.get("isRestricted").and_then(Value::as_bool) == Some(true) {
         return Ok(false);
     }
     super::super::super::downloader::shelf::unchanged_on_shelf(

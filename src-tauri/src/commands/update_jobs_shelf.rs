@@ -195,14 +195,10 @@ fn can_skip_pixiv_body(
         return Ok(false);
     };
     let original: Value = serde_json::from_str(&original).map_err(|e| e.to_string())?;
-    if original
-        .get("missing_illustrations")
-        .and_then(Value::as_array)
-        .is_some_and(|items| !items.is_empty())
-        || metadata
-            .cover_url
-            .as_deref()
-            .is_some_and(crate::source_assets::is_pixiv_placeholder_image)
+    if metadata
+        .cover_url
+        .as_deref()
+        .is_some_and(crate::source_assets::is_pixiv_placeholder_image)
     {
         return Ok(false);
     }
@@ -224,23 +220,39 @@ fn can_skip_pixiv_body(
     {
         return Ok(false);
     }
-    let resources = library
-        .resource_manifest(
-            card.id,
-            crate::library::ResourceScope::Snapshot(card.snapshot_id),
-        )
-        .map_err(|e| e.to_string())?;
-    let names = resources
-        .resources
-        .iter()
-        .filter(|r| r.role == "illustration" && r.file.is_some())
-        .filter_map(|r| r.original_name.clone());
-    if !crate::database::queries::pixiv_missing_references_for_filenames(&original, names)
-        .is_empty()
+    pixiv_copy_ready_for_shortcut(library, card, &original)
+}
+
+/// 一覧と作品情報の省略判定で、同じ保存状態と有効な編集を検査する。
+fn pixiv_copy_ready_for_shortcut(
+    library: &Library,
+    card: &WorkCard,
+    original: &Value,
+) -> Result<bool, String> {
+    let cover = original
+        .get("cover_url")
+        .or_else(|| original.pointer("/detail/cover_url"))
+        .and_then(Value::as_str);
+    if cover.is_some_and(crate::source_assets::is_pixiv_placeholder_image)
+        || original
+            .get("missing_illustrations")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+        || !super::super::downloader::shelf::unchanged_on_shelf(
+            library, card.id, original, "pixiv",
+        )?
     {
         return Ok(false);
     }
-    super::super::downloader::shelf::unchanged_on_shelf(library, card.id, &original, "pixiv")
+    let missing = match library.pixiv_source_image_gaps(card.id, card.snapshot_id) {
+        Ok(missing) => missing,
+        Err(crate::library::Error::ResourceUnavailable) => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    library
+        .pixiv_references_left_by_active_edit(card.id, card.snapshot_id, missing)
+        .map(|missing| missing.is_empty())
+        .map_err(|error| error.to_string())
 }
 
 fn record_revision(
@@ -874,6 +886,86 @@ mod tests {
             .record_work_check(first.id, newer.snapshot_id, 300, true)
             .is_err());
         library.verify().unwrap();
+    }
+
+    #[test]
+    fn update_shortcuts_use_the_active_edit_and_keep_source_reported_gaps_visible() {
+        use crate::library::{EditBlock, EditContent, EditPointerChange, EditRequest, WorkSave};
+        let (_temp, _state, library) = fixture();
+        let mut original = data("pixiv", "本文[uploadedimage:1]", "77");
+        original["detail"]["text_length"] = json!(2);
+        let saved = library
+            .save_readable_work(
+                WorkSave {
+                    request: LibraryId::now_v7(),
+                    provider: "pixiv",
+                    key: "one",
+                    route: "save",
+                    data: &original,
+                    assets: vec![],
+                },
+                None,
+            )
+            .unwrap();
+        let card = library.work_card(saved.entity_id).unwrap();
+        let listed_at = card.saved_at - 1000;
+        let listed = chrono::DateTime::from_timestamp_millis(listed_at)
+            .unwrap()
+            .to_rfc3339();
+        library
+            .remember_work_source_update(card.id, card.snapshot_id, listed_at)
+            .unwrap();
+        library
+            .record_work_check(card.id, card.snapshot_id, card.saved_at, true)
+            .unwrap();
+        let metadata = serde_json::from_value(json!({
+            "id": 1, "title": "作品", "caption": "説明", "tags": [], "text_length": 2,
+            "create_date": "2026-11-01T00:00:00Z", "user": { "id": 77, "name": "作者", "account": "a" }
+        })).unwrap();
+        assert!(!can_skip_pixiv_body(&library, &card, &metadata).unwrap());
+        assert!(!listings::can_skip_listing(&library, &card, &listed).unwrap());
+        let content = EditContent {
+            format: "piep-edit-v1".into(),
+            title: None,
+            media: vec![],
+            provenance: None,
+            blocks: vec![EditBlock {
+                id: LibraryId::now_v7(),
+                ordinal: 0,
+                kind: "paragraph".into(),
+                text: Some("本文".into()),
+                attrs: Value::Null,
+                media_slot: None,
+            }],
+        };
+        library
+            .save_edit(EditRequest {
+                request_id: LibraryId::now_v7(),
+                work: card.id,
+                user: library.id,
+                base: card.snapshot_id,
+                parent: None,
+                expected: 0,
+                content: &content,
+                activate: true,
+            })
+            .unwrap();
+        assert!(can_skip_pixiv_body(&library, &card, &metadata).unwrap());
+        assert!(listings::can_skip_listing(&library, &card, &listed).unwrap());
+        original["missing_illustrations"] = json!(["[uploadedimage:1]"]);
+        assert!(!pixiv_copy_ready_for_shortcut(&library, &card, &original).unwrap());
+        let edit = library.edit_state(card.id, library.id).unwrap();
+        library
+            .change_edit_pointers(
+                LibraryId::now_v7(),
+                card.id,
+                library.id,
+                edit.generation,
+                EditPointerChange::Unpublish,
+            )
+            .unwrap();
+        assert!(!can_skip_pixiv_body(&library, &card, &metadata).unwrap());
+        assert!(!listings::can_skip_listing(&library, &card, &listed).unwrap());
     }
 
     #[test]
