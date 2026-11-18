@@ -358,7 +358,6 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_entity_collections,
             commands::library_v2::library_v2_collections,
             commands::library_v2::library_v2_collection,
-            commands::library_v2::library_v2_version_text,
             commands::library_v2::library_v2_revision_snapshot,
             commands::library_v2::library_v2_original,
             // サーバーモード (commands::server)

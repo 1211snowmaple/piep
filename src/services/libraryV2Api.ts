@@ -333,10 +333,6 @@ export function isShelfPdf(item: ShelfMedia): item is ShelfMedia & { file: strin
   return item.kind === "file" && item.file !== null && /\.pdf$/i.test(item.name ?? "");
 }
 
-export function libraryV2VersionText(work: string, snapshot: string): Promise<string> {
-  return invoke<string>("library_v2_version_text", { work, snapshot });
-}
-
 export interface ShelfRevisionSnapshot {
   /** null は未取得。空文字は保存した空の本文。 */
   text: string | null;
