@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
-import type { MobileShelfPage, MobileShelfWork, MobileShelfWorkDetail } from "@shared/mobileApi";
-import type { PcConnectionStatus, PcMetadata, PcOutlineEntry, PcPage, PcSearchPage, PcWork, PcWorkSearch } from "./pcApi";
+import type { MobileCollection, MobileEntityDetail, MobileShelfCollectionDetail, MobileShelfPage, MobileShelfWork, MobileShelfWorkDetail } from "@shared/mobileApi";
+import type { PcCollection, PcCollectionDetail, PcConnectionStatus, PcEntityDetail, PcEntityPage, PcEntitySeriesPage, PcMetadata, PcOutlineEntry, PcPage, PcSearchPage, PcWork, PcWorkSearch } from "./pcApi";
 
 type NativeScope = NonNullable<PcConnectionStatus["nativeLibrary"]>["scope"];
 
@@ -21,6 +21,8 @@ let scope: NativeScope | null = null;
 let listable = false;
 /** 棚の作品のお気に入りを、要求 UUID と更新世代で付け外しできる接続か。 */
 let favoriteWritable = false;
+/** 作者・シリーズ・コレクションの画面も新しい棚から出せる接続か。 */
+let groupsReadable = false;
 const opened = new Map<string, Promise<NativeOpened | null>>();
 
 /** 新しい棚の作品ではまだ使えない操作の理由。押せない形にして添える。 */
@@ -39,6 +41,7 @@ export function adoptNativeLibrary(status: PcConnectionStatus | null): void {
     && next.connectionGeneration === scope.connectionGeneration;
   listable = Boolean(next && status?.nativeLibrary?.worksSearch);
   favoriteWritable = listable && Boolean(status?.nativeLibrary?.favoriteWrite);
+  groupsReadable = listable && Boolean(status?.nativeLibrary?.groups);
   if (same) return;
   scope = next;
   opened.clear();
@@ -74,6 +77,57 @@ export function setShelfFavorite(library: NativeScope, work: string, expected: s
 export function nativeShelfKey(): string | null {
   const shelf = nativeShelf();
   return shelf ? `${shelf.libraryId}/${shelf.subjectId}/${shelf.syncEpoch}/${shelf.connectionGeneration}` : null;
+}
+
+/** 作者・シリーズ・コレクションの画面を出す新しい棚。出せない接続では null（旧 API の画面のまま）。 */
+export function groupShelf(): NativeScope | null {
+  const shelf = nativeShelf();
+  return shelf && groupsReadable ? shelf : null;
+}
+
+/** 作者・シリーズ・コレクションの問い合わせの鍵に足す。 */
+export function groupShelfKey(): string | null {
+  return groupShelf() ? nativeShelfKey() : null;
+}
+
+/** 棚のコレクション。表紙は棚から引くので、棚の UUID を添える。 */
+function shelfCollection(collection: MobileCollection, library: NativeScope): PcCollection {
+  return { ...collection, coverMode: collection.coverMode as PcCollection["coverMode"], shelfLibrary: library.libraryId };
+}
+
+export async function listShelfEntities(library: NativeScope, kind: "people" | "series", text: string, offset: number, sort?: { sort: string; order: string }): Promise<PcEntityPage> {
+  return invoke<PcEntityPage>("pc_native_entities", { library, kind, text, offset, sort: sort?.sort ?? null, order: sort?.order ?? null });
+}
+
+export async function shelfEntityDetail(library: NativeScope, kind: "people" | "series", source: string, key: string): Promise<PcEntityDetail> {
+  const detail = await invoke<MobileEntityDetail>("pc_native_entity_detail", { library, kind, source, key });
+  return { ...detail, collections: detail.collections.map((collection) => shelfCollection(collection, library)) };
+}
+
+export async function listShelfEntitySeries(library: NativeScope, source: string, key: string, text: string, cursor: string | null, sort?: { sort: string; order: string }): Promise<PcEntitySeriesPage> {
+  return invoke<PcEntitySeriesPage>("pc_native_entity_series", { library, source, key, text, cursor, sort: sort?.sort ?? null, order: sort?.order ?? null });
+}
+
+export async function listShelfCollections(library: NativeScope): Promise<PcCollection[]> {
+  const items = await invoke<MobileCollection[]>("pc_native_collections", { library });
+  return items.map((collection) => shelfCollection(collection, library));
+}
+
+export async function shelfWorkCollections(library: NativeScope, work: string): Promise<PcCollection[]> {
+  const items = await invoke<MobileCollection[]>("pc_native_work_collections", { library, work });
+  return items.map((collection) => shelfCollection(collection, library));
+}
+
+/** コレクションの画面。`collection` は棚の UUID か、旧棚から移したものの旧棚の ID。 */
+export async function shelfCollectionDetail(library: NativeScope, collection: string): Promise<PcCollectionDetail> {
+  const { members, ...summary } = await invoke<MobileShelfCollectionDetail>("pc_native_collection", { library, collection });
+  return { ...shelfCollection(summary, library), members: members.map((member) => ({ ...member, work: member.work ? shelfWork(member.work) : null })) };
+}
+
+/** 新しい棚の作者のアイコン・ヘッダー、シリーズの表紙。 */
+export function shelfEntityCoverPath(kind: "people" | "series", source: string, key: string, banner: boolean): string | null {
+  const shelf = groupShelf();
+  return shelf ? `shelf-entity/${shelf.libraryId}/${kind}/${source}/${encodeURIComponent(key)}${banner ? "/banner" : ""}` : null;
 }
 
 /** 新しい棚の一件を、カードと画面が読む形にする。作品は棚の UUID のまま。 */

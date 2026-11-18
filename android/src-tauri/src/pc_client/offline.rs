@@ -534,9 +534,12 @@ async fn validated_image_response(
     Ok(image)
 }
 
+/// 作者・シリーズの画像を残す。`shelf` があれば新しい棚の画像、なければ旧 API の画像。
+#[allow(clippy::too_many_arguments)]
 async fn save_entity_cover(
     client: &reqwest::Client,
     saved: &SavedConnection,
+    shelf: Option<Id>,
     source: &str,
     kind: &str,
     key: &str,
@@ -546,10 +549,17 @@ async fn save_entity_cover(
     if key.is_empty() {
         return Ok(None);
     }
-    let mut url = reqwest::Url::parse(&format!("{}/api/v1/entities/{kind}/cover", saved.url))
+    let (path, source_name) = match shelf {
+        Some(library) => (
+            format!("/api/v2/libraries/{}/{kind}/cover", library.get()),
+            "provider",
+        ),
+        None => (format!("/api/v1/entities/{kind}/cover"), "source"),
+    };
+    let mut url = reqwest::Url::parse(&format!("{}{path}", saved.url))
         .map_err(|_| ClientError::protocol())?;
     url.query_pairs_mut()
-        .append_pair("source", source)
+        .append_pair(source_name, source)
         .append_pair("key", key);
     let response = match client
         .get(url)
@@ -582,9 +592,11 @@ async fn save_entity_cover(
     }))
 }
 
+/// 選んだ画像を表紙にしたコレクションの表紙を残す。`shelf` があれば新しい棚の表紙。
 async fn save_collection_covers(
     client: &reqwest::Client,
     saved: &SavedConnection,
+    shelf: Option<Id>,
     collections: &[MobileCollection],
     staging: &Path,
     total_bytes: &mut usize,
@@ -609,7 +621,14 @@ async fn save_collection_covers(
         {
             continue;
         }
-        let endpoint = format!("/api/v1/collections/{}/cover/file", collection.id);
+        let endpoint = match shelf {
+            Some(library) => format!(
+                "/api/v2/libraries/{}/collections/{}/cover/file",
+                library.get(),
+                collection.id
+            ),
+            None => format!("/api/v1/collections/{}/cover/file", collection.id),
+        };
         let response = match tokio::time::timeout_at(
             deadline,
             get_pc_with_timeout(client, saved, &endpoint, ASSET_TIMEOUT),
@@ -960,6 +979,7 @@ async fn save_into(
     let author_cover = save_entity_cover(
         client,
         saved,
+        None,
         &metadata.work.source,
         "people",
         &metadata.work.author_id,
@@ -971,6 +991,7 @@ async fn save_into(
         save_entity_cover(
             client,
             saved,
+            None,
             &metadata.work.source,
             "series",
             series_id,
@@ -1009,7 +1030,8 @@ async fn save_into(
         })
         .collect::<BTreeMap<_, _>>();
     let collection_covers =
-        save_collection_covers(client, saved, &collections, staging, &mut total_bytes).await?;
+        save_collection_covers(client, saved, None, &collections, staging, &mut total_bytes)
+            .await?;
     let collection_cover_ids = collection_covers
         .iter()
         .map(|record| record.collection_id.clone())
@@ -1209,9 +1231,11 @@ async fn save_shelf_into(
             sha256: digest(&bytes),
         });
     }
+    let shelf = Some(library.library_id());
     let author_cover = save_entity_cover(
         client,
         saved,
+        shelf,
         &work.source,
         "people",
         &work.author_id,
@@ -1224,6 +1248,7 @@ async fn save_shelf_into(
             save_entity_cover(
                 client,
                 saved,
+                shelf,
                 &work.source,
                 "series",
                 series_id,
@@ -1251,6 +1276,31 @@ async fn save_shelf_into(
             outline_sha256 = Some(digest(&bytes));
         }
     }
+    // 作品の入ったコレクション（読む画面の欄と、保存した作品の一覧の絞り込みに使う）。
+    let work_id = Id::new(uuid::Uuid::parse_str(&work.id).map_err(|_| ClientError::protocol())?)
+        .map_err(|_| ClientError::protocol())?;
+    let collections = native_library::work_collections(pc, library, work_id).await?;
+    let collection_positions = collections
+        .iter()
+        .filter_map(|collection| {
+            collection
+                .position
+                .map(|position| (collection.id.clone(), position))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let collection_covers = save_collection_covers(
+        client,
+        saved,
+        shelf,
+        &collections,
+        staging,
+        &mut total_bytes,
+    )
+    .await?;
+    let collection_cover_ids = collection_covers
+        .iter()
+        .map(|record| record.collection_id.clone())
+        .collect();
     // 受け取っている間に版が変わっていれば、混ざった版を保存しない。
     let latest = native_library::lookup(pc, library, &work.source, &work.source_id).await?;
     if latest.entity_id != found.entity_id || !same_view(&latest, work) {
@@ -1270,9 +1320,9 @@ async fn save_shelf_into(
         saved_content_hash: None,
         saved_edit_hash: work.edit_id.as_ref().map(|id| format!("edit:{id}")),
         page_count,
-        collections: Vec::new(),
-        collection_positions: BTreeMap::new(),
-        collection_cover_ids: Vec::new(),
+        collections,
+        collection_positions,
+        collection_cover_ids,
         has_author_cover: author_cover.is_some(),
         has_series_cover: series_cover.is_some(),
         author_cover_entity: author_cover.as_ref().map(|_| OfflineEntityKey {
@@ -1293,7 +1343,7 @@ async fn save_shelf_into(
         cover,
         author_cover,
         series_cover,
-        collection_covers: Vec::new(),
+        collection_covers,
         outline_sha256,
     };
     write_json(&staging.join("manifest.json"), &manifest)?;

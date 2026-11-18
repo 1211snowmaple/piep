@@ -236,3 +236,17 @@ export interface MobileShelfWorkDetail {
   /** 反映中の編集の基準の版。編集がなければ空。 */
   editBaseVersion: number | null;
 }
+
+/** 新しい棚のコレクションの一回。棚に無い（未保存の）回は `work` が空で、入れた時の題と作者。 */
+export interface MobileShelfCollectionMember {
+  title: string;
+  authorName: string;
+  position: number;
+  work: MobileShelfWork | null;
+}
+
+/** 新しい棚のコレクションの画面。`id` は棚の UUID、表紙は `cover_mode` の枠ごとに */
+/** `/collections/{id}/cover/{single|file|tile-N}` から引く。 */
+export interface MobileShelfCollectionDetail extends MobileCollection {
+  members: MobileShelfCollectionMember[];
+}

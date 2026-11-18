@@ -9,6 +9,7 @@ import { CollectionCard, EntityCard, GroupSkeleton } from "./LibraryGroups";
 import { VirtualWorkList } from "./VirtualWorkList";
 import { entityCoverUrl, imageRecentlyFailed, SmoothImage } from "./images";
 import { defaultPcSearch, getPcEntityDetail, listPcEntitySeries, pcErrorMessage, type PcCollection, type PcConnectionStatus, type PcEntityDetail, type PcWork, type PcWorkSort } from "./pcApi";
+import { groupShelfKey } from "./nativeReading";
 import { activeFilterCount, FilterSheet } from "./FilterSheet";
 import { entitySeriesKey, entitySortGroups, entitySortLabel, entityWorkSortGroups, entityWorkSortLabel, loadEntitySort, loadEntityWorkSort, saveEntitySort, saveEntityWorkSort, splitEntitySort, type EntitySort, type EntityWorkSort } from "./librarySort";
 import { refreshShortList, useAutoLoad, useStatusRecovery, useWorkList, WorkResults } from "./workList";
@@ -108,7 +109,7 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
   const kindPath = isPerson ? "people" : "series";
   const tabsRef = useRef<HTMLElement>(null);
 
-  const detailQuery = useQuery({ queryKey: ["entity-detail", kindPath, page.source, page.key], queryFn: () => getPcEntityDetail(kindPath, page.source, page.key), enabled: reachable, retry: false });
+  const detailQuery = useQuery({ queryKey: ["entity-detail", kindPath, page.source, page.key, groupShelfKey()], queryFn: () => getPcEntityDetail(kindPath, page.source, page.key), enabled: reachable, retry: false });
   useStatusRecovery(detailQuery.error);
   const detail = detailQuery.data;
   const seriesCount = detail?.seriesCount ?? 0;
@@ -131,7 +132,7 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
   const list = useWorkList({ search, scope, pagingMode, page: page.listPage, enabled: reachable && page.tab === "works" });
 
   const series = useInfiniteQuery({
-    queryKey: ["entity-series", page.source, page.key, page.seriesQuery, seriesSort],
+    queryKey: ["entity-series", page.source, page.key, page.seriesQuery, seriesSort, groupShelfKey()],
     queryFn: ({ pageParam }) => listPcEntitySeries(page.source, page.key, page.seriesQuery, pageParam, splitEntitySort(seriesSort)),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.nextCursor,

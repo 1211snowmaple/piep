@@ -1248,3 +1248,286 @@ async fn corrupt_stored_bytes_are_not_sent_and_do_not_expose_paths() {
         !text.contains("objects") && !text.contains(&server.temp.0.to_string_lossy().to_string())
     );
 }
+
+/// 作者 p1 の作品 w1・w2（シリーズ s1）と、作者 p2 の作品 w3。p1 はアイコンとヘッダーを持つ。
+fn grouped_shelf(library: &Library) -> BTreeMap<&'static str, uuid::Uuid> {
+    let mut works = BTreeMap::new();
+    for (key, author, series) in [
+        ("w1", "p1", Some(1)),
+        ("w2", "p1", Some(2)),
+        ("w3", "p2", None),
+    ] {
+        let mut input = capture(key, Some(&png()));
+        input
+            .metadata
+            .insert("author_name".into(), json!(format!("{author} の名")));
+        input.metadata.insert("author_key".into(), json!(author));
+        input.metadata.insert("tags".into(), json!(["a"]));
+        if let Some(position) = series {
+            input.metadata.insert("series_id".into(), json!("s1"));
+            input
+                .metadata
+                .insert("series_title".into(), json!("s1 の題"));
+            input
+                .metadata
+                .insert("series_position".into(), json!(position));
+        }
+        works.insert(key, save(library, input).entity_id);
+    }
+    let mut person = capture("p1", Some(&png()));
+    person.kind = EntityKind::Person;
+    person.metadata = BTreeMap::from([
+        ("display_name".into(), json!("p1 の名")),
+        ("description".into(), json!("紹介")),
+        (
+            "links".into(),
+            json!(["https://example.test/p1", "javascript:alert(1)"]),
+        ),
+    ]);
+    person.media[0].slot = "icon".into();
+    person.media[0].role = "icon".into();
+    let mut banner = capture("p1-banner", Some(&png())).media.remove(0);
+    banner.slot = "banner".into();
+    banner.role = "banner".into();
+    person.media.push(banner);
+    save(library, person);
+    works
+}
+
+impl Server {
+    fn shelf(&self, rest: &str) -> String {
+        format!("/api/v2/libraries/{}{rest}", self.library.id)
+    }
+    async fn read<T: serde::de::DeserializeOwned>(&self, rest: &str, token: &str) -> T {
+        self.get_as(&self.shelf(rest), token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn people_series_and_collections_come_from_the_shelf_in_the_v1_shapes() {
+    let server = Server::start().await;
+    let works = grouped_shelf(&server.library);
+    let collection = uuid::Uuid::now_v7();
+    let member = |key: &str| crate::library::CollectionMember {
+        work_id: works[key],
+        title_at_add: format!("{key} を足した時の題"),
+        author_at_add: "足した時の作者".into(),
+        role: "main".into(),
+        added_by: "manual".into(),
+        pinned: false,
+        note: None,
+    };
+    server
+        .library
+        .save_collection(crate::library::CollectionSave {
+            request_id: uuid::Uuid::now_v7(),
+            id: collection,
+            expected_generation: 0,
+            title: "順に読む".into(),
+            description: None,
+            ordered: true,
+            members: vec![member("w2"), member("w1")],
+        })
+        .unwrap();
+
+    // 接続情報が、この口を出せることを知らせる。
+    let identity = server.get("/api/v2/identity").send().await.unwrap();
+    assert_eq!(identity.headers()["x-piep-groups"], "1");
+
+    // 作者の一覧。作品の多い順で、続きは何件目からか。
+    let people: piep_mobile_api::MobileEntityPage = server.read("/people?limit=1", "fixture").await;
+    assert_eq!(people.total, 2);
+    assert_eq!(people.next_offset, Some(1));
+    assert_eq!(people.items[0].source_key, "p1");
+    assert_eq!(people.items[0].count, 2);
+    assert!(people.items[0].has_cover);
+    let rest: piep_mobile_api::MobileEntityPage = server
+        .read("/people?offset=1&sort=name&order=desc", "fixture")
+        .await;
+    assert_eq!(rest.items.len(), 1);
+    assert_eq!(rest.next_offset, None);
+    let named: piep_mobile_api::MobileEntityPage = server.read("/people?text=p2", "fixture").await;
+    assert_eq!(named.total, 1);
+    let series: piep_mobile_api::MobileEntityPage = server.read("/series", "fixture").await;
+    assert_eq!(series.items[0].source_key, "s1");
+    assert_eq!(series.items[0].count, 2);
+
+    // 作者の画面。外へ開けないリンクは渡さない。
+    let p1: piep_mobile_api::MobileEntityDetail = server
+        .read("/people/detail?provider=pixiv&key=p1", "fixture")
+        .await;
+    assert_eq!(p1.display_name, "p1 の名");
+    assert_eq!(p1.work_count, 2);
+    assert!(p1.has_cover && p1.has_banner);
+    assert_eq!(p1.links, vec!["https://example.test/p1".to_string()]);
+    assert_eq!(p1.series_count, Some(1));
+    assert_eq!(p1.tags[0].name, "a");
+    assert_eq!(p1.collections.len(), 1);
+    assert_eq!(p1.collections[0].id, collection.to_string());
+    let p2: piep_mobile_api::MobileEntityDetail = server
+        .read("/people/detail?provider=pixiv&key=p2", "fixture")
+        .await;
+    assert!(p2.collections.is_empty() && !p2.has_cover);
+    let s1: piep_mobile_api::MobileEntityDetail = server
+        .read("/series/detail?provider=pixiv&key=s1", "fixture")
+        .await;
+    assert_eq!((s1.work_count, s1.series_count), (2, None));
+    let own: piep_mobile_api::MobileEntitySeriesPage = server
+        .read("/people/series?provider=pixiv&key=p1", "fixture")
+        .await;
+    assert_eq!(own.total, 1);
+    assert_eq!(own.items[0].source_key, "s1");
+    assert_eq!(own.next_cursor, None);
+
+    // 画像。作者はアイコンとヘッダー、シリーズのヘッダーは無い。
+    for rest in [
+        "/people/cover?provider=pixiv&key=p1",
+        "/people/cover?provider=pixiv&key=p1&variant=banner",
+    ] {
+        let response = server.get(&server.shelf(rest)).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{rest}");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/webp");
+    }
+
+    // コレクション。回は並べた順で、作品は棚の作品の形。お気に入りは利用者ごと。
+    server
+        .favorite_as(
+            works["w1"],
+            json!({"requestId": uuid::Uuid::now_v7().to_string(), "expected": "0", "favorite": true}),
+            "fixture",
+        )
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let list: Vec<piep_mobile_api::MobileCollection> = server.read("/collections", "fixture").await;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].collection_kind, "ordered");
+    assert_eq!((list[0].member_count, list[0].available_count), (2, 2));
+    assert_eq!(list[0].cover_tiles.len(), 2);
+    assert!(list[0].cover_tiles.iter().all(|tile| tile.has_cover));
+    let detail: piep_mobile_api::MobileShelfCollectionDetail = server
+        .read(&format!("/collections/{collection}"), "fixture")
+        .await;
+    let order: Vec<_> = detail
+        .members
+        .iter()
+        .map(|member| member.work.as_ref().unwrap().id.clone())
+        .collect();
+    assert_eq!(
+        order,
+        vec![works["w2"].to_string(), works["w1"].to_string()]
+    );
+    assert_eq!(detail.members[1].position, 1);
+    assert!(detail.members[1].work.as_ref().unwrap().favorite);
+    let other: piep_mobile_api::MobileShelfCollectionDetail = server
+        .read(&format!("/collections/{collection}"), "second")
+        .await;
+    assert!(!other.members[1].work.as_ref().unwrap().favorite);
+    let tile = server
+        .get(&server.shelf(&format!("/collections/{collection}/cover/tile-0")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tile.status(), StatusCode::OK);
+    let memberships: Vec<piep_mobile_api::MobileCollection> = server
+        .read(&format!("/works/{}/collections", works["w1"]), "fixture")
+        .await;
+    assert_eq!(memberships.len(), 1);
+    assert_eq!(memberships[0].position, Some(1));
+    let none: Vec<piep_mobile_api::MobileCollection> = server
+        .read(&format!("/works/{}/collections", works["w3"]), "fixture")
+        .await;
+    assert!(none.is_empty());
+
+    // 棚に無いもの・知らない条件は、旧棚へ回さず断る。
+    for (rest, status) in [
+        (
+            "/people/detail?provider=pixiv&key=nobody".to_string(),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "/people/detail?provider=pixiv&key=".to_string(),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "/people/cover?provider=pixiv&key=p2".to_string(),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "/series/cover?provider=pixiv&key=s1&variant=banner".to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "/people/series?provider=pixiv&key=nobody".to_string(),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "/people/series?provider=pixiv&key=p1&cursor=-1".to_string(),
+            StatusCode::BAD_REQUEST,
+        ),
+        ("/people?sort=bogus".to_string(), StatusCode::BAD_REQUEST),
+        ("/people?order=up".to_string(), StatusCode::BAD_REQUEST),
+        ("/people?extra=1".to_string(), StatusCode::BAD_REQUEST),
+        (
+            format!("/people?text={}", "x".repeat(201)),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            format!("/collections/{}", uuid::Uuid::now_v7()),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "/collections/not-moved-here".to_string(),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("/collections/{collection}/cover/tile-3"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("/collections/{collection}/cover/single"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("/collections/{collection}/cover/other"),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("/works/{}/collections", uuid::Uuid::now_v7()),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            server
+                .get(&server.shelf(&rest))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            status,
+            "{rest}"
+        );
+    }
+    assert_eq!(
+        server
+            .get(&format!(
+                "/api/v2/libraries/{}/people",
+                uuid::Uuid::now_v7()
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}

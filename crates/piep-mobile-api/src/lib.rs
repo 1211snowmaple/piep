@@ -316,6 +316,26 @@ pub struct MobileShelfWorkDetail {
     pub edit_base_version: Option<i64>,
 }
 
+/// 新しい棚のコレクションの一回。棚に無い（未保存の）回は `work` が空で、入れた時の題と作者。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfCollectionMember {
+    pub title: String,
+    pub author_name: String,
+    pub position: i64,
+    pub work: Option<MobileShelfWork>,
+}
+
+/// 新しい棚のコレクションの画面。`id` は棚の UUID、表紙は `cover_mode` の枠ごとに
+/// `/collections/{id}/cover/{single|file|tile-N}` から引く。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfCollectionDetail {
+    #[serde(flatten)]
+    pub summary: MobileCollection,
+    pub members: Vec<MobileShelfCollectionMember>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

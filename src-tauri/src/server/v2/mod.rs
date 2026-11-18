@@ -1,6 +1,7 @@
 //! 新ライブラリ用の認証付き読取 API。旧 API の意味や本番の保存先を変更しない。
 mod auth;
 mod favorite;
+mod groups;
 mod list;
 pub use auth::{Authority, DeviceAuthority, Grant};
 pub use favorite::FavoriteMirror;
@@ -46,6 +47,8 @@ pub struct Context {
     /// 本文の検索の索引が棚に追いついたか。追いつくまで語の検索には答えない。
     search_ready: AtomicBool,
     covers: Mutex<list::Covers>,
+    /// 作者・シリーズの一覧の集計（棚の世代と条件ごと）。
+    entity_rows: Mutex<groups::EntityRows>,
     /// 携帯のお気に入りを旧 API の変更の記録へ写す口（単独サーバーだけ）。
     favorite_mirror: OnceLock<FavoriteMirror>,
 }
@@ -75,6 +78,7 @@ impl Context {
             devices: Mutex::new(HashMap::new()),
             search_ready: AtomicBool::new(false),
             covers: Mutex::new(list::Covers::default()),
+            entity_rows: Mutex::new(groups::EntityRows::default()),
             favorite_mirror: OnceLock::new(),
         })
     }
@@ -296,6 +300,17 @@ pub fn router(ctx: Arc<Context>) -> Router {
         .route("/api/v2/libraries/{library}/works/{work}",get(list::work))
         .route("/api/v2/libraries/{library}/works/{work}/cover",get(list::cover))
         .route("/api/v2/libraries/{library}/works/{work}/favorite",put(favorite::put))
+        .route("/api/v2/libraries/{library}/works/{work}/collections",get(groups::work_collections))
+        .route("/api/v2/libraries/{library}/people",get(groups::people))
+        .route("/api/v2/libraries/{library}/people/detail",get(groups::person_detail))
+        .route("/api/v2/libraries/{library}/people/series",get(groups::person_series))
+        .route("/api/v2/libraries/{library}/people/cover",get(groups::person_cover))
+        .route("/api/v2/libraries/{library}/series",get(groups::series))
+        .route("/api/v2/libraries/{library}/series/detail",get(groups::series_detail))
+        .route("/api/v2/libraries/{library}/series/cover",get(groups::series_cover))
+        .route("/api/v2/libraries/{library}/collections",get(groups::collections))
+        .route("/api/v2/libraries/{library}/collections/{collection}",get(groups::collection))
+        .route("/api/v2/libraries/{library}/collections/{collection}/cover/{slot}",get(groups::collection_cover))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/bundle",get(bundle))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/manifest",get(manifest))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/files/{file}/chunks/{ordinal}",get(chunk))
@@ -328,6 +343,10 @@ async fn identity(
         "x-piep-favorite-write",
         header::HeaderValue::from_static("1"),
     );
+    // 作者・シリーズ・コレクションの画面を新しい棚から出せる。
+    response
+        .headers_mut()
+        .insert("x-piep-groups", header::HeaderValue::from_static("1"));
     response
 }
 

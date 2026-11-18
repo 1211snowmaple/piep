@@ -7,6 +7,7 @@
 単独サーバーでは、設定で指定した棚を開いて既存の待ち受けにこの読取 API を載せる。
 利用者状態の書き込みは、棚の作品のお気に入りの付け外しだけを提供する（下の「お気に入りの付け外し」）。
 対応能力（`identity` の capabilities）には含めず、応答の `x-piep-favorite-write: 1` で知らせる。
+携帯の作者・シリーズ・コレクションの画面の口も同じく、`x-piep-groups: 1` で知らせる。
 
 管理側は新ライブラリを開き、永続化した同期 epoch と認可器を `Context` に渡す。
 epoch は棚の復元・再作成時に変更し、要求や router の起動ごとには生成しない。
@@ -66,6 +67,14 @@ piep-server activate-library --data <サーバーの置き場> --generation <準
 | `/api/v2/libraries/{library}/works/{work}/cover?size={card\|large}` | 今の版の表紙を携帯向けの WebP（320×480 / 640×960 に収める）で |
 | `POST /api/v2/libraries/{library}/works/search` | 携帯の一覧：旧 API と同じ条件の形で、絞り込み・並べ替え・語の検索・ページ送り |
 | `PUT /api/v2/libraries/{library}/works/{work}/favorite` | 認証した利用者のお気に入りを付け外しする（下の「お気に入りの付け外し」） |
+| `/api/v2/libraries/{library}/works/{work}/collections` | 作品の入ったコレクションと、その中の位置 |
+| `/api/v2/libraries/{library}/{people\|series}?text&offset&limit&sort&order` | 作者・シリーズの一覧。並べる鍵と向きは旧 API と同じ語彙、続きは `nextOffset` |
+| `/api/v2/libraries/{library}/{people\|series}/detail?provider&key` | 作者・シリーズの画面の頭：説明・リンク・タグ・シリーズの数・コレクション |
+| `/api/v2/libraries/{library}/people/series?provider&key&text&sort&order&cursor&limit` | 作者の作品が属するシリーズ。続きの位置は何件目からかの十進 |
+| `/api/v2/libraries/{library}/{people\|series}/cover?provider&key[&variant=banner]` | 作者のアイコン（`banner` はヘッダー、320×480 / 1280×480）、シリーズの表紙 |
+| `/api/v2/libraries/{library}/collections` | コレクションの一覧（更新の新しい順）。`id` は棚の UUID |
+| `/api/v2/libraries/{library}/collections/{collection}` | コレクションの画面。回の作品は一覧と同じ形。旧棚から移したものは旧棚の ID でも開ける |
+| `/api/v2/libraries/{library}/collections/{collection}/cover/{single\|file\|tile-0〜3}` | 表紙に選んだ作品の表紙・選んだ画像・並びの先頭からの回の表紙 |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/bundle` | 読書 bundle：読書用文書（`piep-reader-v1`）と、渡せる全資産の file 記述を一回で |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/resources/{body\|media\|file}/manifest` | 所属と表示版を固定した一ファイルの descriptor |
 | 同じ資産パスの `/files/{file}/chunks/{ordinal}` | 指定した元ファイルの一部分を保存形式のまま転送 |

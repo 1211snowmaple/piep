@@ -477,6 +477,30 @@ impl Library {
         );
         collection_summaries(&conn, &condition, &[entity.as_bytes().to_vec()])
     }
+
+    /// 作品の入ったコレクションと、その中での位置（旧棚の `list_collections_for_work`・
+    /// `list_collection_positions_for_work`）。並びはコレクションの一覧と同じ。
+    pub fn work_collections(&self, work: LibraryId) -> Result<Vec<(CollectionSummary, i64)>> {
+        let conn = self.reader()?;
+        let summaries = collection_summaries(
+            &conn,
+            "EXISTS(SELECT 1 FROM collection_members m WHERE m.collection_id=c.id AND m.work_id=?1)",
+            &[work.as_bytes().to_vec()],
+        )?;
+        let mut statement = conn.prepare_cached(
+            "SELECT position FROM collection_members WHERE collection_id=?1 AND work_id=?2",
+        )?;
+        summaries
+            .into_iter()
+            .map(|summary| {
+                let position: i64 = statement.query_row(
+                    params![summary.id.as_bytes().as_slice(), work.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )?;
+                Ok((summary, position))
+            })
+            .collect()
+    }
 }
 
 /// コレクションの要約を、条件（`c` が `collections`）に当てはまるものだけ、旧棚と同じく更新の新しい順で。

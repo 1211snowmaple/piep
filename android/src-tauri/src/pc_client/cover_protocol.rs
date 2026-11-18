@@ -343,6 +343,52 @@ fn parse_route(path: &str) -> Option<Route> {
                 refreshes: false,
             })
         }
+        // 新しい棚の作者のアイコン・ヘッダーとシリーズの表紙。版を持たないので、古くなったら取り直す。
+        [
+            "shelf-entity",
+            library,
+            kind @ ("people" | "series"),
+            source @ ("pixiv" | "fanbox"),
+            key,
+            rest @ ..,
+        ] if rest.is_empty() || (*kind == "people" && rest == ["banner"]) => {
+            let library = uuid::Uuid::parse_str(library).ok()?;
+            let key = percent_decode(key)?;
+            if key.is_empty() || key.chars().count() > 200 {
+                return None;
+            }
+            let mut query = url::form_urlencoded::Serializer::new(String::new());
+            query.append_pair("provider", source);
+            query.append_pair("key", &key);
+            if !rest.is_empty() {
+                query.append_pair("variant", "banner");
+            }
+            Some(Route::Remote {
+                endpoint: format!(
+                    "/api/v2/libraries/{library}/{kind}/cover?{}",
+                    query.finish()
+                ),
+                refreshes: true,
+            })
+        }
+        // 新しい棚のコレクションの表紙。コレクションの世代は端末の覚えの鍵で、変わると取り直す。
+        [
+            "shelf-collection",
+            library,
+            collection,
+            slot @ ("single" | "file" | "tile-0" | "tile-1" | "tile-2" | "tile-3"),
+            revision,
+        ] => {
+            let library = uuid::Uuid::parse_str(library).ok()?;
+            let collection = uuid::Uuid::parse_str(collection).ok()?;
+            revision.parse::<u64>().ok()?;
+            Some(Route::Remote {
+                endpoint: format!(
+                    "/api/v2/libraries/{library}/collections/{collection}/cover/{slot}"
+                ),
+                refreshes: false,
+            })
+        }
         ["native", entity, kind @ ("snapshot" | "edit"), view, asset] => {
             let entity = uuid::Uuid::parse_str(entity).ok()?;
             let view = uuid::Uuid::parse_str(view).ok()?;
@@ -777,10 +823,43 @@ mod tests {
                 refreshes: false
             })
         );
+        assert_eq!(
+            parse_route(&format!(
+                "/shelf-entity%2F{library}%2Fpeople%2Fpixiv%2Fa%2520b%2Fbanner"
+            )),
+            Some(Route::Remote {
+                endpoint: format!(
+                    "/api/v2/libraries/{library}/people/cover?provider=pixiv&key=a+b&variant=banner"
+                ),
+                refreshes: true
+            })
+        );
+        assert_eq!(
+            parse_route(&format!("/shelf-entity%2F{library}%2Fseries%2Ffanbox%2F9")),
+            Some(Route::Remote {
+                endpoint: format!("/api/v2/libraries/{library}/series/cover?provider=fanbox&key=9"),
+                refreshes: true
+            })
+        );
+        assert_eq!(
+            parse_route(&format!(
+                "/shelf-collection%2F{library}%2F{work}%2Ftile-2%2F4"
+            )),
+            Some(Route::Remote {
+                endpoint: format!("/api/v2/libraries/{library}/collections/{work}/cover/tile-2"),
+                refreshes: false
+            })
+        );
         for bad in [
             format!("/shelf%2F{library}%2F{work}%2F{snapshot}%2Fhuge"),
             format!("/shelf%2F{library}%2F..%2F{snapshot}"),
             format!("/shelf%2F{library}%2F{work}"),
+            format!("/shelf-entity%2F{library}%2Fseries%2Fpixiv%2F9%2Fbanner"),
+            format!("/shelf-entity%2F{library}%2Fpeople%2Fother%2F9"),
+            "/shelf-entity%2Fnot-a-uuid%2Fpeople%2Fpixiv%2F9".to_string(),
+            format!("/shelf-collection%2F{library}%2F{work}%2Ftile-4%2F4"),
+            format!("/shelf-collection%2F{library}%2Flegacy-id%2Ffile%2F4"),
+            format!("/shelf-collection%2F{library}%2F{work}%2Ffile%2F-1"),
         ] {
             assert_eq!(parse_route(&bad), None, "{bad}");
         }

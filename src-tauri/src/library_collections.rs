@@ -61,6 +61,16 @@ impl Library {
         collection_summaries(&conn, "1", &[])
     }
 
+    /// コレクションの要約だけ（回と別版は引かない）。無ければ None。
+    pub fn collection_summary(&self, collection: LibraryId) -> Result<Option<CollectionSummary>> {
+        let conn = self.reader()?;
+        Ok(
+            collection_summaries(&conn, "c.id=?1", &[collection.as_bytes().to_vec()])?
+                .into_iter()
+                .next(),
+        )
+    }
+
     /// 旧棚から移したコレクションを旧棚の ID から引く。移していなければ None。
     pub fn collection_by_legacy_id(&self, legacy: &str) -> Result<Option<LibraryId>> {
         let conn = self.reader()?;

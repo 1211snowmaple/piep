@@ -8,8 +8,9 @@ use piep_library_protocol::{
     ResourceReference, ResourceScope, WorkReadingView,
 };
 use piep_mobile_api::{
-    MobileShelfFavorite, MobileShelfFavoriteUpdate, MobileShelfPage, MobileShelfWork,
-    MobileShelfWorkDetail,
+    MobileCollection, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage,
+    MobileShelfCollectionDetail, MobileShelfFavorite, MobileShelfFavoriteUpdate, MobileShelfPage,
+    MobileShelfWork, MobileShelfWorkDetail,
 };
 use piep_storage::Fingerprint;
 use reqwest::{Response, StatusCode, header::HeaderMap};
@@ -35,6 +36,8 @@ pub struct NativeLibraryStatus {
     works_search: bool,
     /// 棚の作品のお気に入りを、要求 UUID と更新世代で付け外しできるか。
     favorite_write: bool,
+    /// 作者・シリーズ・コレクションの画面を新しい棚から出せるか。
+    groups: bool,
     reader_bundle: bool,
 }
 
@@ -126,6 +129,7 @@ async fn parse_identity(
         works_list: header_is(&headers, "x-piep-works-list", "1"),
         works_search: header_is(&headers, "x-piep-works-search", "1"),
         favorite_write: header_is(&headers, "x-piep-favorite-write", "1"),
+        groups: header_is(&headers, "x-piep-groups", "1"),
         reader_bundle: identity.capabilities.reader_bundle,
     })
 }
@@ -461,6 +465,245 @@ pub async fn pc_native_works(
     .await
 }
 
+fn query(pairs: &[(&str, &str)]) -> String {
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in pairs {
+        query.append_pair(name, value);
+    }
+    query.finish()
+}
+
+fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, ClientError> {
+    serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())
+}
+
+/// コレクションの ID は棚の UUID。表紙の経路にも使うので、ほかの形は受け取らない。
+fn valid_collections(items: &[MobileCollection]) -> bool {
+    items.len() <= 10_000
+        && items
+            .iter()
+            .all(|item| uuid::Uuid::parse_str(&item.id).is_ok() && item.cover_tiles.len() <= 4)
+}
+
+fn kind_path(kind: &str) -> Result<&'static str, ClientError> {
+    match kind {
+        "people" => Ok("people"),
+        "series" => Ok("series"),
+        _ => Err(ClientError::remote()),
+    }
+}
+
+/// 作者・シリーズの一覧（ライブラリの「作者」「シリーズ」）を新しい棚から引く。
+#[tauri::command]
+pub async fn pc_native_entities(
+    state: State<'_, PcClientState>,
+    library: NativeLibraryScope,
+    kind: String,
+    text: String,
+    offset: i64,
+    sort: Option<String>,
+    order: Option<String>,
+) -> Result<MobileEntityPage, ClientError> {
+    let kind = kind_path(&kind)?;
+    if text.chars().count() > 200
+        || !(0..=1_000_000).contains(&offset)
+        || !super::valid_entity_sort(sort.as_deref(), order.as_deref())
+    {
+        return Err(ClientError::remote());
+    }
+    let offset = offset.to_string();
+    let mut pairs = vec![
+        ("text", text.trim()),
+        ("offset", offset.as_str()),
+        ("limit", "30"),
+    ];
+    if let Some(sort) = sort.as_deref() {
+        pairs.push(("sort", sort));
+    }
+    if let Some(order) = order.as_deref() {
+        pairs.push(("order", order));
+    }
+    let endpoint = format!(
+        "/api/v2/libraries/{}/{kind}?{}",
+        library.library_id.get(),
+        query(&pairs)
+    );
+    read(&state, library, &endpoint, |bytes| {
+        let page: MobileEntityPage = parse_json(bytes)?;
+        if page.items.len() > 50 {
+            return Err(ClientError::protocol());
+        }
+        Ok(page)
+    })
+    .await
+}
+
+/// 作者・シリーズの画面の頭（説明・リンク・タグ・コレクション）を新しい棚から引く。
+#[tauri::command]
+pub async fn pc_native_entity_detail(
+    state: State<'_, PcClientState>,
+    library: NativeLibraryScope,
+    kind: String,
+    source: String,
+    key: String,
+) -> Result<MobileEntityDetail, ClientError> {
+    let kind = kind_path(&kind)?;
+    if !super::valid_entity_identity(&source, &key) {
+        return Err(ClientError::remote());
+    }
+    let endpoint = format!(
+        "/api/v2/libraries/{}/{kind}/detail?{}",
+        library.library_id.get(),
+        query(&[("provider", &source), ("key", &key)])
+    );
+    read(&state, library, &endpoint, |bytes| {
+        let detail: MobileEntityDetail = parse_json(bytes)?;
+        if detail.source != source
+            || detail.source_key != key
+            || !valid_collections(&detail.collections)
+        {
+            return Err(ClientError::protocol());
+        }
+        Ok(detail)
+    })
+    .await
+}
+
+/// 作者の作品が属するシリーズの一ページを新しい棚から引く。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn pc_native_entity_series(
+    state: State<'_, PcClientState>,
+    library: NativeLibraryScope,
+    source: String,
+    key: String,
+    text: String,
+    cursor: Option<String>,
+    sort: Option<String>,
+    order: Option<String>,
+) -> Result<MobileEntitySeriesPage, ClientError> {
+    if !super::valid_entity_identity(&source, &key)
+        || text.chars().count() > 200
+        || cursor.as_ref().is_some_and(|cursor| {
+            cursor.is_empty() || cursor.len() > 7 || !cursor.bytes().all(|b| b.is_ascii_digit())
+        })
+        || !super::valid_entity_sort(sort.as_deref(), order.as_deref())
+    {
+        return Err(ClientError::remote());
+    }
+    let mut pairs = vec![
+        ("provider", source.as_str()),
+        ("key", key.as_str()),
+        ("text", text.trim()),
+        ("limit", "30"),
+    ];
+    for (name, value) in [("cursor", &cursor), ("sort", &sort), ("order", &order)] {
+        if let Some(value) = value.as_deref() {
+            pairs.push((name, value));
+        }
+    }
+    let endpoint = format!(
+        "/api/v2/libraries/{}/people/series?{}",
+        library.library_id.get(),
+        query(&pairs)
+    );
+    read(&state, library, &endpoint, |bytes| {
+        let page: MobileEntitySeriesPage = parse_json(bytes)?;
+        if page.items.len() > 50
+            || page
+                .next_cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.is_empty() || cursor.len() > 7)
+        {
+            return Err(ClientError::protocol());
+        }
+        Ok(page)
+    })
+    .await
+}
+
+/// コレクションの一覧を新しい棚から引く。
+#[tauri::command]
+pub async fn pc_native_collections(
+    state: State<'_, PcClientState>,
+    library: NativeLibraryScope,
+) -> Result<Vec<MobileCollection>, ClientError> {
+    let endpoint = format!("/api/v2/libraries/{}/collections", library.library_id.get());
+    read(&state, library, &endpoint, |bytes| {
+        let items: Vec<MobileCollection> = parse_json(bytes)?;
+        if !valid_collections(&items) {
+            return Err(ClientError::protocol());
+        }
+        Ok(items)
+    })
+    .await
+}
+
+/// 作品の入ったコレクションと、その中の位置を新しい棚から引く。
+#[tauri::command]
+pub async fn pc_native_work_collections(
+    state: State<'_, PcClientState>,
+    library: NativeLibraryScope,
+    work: Id,
+) -> Result<Vec<MobileCollection>, ClientError> {
+    work_collections(&state, library, work).await
+}
+
+pub(super) async fn work_collections(
+    state: &PcClientState,
+    library: NativeLibraryScope,
+    work: Id,
+) -> Result<Vec<MobileCollection>, ClientError> {
+    let endpoint = format!(
+        "/api/v2/libraries/{}/works/{}/collections",
+        library.library_id.get(),
+        work.get()
+    );
+    read(state, library, &endpoint, |bytes| {
+        let items: Vec<MobileCollection> = parse_json(bytes)?;
+        if !valid_collections(&items) {
+            return Err(ClientError::protocol());
+        }
+        Ok(items)
+    })
+    .await
+}
+
+/// コレクションの画面（回の作品は一覧と同じ棚の作品の形）を新しい棚から引く。
+#[tauri::command]
+pub async fn pc_native_collection(
+    state: State<'_, PcClientState>,
+    library: NativeLibraryScope,
+    collection: String,
+) -> Result<MobileShelfCollectionDetail, ClientError> {
+    // 棚の UUID か、旧棚から移したコレクションの旧棚の ID（端末に保存した作品が持っている）。
+    if collection.is_empty()
+        || collection.len() > 128
+        || !collection
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ClientError::remote());
+    }
+    let endpoint = format!(
+        "/api/v2/libraries/{}/collections/{collection}",
+        library.library_id.get(),
+    );
+    read(&state, library, &endpoint, |bytes| {
+        let detail: MobileShelfCollectionDetail = parse_json(bytes)?;
+        if !valid_collections(std::slice::from_ref(&detail.summary))
+            || !detail
+                .members
+                .iter()
+                .all(|member| member.work.as_ref().is_none_or(valid_shelf_work))
+        {
+            return Err(ClientError::protocol());
+        }
+        Ok(detail)
+    })
+    .await
+}
+
 fn view_path(scope: NativeLibraryScope, entity: Id, view: &ResourceScope) -> String {
     let (kind, id) = match view {
         ResourceScope::Snapshot(id) => ("snapshot", id),
@@ -594,8 +837,9 @@ mod tests {
             let shelf = identity();
             let wire_headers = headers(&shelf);
             let body = serde_json::to_string(&shelf).unwrap();
-            let advertised =
-                format!("{wire_headers}X-Piep-Works-List: 1\r\nX-Piep-Works-Search: 1\r\n");
+            let advertised = format!(
+                "{wire_headers}X-Piep-Works-List: 1\r\nX-Piep-Works-Search: 1\r\nX-Piep-Groups: 1\r\n"
+            );
             let connected = parse_identity(response("200 OK", &advertised, &body).await, 7)
                 .await
                 .unwrap();
@@ -604,10 +848,11 @@ mod tests {
             assert_eq!(connected.scope.sync_epoch, shelf.sync_epoch);
             assert_eq!(connected.scope.connection_generation, 7);
             assert!(connected.works_list && connected.works_search && connected.reader_bundle);
+            assert!(connected.groups && !connected.favorite_write);
             let older = parse_identity(response("200 OK", &wire_headers, &body).await, 7)
                 .await
                 .unwrap();
-            assert!(!older.works_list && !older.works_search);
+            assert!(!older.works_list && !older.works_search && !older.groups);
             let duplicate = format!(
                 "{wire_headers}X-Piep-Sync-Epoch: {}\r\n",
                 shelf.sync_epoch.get()

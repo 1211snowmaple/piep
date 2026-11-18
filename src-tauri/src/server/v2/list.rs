@@ -38,10 +38,28 @@ const MAX_COVER_PIXELS: u64 = 64_000_000;
 /// 縮めた表紙を覚えておく数。一覧を行き来しても縮め直さない。
 const REMEMBERED_COVERS: usize = 256;
 
+/// 縮める大きさ。作品の表紙は一覧（`Card`）と画面（`Large`）、作者のヘッダーは `Banner`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CoverSize {
+    Card,
+    Large,
+    Banner,
+}
+
+impl CoverSize {
+    fn bounds(self) -> (u32, u32) {
+        match self {
+            Self::Card => (320, 480),
+            Self::Large => (640, 960),
+            Self::Banner => (1280, 480),
+        }
+    }
+}
+
 /// 縮めた表紙。元のファイルと大きさで引く。
 pub(super) struct CoverEntry {
     file: Fingerprint,
-    large: bool,
+    size: CoverSize,
     bytes: Arc<Vec<u8>>,
     mime: &'static str,
 }
@@ -51,11 +69,11 @@ pub(super) struct CoverEntry {
 pub(super) struct Covers(VecDeque<CoverEntry>);
 
 impl Covers {
-    fn get(&mut self, file: Fingerprint, large: bool) -> Option<(Arc<Vec<u8>>, &'static str)> {
+    fn get(&mut self, file: Fingerprint, size: CoverSize) -> Option<(Arc<Vec<u8>>, &'static str)> {
         let index = self
             .0
             .iter()
-            .position(|entry| entry.file == file && entry.large == large)?;
+            .position(|entry| entry.file == file && entry.size == size)?;
         let entry = self.0.remove(index)?;
         let found = (Arc::clone(&entry.bytes), entry.mime);
         self.0.push_front(entry);
@@ -68,13 +86,13 @@ impl Covers {
     }
 }
 
-fn iso(ms: i64) -> String {
+pub(super) fn iso(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms)
         .unwrap_or_default()
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn count(value: u64) -> i64 {
+pub(super) fn count(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
@@ -312,8 +330,8 @@ pub(super) async fn search(
 
 #[derive(Deserialize)]
 pub(super) struct WorkLocation {
-    library: Id,
-    work: Id,
+    pub(super) library: Id,
+    pub(super) work: Id,
 }
 
 pub(super) async fn work(
@@ -408,9 +426,9 @@ pub(super) async fn cover(
     if location.library != ctx.library_id {
         return Err(not_found());
     }
-    let large = match size.as_deref() {
-        None | Some("card") => false,
-        Some("large") => true,
+    let size = match size.as_deref() {
+        None | Some("card") => CoverSize::Card,
+        Some("large") => CoverSize::Large,
         Some(_) => return Err(invalid()),
     };
     let work: LibraryId = location.work.get();
@@ -419,68 +437,81 @@ pub(super) async fn cover(
         let _permit = permit;
         let card = ctx.library.work_card(work).map_err(library_error)?;
         let file = card.cover.ok_or_else(not_found)?;
-        if let Some(found) = ctx
-            .covers
-            .lock()
-            .ok()
-            .and_then(|mut covers| covers.get(file, large))
-        {
-            return Ok(found);
-        }
-        let content = ctx.library.file(file).map_err(library_error)?;
-        if content.length > MAX_COVER_SOURCE_BYTES {
-            return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "asset_too_large"));
-        }
-        let mut source = Vec::with_capacity(usize::try_from(content.length).unwrap_or(0));
-        ctx.library
-            .objects
-            .export(&content, &mut source)
-            .map_err(|_| internal())?;
-        let (width, height) = image::ImageReader::new(std::io::Cursor::new(&source))
-            .with_guessed_format()
-            .map_err(|_| not_found())?
-            .into_dimensions()
-            .map_err(|_| not_found())?;
-        if u64::from(width) * u64::from(height) > MAX_COVER_PIXELS {
-            return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "asset_too_large"));
-        }
-        let (bounds_w, bounds_h) = if large { (640, 960) } else { (320, 480) };
-        let options = crate::epub::intermediate::ImageCompressOptions {
-            enabled: true,
-            max_width: Some(bounds_w),
-            max_height: Some(bounds_h),
-            output_format: Some("webp".into()),
-            webp_quality: 78,
-            webp_method: 0,
-            ..Default::default()
-        };
-        let (bytes, mime) = crate::epub::image_processor::process_image_bytes(&source, &options)
-            .map_err(|_| not_found())?;
-        let mime = match mime.as_str() {
-            "image/webp" => "image/webp",
-            "image/gif" => "image/gif",
-            _ => return Err(not_found()),
-        };
-        let bytes = Arc::new(bytes);
-        if let Ok(mut covers) = ctx.covers.lock() {
-            covers.put(CoverEntry {
-                file,
-                large,
-                bytes: Arc::clone(&bytes),
-                mime,
-            });
-        }
-        Ok((bytes, mime))
+        shrunk_image(&ctx, file, size)
     })
     .await
     .map_err(|_| internal())??;
+    Ok(image_response(bytes, mime))
+}
+
+/// 棚のファイルの画像を縮めて返す（縮めたものは覚えておく）。画像でないファイルは 404。
+pub(super) fn shrunk_image(
+    ctx: &Context,
+    file: Fingerprint,
+    size: CoverSize,
+) -> Result<(Arc<Vec<u8>>, &'static str), ApiError> {
+    if let Some(found) = ctx
+        .covers
+        .lock()
+        .ok()
+        .and_then(|mut covers| covers.get(file, size))
+    {
+        return Ok(found);
+    }
+    let content = ctx.library.file(file).map_err(library_error)?;
+    if content.length > MAX_COVER_SOURCE_BYTES {
+        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "asset_too_large"));
+    }
+    let mut source = Vec::with_capacity(usize::try_from(content.length).unwrap_or(0));
+    ctx.library
+        .objects
+        .export(&content, &mut source)
+        .map_err(|_| internal())?;
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(&source))
+        .with_guessed_format()
+        .map_err(|_| not_found())?
+        .into_dimensions()
+        .map_err(|_| not_found())?;
+    if u64::from(width) * u64::from(height) > MAX_COVER_PIXELS {
+        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "asset_too_large"));
+    }
+    let (bounds_w, bounds_h) = size.bounds();
+    let options = crate::epub::intermediate::ImageCompressOptions {
+        enabled: true,
+        max_width: Some(bounds_w),
+        max_height: Some(bounds_h),
+        output_format: Some("webp".into()),
+        webp_quality: 78,
+        webp_method: 0,
+        ..Default::default()
+    };
+    let (bytes, mime) = crate::epub::image_processor::process_image_bytes(&source, &options)
+        .map_err(|_| not_found())?;
+    let mime = match mime.as_str() {
+        "image/webp" => "image/webp",
+        "image/gif" => "image/gif",
+        _ => return Err(not_found()),
+    };
+    let bytes = Arc::new(bytes);
+    if let Ok(mut covers) = ctx.covers.lock() {
+        covers.put(CoverEntry {
+            file,
+            size,
+            bytes: Arc::clone(&bytes),
+            mime,
+        });
+    }
+    Ok((bytes, mime))
+}
+
+/// 縮めた画像の応答。表紙は版で変わるので、同じ URL でも確かめ直させる（携帯は版を鍵に覚える）。
+pub(super) fn image_response(bytes: Arc<Vec<u8>>, mime: &'static str) -> Response {
     let mut response = (
         [(header::CONTENT_TYPE, mime)],
         Body::from(bytes.as_ref().clone()),
     )
         .into_response();
     let headers = response.headers_mut();
-    // 作品の表紙は版で変わるので、同じ URL でも確かめ直させる（携帯は版を鍵に覚える）。
     headers.insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("private, no-cache, no-transform"),
@@ -493,5 +524,5 @@ pub(super) async fn cover(
         header::X_CONTENT_TYPE_OPTIONS,
         header::HeaderValue::from_static("nosniff"),
     );
-    Ok(response)
+    response
 }

@@ -4,7 +4,7 @@ import type {
 } from "@shared/mobileApi";
 import { invoke } from "@tauri-apps/api/core";
 import { markFavoriteRead, nextFavoriteRevision } from "./favoriteFreshness";
-import { nativeShelf, searchShelf, shelfMetadata, shelfWork, SHELF_NOT_YET } from "./nativeReading";
+import { groupShelf, listShelfCollections, listShelfEntities, listShelfEntitySeries, nativeShelf, searchShelf, shelfCollectionDetail, shelfEntityDetail, shelfMetadata, shelfWork, shelfWorkCollections, SHELF_NOT_YET } from "./nativeReading";
 
 export interface PcConnectionStatus {
   paired: boolean;
@@ -25,6 +25,8 @@ export interface PcConnectionStatus {
     worksSearch?: boolean;
     /** 棚の作品のお気に入りを付け外しできる。 */
     favoriteWrite?: boolean;
+    /** 作者・シリーズ・コレクションの画面を新しい棚から出せる。 */
+    groups?: boolean;
     readerBundle: boolean;
   };
 }
@@ -97,6 +99,8 @@ export type PcEntityDetail = Omit<MobileEntityDetail, "collections"> & { collect
 export type PcCollection = Older<Omit<MobileCollection, "coverMode" | "position">, "coverRevision" | "hasSingleCover" | "hasFileCover" | "coverTiles"> & {
   coverMode?: "mosaic" | "spine" | "single" | "sigil" | "file";
   position?: number | null;
+  /** 新しい棚のコレクションなら、その棚の UUID。表紙は棚から引く。 */
+  shelfLibrary?: string;
 };
 
 export type PcCollectionDetail = PcCollection & {
@@ -225,15 +229,34 @@ export const searchPcWorks = (criteria: PcWorkSearch, cursor: string | null = nu
     return page;
   });
 };
-export const listPcEntities = (kind: "people" | "series", text = "", offset = 0, sort?: { sort: string; order: string }) => invoke<PcEntityPage>("pc_list_entities", { kind, text, offset, sort: sort?.sort ?? null, order: sort?.order ?? null });
-export const getPcEntityDetail = (kind: "people" | "series", source: string, key: string) => invoke<PcEntityDetail>("pc_get_entity_detail", { kind, source, key });
-export const listPcEntitySeries = (source: string, key: string, text: string, cursor: string | null, sort?: { sort: string; order: string }) => invoke<PcEntitySeriesPage>("pc_list_entity_series", { source, key, text, cursor, sort: sort?.sort ?? null, order: sort?.order ?? null });
-export const listPcCollections = () => invoke<PcCollection[]>("pc_list_collections");
-/** 新しい棚の作品のコレクションはまだ出さない（コレクションの画面が旧 API の番号で動く）。 */
-export const getPcWorkCollections = (workId: number | string) => typeof workId === "string" ? Promise.resolve<PcCollection[]>([]) : invoke<PcCollection[]>("pc_get_work_collections", { workId });
+// 作者・シリーズ・コレクションの画面は、接続先が出せるなら新しい棚から引く（形は同じ）。
+export const listPcEntities = (kind: "people" | "series", text = "", offset = 0, sort?: { sort: string; order: string }) => {
+  const library = groupShelf();
+  return library ? listShelfEntities(library, kind, text, offset, sort) : invoke<PcEntityPage>("pc_list_entities", { kind, text, offset, sort: sort?.sort ?? null, order: sort?.order ?? null });
+};
+export const getPcEntityDetail = (kind: "people" | "series", source: string, key: string) => {
+  const library = groupShelf();
+  return library ? shelfEntityDetail(library, kind, source, key) : invoke<PcEntityDetail>("pc_get_entity_detail", { kind, source, key });
+};
+export const listPcEntitySeries = (source: string, key: string, text: string, cursor: string | null, sort?: { sort: string; order: string }) => {
+  const library = groupShelf();
+  return library ? listShelfEntitySeries(library, source, key, text, cursor, sort) : invoke<PcEntitySeriesPage>("pc_list_entity_series", { source, key, text, cursor, sort: sort?.sort ?? null, order: sort?.order ?? null });
+};
+export const listPcCollections = () => {
+  const library = groupShelf();
+  return library ? listShelfCollections(library) : invoke<PcCollection[]>("pc_list_collections");
+};
+/** 新しい棚の作品は棚から引く。棚のコレクションを出せない接続では出さない。 */
+export const getPcWorkCollections = (workId: number | string) => {
+  if (typeof workId === "number") return invoke<PcCollection[]>("pc_get_work_collections", { workId });
+  const library = groupShelf();
+  return library ? shelfWorkCollections(library, workId) : Promise.resolve<PcCollection[]>([]);
+};
 export const getPcCollection = (collectionId: string) => {
   const revision = nextFavoriteRevision();
-  return invoke<PcCollectionDetail>("pc_get_collection", { collectionId }).then((collection) => {
+  const library = groupShelf();
+  const request = library ? shelfCollectionDetail(library, collectionId) : invoke<PcCollectionDetail>("pc_get_collection", { collectionId });
+  return request.then((collection) => {
     for (const member of collection.members) if (member.work) markFavoriteRead(member.work, revision);
     return collection;
   });

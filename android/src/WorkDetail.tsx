@@ -8,6 +8,7 @@ import { WorkThumbnail } from "./WorkThumbnail";
 import { WorkFavoriteButton } from "./FavoriteButton";
 import { WorkFacts, workFacts } from "./WorkFacts";
 import { defaultPcSearch, deleteOfflineWork, getPcMetadata, getPcWorkCollections, listOfflineWorks, pcErrorMessage, sameSavedVersion, sameWork, saveOfflineWork, type OfflineWork, type PcCollection, type PcWork } from "./pcApi";
+import { groupShelfKey } from "./nativeReading";
 import { homePage, useAppNavigation } from "./appHistory";
 import { hasReadingPosition } from "./OnlineReader";
 import { plainText } from "./workText";
@@ -33,7 +34,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
   const browsable = navigation.canBrowseServer;
   const online = !selected.offline;
   const metadataQuery = useQuery({ queryKey: ["metadata", selected.work.id], queryFn: () => getPcMetadata(selected.work.id), enabled: online });
-  const collectionsQuery = useQuery({ queryKey: ["work-collections", selected.work.id], queryFn: () => getPcWorkCollections(selected.work.id), enabled: online });
+  const collectionsQuery = useQuery({ queryKey: ["work-collections", selected.work.id, groupShelfKey()], queryFn: () => getPcWorkCollections(selected.work.id), enabled: online });
   const savedQuery = useQuery({ queryKey: ["offline-works", savedRevision], queryFn: listOfflineWorks, enabled: online, staleTime: Infinity });
   const metadata = metadataQuery.data;
   const work = metadata?.work ?? selected.work;
