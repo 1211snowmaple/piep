@@ -433,6 +433,130 @@ async fn missing_resources_invalid_parameters_and_wrong_libraries_do_not_fall_ba
 }
 
 #[tokio::test]
+async fn provider_keys_resolve_to_the_current_reading_view_only_while_on_the_shelf() {
+    let server = Server::start().await;
+    let saved = save(&server.library, capture("work+one", None));
+    let route = format!("/api/v2/libraries/{}/works/lookup", server.library.id);
+    let url = format!("{route}?provider=pixiv&key=work%2Bone");
+    let response = server
+        .get(&url)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(response.headers()[header::VARY], "Authorization");
+    let view: protocol::WorkReadingView = response.json().await.unwrap();
+    assert_eq!(view.entity_id.get(), saved.entity_id);
+    assert_eq!(view.snapshot_id.get(), saved.snapshot_id);
+    assert_eq!(view.edit_id, None);
+    let bundle_url = format!(
+        "/api/v2/libraries/{}/entities/{}/views/snapshot/{}/bundle",
+        server.library.id,
+        view.entity_id.get(),
+        view.snapshot_id.get(),
+    );
+    let bundle = server
+        .get(&bundle_url)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        protocol::ReaderBundle::parse(&bundle.bytes().await.unwrap())
+            .unwrap()
+            .entity_id,
+        view.entity_id,
+    );
+
+    let edit = server
+        .library
+        .save_edit(crate::library::EditRequest {
+            request_id: uuid::Uuid::now_v7(),
+            work: saved.entity_id,
+            user: server.library.id,
+            base: saved.snapshot_id,
+            parent: None,
+            expected: 0,
+            content: &crate::library::EditContent {
+                format: "piep-edit-v1".into(),
+                title: None,
+                blocks: vec![],
+                media: vec![],
+                provenance: None,
+            },
+            activate: true,
+        })
+        .unwrap();
+    let reflected: protocol::WorkReadingView = server
+        .get(&url)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reflected.edit_id, Some(Id::new(edit).unwrap()));
+    assert_eq!(reflected.snapshot_id, view.snapshot_id);
+    let edit_url = format!(
+        "/api/v2/libraries/{}/entities/{}/views/edit/{edit}/bundle",
+        server.library.id,
+        reflected.entity_id.get(),
+    );
+    let response = server
+        .get(&edit_url)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let edit_bundle = protocol::ReaderBundle::parse(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        edit_bundle.scope,
+        protocol::ResourceScope::Edit(Id::new(edit).unwrap())
+    );
+
+    for (path, status) in [
+        (url.replace("pixiv", "fanbox"), StatusCode::NOT_FOUND),
+        (
+            url.replace(
+                &server.library.id.to_string(),
+                &uuid::Uuid::now_v7().to_string(),
+            ),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("{route}?provider=pixiv&key="),
+            StatusCode::BAD_REQUEST,
+        ),
+        (format!("{url}&key=other"), StatusCode::BAD_REQUEST),
+        (format!("{url}&token=fixture"), StatusCode::BAD_REQUEST),
+    ] {
+        assert_eq!(
+            server.get(&path).send().await.unwrap().status(),
+            status,
+            "{path}"
+        );
+    }
+    server
+        .library
+        .remove_work(uuid::Uuid::now_v7(), saved.entity_id, 1)
+        .unwrap();
+    assert_eq!(
+        server.get(&url).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    server.authority.active.store(false, Ordering::SeqCst);
+    assert_eq!(
+        server.get(&url).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
 async fn corrupt_stored_bytes_are_not_sent_and_do_not_expose_paths() {
     let server = Server::start().await;
     let saved = save(&server.library, capture("one", Some(b"image")));

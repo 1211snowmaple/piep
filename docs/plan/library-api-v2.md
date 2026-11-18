@@ -2,7 +2,8 @@
 
 ## 実装の境界
 
-`server::v2::router` は接続情報、読書 bundle、資産 manifest、圧縮した部分の転送を提供する。
+`server::v2::router` は接続情報、取得元の ID からの作品照合、読書 bundle、資産 manifest、
+圧縮した部分の転送を提供する。
 単独サーバーでは、設定で指定した棚を開いて既存の待ち受けにこの読取 API を載せる。
 一覧と利用者状態の書き込みは未提供で、対応能力にも含めない。
 
@@ -58,12 +59,18 @@ piep-server activate-library --data <サーバーの置き場> --generation <準
 | GET | 用途 |
 | --- | --- |
 | `/api/v2/identity` | 棚・利用者・同期 epoch・形式・上限・対応能力 |
+| `/api/v2/libraries/{library}/works/lookup?provider={provider}&key={key}` | 取得元の作品 ID から、棚の作品と現在の読書用の版を照合 |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/bundle` | 読書 bundle：読書用文書（`piep-reader-v1`）と、渡せる全資産の file 記述を一回で |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/resources/{body\|media\|file}/manifest` | 所属と表示版を固定した一ファイルの descriptor |
 | 同じ資産パスの `/files/{file}/chunks/{ordinal}` | 指定した元ファイルの一部分を保存形式のまま転送 |
 
 media と file は `slot` query が必須。body は query 不要。
 取得時の raw 応答 original は、内部情報を含み得るため読取 API では提供しない。
+
+作品照合には取得元の名前（例 `pixiv`、128 バイトまで）と、
+URL エンコードした取得元の作品 ID（デコード後 4096 バイトまで）を渡す。
+応答の `entityId` と `snapshotId` で保存版の bundle を取れる。`editId` がある作品の反映中の
+編集を読む場合は `views/edit/{editId}/bundle` を使う。棚に現在ある作品だけが照合できる。
 file は利用者向けの attachment / document に限る。管理用原本の出力はローカル保管層の
 別機能として保持する。利用者の編集版は認証した利用者との所属も照合する。
 
@@ -85,7 +92,7 @@ file は利用者向けの attachment / document に限る。管理用原本の�
 
 部分は中身のハッシュで指定して取るので、持っていれば要求しない。ETag と 304 は持たない
 （条件付き要求も毎回認証・所属・実体を確かめて中身を返す）。部分には
-`private, max-age=31536000, immutable, no-transform`、記録（bundle・manifest）には
+`private, max-age=31536000, immutable, no-transform`、記録（作品照合・bundle・manifest）には
 `private, no-cache, no-transform`、どちらにも `Vary: Authorization` を付ける。
 圧縮済み object を再圧縮する共通 middleware は組み込まない。
 

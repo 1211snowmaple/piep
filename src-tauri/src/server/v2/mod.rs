@@ -4,7 +4,7 @@ pub use auth::{Authority, DeviceAuthority, Grant};
 
 use crate::library::{
     protocol::{self, Decimal, Hash, Id},
-    Library, ResourceReference, ResourceScope,
+    EntityKind, Library, ResourceReference, ResourceScope,
 };
 use axum::{
     body::Body,
@@ -240,6 +240,7 @@ fn reader_resource(
 pub fn router(ctx: Arc<Context>) -> Router {
     Router::new()
         .route("/api/v2/identity",get(identity))
+        .route("/api/v2/libraries/{library}/works/lookup",get(work_lookup))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/bundle",get(bundle))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/manifest",get(manifest))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/files/{file}/chunks/{ordinal}",get(chunk))
@@ -262,6 +263,54 @@ async fn identity(
     );
     response
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkLookupQuery {
+    provider: String,
+    key: String,
+}
+
+async fn work_lookup(
+    State(ctx): State<Arc<Context>>,
+    Extension(principal): Extension<Principal>,
+    path: Result<Path<Id>, axum::extract::rejection::PathRejection>,
+    query: Result<Query<WorkLookupQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Path(library) = path.map_err(|_| invalid())?;
+    let Query(WorkLookupQuery { provider, key }) = query.map_err(|_| invalid())?;
+    if library != ctx.library_id {
+        return Err(not_found());
+    }
+    if provider.is_empty() || provider.len() > 128 || key.is_empty() || key.len() > 4096 {
+        return Err(invalid());
+    }
+    let permit = read_permit(&ctx, &principal.device).await?;
+    let view = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let work = ctx
+            .library
+            .entity_by_key(EntityKind::Work, &provider, &key)
+            .map_err(library_error)?
+            .ok_or_else(not_found)?;
+        // 取得元の識別だけが残る作品を除き、一覧と同じ保存版と編集を返す。
+        let card = ctx.library.work_card(work).map_err(library_error)?;
+        Ok::<_, ApiError>(protocol::WorkReadingView {
+            entity_id: Id::new(card.id).map_err(|_| internal())?,
+            snapshot_id: Id::new(card.snapshot_id).map_err(|_| internal())?,
+            edit_id: card
+                .edit_id
+                .map(Id::new)
+                .transpose()
+                .map_err(|_| internal())?,
+        })
+    })
+    .await
+    .map_err(|_| internal())??;
+    let bytes = serde_json::to_vec(&view).map_err(|_| internal())?;
+    Ok(representation(bytes, "application/json", false))
+}
+
 #[derive(Deserialize)]
 struct Location {
     library: Id,
