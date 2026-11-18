@@ -387,7 +387,7 @@ where
 }
 
 fn read_routes(ctx: Ctx) -> Router {
-    let routes = Router::new()
+    Router::new()
         .route("/api/v1/about", get(about))
         .route("/api/v1/works/search", post(search))
         .route("/api/v1/search/suggest", get(search_suggest))
@@ -420,11 +420,7 @@ fn read_routes(ctx: Ctx) -> Router {
         .route("/api/v1/pair", post(pair))
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .layer(middleware::from_fn(read_timeout))
-        .with_state(Arc::clone(&ctx));
-    match ctx.reader_shelf.get() {
-        Some(shelf) => routes.merge(super::v2::router(Arc::clone(shelf))),
-        None => routes,
-    }
+        .with_state(ctx)
 }
 
 fn admin_routes(ctx: Ctx) -> Router {
@@ -497,13 +493,16 @@ async fn authorize_before_body(ctx: Ctx, request: Request, next: Next, admin: bo
 
 /// 読み手の口。管理の API は載せない。
 pub fn reader_router(ctx: Ctx) -> Router {
-    finish(read_routes(ctx))
+    finish(read_routes(Arc::clone(&ctx)), &ctx)
 }
 
 /// 読み手と管理の両方を受ける口。管理の口を分けるときは、そちらにもこれを使う。
 /// 管理者の登録と証明書の確認に `pair` と `hello` が要るからである。
 pub fn combined_router(ctx: Ctx) -> Router {
-    finish(read_routes(Arc::clone(&ctx)).merge(admin_routes(ctx)))
+    finish(
+        read_routes(Arc::clone(&ctx)).merge(admin_routes(Arc::clone(&ctx))),
+        &ctx,
+    )
 }
 
 /// 管理者の口に、管理画面も載せる。`AdminWeb` を渡した単独サーバーだけが使う。
@@ -511,21 +510,37 @@ pub fn admin_router(ctx: Ctx) -> Router {
     finish(
         read_routes(Arc::clone(&ctx))
             .merge(admin_routes(Arc::clone(&ctx)))
-            .merge(admin_web::web_routes(ctx)),
+            .merge(admin_web::web_routes(Arc::clone(&ctx))),
+        &ctx,
     )
     .layer(Extension(admin_web::PageHere))
 }
 
-fn finish(router: Router) -> Router {
-    router
+fn finish(router: Router, ctx: &Ctx) -> Router {
+    let legacy = router
         .fallback(|| async { ApiError::not_found() })
         // 本文と一覧の JSON は大きく縮む。既定の判定は画像を素通りさせる。
         // 頼まれたときだけ圧縮するので、古い端末の受け取り方は変わらない。
         .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))
-        .layer(middleware::from_fn(observe))
+        .layer(middleware::from_fn(legacy_no_store));
+    // v2 の資産は形式とキャッシュの条件を自分で決める。配信時に圧縮し直さない。
+    let routes = match ctx.reader_shelf.get() {
+        Some(shelf) => legacy.merge(super::v2::router(Arc::clone(shelf))),
+        None => legacy,
+    };
+    routes.layer(middleware::from_fn(observe))
 }
 
-/// 応答に印を付け、記録を残す。
+async fn legacy_no_store(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response
+}
+
+/// 要求の記録を残す。
 ///
 /// 記録に載せるのは端点の型と状態コードと所要時間だけで、作品 ID も問い合わせも載せない。
 /// 検索語や登録の鍵が残らないようにするためである。成功は読書のたびに起きるので debug に落とす。
@@ -538,11 +553,7 @@ async fn observe(request: Request, next: Next) -> Response {
         .map_or("(経路なし)".to_string(), |path| {
             path.as_str().to_string()
         });
-    let mut response = next.run(request).await;
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-store"),
-    );
+    let response = next.run(request).await;
     let status = response.status();
     let elapsed = started.elapsed().as_millis();
     if status.is_success() {

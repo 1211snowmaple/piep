@@ -1319,8 +1319,8 @@ mod tests {
 
     #[tokio::test]
     async fn configured_shelf_mounts_with_explicit_device_grants_and_a_persistent_epoch() {
-        use crate::library::protocol::{Id, LibraryIdentity};
-        use reqwest::StatusCode;
+        use crate::library::protocol::{Id, LibraryIdentity, ReaderBundle};
+        use reqwest::{header, StatusCode};
 
         struct Temp(PathBuf);
         impl Drop for Temp {
@@ -1334,14 +1334,15 @@ mod tests {
         fs::create_dir_all(paths.state()).unwrap();
         let library = crate::library::Library::create(&paths.native_library()).unwrap();
         let id = Id::new(library.id).unwrap();
-        library
+        let body = "配信で確かめる本文。".repeat(100);
+        let saved = library
             .save_readable_work(
                 crate::library::WorkSave {
                     request: uuid::Uuid::now_v7(),
                     provider: "pixiv",
                     key: "1",
                     route: "test",
-                    data: &serde_json::json!({"detail":{"title":"配信中の作品"},"text":"本文"}),
+                    data: &serde_json::json!({"detail":{"title":"配信中の作品"},"text":body}),
                     assets: vec![],
                 },
                 None,
@@ -1380,16 +1381,19 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let serving = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .no_gzip()
+            .build()
+            .unwrap();
         let get = |token: &str| {
             client
                 .get(format!("{base}/api/v2/identity"))
                 .bearer_auth(token)
         };
-        assert_eq!(
-            get(&other.token).send().await.unwrap().status(),
-            StatusCode::UNAUTHORIZED
-        );
+        let denied = get(&other.token).send().await.unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(denied.headers()[header::CACHE_CONTROL], "no-store");
         let identity: LibraryIdentity = get(&granted.token)
             .send()
             .await
@@ -1402,6 +1406,56 @@ mod tests {
         assert_eq!(identity.library_id, id);
         assert_eq!(identity.subject_id, subject);
         assert_eq!(identity.sync_epoch, epoch);
+        let view = format!(
+            "{base}/api/v2/libraries/{}/entities/{}/views/snapshot/{}",
+            id.get(),
+            saved.entity_id,
+            saved.snapshot_id,
+        );
+        let resource = |url: String| {
+            client
+                .get(url)
+                .bearer_auth(&granted.token)
+                .header(header::ACCEPT_ENCODING, "gzip")
+        };
+        let response = resource(format!("{view}/bundle"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-cache, no-transform"
+        );
+        assert_eq!(response.headers()[header::VARY], "Authorization");
+        assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
+        let bundle = ReaderBundle::parse(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(bundle.files.len(), 1);
+        let file = bundle.files[0].file.to_native();
+        let response = resource(format!("{view}/resources/body/files/{}/chunks/0", file.id))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, max-age=31536000, immutable, no-transform"
+        );
+        assert_eq!(response.headers()[header::VARY], "Authorization");
+        assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
+        assert_eq!(file.chunks.len(), 1);
+        let restored =
+            piep_storage::decode_chunk(&response.bytes().await.unwrap(), &file.chunks[0]).unwrap();
+        assert_eq!(crate::library::Fingerprint::of(&restored), file.id);
+        let legacy = resource(format!("{base}/api/v1/about"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(legacy.headers()[header::CACHE_CONTROL], "private, no-store");
         let admin_ticket = store
             .issue_pairing(Role::Admin, Duration::from_secs(60))
             .unwrap();
