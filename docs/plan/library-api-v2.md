@@ -24,13 +24,31 @@ sync_epoch = "<同期の世代 UUID>"
 ```
 
 設定の許可を起動時に読み、端末登録が有効かを要求ごとに確認する。`library_v2` を省いた
-設定では従来の待ち受けで動く。新しい棚の配置と許可の変更は、管理者が設定ファイルで行う。
-`piep-library backup <新棚> <新規出力先>` で検証済みの写しを作れる。端末の登録 ID は既存の
-管理 API `GET /api/v1/admin/devices` の `id` を使い、読む利用者は保存済みの利用者の UUID を指定する。
+設定では従来の待ち受けで動く。端末の登録 ID は既存の管理 API `GET /api/v1/admin/devices` の
+`id` を使い、読む利用者は保存済みの利用者の UUID を指定する。
 
 管理者は `GET /api/v1/admin/status` の `libraryV2` で、開いている棚の
 `libraryId`、`syncEpoch`、`works`（十進文字列）を確認できる。設定を省いたサーバーは
 従来の応答を返す。管理 API に入る権限と、この棚を読める端末の許可は別々に確かめる。
+
+### サーバーに棚の写しを置く
+
+`piep-library backup <新棚> <新規出力先>` で作った写しをサーバーへ運ぶ。サーバー上で、
+初期化済みの置き場と運んだ写しを指定する。
+
+```text
+piep-server stage-library --data <サーバーの置き場> --shelf <運んだ棚の写し>
+piep-server activate-library --data <サーバーの置き場> --generation <準備で表示された UUID>
+```
+
+準備は稼働中にも実行できる。棚の内容を検証した写しを `library-v2-generations/<準備の UUID>/`
+に置く。続いてサーバーを停止して選んだ写しを有効にすると、再検証後に `server.toml` の
+`library_v2.generation` が更新される。初回は `library_v2.readers` に端末の許可を設定してから起動する。
+以後の切り替えは同じ棚の UUID の写しの間で行い、設定済みの端末の許可を引き継ぐ。
+
+切り替えと復元のたびに同期 epoch を発行する。同じ写しを続けて指定した場合は現在の epoch を使う。
+以前の写しへ戻すには、停止中にその準備の UUID を指定して有効にし、サーバーを起動する。
+`generation` を省いて手動配置の `library-v2/` を開く構成も引き続き使える。
 
 ## 要求と応答
 

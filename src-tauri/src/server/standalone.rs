@@ -1,5 +1,8 @@
 //! 単独サーバー（`piep-server`）の本体。設定、置き場、待ち受け、コマンド。
 
+#[path = "standalone_native.rs"]
+mod native;
+
 use super::admin_assets::ADMIN_ASSETS;
 use super::admin_store::TicketKind;
 use super::http::admin_web::command_ticket;
@@ -61,6 +64,7 @@ pub struct ServerConfig {
 pub struct ReaderShelfConfig {
     pub library_id: crate::library::protocol::Id,
     pub sync_epoch: crate::library::protocol::Id,
+    pub generation: Option<crate::library::protocol::Id>,
     #[serde(default)]
     pub readers: std::collections::BTreeMap<String, crate::library::protocol::Id>,
 }
@@ -71,8 +75,12 @@ impl ReaderShelfConfig {
         paths: &ServerPaths,
         store: Arc<ServerStore>,
     ) -> Result<Arc<super::v2::Context>, String> {
+        let root = match self.generation {
+            Some(generation) => native::generation_path(paths, generation)?,
+            None => paths.native_library(),
+        };
         let library = Arc::new(
-            crate::library::Library::open_matching(&paths.native_library(), self.library_id.get())
+            crate::library::Library::open_matching(&root, self.library_id.get())
                 .map_err(|error| format!("新しい棚を開けません: {error}"))?,
         );
         let authority = Arc::new(super::v2::DeviceAuthority::new(store));
@@ -847,18 +855,29 @@ pub fn command_admin_web(data: &Path, enable: bool) -> Result<(), String> {
 /// `EXIT_RESTART` なら、管理画面から頼まれたので立ち上げ直す。
 pub async fn command_run(data: &Path) -> Result<i32, String> {
     let paths = ServerPaths::new(data)?;
-    fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
-    // 同じ置き場を 2 つのプロセスで動かさない。
-    let lock =
-        File::create(paths.lock()).map_err(|error| format!("置き場を確保できません: {error}"))?;
-    lock.try_lock()
-        .map_err(|_| "この置き場ではすでに piep-server が動いています".to_string())?;
+    let lock = lock_server(&paths)?;
     match run_locked(paths.clone(), lock).await {
         Err(error) if restore_trial(&paths, &error) => Err(format!(
             "{error}。管理画面で変えた接続の設定では立ち上がれないので、前の設定へ戻しました"
         )),
         other => other,
     }
+}
+
+/// 待ち受けの起動と配信する棚の選択を、同じ置き場で直列化する。
+fn lock_server(paths: &ServerPaths) -> Result<File, String> {
+    fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(paths.lock())
+        .map_err(|error| format!("置き場を確保できません: {error}"))?;
+    lock.try_lock().map_err(|_| {
+        "この置き場は piep-server が使用中です。停止してからやり直してください".to_string()
+    })?;
+    Ok(lock)
 }
 
 async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
@@ -1039,6 +1058,10 @@ const USAGE: &str = "piep-server <command>
   admin-web --data <dir> --enable|--disable
                                          管理画面を戻す、または止める
   status --data <dir>                    状態を出す
+  stage-library --data <dir> --shelf <dir>
+                                         検証済みの新しい棚の写しを用意し、世代の UUID を出す
+  activate-library --data <dir> --generation <UUID>
+                                         停止中のサーバーで配信する写しを選ぶ
   --version                              版を出す
 
 --url はデスクトップ版からこのサーバーへ届く URL。127.0.0.1 だけで待ち受けていて、
@@ -1056,6 +1079,8 @@ struct Arguments {
     replace: bool,
     enable: bool,
     disable: bool,
+    shelf: Option<PathBuf>,
+    generation: Option<crate::library::protocol::Id>,
 }
 
 fn parse_arguments(args: &[String]) -> Result<Arguments, String> {
@@ -1080,6 +1105,18 @@ fn parse_arguments(args: &[String]) -> Result<Arguments, String> {
             "--replace" => parsed.replace = true,
             "--enable" => parsed.enable = true,
             "--disable" => parsed.disable = true,
+            "--shelf" if parsed.command == "stage-library" && parsed.shelf.is_none() => {
+                parsed.shelf = Some(PathBuf::from(iter.next().ok_or_else(|| USAGE.to_string())?));
+            }
+            "--generation"
+                if parsed.command == "activate-library" && parsed.generation.is_none() =>
+            {
+                let value = iter.next().ok_or_else(|| USAGE.to_string())?;
+                parsed.generation = Some(
+                    serde_json::from_value(serde_json::Value::String(value.clone()))
+                        .map_err(|error| format!("棚の世代が不正です: {error}"))?,
+                );
+            }
             _ => return Err(USAGE.to_string()),
         }
     }
@@ -1174,6 +1211,27 @@ pub async fn main_from_args(args: Vec<String>) -> i32 {
             "init" => {
                 let payload = command_init(required_data(&parsed)?, parsed.url.clone()).await?;
                 print_pairing(&payload);
+                Ok(0)
+            }
+            "stage-library" => {
+                let paths = ServerPaths::new(required_data(&parsed)?)?;
+                let shelf = parsed.shelf.ok_or_else(|| USAGE.to_string())?;
+                let generation = tokio::task::spawn_blocking(move || native::stage(&paths, &shelf))
+                    .await
+                    .map_err(|error| error.to_string())??;
+                println!("{}", generation.get());
+                Ok(0)
+            }
+            "activate-library" => {
+                let paths = ServerPaths::new(required_data(&parsed)?)?;
+                let generation = parsed.generation.ok_or_else(|| USAGE.to_string())?;
+                tokio::task::spawn_blocking(move || native::activate(&paths, generation))
+                    .await
+                    .map_err(|error| error.to_string())??;
+                println!(
+                    "配信する棚に {} を指定しました。サーバーを起動してください。",
+                    generation.get()
+                );
                 Ok(0)
             }
             "admin-pair" => {
