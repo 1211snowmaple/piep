@@ -72,11 +72,11 @@ fn every_page_must_match_metadata_and_failed_updates_keep_readable_old_pages() {
             .unwrap();
         let good = serde_json::json!({"currentVersion": 1, "contentHash": "source-v1", "activeEditHash": "edit-A"});
         let (saved, handle) = server(good.clone(), 5);
-        save_snapshot(&state, &client, &saved, &metadata)
+        save_legacy_snapshot(&state, &client, &saved, &metadata)
             .await
             .unwrap();
         handle.join().unwrap();
-        let original = read_manifest(&state, 3).unwrap().1;
+        let original = read_manifest(&state, &OfflineKey::Legacy(3)).unwrap().1;
         for bad in [
             serde_json::json!({"currentVersion": 1, "contentHash": "source-v1", "activeEditHash": "edit-B"}),
             serde_json::json!({"currentVersion": 2, "contentHash": "source-v1", "activeEditHash": "edit-A"}),
@@ -85,27 +85,35 @@ fn every_page_must_match_metadata_and_failed_updates_keep_readable_old_pages() {
         ] {
             let (saved, handle) = server(bad, 2);
             assert!(
-                save_snapshot(&state, &client, &saved, &metadata)
+                save_legacy_snapshot(&state, &client, &saved, &metadata)
                     .await
                     .is_err()
             );
             handle.join().unwrap();
-            assert_eq!(read_manifest(&state, 3).unwrap().1, original);
+            assert_eq!(
+                read_manifest(&state, &OfflineKey::Legacy(3)).unwrap().1,
+                original
+            );
             assert!(
-                read_offline_page(&state, 3, 0)
+                read_offline_page(&state, &OfflineKey::Legacy(3), 0)
                     .unwrap()
                     .page
                     .html
                     .contains("page-0")
             );
             assert!(
-                read_offline_page(&state, 3, 1)
+                read_offline_page(&state, &OfflineKey::Legacy(3), 1)
                     .unwrap()
                     .page
                     .html
                     .contains("page-1")
             );
-            assert_eq!(fs::read_dir(state.work_dir(3).unwrap()).unwrap().count(), 2);
+            assert_eq!(
+                fs::read_dir(state.work_dir(&OfflineKey::Legacy(3)).unwrap())
+                    .unwrap()
+                    .count(),
+                2
+            );
         }
         fs::remove_dir_all(root).unwrap();
     });
@@ -124,11 +132,11 @@ fn reading_during_a_save_and_aborting_it_keep_the_published_snapshot() {
             .unwrap();
         let good = serde_json::json!({"currentVersion": 1, "contentHash": "source-v1", "activeEditHash": "edit-A"});
         let (saved, handle) = server(good, 5);
-        save_snapshot(&state, &client, &saved, &metadata)
+        save_legacy_snapshot(&state, &client, &saved, &metadata)
             .await
             .unwrap();
         handle.join().unwrap();
-        let original = read_manifest(&state, 3).unwrap().1;
+        let original = read_manifest(&state, &OfflineKey::Legacy(3)).unwrap().1;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (sent, received) = std::sync::mpsc::channel();
@@ -151,15 +159,18 @@ fn reading_during_a_save_and_aborting_it_keep_the_published_snapshot() {
             let state = state.clone();
             tauri::async_runtime::spawn(async move {
                 let saved = SavedConnection { url, ..saved };
-                save_snapshot(&state, &client, &saved, &metadata).await
+                save_legacy_snapshot(&state, &client, &saved, &metadata).await
             })
         };
         received.recv_timeout(Duration::from_secs(5)).unwrap();
         {
             let _read = state.lock.lock().await;
-            assert_eq!(read_manifest(&state, 3).unwrap().1, original);
+            assert_eq!(
+                read_manifest(&state, &OfflineKey::Legacy(3)).unwrap().1,
+                original
+            );
             assert!(
-                read_offline_page(&state, 3, 1)
+                read_offline_page(&state, &OfflineKey::Legacy(3), 1)
                     .unwrap()
                     .page
                     .html
@@ -170,19 +181,27 @@ fn reading_during_a_save_and_aborting_it_keep_the_published_snapshot() {
         assert!(saving.await.is_err());
         release.send(()).unwrap();
         blocked.join().unwrap();
-        assert_eq!(read_manifest(&state, 3).unwrap().1, original);
+        assert_eq!(
+            read_manifest(&state, &OfflineKey::Legacy(3)).unwrap().1,
+            original
+        );
         drop(state);
         let reopened = OfflineState::new(root.clone());
-        assert_eq!(read_manifest(&reopened, 3).unwrap().1, original);
+        assert_eq!(
+            read_manifest(&reopened, &OfflineKey::Legacy(3)).unwrap().1,
+            original
+        );
         assert!(
-            read_offline_page(&reopened, 3, 1)
+            read_offline_page(&reopened, &OfflineKey::Legacy(3), 1)
                 .unwrap()
                 .page
                 .html
                 .contains("page-1")
         );
         assert_eq!(
-            fs::read_dir(reopened.work_dir(3).unwrap()).unwrap().count(),
+            fs::read_dir(reopened.work_dir(&OfflineKey::Legacy(3)).unwrap())
+                .unwrap()
+                .count(),
             2
         );
         fs::remove_dir_all(root).unwrap();
@@ -202,7 +221,7 @@ fn saved_bodies_are_searchable_offline_and_follow_saves_and_deletes() {
             .unwrap();
         let good = serde_json::json!({"currentVersion": 1, "contentHash": "source-v1", "activeEditHash": "edit-A"});
         let (saved, handle) = server(good, 5);
-        save_snapshot(&state, &client, &saved, &metadata)
+        save_legacy_snapshot(&state, &client, &saved, &metadata)
             .await
             .unwrap();
         handle.join().unwrap();
@@ -235,7 +254,7 @@ fn saved_bodies_are_searchable_offline_and_follow_saves_and_deletes() {
         super::index::reconcile(&state).unwrap();
         assert_eq!(super::index::search(&state, "page-1").unwrap().len(), 1);
 
-        delete_saved_work(&state, 3, "pixiv", "3").unwrap();
+        delete_saved_work(&state, &OfflineKey::Legacy(3), "pixiv", "3").unwrap();
         assert!(super::index::search(&state, "page").unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     });

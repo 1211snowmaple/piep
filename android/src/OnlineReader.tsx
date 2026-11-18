@@ -203,7 +203,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   const imageSource = (assetId: number, width: number, generation: string | null): string | Promise<string> => {
-    if (offline) return getOfflineAsset(v1WorkId(work), assetId, generation!).then((asset) => `data:${asset.mimeType};base64,${asset.base64}`);
+    if (offline) return getOfflineAsset(work.id, assetId, generation!).then((asset) => `data:${asset.mimeType};base64,${asset.base64}`);
     const url = native.current ? nativeImageUrl(native.current, assetId) : illustrationUrl(v1WorkId(work), assetId, width, readingWork.currentVersion, readingWork.contentHash);
     if (!url) throw new Error("画像を読み込めません");
     return url;
@@ -562,7 +562,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
           setOutline(native.current.outline);
           return;
         }
-        const entries = await (offline ? getOfflineOutline(v1WorkId(work), offlineGeneration!) : getPcOutline(work.id, selectedVersion));
+        const entries = await (offline ? getOfflineOutline(work.id, offlineGeneration!) : getPcOutline(work.id, selectedVersion));
         if (!alive) return;
         if (!offline) {
           const after = await loadMetadata();
@@ -597,7 +597,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     setAssetsReady(false);
     void (async () => {
       try {
-        const next = await (offline ? getOfflinePage(v1WorkId(work), pageIndex) : readPage(pageIndex));
+        const next = await (offline ? getOfflinePage(work.id, pageIndex) : readPage(pageIndex));
         if (cancelled || !next) return;
         if (guidedPage.current) {
           guidedPage.current = false;
@@ -802,7 +802,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   const loadSection = async (target: number): Promise<LoadedSection | null> => {
-    const next = await (offline ? getOfflinePage(v1WorkId(work), target) : readPage(target));
+    const next = await (offline ? getOfflinePage(work.id, target) : readPage(target));
     if (!next) return null;
     const generation = "generation" in next && typeof next.generation === "string" ? next.generation : null;
     if (offline && !generation) throw new Error("保存済み作品の版を確認できませんでした。もう一度読み込んでください");

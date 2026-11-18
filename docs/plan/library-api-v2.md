@@ -5,7 +5,8 @@
 `server::v2::router` は接続情報、作品一覧、取得元の ID からの作品照合、読書 bundle、資産 manifest、
 圧縮した部分の転送を提供する。
 単独サーバーでは、設定で指定した棚を開いて既存の待ち受けにこの読取 API を載せる。
-利用者状態の書き込みは未提供で、対応能力にも含めない。
+利用者状態の書き込みは、棚の作品のお気に入りの付け外しだけを提供する（下の「お気に入りの付け外し」）。
+対応能力（`identity` の capabilities）には含めず、応答の `x-piep-favorite-write: 1` で知らせる。
 
 管理側は新ライブラリを開き、永続化した同期 epoch と認可器を `Context` に渡す。
 epoch は棚の復元・再作成時に変更し、要求や router の起動ごとには生成しない。
@@ -64,6 +65,7 @@ piep-server activate-library --data <サーバーの置き場> --generation <準
 | `/api/v2/libraries/{library}/works/{work}` | 携帯の作品の画面：今の版のカード・説明・作者とシリーズ・版の一覧 |
 | `/api/v2/libraries/{library}/works/{work}/cover?size={card\|large}` | 今の版の表紙を携帯向けの WebP（320×480 / 640×960 に収める）で |
 | `POST /api/v2/libraries/{library}/works/search` | 携帯の一覧：旧 API と同じ条件の形で、絞り込み・並べ替え・語の検索・ページ送り |
+| `PUT /api/v2/libraries/{library}/works/{work}/favorite` | 認証した利用者のお気に入りを付け外しする（下の「お気に入りの付け外し」） |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/bundle` | 読書 bundle：読書用文書（`piep-reader-v1`）と、渡せる全資産の file 記述を一回で |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/resources/{body\|media\|file}/manifest` | 所属と表示版を固定した一ファイルの descriptor |
 | 同じ資産パスの `/files/{file}/chunks/{ordinal}` | 指定した元ファイルの一部分を保存形式のまま転送 |
@@ -119,3 +121,19 @@ file は利用者向けの attachment / document に限る。管理用原本の�
 別作品・別 file・別の棚、破損、端末ごとの同時数と待ち、棚・epoch のヘッダー、raw 原本の
 非公開を確認する。
 実サービスへの接続や実際の端末登録・鍵発行は必要ない。
+
+## お気に入りの付け外し
+
+本文は `{"requestId": "<UUID>", "expected": "<十進の更新世代>", "favorite": true|false}` で、
+知らない項目は 400。`expected` は一覧や作品の画面の `favoriteGeneration`（利用者ごとの値、
+行が無ければ `"0"`）か、前の付け外しで返った `generation`。符号・空白・先頭の 0 の重ねは 400。
+
+- 成功すると `{"favorite": …, "generation": "<十進>"}` を返す。同じ `requestId` を送り直すと、
+  棚に残した受領をそのまま返し、世代は進まない。
+- 世代が違う（別の端末やデスクトップで先に変わった）か、同じ `requestId` を別の変更に使ったときは
+  409 `{"error": "favorite_conflict", "current": {"favorite": …, "generation": …}}`。端末の時刻で
+  勝者を決めない。識別のヘッダーは 409 でも付くので、棚の入れ替わり（ヘッダーが変わる 409）と見分けられる。
+- 棚に無い作品・外した作品は 404、棚が書き込み中なら 503 `busy`。
+- 単独サーバーは同じ変更を旧 API の変更の記録（`favorite_changes`）へも写し、デスクトップ版は
+  今までどおり取り込む。旧 API で変えた値は新しい棚の利用者にも当て、写しを入れ替えたときは、
+  デスクトップ版がまだ取り込んでいない変更を当て直す。

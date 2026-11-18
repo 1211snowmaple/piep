@@ -5,6 +5,7 @@
 //! WebView へ返し、取得したものは端末に残す。次からはサーバーへ行かずに出せる。
 
 use super::image_validation::validate_display_image;
+use super::offline::OfflineKey;
 use super::{
     ASSET_TIMEOUT, MAX_ASSET_BYTES, PcClientState, SavedConnection, authenticated_get_with_saved,
     bounded_response_bytes,
@@ -35,14 +36,14 @@ enum Route {
         refreshes: bool,
     },
     SavedCover {
-        work_id: i64,
+        work_id: OfflineKey,
     },
     SavedEntity {
-        work_id: i64,
+        work_id: OfflineKey,
         kind: String,
     },
     SavedCollection {
-        work_id: i64,
+        work_id: OfflineKey,
         collection_id: String,
     },
     /// 新しい棚の本文の画像。開いた文書の鍵と、その文書の中の画像の番号。
@@ -352,7 +353,7 @@ fn parse_route(path: &str) -> Option<Route> {
             })
         }
         ["saved", id, _generation] => Some(Route::SavedCover {
-            work_id: positive(id)?,
+            work_id: OfflineKey::parse(id)?,
         }),
         [
             "saved-entity",
@@ -360,12 +361,12 @@ fn parse_route(path: &str) -> Option<Route> {
             kind @ ("people" | "series"),
             _generation,
         ] => Some(Route::SavedEntity {
-            work_id: positive(id)?,
+            work_id: OfflineKey::parse(id)?,
             kind: (*kind).to_string(),
         }),
         ["saved-collection", id, collection, _generation] if safe_collection_id(collection) => {
             Some(Route::SavedCollection {
-                work_id: positive(id)?,
+                work_id: OfflineKey::parse(id)?,
                 collection_id: (*collection).to_string(),
             })
         }
@@ -512,7 +513,7 @@ async fn serve_remote<R: Runtime>(
     }
 }
 
-fn sniffed_mime(bytes: &[u8]) -> Option<&'static str> {
+pub(super) fn sniffed_mime(bytes: &[u8]) -> Option<&'static str> {
     Some(match image::guess_format(bytes).ok()? {
         image::ImageFormat::Jpeg => "image/jpeg",
         image::ImageFormat::Png => "image/png",
@@ -579,14 +580,14 @@ async fn serve<R: Runtime>(app: &AppHandle<R>, path: &str) -> Response<Vec<u8>> 
             refreshes,
         } => return serve_remote(app, path, &endpoint, refreshes).await,
         Route::Native { key, asset } => return serve_native(app, &key, asset).await,
-        Route::SavedCover { work_id } => saved_cover(&app.state::<OfflineState>(), work_id).await,
+        Route::SavedCover { work_id } => saved_cover(&app.state::<OfflineState>(), &work_id).await,
         Route::SavedEntity { work_id, kind } => {
-            saved_entity_cover(&app.state::<OfflineState>(), work_id, &kind).await
+            saved_entity_cover(&app.state::<OfflineState>(), &work_id, &kind).await
         }
         Route::SavedCollection {
             work_id,
             collection_id,
-        } => saved_collection_cover(&app.state::<OfflineState>(), work_id, &collection_id).await,
+        } => saved_collection_cover(&app.state::<OfflineState>(), &work_id, &collection_id).await,
     };
     match saved {
         Ok((mime, bytes)) => respond(StatusCode::OK, Some(&mime), bytes),
@@ -787,7 +788,21 @@ mod tests {
         assert_eq!(parse_route("/asset%2F12%2F-5%2F1080%2F3%2Fabc"), None);
         assert_eq!(
             parse_route("/saved%2F7%2F99"),
-            Some(Route::SavedCover { work_id: 7 })
+            Some(Route::SavedCover {
+                work_id: OfflineKey::Legacy(7)
+            })
+        );
+        let shelf = uuid::Uuid::now_v7();
+        assert_eq!(
+            parse_route(&format!("/saved-entity%2F{shelf}%2Fpeople%2F1")),
+            Some(Route::SavedEntity {
+                work_id: OfflineKey::Shelf(shelf),
+                kind: "people".into()
+            })
+        );
+        assert_eq!(
+            parse_route(&format!("/saved%2F{}%2F1", shelf.simple())),
+            None
         );
         for bad in [
             "/work%2F0%2F1%2Fa",

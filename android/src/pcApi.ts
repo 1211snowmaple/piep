@@ -1,10 +1,10 @@
 import type {
   MobileCollection, MobileCollectionMember, MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage,
-  MobileMetadata, MobilePage, MobilePerson, MobileRevision, MobileSearchPage, MobileSeriesMembership, MobileWork,
+  MobileMetadata, MobilePage, MobilePerson, MobileRevision, MobileSearchPage, MobileSeriesMembership, MobileShelfWork, MobileWork,
 } from "@shared/mobileApi";
 import { invoke } from "@tauri-apps/api/core";
 import { markFavoriteRead, nextFavoriteRevision } from "./favoriteFreshness";
-import { nativeShelf, searchShelf, shelfMetadata, SHELF_NOT_YET } from "./nativeReading";
+import { nativeShelf, searchShelf, shelfMetadata, shelfWork, SHELF_NOT_YET } from "./nativeReading";
 
 export interface PcConnectionStatus {
   paired: boolean;
@@ -23,6 +23,8 @@ export interface PcConnectionStatus {
     worksList: boolean;
     /** 一覧・作品の画面・表紙を新しい棚から出せる。 */
     worksSearch?: boolean;
+    /** 棚の作品のお気に入りを付け外しできる。 */
+    favoriteWrite?: boolean;
     readerBundle: boolean;
   };
 }
@@ -51,24 +53,34 @@ type Older<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
 export type PcWork = Omit<Older<MobileWork, "sourceCreatedAt" | "downloadedAt">, "id"> & {
   /** 旧 API の作品は数の ID、新しい棚の作品は棚の UUID（文字列）。 */
   id: number | string;
-  /** 新しい棚の作品だけが持つ。 */
-  shelf?: { snapshotId: string; edited: boolean };
+  /** 新しい棚の作品だけが持つ。`favoriteGeneration` はお気に入りの更新世代（十進の文字列）。 */
+  shelf?: { snapshotId: string; edited: boolean; editId?: string | null; favoriteGeneration?: string };
   /** フロント側だけの取得順。お気に入りの書き込みより新しい応答を見分ける。 */
   favoriteReadSequence?: number;
 };
-
-/** 端末に保存した作品。保存は旧 API の作品だけなので、番号で指す。 */
-export type SavedPcWork = PcWork & { id: number };
 
 /** 新しい棚の作品か（UUID で指す）。旧 API の番号を使う操作には渡さない。 */
 export function isShelfWork(work: Pick<PcWork, "id">): boolean {
   return typeof work.id === "string";
 }
 
-/** 旧 API の番号。端末に保存した作品など、番号でしか指せない操作の前に使う。 */
+/** 旧 API の番号。旧 API の挿絵など、番号でしか指せない操作の前に使う。 */
 export function v1WorkId(work: Pick<PcWork, "id">): number {
   if (typeof work.id !== "number") throw new Error(SHELF_NOT_YET);
   return work.id;
+}
+
+/**
+ * 端末に保存した版が、今サーバーにある版と同じか。新しい棚の作品は版と編集の UUID で、
+ * 旧 API の作品は版の番号と内容の印で見る。
+ */
+export function sameSavedVersion(work: PcWork, saved: Pick<OfflineWork, "work" | "savedVersion" | "savedContentHash">): boolean {
+  if (work.shelf || saved.work.shelf) {
+    return Boolean(work.shelf && saved.work.shelf)
+      && work.shelf!.snapshotId === saved.work.shelf!.snapshotId
+      && (work.shelf!.editId ?? null) === (saved.work.shelf!.editId ?? null);
+  }
+  return work.currentVersion === saved.savedVersion && work.contentHash === saved.savedContentHash;
 }
 
 /** 新しい棚の作品ではまだ使えない操作。 */
@@ -162,7 +174,9 @@ export interface PcAsset {
 }
 
 export interface OfflineWork {
-  work: SavedPcWork;
+  work: PcWork;
+  /** 新しい棚の作品なら、その棚の UUID。 */
+  shelfLibrary?: string;
   people?: PcPerson[];
   series?: PcSeriesMembership[];
   savedAtMs: number;
@@ -181,14 +195,14 @@ export interface OfflineWork {
 
 /** 保存した作品の本文で見つかった箇所。page は 0 から数える。pages は語を含むページの数。 */
 export interface OfflineTextHit {
-  workId: number;
+  workId: number | string;
   page: number;
   snippet: string;
   pages: number;
 }
 
 export interface OfflineIssue {
-  workId: number;
+  workId: number | string;
   issue: "offline_storage";
 }
 
@@ -245,17 +259,33 @@ export interface SearchSuggestion {
 }
 export const searchPcSuggestions = (text: string) => invoke<{ items: SearchSuggestion[] }>("pc_search_suggest", { text }).then((result) => result.items);
 export const lookupPcWork = (source: string, key: string) => invoke<PcWork | null>("pc_lookup_work", { source, key });
-export const listOfflineWorks = () => invoke<OfflineWork[]>("offline_list_works");
-export const saveOfflineWork = (workId: number | string) => typeof workId === "string" ? notYet() : invoke<OfflineWork>("offline_save_work", { workId });
-export const getOfflinePage = (workId: number, page: number) => invoke<OfflinePage>("offline_get_page", { workId, page });
-export const getOfflineOutline = (workId: number, generation: string) => invoke<PcOutlineEntry[]>("offline_get_outline", { workId, generation });
-export const getOfflineAsset = (workId: number, assetId: number, generation: string) => invoke<PcAsset>("offline_get_asset", { workId, assetId, generation });
+/** Rust が返す保存版の一覧の行。新しい棚の作品は棚の一覧と同じ形で残っている。 */
+type StoredOfflineWork = Omit<OfflineWork, "work"> & { work: PcWork | MobileShelfWork };
+
+/** 保存版の行を画面の形にする。新しい棚の作品は一覧の一件と同じ変換を通す。 */
+function offlineWork(stored: StoredOfflineWork): OfflineWork {
+  const work = stored.work;
+  if (typeof work.id === "string" && "snapshotId" in work) return { ...stored, work: shelfWork(work) };
+  return stored as OfflineWork;
+}
+
+export const listOfflineWorks = () => invoke<StoredOfflineWork[]>("offline_list_works").then((works) => works.map(offlineWork));
+/** 端末に保存する。新しい棚の作品は、今つながっている棚から読む画面と同じ組み立てで保存する。 */
+export const saveOfflineWork = (workId: number | string) => {
+  if (typeof workId === "number") return invoke<StoredOfflineWork>("offline_save_work", { workId }).then(offlineWork);
+  const library = nativeShelf();
+  if (!library) return Promise.reject({ code: "library_changed", message: "接続先の本棚が変わりました。一覧を開き直してください" });
+  return invoke<StoredOfflineWork>("offline_save_shelf_work", { library, work: workId }).then(offlineWork);
+};
+export const getOfflinePage = (workId: number | string, page: number) => invoke<OfflinePage>("offline_get_page", { workId, page });
+export const getOfflineOutline = (workId: number | string, generation: string) => invoke<PcOutlineEntry[]>("offline_get_outline", { workId, generation });
+export const getOfflineAsset = (workId: number | string, assetId: number, generation: string) => invoke<PcAsset>("offline_get_asset", { workId, assetId, generation });
 export const deleteOfflineWork = (work: Pick<PcWork, "id" | "source" | "sourceId">) => invoke<void>("offline_delete_work", { workId: work.id, source: work.source, sourceId: work.sourceId });
 /** 数値 ID はサーバーごとに振られる。同じ作品かは取得元の識別子まで見て決める。 */
 export const sameWork = (left: Pick<PcWork, "id" | "source" | "sourceId">, right: Pick<PcWork, "id" | "source" | "sourceId">) => left.id === right.id && left.source === right.source && left.sourceId === right.sourceId;
 export const searchOfflineText = (query: string) => invoke<OfflineTextHit[]>("offline_search_text", { query });
 export const listOfflineIssues = () => invoke<OfflineIssue[]>("offline_list_issues");
-export const deleteOfflineIssue = (workId: number) => invoke<void>("offline_delete_corrupt_work", { workId });
+export const deleteOfflineIssue = (workId: number | string) => invoke<void>("offline_delete_corrupt_work", { workId });
 
 export function pcErrorMessage(error: unknown): string {
   if (typeof error === "object" && error && "message" in error && typeof error.message === "string") return error.message;

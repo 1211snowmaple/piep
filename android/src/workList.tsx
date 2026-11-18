@@ -3,7 +3,7 @@ import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient, useQuerie
 import { WorkCard, WorkCardSkeleton, type SavedState } from "./WorkCard";
 import { VirtualWorkList } from "./VirtualWorkList";
 import { nativeShelfKey } from "./nativeReading";
-import { getPcMetadata, sameWork, listOfflineWorks, pcErrorMessage, searchPcWorks, type PcSearchPage, type PcWork, type PcWorkScope, type PcWorkSearch } from "./pcApi";
+import { getPcMetadata, sameSavedVersion, sameWork, listOfflineWorks, pcErrorMessage, searchPcWorks, type PcSearchPage, type PcWork, type PcWorkScope, type PcWorkSearch } from "./pcApi";
 
 export const statusQueryKey = ["pc-status"] as const;
 const pageSize = 20;
@@ -155,10 +155,10 @@ export function useSavedStates(items: PcWork[], savedRevision: number, reachable
     const saved = savedById.get(work.id);
     return saved && sameWork(saved.work, work) ? saved : null;
   };
-  const sameVersion = (work: PcWork, saved: { savedVersion: number; savedContentHash: string | null }) => work.currentVersion === saved.savedVersion && work.contentHash === saved.savedContentHash;
+  // 新しい棚の作品は一覧の一件に編集の UUID まで載っているので、問い合わせずに比べられる。
   const toCheck = items.filter((work) => {
     const saved = savedFor(work);
-    return saved ? sameVersion(work, saved) : false;
+    return saved && !work.shelf ? sameSavedVersion(work, saved) : false;
   });
   const editHashes = useQueries({
     queries: toCheck.map((work) => ({
@@ -177,7 +177,7 @@ export function useSavedStates(items: PcWork[], savedRevision: number, reachable
     const saved = savedFor(work);
     if (!saved) return null;
     const known = editHashes.get(work.id);
-    return { changed: !sameVersion(work, saved) || (known !== undefined && known !== saved.savedEditHash) };
+    return { changed: !sameSavedVersion(work, saved) || (known !== undefined && known !== saved.savedEditHash) };
   };
 }
 

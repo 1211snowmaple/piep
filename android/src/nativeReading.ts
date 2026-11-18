@@ -19,6 +19,8 @@ export interface NativeOpened {
 let scope: NativeScope | null = null;
 /** 一覧・作品の画面・表紙も新しい棚から出せる接続か。 */
 let listable = false;
+/** 棚の作品のお気に入りを、要求 UUID と更新世代で付け外しできる接続か。 */
+let favoriteWritable = false;
 const opened = new Map<string, Promise<NativeOpened | null>>();
 
 /** 新しい棚の作品ではまだ使えない操作の理由。押せない形にして添える。 */
@@ -36,6 +38,7 @@ export function adoptNativeLibrary(status: PcConnectionStatus | null): void {
     && next.syncEpoch === scope.syncEpoch
     && next.connectionGeneration === scope.connectionGeneration;
   listable = Boolean(next && status?.nativeLibrary?.worksSearch);
+  favoriteWritable = listable && Boolean(status?.nativeLibrary?.favoriteWrite);
   if (same) return;
   scope = next;
   opened.clear();
@@ -44,6 +47,27 @@ export function adoptNativeLibrary(status: PcConnectionStatus | null): void {
 /** 一覧・作品の画面・表紙を出す新しい棚。出せない接続では null（旧 API の一覧のまま）。 */
 export function nativeShelf(): NativeScope | null {
   return scope && listable && isTauri() ? scope : null;
+}
+
+/** 棚の作品のお気に入りを付け外しできる棚。できない接続では null（印だけ出す）。 */
+export function favoriteShelf(): NativeScope | null {
+  const shelf = nativeShelf();
+  return shelf && favoriteWritable ? shelf : null;
+}
+
+/** お気に入りを付け外しした結果。`conflict` は別の端末やデスクトップで先に変わっていたとき。 */
+export interface ShelfFavorite {
+  favorite: boolean;
+  generation: string;
+  conflict: boolean;
+}
+
+/**
+ * 棚の作品のお気に入りを付け外しする。押すたびに新しい要求 UUID を作る（同じ要求を送り直しても
+ * 一度だけ効く）。`expected` は画面が知っている更新世代で、違えば今の値が返る。
+ */
+export function setShelfFavorite(library: NativeScope, work: string, expected: string, favorite: boolean): Promise<ShelfFavorite> {
+  return invoke<ShelfFavorite>("pc_native_set_favorite", { library, work, request: crypto.randomUUID(), expected, favorite });
 }
 
 /** 一覧の問い合わせの鍵に足す。棚や接続が変われば、一覧も取り直す。 */
@@ -56,7 +80,7 @@ export function nativeShelfKey(): string | null {
 export function shelfWork(work: MobileShelfWork): PcWork {
   return {
     id: work.id,
-    shelf: { snapshotId: work.snapshotId, edited: work.edited },
+    shelf: { snapshotId: work.snapshotId, edited: work.edited, editId: work.editId ?? null, favoriteGeneration: work.favoriteGeneration ?? "0" },
     source: work.source,
     sourceId: work.sourceId,
     title: work.title,
@@ -100,9 +124,15 @@ export async function shelfMetadata(workId: string): Promise<PcMetadata> {
     versions: [],
     isEdited: detail.work.edited,
     activeEditId: null,
-    // 編集の中身の印は渡らない。編集した版の UUID で読書位置を分ける（編集し直せば別の本文）。
-    activeEditHash: detail.work.edited ? `edit:${detail.work.snapshotId}` : null,
+    // 編集の中身の印は渡らない。編集の UUID で読書位置と保存版を分ける（編集し直せば別の本文）。
+    activeEditHash: shelfEditHash(detail.work),
   };
+}
+
+/** 編集の印。端末に保存した版の印（Rust 側の `edit:{UUID}`）と同じ形。 */
+export function shelfEditHash(work: Pick<MobileShelfWork, "edited" | "editId" | "snapshotId">): string | null {
+  if (!work.edited) return null;
+  return work.editId ? `edit:${work.editId}` : `edit:${work.snapshotId}`;
 }
 
 /** 新しい棚の作品の表紙。版の UUID を鍵にして、版が変われば取り直す。 */

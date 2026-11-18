@@ -7,8 +7,7 @@ import { ProviderMark } from "./ProviderMark";
 import { WorkThumbnail } from "./WorkThumbnail";
 import { WorkFavoriteButton } from "./FavoriteButton";
 import { WorkFacts, workFacts } from "./WorkFacts";
-import { defaultPcSearch, deleteOfflineWork, getPcMetadata, getPcWorkCollections, isShelfWork, listOfflineWorks, pcErrorMessage, sameWork, saveOfflineWork, type OfflineWork, type PcCollection, type PcWork } from "./pcApi";
-import { SHELF_NOT_YET } from "./nativeReading";
+import { defaultPcSearch, deleteOfflineWork, getPcMetadata, getPcWorkCollections, listOfflineWorks, pcErrorMessage, sameSavedVersion, sameWork, saveOfflineWork, type OfflineWork, type PcCollection, type PcWork } from "./pcApi";
 import { homePage, useAppNavigation } from "./appHistory";
 import { hasReadingPosition } from "./OnlineReader";
 import { plainText } from "./workText";
@@ -56,7 +55,8 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
   const description = useMemo(() => plainText(work.excerpt), [work.excerpt]);
   const tags = work.tags ?? [];
   const resume = hasReadingPosition(work, selected.offline ? selected.snapshot.savedEditHash : metadata?.activeEditHash ?? null);
-  const outdated = Boolean(online && saved && (work.currentVersion !== saved.savedVersion || work.contentHash !== saved.savedContentHash || (metadata && metadata.activeEditHash !== saved.savedEditHash)));
+  // 新しい棚の作品は版と編集の UUID で比べる。旧 API の作品は編集の印を作品の情報から見る。
+  const outdated = Boolean(online && saved && (!sameSavedVersion(work, saved) || (!work.shelf && metadata && metadata.activeEditHash !== saved.savedEditHash)));
 
   useEffect(() => {
     const node = descriptionRef.current;
@@ -131,9 +131,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
       {online && outdated && !saving && <p className="detail-actions-note">端末の保存より新しい版があります</p>}
       <div className="detail-actions-row">
         <button className="primary-button detail-read" type="button" onClick={onRead}><Icons.read aria-hidden="true" />{readLabel}</button>
-        {online && (isShelfWork(work)
-          ? <button className="icon-button icon-button--large" type="button" disabled aria-label={`端末に保存（${SHELF_NOT_YET}）`} title={SHELF_NOT_YET}><Icons.saveOffline aria-hidden="true" /></button>
-          : saved && !outdated && !saving
+        {online && (saved && !outdated && !saving
           ? <span className="card-saved card-saved--large" role="img" aria-label="端末に保存済み" title="端末に保存済み"><Icons.confirm aria-hidden="true" /></span>
           : <button className="icon-button icon-button--large" type="button" data-tone={outdated ? "warn" : undefined} data-busy={saving || undefined} disabled={saving} aria-label={saving ? "保存しています" : outdated ? "端末の保存を更新" : "端末に保存"} title={outdated ? "端末の保存を更新" : "端末に保存"} onClick={() => void save()}>{saving ? <Icons.busy aria-hidden="true" /> : outdated ? <Icons.updates aria-hidden="true" /> : <Icons.saveOffline aria-hidden="true" />}</button>)}
         <WorkFavoriteButton work={work} className="icon-button icon-button--large" readOnly={selected.offline} />

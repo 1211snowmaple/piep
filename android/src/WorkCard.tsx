@@ -1,8 +1,7 @@
 import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import { Icons } from "./icons";
 import { WorkFavoriteButton } from "./FavoriteButton";
-import { isShelfWork, v1WorkId, pcErrorMessage, saveOfflineWork, type PcWork } from "./pcApi";
-import { SHELF_NOT_YET } from "./nativeReading";
+import { pcErrorMessage, saveOfflineWork, type PcWork } from "./pcApi";
 import { WorkThumbnail } from "./WorkThumbnail";
 import { ProviderMark } from "./ProviderMark";
 import { MobileTagRow } from "./MobileTagRow";
@@ -13,7 +12,7 @@ import { useLongPress } from "./longPress";
 
 export function AuthorAvatar({ work, offline, offlineAuthorCover, snapshotGeneration }: { work: PcWork; offline: boolean; offlineAuthorCover: boolean; snapshotGeneration?: number }) {
   const src = offline
-    ? offlineAuthorCover ? savedEntityCoverUrl(v1WorkId(work), "people", snapshotGeneration ?? 0) : null
+    ? offlineAuthorCover ? savedEntityCoverUrl(work.id, "people", snapshotGeneration ?? 0) : null
     : work.authorId ? entityCoverUrl("people", work.source, work.authorId) : null;
   const [failed, setFailed] = useState(() => imageRecentlyFailed(src));
   useEffect(() => { setFailed(imageRecentlyFailed(src)); }, [src]);
@@ -30,8 +29,6 @@ function CardSave({ work, state, onSaved, onProblem }: { work: PcWork; state: Sa
   const [saving, setSaving] = useState(false);
   if (state && !state.changed && !saving) return <span className="card-action" data-tone="ok" role="img" aria-label="端末に保存済み"><Icons.confirm aria-hidden="true" /></span>;
   if (!onSaved) return null;
-  // 新しい棚の作品は、まだ端末に保存できない。場所はそのまま、押せない形で理由を添える。
-  if (isShelfWork(work)) return <button type="button" className="card-action" disabled aria-label={`${work.title}を端末に保存（${SHELF_NOT_YET}）`} title={SHELF_NOT_YET}><Icons.saveOffline aria-hidden="true" /></button>;
   const save = async () => {
     setSaving(true);
     onProblem(null);

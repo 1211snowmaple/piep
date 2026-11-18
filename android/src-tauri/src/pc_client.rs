@@ -18,10 +18,9 @@ use url::Url;
 use crate::secret_cipher::SecretCipher;
 // サーバーから受け取る型。サーバーと同じ定義（crates/piep-mobile-api）を使う。
 pub use piep_mobile_api::{
-    MobileCollection, MobileCollectionCoverTile, MobileCollectionDetail, MobileCollectionMember,
-    MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage, MobileFacet,
-    MobileMetadata, MobilePage, MobilePerson, MobileRevision, MobileSearchPage as SearchPage,
-    MobileSeriesMembership, MobileVersion, MobileWork,
+    MobileCollection, MobileCollectionDetail, MobileEntityDetail, MobileEntityPage,
+    MobileEntitySeriesPage, MobileMetadata, MobilePage, MobilePerson,
+    MobileSearchPage as SearchPage, MobileSeriesMembership, MobileWork,
 };
 
 pub mod cover_protocol;

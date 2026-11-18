@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { pcErrorMessage, setPcFavorite, type PcWork } from "./pcApi";
+import { isShelfWork, pcErrorMessage, setPcFavorite, type PcWork } from "./pcApi";
+import { favoriteShelf, setShelfFavorite } from "./nativeReading";
 import { useAppNavigation } from "./appHistory";
 import { favoriteReadRevision, nextFavoriteRevision } from "./favoriteFreshness";
 
@@ -9,8 +10,14 @@ import { favoriteReadRevision, nextFavoriteRevision } from "./favoriteFreshness"
  *
  * 一覧・詳細・読書画面はそれぞれ別の時点の作品を持っているので、ここを通して同じ値を見る。
  * 鍵は取得元の番号。サーバーの作品番号は同じ作品でも機械ごとに違う。
+ * 新しい棚の作品は更新世代（`generation`）も覚え、次の付け外しの `expected` に使う。
  */
-type Entry = { favorite: boolean; busy: boolean; revision: number };
+type Entry = { favorite: boolean; busy: boolean; revision: number; generation?: string };
+
+/** 送り直しても一度だけ効く書き込み。古い世代からなら、今の値と `conflict` が返る。 */
+type Stored = { favorite: boolean; generation?: string; conflict?: boolean };
+
+const CONFLICT_NOTICE = "ほかの端末かデスクトップで先に変わっていたので、今の値に合わせました";
 
 const entries = new Map<string, Entry>();
 const listeners = new Set<() => void>();
@@ -67,11 +74,12 @@ export function useFavorite(work: PcWork): { favorite: boolean; busy: boolean; o
   const favorite = refreshed ? work.favorite : entry?.favorite ?? work.favorite;
   const busy = entry?.busy ?? false;
 
+  const remoteGeneration = work.shelf?.favoriteGeneration;
   useEffect(() => {
     if (!refreshed || entries.get(key) !== entry) return;
-    entries.set(key, { favorite: work.favorite, busy: false, revision: remoteRevision });
+    entries.set(key, { favorite: work.favorite, busy: false, revision: remoteRevision, generation: remoteGeneration });
     emit();
-  }, [entry, key, refreshed, remoteRevision, work.favorite]);
+  }, [entry, key, refreshed, remoteRevision, remoteGeneration, work.favorite]);
 
   const refreshQueries = useCallback(() => {
     for (const name of ["shelf-count", "metadata", "works", "works-page", "collection"]) {
@@ -79,29 +87,39 @@ export function useFavorite(work: PcWork): { favorite: boolean; busy: boolean; o
     }
   }, [queryClient]);
 
+  // 新しい棚の作品は、棚が付け外しを受け付ける接続のときだけ押せる。
+  const shelf = isShelfWork(work) ? favoriteShelf() : null;
+  const writable = isShelfWork(work) ? shelf !== null && work.shelf !== undefined : navigation.canWriteFavorite;
+  const generation = (refreshed ? undefined : entry?.generation) ?? remoteGeneration ?? "0";
+
   const toggle = useCallback((next: boolean) => {
-    const before = favorite;
-    if (entries.get(key)?.busy) return;
-    const pending: Entry = { favorite: next, busy: true, revision: nextFavoriteRevision() };
+    const before = entries.get(key);
+    const previous = { favorite, generation: before?.generation };
+    if (before?.busy) return;
+    const pending: Entry = { favorite: next, busy: true, revision: nextFavoriteRevision(), generation: previous.generation };
     entries.set(key, pending);
     emit();
-    setPcFavorite(work.source, work.sourceId, next)
+    const request: Promise<Stored> = shelf
+      ? setShelfFavorite(shelf, String(work.id), generation, next)
+      : setPcFavorite(work.source, work.sourceId, next);
+    request
       .then((stored) => {
         // 接続変更後に届いた古いサーバーの返事は、新しい本棚へ当てない。
         if (entries.get(key) !== pending) return;
-        entries.set(key, { favorite: stored.favorite, busy: false, revision: nextFavoriteRevision() });
+        entries.set(key, { favorite: stored.favorite, busy: false, revision: nextFavoriteRevision(), generation: stored.generation });
         emit();
+        if (stored.conflict) showNotice(CONFLICT_NOTICE);
         // サイドバーの件数と、お気に入りで絞った一覧を次に開いたときに合わせる。
         refreshQueries();
       })
       .catch((error: unknown) => {
         if (entries.get(key) !== pending) return;
-        entries.set(key, { favorite: before, busy: false, revision: nextFavoriteRevision() });
+        entries.set(key, { favorite: previous.favorite, busy: false, revision: nextFavoriteRevision(), generation: previous.generation });
         emit();
         showNotice(pcErrorMessage(error));
         refreshQueries();
       });
-  }, [favorite, key, refreshQueries, work.source, work.sourceId]);
+  }, [favorite, generation, key, refreshQueries, shelf, work.id, work.source, work.sourceId]);
 
-  return { favorite, busy, onToggle: navigation.canWriteFavorite ? toggle : undefined };
+  return { favorite, busy, onToggle: writable ? toggle : undefined };
 }

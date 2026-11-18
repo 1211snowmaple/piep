@@ -7,7 +7,10 @@ use piep_library_protocol::{
     Id, LibraryIdentity, MAX_IDENTITY_BYTES, MAX_MANIFEST_BYTES, ReaderBundle, ReaderWorkPage,
     ResourceReference, ResourceScope, WorkReadingView,
 };
-use piep_mobile_api::{MobileShelfPage, MobileShelfWork, MobileShelfWorkDetail};
+use piep_mobile_api::{
+    MobileShelfFavorite, MobileShelfFavoriteUpdate, MobileShelfPage, MobileShelfWork,
+    MobileShelfWorkDetail,
+};
 use piep_storage::Fingerprint;
 use reqwest::{Response, StatusCode, header::HeaderMap};
 use serde::{Deserialize, Serialize};
@@ -30,6 +33,8 @@ pub struct NativeLibraryStatus {
     works_list: bool,
     /// 一覧（絞り込み・並べ替え・語の検索）・作品の画面・表紙を新しい棚から出せるか。
     works_search: bool,
+    /// 棚の作品のお気に入りを、要求 UUID と更新世代で付け外しできるか。
+    favorite_write: bool,
     reader_bundle: bool,
 }
 
@@ -40,6 +45,10 @@ fn header_is(headers: &HeaderMap, name: &str, expected: &str) -> bool {
 }
 
 impl NativeLibraryScope {
+    pub(super) fn library_id(&self) -> Id {
+        self.library_id
+    }
+
     /// 同じ接続の同じ棚・利用者か。
     pub(super) fn same_as(&self, other: &Self) -> bool {
         self.library_id == other.library_id
@@ -116,6 +125,7 @@ async fn parse_identity(
         scope,
         works_list: header_is(&headers, "x-piep-works-list", "1"),
         works_search: header_is(&headers, "x-piep-works-search", "1"),
+        favorite_write: header_is(&headers, "x-piep-favorite-write", "1"),
         reader_bundle: identity.capabilities.reader_bundle,
     })
 }
@@ -226,6 +236,118 @@ async fn post_bounded<T>(
     state.with_connection(generation, || Ok(result))
 }
 
+/// 十進の数字だけ（符号・空白・先頭の 0 の重ねを受け付けない）。
+fn canonical_generation(value: &str) -> bool {
+    value
+        .parse::<u64>()
+        .is_ok_and(|parsed| parsed <= i64::MAX as u64 && parsed.to_string() == value)
+}
+
+/// お気に入りを付け外しした結果。`conflict` は別の端末やデスクトップで先に変わっていたとき
+/// （値は今のもの。端末の時刻で勝者を決めない）。
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeFavorite {
+    favorite: bool,
+    generation: String,
+    conflict: bool,
+}
+
+#[derive(Deserialize)]
+struct FavoriteConflict {
+    error: String,
+    current: MobileShelfFavorite,
+}
+
+fn favorite_missing() -> ClientError {
+    ClientError {
+        code: "favorite_missing",
+        message: "この作品は本棚から外されました。一覧を開き直してください",
+    }
+}
+
+fn parse_favorite(bytes: &[u8], conflict: bool) -> Result<NativeFavorite, ClientError> {
+    let current = if conflict {
+        let body: FavoriteConflict =
+            serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
+        if body.error != "favorite_conflict" {
+            return Err(ClientError::protocol());
+        }
+        body.current
+    } else {
+        serde_json::from_slice::<MobileShelfFavorite>(bytes).map_err(|_| ClientError::protocol())?
+    };
+    if !canonical_generation(&current.generation) {
+        return Err(ClientError::protocol());
+    }
+    Ok(NativeFavorite {
+        favorite: current.favorite,
+        generation: current.generation,
+        conflict,
+    })
+}
+
+/// 棚の作品のお気に入りを付け外しする。`request` は画面が一度の操作ごとに作る UUID で、
+/// 送り直しても一度だけ効く。`expected` は画面が知っている更新世代。
+#[tauri::command]
+pub async fn pc_native_set_favorite(
+    state: State<'_, PcClientState>,
+    library: NativeLibraryScope,
+    work: Id,
+    request: Id,
+    expected: String,
+    favorite: bool,
+) -> Result<NativeFavorite, ClientError> {
+    if !canonical_generation(&expected) {
+        return Err(ClientError::remote());
+    }
+    let (generation, saved) = state.connection_snapshot()?;
+    if generation != library.connection_generation {
+        return Err(library_changed());
+    }
+    let saved = saved.ok_or_else(ClientError::invalid_pairing)?;
+    let client = state.client(&saved)?;
+    let body = MobileShelfFavoriteUpdate {
+        request_id: request.get().to_string(),
+        expected,
+        favorite,
+    };
+    let response = client
+        .put(format!(
+            "{}/api/v2/libraries/{}/works/{}/favorite",
+            saved.url,
+            library.library_id.get(),
+            work.get()
+        ))
+        .bearer_auth(&saved.token)
+        .timeout(REQUEST_TIMEOUT)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
+    let result = favorite_response(response, library).await?;
+    state.with_connection(generation, || Ok(result))
+}
+
+async fn favorite_response(
+    response: Response,
+    scope: NativeLibraryScope,
+) -> Result<NativeFavorite, ClientError> {
+    match response.status() {
+        // 世代の食い違いは棚の入れ替わり（409）と同じ番号で返るので、本文で見分ける。
+        StatusCode::CONFLICT if scope.matches(response.headers()) => {
+            let bytes = bounded_response_bytes(response, MAX_IDENTITY_BYTES).await?;
+            parse_favorite(&bytes, true).map_err(|_| library_changed())
+        }
+        StatusCode::NOT_FOUND => Err(favorite_missing()),
+        _ => {
+            let bytes =
+                bounded_response_bytes(check_scope(response, scope)?, MAX_IDENTITY_BYTES).await?;
+            parse_favorite(&bytes, false)
+        }
+    }
+}
+
 /// 一件が棚の作品として読めるか（UUID と取得元の鍵）。
 fn valid_shelf_work(work: &MobileShelfWork) -> bool {
     uuid::Uuid::parse_str(&work.id).is_ok()
@@ -282,12 +404,20 @@ pub async fn pc_native_work(
     library: NativeLibraryScope,
     work: Id,
 ) -> Result<MobileShelfWorkDetail, ClientError> {
+    work_detail(&state, library, work).await
+}
+
+pub(super) async fn work_detail(
+    state: &PcClientState,
+    library: NativeLibraryScope,
+    work: Id,
+) -> Result<MobileShelfWorkDetail, ClientError> {
     let endpoint = format!(
         "/api/v2/libraries/{}/works/{}",
         library.library_id.get(),
         work.get()
     );
-    read(&state, library, &endpoint, |bytes| {
+    read(state, library, &endpoint, |bytes| {
         let detail: MobileShelfWorkDetail =
             serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
         if detail.work.id != work.get().to_string() || !valid_shelf_work(&detail.work) {
@@ -524,6 +654,100 @@ mod tests {
                     code,
                 );
             }
+        });
+    }
+
+    #[test]
+    fn a_favorite_conflict_returns_the_current_value_and_a_changed_shelf_stays_a_change() {
+        tauri::async_runtime::block_on(async {
+            let shelf = identity();
+            let scope = NativeLibraryScope {
+                library_id: shelf.library_id,
+                subject_id: shelf.subject_id,
+                sync_epoch: shelf.sync_epoch,
+                connection_generation: 1,
+            };
+            let wire = headers(&shelf);
+            let stored = favorite_response(
+                response("200 OK", &wire, r#"{"favorite":true,"generation":"3"}"#).await,
+                scope,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                stored,
+                NativeFavorite {
+                    favorite: true,
+                    generation: "3".into(),
+                    conflict: false
+                }
+            );
+            let conflict = favorite_response(
+                response(
+                    "409 Conflict",
+                    &wire,
+                    r#"{"error":"favorite_conflict","current":{"favorite":false,"generation":"4"}}"#,
+                )
+                .await,
+                scope,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                (
+                    conflict.favorite,
+                    conflict.generation.as_str(),
+                    conflict.conflict
+                ),
+                (false, "4", true)
+            );
+            let other = headers(&LibraryIdentity::new(
+                shelf.library_id,
+                shelf.subject_id,
+                identity().sync_epoch,
+            ));
+            for (status, head, body, code) in [
+                (
+                    "409 Conflict",
+                    other.clone(),
+                    r#"{"error":"favorite_conflict","current":{"favorite":false,"generation":"4"}}"#,
+                    "library_changed",
+                ),
+                (
+                    "409 Conflict",
+                    wire.clone(),
+                    r#"{"error":"library_changed"}"#,
+                    "library_changed",
+                ),
+                ("404 Not Found", wire.clone(), "", "favorite_missing"),
+                (
+                    "200 OK",
+                    wire.clone(),
+                    r#"{"favorite":true,"generation":"03"}"#,
+                    "protocol_mismatch",
+                ),
+                (
+                    "200 OK",
+                    other,
+                    r#"{"favorite":true,"generation":"3"}"#,
+                    "library_changed",
+                ),
+            ] {
+                assert_eq!(
+                    favorite_response(response(status, &head, body).await, scope)
+                        .await
+                        .unwrap_err()
+                        .code,
+                    code,
+                    "{status} {body}"
+                );
+            }
+            assert!(canonical_generation("0") && canonical_generation("12"));
+            assert!(
+                !canonical_generation("-1")
+                    && !canonical_generation("01")
+                    && !canonical_generation(" 1")
+            );
         });
     }
 }

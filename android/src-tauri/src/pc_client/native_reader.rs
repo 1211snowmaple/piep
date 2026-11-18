@@ -32,6 +32,36 @@ pub(crate) struct NativeDocument {
     images: Vec<BundleFile>,
 }
 
+impl NativeDocument {
+    pub(crate) fn pages(&self) -> &[String] {
+        &self.pages
+    }
+
+    pub(crate) fn source_page_starts(&self) -> &[usize] {
+        &self.source_page_starts
+    }
+
+    pub(crate) fn text_chars(&self) -> usize {
+        self.text_chars
+    }
+
+    pub(crate) fn image_count(&self) -> usize {
+        self.images.len()
+    }
+
+    /// 本文の `asset` 番目の画像を取りに行く先。
+    pub(crate) fn image(&self, asset: usize) -> Option<ImageTarget> {
+        let file = self.images.get(asset)?;
+        Some(ImageTarget {
+            scope: self.scope,
+            entity: self.entity,
+            view: file.scope.clone(),
+            resource: file.resource.clone(),
+            file: file.file.to_native(),
+        })
+    }
+}
+
 #[derive(Default)]
 pub struct NativeReaderState {
     documents: Mutex<VecDeque<Arc<NativeDocument>>>,
@@ -212,15 +242,7 @@ pub(crate) fn image_target(
     key: &str,
     asset: usize,
 ) -> Option<ImageTarget> {
-    let document = reader.find(key)?;
-    let file = document.images.get(asset)?;
-    Some(ImageTarget {
-        scope: document.scope,
-        entity: document.entity,
-        view: file.scope.clone(),
-        resource: file.resource.clone(),
-        file: file.file.to_native(),
-    })
+    reader.find(key)?.image(asset)
 }
 
 /// 部分実体を順に受け取り、それぞれと全体のハッシュを確かめてつなぐ。

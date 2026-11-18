@@ -240,7 +240,6 @@
 .reader-info-footer { flex: none; padding: 10px 16px calc(10px + var(--piep-safe-bottom)); border-top: 1px solid var(--reader-line); background: var(--reader-surface); }
 .reader-info-save { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 48px; padding: 8px 16px; border: 0; border-radius: 10px; background: var(--reader-accent); color: #fff; font-size: var(--fs-control); font-weight: 700; }
 .reader-info-save:disabled { opacity: .75; }
-.reader-info-save[data-locked] { background: var(--reader-control); color: var(--reader-muted); opacity: 1; }
 .reader-info-save[data-done] { background: var(--reader-accent-soft); color: var(--reader-accent); }
 .reader-info-save svg { flex: none; width: 18px; height: 18px; }
 .reader-info-save[data-busy] svg { animation: icon-spin 900ms linear infinite; }

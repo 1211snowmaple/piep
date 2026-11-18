@@ -2,7 +2,7 @@ import type { ReactElement, ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render as renderRaw, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { OfflineWork, SavedPcWork } from "./pcApi";
+import type { OfflineWork, PcWork } from "./pcApi";
 
 const api = vi.hoisted(() => ({ listOfflineWorks: vi.fn(), listOfflineIssues: vi.fn(), searchOfflineText: vi.fn() }));
 vi.mock("./pcApi", async (original) => ({ ...await original<typeof import("./pcApi")>(), ...api }));
@@ -22,11 +22,11 @@ function render(element: ReactElement) {
 }
 
 function saved(id: number, title: string): OfflineWork {
-  const work: SavedPcWork = {
+  const work: PcWork = {
     id, source: "pixiv", sourceId: String(id), title, authorName: "作者", authorId: "1", contentType: "novel",
     tags: [], excerpt: null, textLength: 100, assetCount: 0, hasCover: false, favorite: false, seriesTitle: null, seriesId: null,
     currentVersion: 1, contentHash: "h",
-  } as SavedPcWork;
+  } as PcWork;
   return { work, savedAtMs: id, savedVersion: 1, savedContentHash: "h", savedEditHash: null, pageCount: 5 };
 }
 

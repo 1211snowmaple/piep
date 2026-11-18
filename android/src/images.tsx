@@ -32,9 +32,9 @@ export const illustrationUrl = (workId: number, assetId: number, width: number, 
 export const workCoverUrlById = (workId: number, revision: number) => imageUrl(`work/${workId}/c${revision}/`);
 export const entityCoverUrl = (kind: "people" | "series", source: string, key: string, banner = false) => imageUrl(`entity/${kind}/${source}/${encodeURIComponent(key)}${banner ? "/banner" : ""}`);
 export const collectionCoverUrl = (collectionId: string, slot: string, revision: number) => imageUrl(`collection/${collectionId}/${slot}/${revision}`);
-export const savedCoverUrl = (workId: number, generation: number) => imageUrl(`saved/${workId}/${generation}`, false);
-export const savedEntityCoverUrl = (workId: number, kind: "people" | "series", generation: number) => imageUrl(`saved-entity/${workId}/${kind}/${generation}`, false);
-export const savedCollectionCoverUrl = (workId: number, collectionId: string, generation: number) => imageUrl(`saved-collection/${workId}/${collectionId}/${generation}`, false);
+export const savedCoverUrl = (workId: number | string, generation: number) => imageUrl(`saved/${workId}/${generation}`, false);
+export const savedEntityCoverUrl = (workId: number | string, kind: "people" | "series", generation: number) => imageUrl(`saved-entity/${workId}/${kind}/${generation}`, false);
+export const savedCollectionCoverUrl = (workId: number | string, collectionId: string, generation: number) => imageUrl(`saved-collection/${workId}/${collectionId}/${generation}`, false);
 
 // 一度出た画像は、スクロールで戻ったときに溶け込ませず、その場で出す。
 const loaded = new Set<string>();
