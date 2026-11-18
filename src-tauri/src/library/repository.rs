@@ -327,6 +327,15 @@ impl Library {
     }
 
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_inner(root, None)
+    }
+
+    /// 設定で指定した棚かを、DB の更新を始める前に照合する。
+    pub fn open_matching(root: &Path, expected: LibraryId) -> Result<Self> {
+        Self::open_inner(root, Some(expected))
+    }
+
+    fn open_inner(root: &Path, expected: Option<LibraryId>) -> Result<Self> {
         regular_directory(root)?;
         let lock = Self::lock(root)?;
         super::store::regular_file(&root.join("library.json"))?;
@@ -341,6 +350,11 @@ impl Library {
         if marker.format != "piep-library" || marker.version != 1 {
             return Err(Error::Unsupported(
                 "保存形式または最低対応版が異なります".into(),
+            ));
+        }
+        if expected.is_some_and(|id| id != marker.library_id) {
+            return Err(Error::Integrity(
+                "指定した棚 ID が保存済みの棚と一致しません".into(),
             ));
         }
         super::store::regular_file(&root.join("library.db"))?;

@@ -996,6 +996,7 @@ async fn wait_for_search(
     token: &str,
     text: &str,
     expected: i64,
+    receiver: Option<&super::sync_receive::SyncReceiver>,
 ) -> serde_json::Value {
     let mut last = serde_json::Value::Null;
     for _ in 0..600 {
@@ -1013,6 +1014,9 @@ async fn wait_for_search(
             .is_some_and(|items| items.len() as i64 == expected)
         {
             return last;
+        }
+        if let Some(error) = receiver.and_then(|receiver| receiver.status().index_error) {
+            panic!("検索索引の更新に失敗しました: {error}");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -1085,7 +1089,15 @@ async fn a_library_sent_from_the_desktop_can_be_read_from_the_standalone_server(
         .expect("reader token")
         .to_string();
 
-    let results = wait_for_search(&client, &url, &reader, "サーバー接続試験", 1).await;
+    let results = wait_for_search(
+        &client,
+        &url,
+        &reader,
+        "サーバー接続試験",
+        1,
+        Some(&parts.receiver),
+    )
+    .await;
     let work_id = results["items"][0]["id"].as_i64().expect("id");
     assert_read_api(
         &client,
@@ -1131,7 +1143,15 @@ async fn a_library_sent_from_the_desktop_can_be_read_from_the_standalone_server(
     assert_eq!(third.works, 2);
     assert_eq!(third.files_added, 2, "{third:?}");
     assert_eq!(third.files_removed, 0);
-    wait_for_search(&client, &url, &reader, "二つ目の作品", 1).await;
+    wait_for_search(
+        &client,
+        &url,
+        &reader,
+        "二つ目の作品",
+        1,
+        Some(&parts.receiver),
+    )
+    .await;
     // 入れ替えのあとも、鍵と読書位置は生きている。
     let listed: serde_json::Value = client
         .get(format!("{url}/api/v1/reading?since=0"))
@@ -2765,7 +2785,7 @@ async fn put_favorite(
 }
 
 async fn favorite_on_server(client: &reqwest::Client, url: &str, token: &str) -> bool {
-    let found = wait_for_search(client, url, token, "サーバー接続試験", 1).await;
+    let found = wait_for_search(client, url, token, "サーバー接続試験", 1, None).await;
     found["items"][0]["favorite"]
         .as_bool()
         .expect("favorite flag")

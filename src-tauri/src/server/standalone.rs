@@ -50,8 +50,35 @@ pub struct ServerConfig {
     #[serde(default)]
     pub public_url: String,
     pub tls: Option<TlsSetting>,
+    pub library_v2: Option<ReaderShelfConfig>,
     #[serde(default)]
     pub update: UpdateConfig,
+}
+
+/// サーバーの置き場にある新しい棚と、そこを読める端末を明示する。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReaderShelfConfig {
+    pub library_id: crate::library::protocol::Id,
+    pub sync_epoch: crate::library::protocol::Id,
+    #[serde(default)]
+    pub readers: std::collections::BTreeMap<String, crate::library::protocol::Id>,
+}
+
+impl ReaderShelfConfig {
+    fn open(&self, paths: &ServerPaths, store: Arc<ServerStore>) -> Result<Router, String> {
+        let library = Arc::new(
+            crate::library::Library::open_matching(&paths.native_library(), self.library_id.get())
+                .map_err(|error| format!("新しい棚を開けません: {error}"))?,
+        );
+        let authority = Arc::new(super::v2::DeviceAuthority::new(store));
+        for (device, subject) in &self.readers {
+            authority.grant(device.clone(), self.library_id, *subject)?;
+        }
+        let context = super::v2::Context::new(library, authority, self.sync_epoch)
+            .map_err(|error| error.to_string())?;
+        Ok(super::v2::router(Arc::new(context)))
+    }
 }
 
 /// 自己更新。`install` で置いたときだけ動く。
@@ -135,6 +162,9 @@ impl ServerPaths {
     }
     pub fn library(&self) -> PathBuf {
         self.root.join("library")
+    }
+    pub fn native_library(&self) -> PathBuf {
+        self.root.join("library-v2")
     }
     pub fn storage(&self) -> PathBuf {
         self.library().join("downloads")
@@ -307,6 +337,7 @@ pub(crate) async fn next_connection(
         admin_listen,
         public_url,
         tls,
+        library_v2: current.library_v2.clone(),
         update: current.update.clone(),
     };
     next.validate()?;
@@ -834,6 +865,15 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
         .and_then(|material| material.fingerprint.clone());
     let tls_config = material.map(|material| material.config);
     let parts = assemble(&paths, config.public_url(), fingerprint)?;
+    let native_reader = config
+        .library_v2
+        .as_ref()
+        .map(|settings| settings.open(&paths, Arc::clone(&parts.context.store)))
+        .transpose()?;
+    let with_native_reader = |router: Router| match &native_reader {
+        Some(native) => router.merge(native.clone()),
+        None => router,
+    };
     parts.receiver.start_index_catch_up();
     note_started(&paths, &parts.context.store);
     let handle = axum_server::Handle::new();
@@ -859,8 +899,8 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
     let mut tasks = tokio::task::JoinSet::new();
     match config.admin_listen {
         Some(admin_address) => {
-            let read = reader_router(Arc::clone(&parts.context));
-            let admin = admin_router(Arc::clone(&parts.context));
+            let read = with_native_reader(reader_router(Arc::clone(&parts.context)));
+            let admin = with_native_reader(admin_router(Arc::clone(&parts.context)));
             tasks.spawn(run_listener(
                 config.listen,
                 tls_config.clone(),
@@ -884,13 +924,13 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
             tasks.spawn(run_listener(
                 config.listen,
                 tls_config,
-                router,
+                with_native_reader(router),
                 handle.clone(),
             ));
             log::info!("待ち受け: {}", config.listen);
             if let Some(local) = local {
                 // 開けなくても携帯は困らないので、サーバーは止めない。
-                let admin = admin_router(Arc::clone(&parts.context));
+                let admin = with_native_reader(admin_router(Arc::clone(&parts.context)));
                 let local_handle = handle.clone();
                 tasks.spawn(async move {
                     if let Err(error) = run_listener(local, None, admin, local_handle).await {
@@ -1219,6 +1259,80 @@ mod tests {
         toml::from_str(text).expect("config")
     }
 
+    #[tokio::test]
+    async fn configured_shelf_mounts_with_explicit_device_grants_and_a_persistent_epoch() {
+        use crate::library::protocol::{Id, LibraryIdentity};
+        use reqwest::StatusCode;
+
+        struct Temp(PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp =
+            Temp(std::env::temp_dir().join(format!("piep-server-v2-{}", uuid::Uuid::now_v7())));
+        let paths = ServerPaths::new(&temp.0).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        let library = crate::library::Library::create(&paths.native_library()).unwrap();
+        let id = Id::new(library.id).unwrap();
+        drop(library);
+        let epoch = Id::new(uuid::Uuid::now_v7()).unwrap();
+        let subject = Id::new(uuid::Uuid::now_v7()).unwrap();
+        let parts = assemble(&paths, None, None).unwrap();
+        let store = Arc::clone(&parts.context.store);
+        let pair = |name| {
+            let ticket = store
+                .issue_pairing(Role::Reader, Duration::from_secs(60))
+                .unwrap();
+            store.consume_pairing(&ticket, name).unwrap()
+        };
+        let granted = pair("登録した端末");
+        let other = pair("許可のない端末");
+        let text = format!(
+            "[library_v2]\nlibrary_id = \"{}\"\nsync_epoch = \"{}\"\n[library_v2.readers]\n\"{}\" = \"{}\"\n",
+            id.get(), epoch.get(), granted.device_id, subject.get(),
+        );
+        let changed_connection = connection_text(&text, &config("")).unwrap();
+        let settings = config(&changed_connection).library_v2.unwrap();
+        assert_eq!(settings.readers.get(&granted.device_id), Some(&subject));
+        let mut wrong = settings.clone();
+        wrong.library_id = subject;
+        assert!(wrong.open(&paths, Arc::clone(&store)).is_err());
+        // 開き直しても設定した epoch と許可を使う。
+        drop(settings.open(&paths, Arc::clone(&store)).unwrap());
+        let router = reader_router(Arc::clone(&parts.context))
+            .merge(settings.open(&paths, Arc::clone(&store)).unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/api/v2/identity", listener.local_addr().unwrap());
+        let serving = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let get = |token: &str| client.get(&url).bearer_auth(token);
+        assert_eq!(
+            get(&other.token).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let identity: LibraryIdentity = get(&granted.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(identity.library_id, id);
+        assert_eq!(identity.subject_id, subject);
+        assert_eq!(identity.sync_epoch, epoch);
+        assert!(store.revoke_device(&granted.device_id).unwrap());
+        assert_eq!(
+            get(&granted.token).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        serving.abort();
+        let _ = serving.await;
+    }
+
     #[test]
     fn plain_http_is_only_allowed_on_loopback() {
         assert!(config("").validate().is_ok());
@@ -1370,6 +1484,7 @@ auto = false
                 cert: PathBuf::from("C:/certs/cert.pem"),
                 key: PathBuf::from("C:/certs/key.pem"),
             }),
+            library_v2: None,
             update: UpdateConfig::default(),
         };
         let written = connection_text(&text, &next).expect("written");
@@ -1390,6 +1505,7 @@ auto = false
             admin_listen: None,
             public_url: String::new(),
             tls: None,
+            library_v2: None,
             update: UpdateConfig::default(),
         };
         let written = connection_text(&written, &back).expect("written again");
