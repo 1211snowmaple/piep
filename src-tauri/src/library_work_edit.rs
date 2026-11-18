@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+#[path = "library_work_edit_audit.rs"]
+mod audit;
+
 /// 編集の版の一つ（下書きか反映中）。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

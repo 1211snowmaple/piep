@@ -1486,8 +1486,11 @@ pub async fn library_v2_editor(
 }
 
 /// 編集した後の後始末。一覧の集計を捨て、本文の検索の索引を追いつかせる。
-fn after_edit(state: &LibraryV2, library: &Library) {
+fn after_edit(state: &LibraryV2, library: &Library, work: LibraryId) {
     state.forget_derived();
+    if let Err(error) = library.audit_pixiv_edit_images(work) {
+        log::warn!("編集した作品の取得状態を見直せません: {error}");
+    }
     if let Err(error) = library.sync_search_index(&mut |_, _| {}) {
         log::error!("編集を検索の索引へ反映できません: {error}");
     }
@@ -1522,11 +1525,12 @@ pub async fn library_v2_save_editor(
     tauri::async_runtime::spawn_blocking(move || {
         let library = state.writable()?;
         let publish = save.publish;
+        let work = parse_id(&work)?;
         let result = library
-            .save_editor(parse_id(&request)?, parse_id(&work)?, save)
+            .save_editor(parse_id(&request)?, work, save)
             .map_err(|e| e.to_string())?;
         if publish {
-            after_edit(&state, &library);
+            after_edit(&state, &library, work);
         }
         Ok(result)
     })
@@ -1546,14 +1550,9 @@ pub async fn library_v2_edit_pointer(
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let library = state.writable()?;
+        let work = parse_id(&work)?;
         let changed = library
-            .change_edit_pointers(
-                parse_id(&request)?,
-                parse_id(&work)?,
-                library.id,
-                expected,
-                change,
-            )
+            .change_edit_pointers(parse_id(&request)?, work, library.id, expected, change)
             .map_err(|e| e.to_string())?;
         // 反映中の版が変わるときだけ、一覧の集計と本文の検索を追いつかせる。
         if matches!(
@@ -1562,7 +1561,7 @@ pub async fn library_v2_edit_pointer(
                 | crate::library::EditPointerChange::Unpublish
                 | crate::library::EditPointerChange::Restore { .. }
         ) {
-            after_edit(&state, &library);
+            after_edit(&state, &library, work);
         }
         Ok(changed)
     })

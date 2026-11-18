@@ -25,6 +25,31 @@ fn missing() -> Vec<String> {
         .map(str::to_owned)
         .into()
 }
+
+#[test]
+fn image_hold_audit_uses_the_saved_bindings_and_requires_the_current_snapshot() {
+    let temp = Temp::new();
+    let library = Library::create(&temp.0).unwrap();
+    let first = save(&library, "1", &data());
+    let gaps = library
+        .pixiv_source_image_gaps(first.entity_id, first.snapshot_id)
+        .unwrap();
+    assert_eq!(gaps, missing());
+    let finding = json!({"holdKind":"incomplete","missingReferences":gaps});
+    let mut revised = data();
+    revised["text"] = json!("新しい本文");
+    save(&library, "1", &revised);
+    library
+        .reconcile_pixiv_image_hold(
+            first.entity_id,
+            first.snapshot_id,
+            0,
+            None,
+            Some(("題", &finding)),
+        )
+        .unwrap();
+    assert!(library.discovery("pixiv", "1").unwrap().is_none());
+}
 fn save(library: &Library, key: &str, data: &Value) -> crate::library::CaptureResult {
     library
         .save_readable_work(

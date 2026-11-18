@@ -20,6 +20,139 @@ fn input(kind: &str, text: Option<&str>, asset: Option<i64>) -> WorkBlockInput {
 }
 
 #[test]
+fn a_published_pixiv_edit_settles_only_the_image_hold_and_unpublishing_restores_it() {
+    use crate::library::{DiscoveryInput, WorkSave};
+    let temp = Temp(std::env::temp_dir().join(format!("piep-edit-audit-{}", LibraryId::now_v7())));
+    let library = Library::create(&temp.0).unwrap();
+    let data = json!({"detail":{"title":"原題"},"text":"本文[uploadedimage:1]"});
+    let saved = library
+        .save_readable_work(
+            WorkSave {
+                request: LibraryId::now_v7(),
+                provider: "pixiv",
+                key: "w",
+                route: "save",
+                data: &data,
+                assets: vec![],
+            },
+            None,
+        )
+        .unwrap();
+    let work = saved.entity_id;
+    let current = || library.discovery("pixiv", "w").unwrap();
+    library.audit_pixiv_edit_images(work).unwrap();
+    let hold = current().unwrap();
+    let draft = library
+        .save_editor(
+            LibraryId::now_v7(),
+            work,
+            EditorSave {
+                base: saved.snapshot_id,
+                expected: 0,
+                title: None,
+                blocks: vec![input("paragraph", Some("画像を除いた本文"), None)],
+                media: vec![],
+                publish: false,
+            },
+        )
+        .unwrap();
+    library.audit_pixiv_edit_images(work).unwrap();
+    assert_eq!(current().unwrap().generation, hold.generation);
+    let edit = library
+        .change_edit_pointers(
+            LibraryId::now_v7(),
+            work,
+            library.id,
+            draft.generation,
+            EditPointerChange::Publish,
+        )
+        .unwrap();
+    library
+        .reconcile_pixiv_image_hold(work, saved.snapshot_id, draft.generation, Some(&hold), None)
+        .unwrap();
+    assert_eq!(
+        current().unwrap().id,
+        hold.id,
+        "stale edit must not change the candidate"
+    );
+    library.audit_pixiv_edit_images(work).unwrap();
+    assert!(current().is_none());
+    let unpublish = library
+        .change_edit_pointers(
+            LibraryId::now_v7(),
+            work,
+            library.id,
+            edit.generation,
+            EditPointerChange::Unpublish,
+        )
+        .unwrap();
+    library.audit_pixiv_edit_images(work).unwrap();
+    let restored = current().unwrap();
+    assert!(restored.generation > hold.generation);
+    assert_eq!(restored.hold_kind.as_deref(), Some("incomplete"));
+    assert_eq!(library.current_snapshot(work).unwrap(), saved.snapshot_id);
+    assert_eq!(
+        library
+            .pixiv_source_image_gaps(work, saved.snapshot_id)
+            .unwrap(),
+        ["[uploadedimage:1]"]
+    );
+    let mixed = json!({"holdKind":"incomplete","holdReason":"画像と作品情報の未取得",
+        "missingReferences":["[uploadedimage:1]"],"missingMetadata":["caption"]})
+    .to_string();
+    library
+        .record_discovery(
+            LibraryId::now_v7(),
+            DiscoveryInput {
+                provider: "pixiv",
+                key: "w",
+                kind: "revision",
+                title: "原題",
+                payload: &mixed,
+                target_type: Some("work"),
+            },
+            true,
+        )
+        .unwrap();
+    let metadata_hold = current().unwrap();
+    library
+        .change_edit_pointers(
+            LibraryId::now_v7(),
+            work,
+            library.id,
+            unpublish.generation,
+            EditPointerChange::Restore {
+                edit: edit.active.unwrap(),
+            },
+        )
+        .unwrap();
+    library.audit_pixiv_edit_images(work).unwrap();
+    assert_eq!(current().unwrap().payload, metadata_hold.payload);
+    library
+        .decide_discovery(
+            LibraryId::now_v7(),
+            "pixiv",
+            "w",
+            Some(metadata_hold.generation),
+            true,
+        )
+        .unwrap();
+    let generation = library.edit_state(work, library.id).unwrap().generation;
+    library
+        .reconcile_pixiv_image_hold(
+            work,
+            saved.snapshot_id,
+            generation,
+            Some(&metadata_hold),
+            None,
+        )
+        .unwrap();
+    library.audit_pixiv_edit_images(work).unwrap();
+    assert_eq!(current().unwrap().decision, "dismissed");
+    library.verify().unwrap();
+}
+
+#[test]
 fn the_editor_opens_the_source_saves_drafts_once_publishes_and_goes_back() {
     let temp = Temp(std::env::temp_dir().join(format!("piep-work-edit-{}", LibraryId::now_v7())));
     let library = Library::create(&temp.0).unwrap();

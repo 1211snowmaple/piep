@@ -117,6 +117,108 @@ fn validate_key(provider: &str, key: &str) -> Result<()> {
 }
 
 impl Library {
+    /// 編集後の再検査を、読んだ保存状態・編集世代・候補がまだ同じ場合だけ反映する。
+    pub(crate) fn reconcile_pixiv_image_hold(
+        &self,
+        work: LibraryId,
+        snapshot: LibraryId,
+        edit_generation: i64,
+        previous: Option<&Discovery>,
+        finding: Option<(&str, &Value)>,
+    ) -> Result<()> {
+        if previous.is_some_and(|row| {
+            row.work != work
+                || row.provider != "pixiv"
+                || row.decision != "held"
+                || row.hold_kind.as_deref() != Some("incomplete")
+        }) {
+            return Ok(());
+        }
+        let prepared = finding
+            .map(|(_, value)| -> Result<super::repository::PreparedFile> {
+                let bytes = serde_json::to_vec(value)?;
+                if bytes.len() as u64 > super::job_history::MAX_JOB_PAYLOAD_BYTES {
+                    return Err(Error::Unsupported(
+                        "候補が読み込み上限を超えています".into(),
+                    ));
+                }
+                Ok(self.objects.put_stored(bytes.as_slice())?.into())
+            })
+            .transpose()?;
+        let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let tx = conn.transaction()?;
+        let current: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM entity_current c JOIN library_items li ON li.work_id=c.entity_id
+                JOIN external_identities x ON x.entity_id=c.entity_id AND x.kind='work' AND x.provider='pixiv'
+                LEFT JOIN edit_documents e ON e.work_id=c.entity_id AND e.user_id=?3
+                WHERE c.entity_id=?1 AND c.snapshot_id=?2 AND coalesce(e.generation,0)=?4)",
+            params![work.as_bytes().as_slice(), snapshot.as_bytes().as_slice(), self.id.as_bytes().as_slice(), edit_generation],
+            |row| row.get(0),
+        )?;
+        if !current {
+            return Ok(());
+        }
+        let mut stmt = tx.prepare(&format!(
+            "SELECT {COLUMNS} FROM {TABLES} WHERE c.work_id=?1 AND x.provider='pixiv'"
+        ))?;
+        let rows = stmt
+            .query_map([work.as_bytes().as_slice()], row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let candidate = match (rows.as_slice(), previous) {
+            ([], None) => None,
+            ([current], Some(previous))
+                if current.id == previous.id
+                    && current.generation == previous.generation
+                    && current.payload == previous.payload
+                    && current.decision == "held"
+                    && current.hold_kind.as_deref() == Some("incomplete") =>
+            {
+                Some(current)
+            }
+            _ => return Ok(()),
+        };
+        let request = LibraryId::now_v7();
+        let now = chrono::Utc::now().timestamp_millis();
+        if let (Some(file), Some((title, value))) = (prepared, finding) {
+            if candidate.is_some_and(|row| row.payload == file.file.id && row.title == title) {
+                return Ok(());
+            }
+            Self::register_file(&tx, &file)?;
+            let id = candidate.map_or(request, |row| row.id);
+            tx.execute("INSERT INTO discovery_candidates(id,work_id,kind,title,decision,hold_kind,payload_file_id,target_type,first_seen_at,updated_at)
+                VALUES(?1,?2,'revision',?3,'held','incomplete',?4,'work',?5,?5)
+                ON CONFLICT(id) DO UPDATE SET title=excluded.title,payload_file_id=excluded.payload_file_id,updated_at=excluded.updated_at",
+                params![id.as_bytes().as_slice(),work.as_bytes().as_slice(),title,file.file.id.0.as_slice(),now])?;
+            tx.execute("INSERT INTO discovery_summaries(candidate_id,payload_file_id,summary_json) VALUES(?1,?2,?3)
+                ON CONFLICT(candidate_id) DO UPDATE SET payload_file_id=excluded.payload_file_id,summary_json=excluded.summary_json",
+                params![id.as_bytes().as_slice(),file.file.id.0.as_slice(),summary(value).to_string()])?;
+        } else if let Some(row) = candidate {
+            tx.execute(
+                "DELETE FROM discovery_candidates WHERE id=?1",
+                [row.id.as_bytes().as_slice()],
+            )?;
+        } else {
+            return Ok(());
+        }
+        let generation: i64 = tx.query_row(
+            "INSERT INTO discovery_state(work_id,generation) VALUES(?1,1)
+            ON CONFLICT(work_id) DO UPDATE SET generation=generation+1 RETURNING generation",
+            [work.as_bytes().as_slice()],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "UPDATE library_meta SET generation=generation+1 WHERE singleton=1",
+            [],
+        )?;
+        let payload = json!({"request":{"snapshot":snapshot,"editGeneration":edit_generation,
+            "change":{"kind":"audit_incomplete","held":finding.is_some()}},"generation":generation});
+        tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'discovery',?3,?4)",
+            params![request.as_bytes().as_slice(),work.as_bytes().as_slice(),payload.to_string(),now])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// 旧形式から移した候補だけ、一度原本から表示の写しを作る。以降の一覧は原本を開かない。
     pub fn prepare_discovery_summaries(&self) -> Result<()> {
         let mut cursor = None;
