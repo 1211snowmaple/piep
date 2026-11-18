@@ -231,6 +231,33 @@ impl ServerContext {
         self.reader_shelf
             .set(Arc::clone(&shelf))
             .map_err(|_| "新しい棚は既に設定されています".to_owned())?;
+        if let Library::Swappable(db) = &self.library {
+            // 携帯が新しい棚で変えたお気に入りを、旧 API の変更の記録にも残す。デスクトップ版は
+            // 今までどおりその記録を取り込み、旧 API の画面も同じ値を出す。
+            let (store, db) = (Arc::clone(&self.store), Arc::clone(db));
+            shelf.set_favorite_mirror(Box::new(move |source, source_id, device, favorite| {
+                let Some(current) = db.current() else {
+                    return;
+                };
+                let update = super::store::FavoriteUpdate {
+                    favorite,
+                    device_time: super::store::now_ms(),
+                };
+                if let Err(error) =
+                    store.apply_favorite(&current, source, source_id, device, &update)
+                {
+                    log::warn!("お気に入りを旧 API の記録へ写せません: {error}");
+                }
+            }));
+            // デスクトップ版がまだ取り込んでいない携帯の変更を、入れ替えた写しへ当て直す。
+            let (store, follow) = (Arc::clone(&self.store), Arc::clone(&shelf));
+            let spawned = std::thread::Builder::new()
+                .name("piep-v2-favorites".into())
+                .spawn(move || reapply_shelf_favorites(&store, &follow));
+            if let Err(error) = spawned {
+                log::warn!("お気に入りを当て直すスレッドを作れません: {error}");
+            }
+        }
         shelf.prepare_search();
         Ok(())
     }
@@ -376,6 +403,40 @@ fn require_admin(ctx: &ServerContext, headers: &HeaderMap) -> Result<AuthorizedD
         Ok(device)
     } else {
         Err(ApiError::forbidden())
+    }
+}
+
+/// 旧 API の変更の記録のうち、デスクトップ版がまだ取り込んでいないものを新しい棚へ当てる。
+fn reapply_shelf_favorites(store: &ServerStore, shelf: &super::v2::Context) {
+    let mut since = 0;
+    let mut applied = 0;
+    loop {
+        let changes = match store.favorite_changes_since(since, 500) {
+            Ok(changes) => changes,
+            Err(error) => {
+                log::warn!("お気に入りの記録を読めません: {error}");
+                return;
+            }
+        };
+        let Some(last) = changes.last() else {
+            break;
+        };
+        since = last.cursor;
+        for change in &changes {
+            match shelf.follow_favorite(
+                Some(&change.device_id),
+                &change.source,
+                &change.source_id,
+                change.favorite,
+            ) {
+                Ok(true) => applied += 1,
+                Ok(false) => {}
+                Err(error) => log::warn!("お気に入りを新しい棚へ当て直せません: {error}"),
+            }
+        }
+    }
+    if applied > 0 {
+        log::info!("携帯のお気に入り {applied} 件を新しい棚へ当て直しました");
     }
 }
 
@@ -1537,16 +1598,29 @@ async fn favorite_put(
         Library::Swappable(_) => {
             let store = Arc::clone(&ctx.store);
             let (key, id) = (source.clone(), source_id.clone());
+            let device_id = device.id.clone();
             let stored = with_db(&ctx, move |db| {
                 store
-                    .apply_favorite(db, &key, &id, &device.id, &update)
+                    .apply_favorite(db, &key, &id, &device_id, &update)
                     .map_err(|error| {
                         log::error!("お気に入りを書けません: {error}");
                         ApiError::internal()
                     })
             })
             .await?;
-            stored.ok_or_else(ApiError::not_found)?.favorite
+            let stored = stored.ok_or_else(ApiError::not_found)?;
+            // 旧 API の画面（作者・シリーズなど）で変えた値も、新しい棚の一覧と揃える。
+            if let Some(shelf) = ctx.reader_shelf.get().cloned() {
+                let (key, id, favorite) = (source.clone(), source_id.clone(), stored.favorite);
+                let device = device.id.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(error) = shelf.follow_favorite(Some(&device), &key, &id, favorite) {
+                        log::warn!("お気に入りを新しい棚へ当てられません: {error}");
+                    }
+                })
+                .await;
+            }
+            stored.favorite
         }
     };
     Ok(Json(FavoriteState {

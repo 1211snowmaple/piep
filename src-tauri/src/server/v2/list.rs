@@ -10,8 +10,8 @@ use super::{
 };
 use crate::library::protocol::Id;
 use crate::library::{
-    CountRange, DateField, DateRange, EntityKind, Fingerprint, LibraryId, RevisionFilter, WorkCard,
-    WorkCursor, WorkFilter, WorkListQuery, WorkSort,
+    CountRange, DateField, DateRange, EntityKind, Fingerprint, LibraryId, RevisionFilter,
+    UserState, WorkCard, WorkCursor, WorkFilter, WorkListQuery, WorkSort,
 };
 use crate::library_search::{parse_query, TextSearch};
 use crate::library_view::CardKeys;
@@ -78,7 +78,8 @@ fn count(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-pub(super) fn shelf_work(card: &WorkCard, keys: CardKeys) -> MobileShelfWork {
+/// `state` はこの利用者のお気に入り（一覧の行は棚の持ち主のものなので、利用者ごとに引き直す）。
+pub(super) fn shelf_work(card: &WorkCard, keys: CardKeys, state: &UserState) -> MobileShelfWork {
     MobileShelfWork {
         id: card.id.to_string(),
         snapshot_id: card.snapshot_id.to_string(),
@@ -95,7 +96,9 @@ pub(super) fn shelf_work(card: &WorkCard, keys: CardKeys) -> MobileShelfWork {
         has_cover: card.cover.is_some(),
         current_version: count(card.version_number),
         edited: card.edit_id.is_some(),
-        favorite: card.favorite,
+        edit_id: card.edit_id.map(|id| id.to_string()),
+        favorite: state.favorite,
+        favorite_generation: state.generation.to_string(),
         series_title: card.series_title.clone(),
         series_id: keys.series,
         source_created_at: card.published_at.map(iso),
@@ -287,8 +290,13 @@ pub(super) async fn search(
             .items
             .iter()
             .zip(keys)
-            .map(|(card, keys)| shelf_work(card, keys))
-            .collect();
+            .map(|(card, keys)| {
+                let state = library
+                    .user_state(card.id, subject.get())
+                    .map_err(library_error)?;
+                Ok(shelf_work(card, keys, &state))
+            })
+            .collect::<Result<Vec<_>, ApiError>>()?;
         serde_json::to_vec(&MobileShelfPage {
             items,
             next_cursor,
@@ -320,10 +328,15 @@ pub(super) async fn work(
         return Err(not_found());
     }
     let work: LibraryId = location.work.get();
+    let subject = principal.subject.get();
     let permit = read_permit(&ctx, &principal.device).await?;
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let head = ctx.library.work_head(work).map_err(library_error)?;
+        let state = ctx
+            .library
+            .user_state(work, subject)
+            .map_err(library_error)?;
         let card = &head.card;
         let people = head
             .author_key
@@ -352,6 +365,7 @@ pub(super) async fn work(
                 author: head.author_key.clone(),
                 series: head.series_key.clone(),
             },
+            &state,
         );
         work.excerpt = head.caption.clone();
         let detail = MobileShelfWorkDetail {

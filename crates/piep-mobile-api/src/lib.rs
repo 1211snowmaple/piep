@@ -250,13 +250,37 @@ pub struct MobileShelfWork {
     pub current_version: i64,
     /// 反映中の編集があるか。
     pub edited: bool,
+    /// 反映中の編集の UUID。編集し直すと変わるので、読書位置と保存の印を分ける目印になる。
+    #[serde(default)]
+    pub edit_id: Option<String>,
     pub favorite: bool,
+    /// この利用者のお気に入りの更新世代（十進の文字列）。付け外しの `expected` に渡す。
+    #[serde(default)]
+    pub favorite_generation: String,
     pub series_title: Option<String>,
     pub series_id: Option<String>,
     /// 公開日（ISO 8601）。
     pub source_created_at: Option<String>,
     /// 保存日（ISO 8601）。
     pub downloaded_at: String,
+}
+
+/// 新しい棚の作品のお気に入りを付け外しする。`request_id` は端末が作る UUID で、送り直しても
+/// 一度だけ効く。`expected` は手元の更新世代（十進の文字列）。違えば 409 で今の値が返る。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfFavoriteUpdate {
+    pub request_id: String,
+    pub expected: String,
+    pub favorite: bool,
+}
+
+/// お気に入りの今の値と更新世代（十進の文字列）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfFavorite {
+    pub favorite: bool,
+    pub generation: String,
 }
 
 /// 新しい棚の一覧の一ページ。続きは `next_cursor` を変えずに次の要求へ渡す。

@@ -16,6 +16,10 @@ pub struct Grant {
 /// 認証済み端末を棚と利用者へ明示的に結ぶ。利用者 ID を端末 ID から作らない。
 pub trait Authority: Send + Sync {
     fn grant(&self, bearer: &str, library: Id) -> Option<Grant>;
+    /// 端末に許した利用者（旧 API で届いた変更を、同じ利用者へ当てるため）。
+    fn subject_of(&self, _device: &str, _library: Id) -> Option<Id> {
+        None
+    }
 }
 
 /// 既存の bearer 検証を使うアダプター。grants は管理側が明示して投入する。
@@ -61,5 +65,12 @@ impl Authority for DeviceAuthority {
             device: device.id,
             subject,
         })
+    }
+    fn subject_of(&self, device: &str, library: Id) -> Option<Id> {
+        self.grants
+            .read()
+            .ok()?
+            .get(&(device.to_owned(), library.get()))
+            .copied()
     }
 }

@@ -183,13 +183,31 @@ export interface MobileShelfWork {
   currentVersion: number;
   /** 反映中の編集があるか。 */
   edited: boolean;
+  /** 反映中の編集の UUID。編集し直すと変わるので、読書位置と保存の印を分ける目印になる。 */
+  editId: string | null;
   favorite: boolean;
+  /** この利用者のお気に入りの更新世代（十進の文字列）。付け外しの `expected` に渡す。 */
+  favoriteGeneration: string;
   seriesTitle: string | null;
   seriesId: string | null;
   /** 公開日（ISO 8601）。 */
   sourceCreatedAt: string | null;
   /** 保存日（ISO 8601）。 */
   downloadedAt: string;
+}
+
+/** 新しい棚の作品のお気に入りを付け外しする。`request_id` は端末が作る UUID で、送り直しても */
+/** 一度だけ効く。`expected` は手元の更新世代（十進の文字列）。違えば 409 で今の値が返る。 */
+export interface MobileShelfFavoriteUpdate {
+  requestId: string;
+  expected: string;
+  favorite: boolean;
+}
+
+/** お気に入りの今の値と更新世代（十進の文字列）。 */
+export interface MobileShelfFavorite {
+  favorite: boolean;
+  generation: string;
 }
 
 /** 新しい棚の一覧の一ページ。続きは `next_cursor` を変えずに次の要求へ渡す。 */

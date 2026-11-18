@@ -916,6 +916,178 @@ async fn the_work_screen_and_cover_come_from_the_current_version_of_a_shelved_wo
     }
 }
 
+impl Server {
+    fn favorite_as(
+        &self,
+        work: uuid::Uuid,
+        body: serde_json::Value,
+        token: &str,
+    ) -> reqwest::RequestBuilder {
+        self.client
+            .put(format!(
+                "{}/api/v2/libraries/{}/works/{work}/favorite",
+                self.base, self.library.id
+            ))
+            .bearer_auth(token)
+            .json(&body)
+    }
+}
+
+#[tokio::test]
+async fn a_favorite_from_the_phone_counts_once_and_refuses_a_stale_generation() {
+    let server = Server::start().await;
+    let north = save(&server.library, capture("north", None));
+    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&mirrored);
+    server
+        .context
+        .set_favorite_mirror(Box::new(move |source, key, device, favorite| {
+            seen.lock().unwrap().push((
+                source.to_owned(),
+                key.to_owned(),
+                device.to_owned(),
+                favorite,
+            ));
+        }));
+    let request = uuid::Uuid::now_v7().to_string();
+    let body = json!({"requestId": request, "expected": "0", "favorite": true});
+
+    // 一度目で付き、同じ要求を送り直しても世代は進まない（受領を返す）。
+    for _ in 0..2 {
+        let stored: piep_mobile_api::MobileShelfFavorite = server
+            .favorite_as(north.entity_id, body.clone(), "fixture")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!((stored.favorite, stored.generation.as_str()), (true, "1"));
+    }
+    // 旧 API の記録へも写す（デスクトップ版が取り込む）。
+    assert_eq!(
+        mirrored.lock().unwrap().first().cloned(),
+        Some(("pixiv".into(), "north".into(), "phone".into(), true))
+    );
+
+    // 一覧と作品の画面は、この利用者の値と世代を出す。別の利用者の値は別。
+    let page = shelf_page(server.search(json!({})).send().await.unwrap()).await;
+    assert!(page.items[0].favorite);
+    assert_eq!(page.items[0].favorite_generation, "1");
+    let other = shelf_page(server.search_as(json!({}), "second").send().await.unwrap()).await;
+    assert!(!other.items[0].favorite);
+    assert_eq!(other.items[0].favorite_generation, "0");
+
+    // 古い世代からの変更は断り、今の値を返す（端末の時刻で勝者を決めない）。
+    let stale = server
+        .favorite_as(
+            north.entity_id,
+            json!({"requestId": uuid::Uuid::now_v7().to_string(), "expected": "0", "favorite": false}),
+            "fixture",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let conflict: serde_json::Value = stale.json().await.unwrap();
+    assert_eq!(conflict["error"], "favorite_conflict");
+    assert_eq!(
+        conflict["current"],
+        json!({"favorite": true, "generation": "1"})
+    );
+
+    // 形の崩れた値・知らない作品・棚から外した作品・権限の無い端末は断る。
+    for (work, body, status) in [
+        (
+            north.entity_id,
+            json!({"requestId": "x", "expected": "1", "favorite": false}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            north.entity_id,
+            json!({"requestId": uuid::Uuid::now_v7().to_string(), "expected": "01", "favorite": false}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            north.entity_id,
+            json!({"requestId": uuid::Uuid::now_v7().to_string(), "expected": "-1", "favorite": false}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            north.entity_id,
+            json!({"requestId": uuid::Uuid::now_v7().to_string(), "expected": "1", "favorite": false, "extra": 1}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            uuid::Uuid::now_v7(),
+            json!({"requestId": uuid::Uuid::now_v7().to_string(), "expected": "0", "favorite": true}),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            server
+                .favorite_as(work, body, "fixture")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            status
+        );
+    }
+    assert_eq!(
+        server
+            .favorite_as(north.entity_id, json!({"requestId": uuid::Uuid::now_v7().to_string(), "expected": "1", "favorite": false}), "nobody")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // 旧 API で変えた値は、この棚の持ち主にも当たる。同じ値なら世代を進めない。
+    assert!(server
+        .context
+        .follow_favorite(None, "pixiv", "north", true)
+        .unwrap());
+    assert_eq!(
+        server
+            .library
+            .user_state(north.entity_id, server.library.id)
+            .unwrap()
+            .generation,
+        1
+    );
+    assert!(server
+        .context
+        .follow_favorite(None, "pixiv", "north", false)
+        .unwrap());
+    let state = server
+        .library
+        .user_state(north.entity_id, server.library.id)
+        .unwrap();
+    assert_eq!((state.favorite, state.generation), (false, 2));
+    assert!(!server
+        .context
+        .follow_favorite(None, "pixiv", "nowhere", true)
+        .unwrap());
+
+    server
+        .library
+        .remove_work(uuid::Uuid::now_v7(), north.entity_id, 1)
+        .unwrap();
+    assert_eq!(
+        server
+            .favorite_as(north.entity_id, json!({"requestId": uuid::Uuid::now_v7().to_string(), "expected": "2", "favorite": true}), "fixture")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
 #[tokio::test]
 async fn edit_reads_are_limited_to_the_subjects_published_and_archived_views() {
     let server = Server::start().await;

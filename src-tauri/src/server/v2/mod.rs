@@ -1,7 +1,9 @@
 //! 新ライブラリ用の認証付き読取 API。旧 API の意味や本番の保存先を変更しない。
 mod auth;
+mod favorite;
 mod list;
 pub use auth::{Authority, DeviceAuthority, Grant};
+pub use favorite::FavoriteMirror;
 
 use crate::library::{
     protocol::{self, Decimal, Hash, Id},
@@ -13,7 +15,7 @@ use axum::{
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
     Extension, Json, Router,
 };
 use headers::{authorization::Bearer, Authorization, HeaderMapExt};
@@ -22,7 +24,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     time::Duration,
 };
@@ -44,6 +46,8 @@ pub struct Context {
     /// 本文の検索の索引が棚に追いついたか。追いつくまで語の検索には答えない。
     search_ready: AtomicBool,
     covers: Mutex<list::Covers>,
+    /// 携帯のお気に入りを旧 API の変更の記録へ写す口（単独サーバーだけ）。
+    favorite_mirror: OnceLock<FavoriteMirror>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -71,6 +75,7 @@ impl Context {
             devices: Mutex::new(HashMap::new()),
             search_ready: AtomicBool::new(false),
             covers: Mutex::new(list::Covers::default()),
+            favorite_mirror: OnceLock::new(),
         })
     }
 
@@ -290,6 +295,7 @@ pub fn router(ctx: Arc<Context>) -> Router {
         .route("/api/v2/libraries/{library}/works/search",post(list::search))
         .route("/api/v2/libraries/{library}/works/{work}",get(list::work))
         .route("/api/v2/libraries/{library}/works/{work}/cover",get(list::cover))
+        .route("/api/v2/libraries/{library}/works/{work}/favorite",put(favorite::put))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/bundle",get(bundle))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/manifest",get(manifest))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/files/{file}/chunks/{ordinal}",get(chunk))
@@ -317,6 +323,11 @@ async fn identity(
     response
         .headers_mut()
         .insert("x-piep-works-search", header::HeaderValue::from_static("1"));
+    // 新しい棚の作品のお気に入りを、要求 UUID と更新世代で付け外しできる。
+    response.headers_mut().insert(
+        "x-piep-favorite-write",
+        header::HeaderValue::from_static("1"),
+    );
     response
 }
 
