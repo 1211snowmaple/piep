@@ -4,7 +4,7 @@ pub use auth::{Authority, DeviceAuthority, Grant};
 
 use crate::library::{
     protocol::{self, Decimal, Hash, Id},
-    EntityKind, Library, ResourceReference, ResourceScope,
+    Library, ResourceReference, ResourceScope,
 };
 use axum::{
     body::Body,
@@ -235,11 +235,31 @@ fn reader_resource(
     Ok(())
 }
 
+fn authorize_reader_view(
+    ctx: &Context,
+    subject: Id,
+    entity: uuid::Uuid,
+    scope: ResourceScope,
+) -> Result<(), ApiError> {
+    let ResourceScope::Edit(edit) = scope else {
+        return Ok(());
+    };
+    if !ctx
+        .library
+        .reader_may_read_edit(entity, subject.get(), edit)
+        .map_err(library_error)?
+    {
+        return Err(not_found());
+    }
+    Ok(())
+}
+
 /// 新しい棚と明示的な権限設定があるときだけ既存 router に merge する。
 /// この関数だけで旧ライブラリを開き直したり、本番を切り替えたりしない。
 pub fn router(ctx: Arc<Context>) -> Router {
     Router::new()
         .route("/api/v2/identity",get(identity))
+        .route("/api/v2/libraries/{library}/works",get(works))
         .route("/api/v2/libraries/{library}/works/lookup",get(work_lookup))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/bundle",get(bundle))
         .route("/api/v2/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/manifest",get(manifest))
@@ -262,6 +282,85 @@ async fn identity(
         header::HeaderValue::from_static("no-store"),
     );
     response
+        .headers_mut()
+        .insert("x-piep-works-list", header::HeaderValue::from_static("1"));
+    response
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorksQuery {
+    limit: Option<u8>,
+    after: Option<String>,
+}
+
+fn work_page_boundary(value: &str, epoch: Id, subject: Id) -> Result<(i64, uuid::Uuid), ApiError> {
+    let parts: Vec<_> = value.splitn(4, '.').collect();
+    let [saved_epoch, saved_subject, time, work] = parts.as_slice() else {
+        return Err(invalid());
+    };
+    let work_id = uuid::Uuid::parse_str(work).map_err(|_| invalid())?;
+    let saved_at = time.parse::<i64>().map_err(|_| invalid())?;
+    if work_id.is_nil() || work_id.to_string() != *work {
+        return Err(invalid());
+    }
+    if epoch.get().to_string() != *saved_epoch || subject.get().to_string() != *saved_subject {
+        return Err(ApiError(StatusCode::CONFLICT, "stale_cursor"));
+    }
+    Ok((saved_at, work_id))
+}
+
+async fn works(
+    State(ctx): State<Arc<Context>>,
+    Extension(principal): Extension<Principal>,
+    path: Result<Path<Id>, axum::extract::rejection::PathRejection>,
+    query: Result<Query<WorksQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Path(library) = path.map_err(|_| invalid())?;
+    let Query(WorksQuery { limit, after }) = query.map_err(|_| invalid())?;
+    if library != ctx.library_id {
+        return Err(not_found());
+    }
+    let limit = limit.unwrap_or(30);
+    if !(1..=50).contains(&limit) {
+        return Err(invalid());
+    }
+    let subject = principal.subject;
+    let epoch = ctx.sync_epoch;
+    let after = after
+        .as_deref()
+        .map(|value| work_page_boundary(value, epoch, subject))
+        .transpose()?;
+    let permit = read_permit(&ctx, &principal.device).await?;
+    let bytes = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let mut rows = ctx
+            .library
+            .reader_works(subject.get(), limit + 1, after)
+            .map_err(library_error)?;
+        let limit = usize::from(limit);
+        let next = if rows.len() > limit {
+            rows.truncate(limit);
+            rows.last().map(|(work, saved_at)| {
+                format!(
+                    "{}.{}.{saved_at}.{}",
+                    epoch.get(),
+                    subject.get(),
+                    work.view.entity_id.get()
+                )
+            })
+        } else {
+            None
+        };
+        let page = protocol::ReaderWorkPage {
+            items: rows.into_iter().map(|(work, _)| work).collect(),
+            next,
+        };
+        serde_json::to_vec(&page).map_err(|_| internal())
+    })
+    .await
+    .map_err(|_| internal())??;
+    Ok(representation(bytes, "application/json", false))
 }
 
 #[derive(Deserialize)]
@@ -288,22 +387,10 @@ async fn work_lookup(
     let permit = read_permit(&ctx, &principal.device).await?;
     let view = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let work = ctx
-            .library
-            .entity_by_key(EntityKind::Work, &provider, &key)
+        ctx.library
+            .reader_work_by_key(principal.subject.get(), &provider, &key)
             .map_err(library_error)?
-            .ok_or_else(not_found)?;
-        // 取得元の識別だけが残る作品を除き、一覧と同じ保存版と編集を返す。
-        let card = ctx.library.work_card(work).map_err(library_error)?;
-        Ok::<_, ApiError>(protocol::WorkReadingView {
-            entity_id: Id::new(card.id).map_err(|_| internal())?,
-            snapshot_id: Id::new(card.snapshot_id).map_err(|_| internal())?,
-            edit_id: card
-                .edit_id
-                .map(Id::new)
-                .transpose()
-                .map_err(|_| internal())?,
-        })
+            .ok_or_else(not_found)
     })
     .await
     .map_err(|_| internal())??;
@@ -417,6 +504,7 @@ async fn bundle(
     let permit = read_permit(&ctx, &principal.device).await?;
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        authorize_reader_view(&ctx, principal.subject, entity, scope)?;
         ctx.library
             .reader_bundle(entity, scope)
             .map_err(library_error)?
@@ -446,6 +534,7 @@ async fn manifest(
     let permit = read_permit(&ctx, &principal.device).await?;
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        authorize_reader_view(&ctx, principal.subject, entity, scope)?;
         reader_resource(&ctx, entity, scope, &reference)?;
         ctx.library
             .resource_transfer_manifest(entity, scope, &reference)
@@ -483,6 +572,7 @@ async fn chunk(
     let permit = read_permit(&ctx, &principal.device).await?;
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        authorize_reader_view(&ctx, principal.subject, entity, scope)?;
         reader_resource(&ctx, entity, scope, &reference)?;
         // 順番より前に、要求した保存状態・資産・file の所属を確認する。
         let owned = ctx

@@ -22,6 +22,7 @@ mod pixiv_edit_gaps;
 mod profile_capture;
 pub use profile_capture::{ProfileSave, PROFILE_REFRESH_ROUTE};
 mod reader;
+mod reader_catalogue;
 mod reader_references;
 mod reading;
 mod reclaim;

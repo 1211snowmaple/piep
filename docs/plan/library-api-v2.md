@@ -2,10 +2,10 @@
 
 ## 実装の境界
 
-`server::v2::router` は接続情報、取得元の ID からの作品照合、読書 bundle、資産 manifest、
+`server::v2::router` は接続情報、作品一覧、取得元の ID からの作品照合、読書 bundle、資産 manifest、
 圧縮した部分の転送を提供する。
 単独サーバーでは、設定で指定した棚を開いて既存の待ち受けにこの読取 API を載せる。
-一覧と利用者状態の書き込みは未提供で、対応能力にも含めない。
+利用者状態の書き込みは未提供で、対応能力にも含めない。
 
 管理側は新ライブラリを開き、永続化した同期 epoch と認可器を `Context` に渡す。
 epoch は棚の復元・再作成時に変更し、要求や router の起動ごとには生成しない。
@@ -59,6 +59,7 @@ piep-server activate-library --data <サーバーの置き場> --generation <準
 | GET | 用途 |
 | --- | --- |
 | `/api/v2/identity` | 棚・利用者・同期 epoch・形式・上限・対応能力 |
+| `/api/v2/libraries/{library}/works` | 保存日の新しい順に、棚にある作品と現在の読書用の版を一ページ返す |
 | `/api/v2/libraries/{library}/works/lookup?provider={provider}&key={key}` | 取得元の作品 ID から、棚の作品と現在の読書用の版を照合 |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/bundle` | 読書 bundle：読書用文書（`piep-reader-v1`）と、渡せる全資産の file 記述を一回で |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/resources/{body\|media\|file}/manifest` | 所属と表示版を固定した一ファイルの descriptor |
@@ -72,7 +73,14 @@ URL エンコードした取得元の作品 ID（デコード後 4096 バイト�
 応答の `entityId` と `snapshotId` で保存版の bundle を取れる。`editId` がある作品の反映中の
 編集を読む場合は `views/edit/{editId}/bundle` を使う。棚に現在ある作品だけが照合できる。
 file は利用者向けの attachment / document に限る。管理用原本の出力はローカル保管層の
-別機能として保持する。利用者の編集版は認証した利用者との所属も照合する。
+別機能として保持する。一覧と照合の `editId` は認証した利用者が反映中の版を指す。
+編集の bundle・manifest・部分実体では、その利用者が反映中か以前の編集版に残しているかを確かめる。
+
+一覧の対応は `identity` の応答ヘッダー `X-Piep-Works-List: 1` で分かる。
+`limit` は 1〜50 件、省略時は 30 件。一覧の `items` の各行には `view`（作品照合と同じ項目）、
+`provider`、`key`、`title`、`authorName`、`contentType` が入る。同じ保存日の作品は作品 UUID の降順。
+`next` があれば変更せず次の要求の `after` に渡し、`null` なら終わり。
+同期 epoch または利用者が変わった場合は 409（`stale_cursor`）を返すので、最初のページから読み直す。
 
 `identity` は `piep-library-api-v2` 形式を厳密に検査する。旧 `/api/about` に
 `apiVersion: 2` があっても新ライブラリ対応とは解釈しない。
@@ -92,11 +100,11 @@ file は利用者向けの attachment / document に限る。管理用原本の�
 
 部分は中身のハッシュで指定して取るので、持っていれば要求しない。ETag と 304 は持たない
 （条件付き要求も毎回認証・所属・実体を確かめて中身を返す）。部分には
-`private, max-age=31536000, immutable, no-transform`、記録（作品照合・bundle・manifest）には
+`private, max-age=31536000, immutable, no-transform`、記録（作品一覧・作品照合・bundle・manifest）には
 `private, no-cache, no-transform`、どちらにも `Vary: Authorization` を付ける。
 圧縮済み object を再圧縮する共通 middleware は組み込まない。
 
-合成した棚と loopback HTTP による 7 試験で、認証、bundle からの全部分の復元、解除、
+合成した棚と loopback HTTP の試験で、認証、bundle からの全部分の復元、解除、
 別作品・別 file・別の棚、破損、端末ごとの同時数と待ち、棚・epoch のヘッダー、raw 原本の
 非公開を確認する。
 実サービスへの接続や実際の端末登録・鍵発行は必要ない。

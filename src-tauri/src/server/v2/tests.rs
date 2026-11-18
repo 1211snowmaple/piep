@@ -22,18 +22,19 @@ impl Drop for Temp {
 struct TestAuthority {
     library: Id,
     subject: Id,
+    other_subject: Id,
     active: AtomicBool,
 }
 impl Authority for TestAuthority {
     fn grant(&self, bearer: &str, library: Id) -> Option<Grant> {
-        let device = match bearer {
-            "fixture" => "phone",
-            "second" => "tablet",
+        let (device, subject) = match bearer {
+            "fixture" => ("phone", self.subject),
+            "second" => ("tablet", self.other_subject),
             _ => return None,
         };
         (library == self.library && self.active.load(Ordering::SeqCst)).then(|| Grant {
             device: device.into(),
-            subject: self.subject,
+            subject,
         })
     }
 }
@@ -58,6 +59,7 @@ impl Server {
         let authority = Arc::new(TestAuthority {
             library: Id::new(library.id).unwrap(),
             subject: Id::new(library.id).unwrap(),
+            other_subject: Id::new(uuid::Uuid::now_v7()).unwrap(),
             active: AtomicBool::new(true),
         });
         let context = Arc::new(
@@ -83,9 +85,12 @@ impl Server {
         }
     }
     fn get(&self, path: &str) -> reqwest::RequestBuilder {
+        self.get_as(path, "fixture")
+    }
+    fn get_as(&self, path: &str, token: &str) -> reqwest::RequestBuilder {
         self.client
             .get(format!("{}{path}", self.base))
-            .bearer_auth("fixture")
+            .bearer_auth(token)
     }
     fn resource(&self, entity: uuid::Uuid, snapshot: uuid::Uuid) -> String {
         format!(
@@ -223,6 +228,7 @@ async fn identity_requires_bearer_and_offers_the_reader_bundle_but_no_mutation()
     }
     let response = server.get("/api/v2/identity").send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-piep-works-list"], "1");
     let identity = protocol::LibraryIdentity::parse(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(identity.library_id.get(), server.library.id);
     assert_eq!(identity.subject_id, server.authority.subject);
@@ -553,6 +559,217 @@ async fn provider_keys_resolve_to_the_current_reading_view_only_while_on_the_she
     assert_eq!(
         server.get(&url).send().await.unwrap().status(),
         StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn the_works_list_pages_tied_dates_and_keeps_cursors_with_the_reader_and_epoch() {
+    let server = Server::start().await;
+    let north = save(&server.library, capture("north", None));
+    let south = save(&server.library, capture("south", None));
+    let removed = save(&server.library, capture("removed", None));
+    server
+        .library
+        .remove_work(uuid::Uuid::now_v7(), removed.entity_id, 1)
+        .unwrap();
+    let route = format!("/api/v2/libraries/{}/works", server.library.id);
+    let first = format!("{route}?limit=1");
+    let response = server
+        .get(&first)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(response.headers()[header::VARY], "Authorization");
+    assert_eq!(
+        response.headers()["x-piep-sync-epoch"],
+        server.context.sync_epoch.get().to_string()
+    );
+    let page: protocol::ReaderWorkPage = response.json().await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    let item = &page.items[0];
+    assert_eq!(
+        item.view.entity_id.get(),
+        north.entity_id.max(south.entity_id)
+    );
+    assert_eq!(item.provider, "pixiv");
+    assert_eq!(item.title, item.key);
+    let cursor = page.next.unwrap();
+    let second = format!("{first}&after={cursor}");
+    let last: protocol::ReaderWorkPage = server
+        .get(&second)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(last.items.len(), 1);
+    assert_eq!(
+        last.items[0].view.entity_id.get(),
+        north.entity_id.min(south.entity_id)
+    );
+    assert!(last.next.is_none());
+    let stale = second.replace(
+        &server.context.sync_epoch.get().to_string(),
+        &uuid::Uuid::now_v7().to_string(),
+    );
+    assert_eq!(
+        server.get(&stale).send().await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        server
+            .get_as(&second, "second")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    for path in [
+        format!("{route}?limit=0"),
+        format!("{route}?limit=51"),
+        format!("{first}&after=broken"),
+    ] {
+        assert_eq!(
+            server.get(&path).send().await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    server.authority.active.store(false, Ordering::SeqCst);
+    assert_eq!(
+        server.get(&route).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn edit_reads_are_limited_to_the_subjects_published_and_archived_views() {
+    let server = Server::start().await;
+    let saved = save(&server.library, capture("edited", None));
+    let content = crate::library::EditContent {
+        format: "piep-edit-v1".into(),
+        title: None,
+        blocks: vec![],
+        media: vec![],
+        provenance: None,
+    };
+    let save_edit = |user, expected, activate| {
+        server
+            .library
+            .save_edit(crate::library::EditRequest {
+                request_id: uuid::Uuid::now_v7(),
+                work: saved.entity_id,
+                user,
+                base: saved.snapshot_id,
+                parent: None,
+                expected,
+                content: &content,
+                activate,
+            })
+            .unwrap()
+    };
+    let first = save_edit(server.authority.subject.get(), 0, true);
+    let draft = save_edit(server.authority.subject.get(), 1, false);
+    let second = save_edit(server.authority.other_subject.get(), 0, true);
+    let shelf = format!("/api/v2/libraries/{}", server.library.id);
+    let lookup = format!("{shelf}/works/lookup?provider=pixiv&key=edited");
+    for (token, expected) in [("fixture", first), ("second", second)] {
+        let view: protocol::WorkReadingView = server
+            .get_as(&lookup, token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(view.edit_id, Some(Id::new(expected).unwrap()));
+        let list: protocol::ReaderWorkPage = server
+            .get_as(&format!("{shelf}/works"), token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(list.items[0].view, view);
+    }
+
+    let edit_path = |edit| format!("{shelf}/entities/{}/views/edit/{edit}", saved.entity_id);
+    let paths = |edit| {
+        let view = edit_path(edit);
+        let descriptor = server
+            .library
+            .resource_transfer_manifest(
+                saved.entity_id,
+                ResourceScope::Edit(edit),
+                &ResourceReference::Body,
+            )
+            .unwrap();
+        [
+            format!("{view}/bundle"),
+            format!("{view}/resources/body/manifest"),
+            format!(
+                "{view}/resources/body/files/{}/chunks/0",
+                descriptor.file.id.get()
+            ),
+        ]
+    };
+    for path in paths(first) {
+        assert_eq!(
+            server.get(&path).send().await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            server
+                .get_as(&path, "second")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    for path in paths(draft) {
+        assert_eq!(
+            server.get(&path).send().await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    let change = |generation, change| {
+        server
+            .library
+            .change_edit_pointers(
+                uuid::Uuid::now_v7(),
+                saved.entity_id,
+                server.authority.subject.get(),
+                generation,
+                change,
+            )
+            .unwrap()
+    };
+    let bundle = format!("{}/bundle", edit_path(first));
+    let archived = change(2, crate::library::EditPointerChange::Unpublish);
+    assert_eq!(
+        server.get(&bundle).send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    change(
+        archived.generation,
+        crate::library::EditPointerChange::Forget { edit: first },
+    );
+    assert_eq!(
+        server.get(&bundle).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
     );
 }
 

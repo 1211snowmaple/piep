@@ -110,6 +110,31 @@ impl EditContent {
 }
 
 impl Library {
+    /// 読取 API で指定できる編集は、その利用者が反映した版と以前の編集版。
+    pub fn reader_may_read_edit(
+        &self,
+        work: LibraryId,
+        user: LibraryId,
+        edit: LibraryId,
+    ) -> Result<bool> {
+        let conn = self.reader()?;
+        let mut query = conn.prepare_cached(
+            "SELECT EXISTS(
+                SELECT 1 FROM edit_documents WHERE work_id=?1 AND user_id=?2 AND active_id=?3
+                UNION ALL
+                SELECT 1 FROM edit_archive WHERE work_id=?1 AND user_id=?2 AND edit_id=?3
+            )",
+        )?;
+        Ok(query.query_row(
+            params![
+                work.as_bytes().as_slice(),
+                user.as_bytes().as_slice(),
+                edit.as_bytes().as_slice()
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn edit_state(&self, work: LibraryId, user: LibraryId) -> Result<EditState> {
         use rusqlite::OptionalExtension;
         let conn = self.reader()?;
