@@ -27,11 +27,10 @@ android {
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
     signingConfigs {
-        create("release") {
-            val keystorePropertiesFile = rootProject.file("keystore.properties")
-            require(keystorePropertiesFile.exists()) {
-                "Release signing requires src-tauri/gen/android/keystore.properties"
-            }
+        // 署名鍵は配布物を作るときだけ要る。鍵の無い手元でも確認用の debug は組めるようにする
+        // （配布物を作る tools/release.ps1 は鍵が無ければ先に止める）。
+        val keystorePropertiesFile = rootProject.file("keystore.properties")
+        if (keystorePropertiesFile.exists()) create("release") {
             val keystoreProperties = Properties().apply {
                 FileInputStream(keystorePropertiesFile).use { load(it) }
             }
@@ -55,7 +54,7 @@ android {
             }
         }
         getByName("release") {
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release")
             optimization {
                enable = true
             }

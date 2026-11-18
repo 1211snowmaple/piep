@@ -135,6 +135,8 @@ function App() {
     queryFn: getPcStatus,
     enabled: isTauri(),
     staleTime: 15_000,
+    // 画面に戻ったら確かめ直す。つないだままでも、サーバー側で新しい棚へ切り替わったことに気づける。
+    refetchOnWindowFocus: true,
     retry: false,
     refetchInterval: (query) => query.state.data?.reachable ? false : 15_000,
   });
