@@ -38,6 +38,15 @@ pub struct Context {
     readers: Arc<tokio::sync::Semaphore>,
     devices: Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
 }
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ShelfStatus {
+    library_id: Id,
+    sync_epoch: Id,
+    works: Decimal,
+}
+
 impl Context {
     /// sync_epoch は管理側の永続状態から渡し、棚の復元・再作成時には更新する。
     /// router や要求ごとに新しい epoch を生成しない。
@@ -53,6 +62,17 @@ impl Context {
             sync_epoch,
             readers: Arc::new(tokio::sync::Semaphore::new(READERS)),
             devices: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub(super) fn shelf_status(&self) -> crate::library::Result<ShelfStatus> {
+        let conn = self.library.reader()?;
+        let works: i64 =
+            conn.query_row("SELECT count(*) FROM library_items", [], |row| row.get(0))?;
+        Ok(ShelfStatus {
+            library_id: self.library_id,
+            sync_epoch: self.sync_epoch,
+            works: Decimal::new(works as u64),
         })
     }
 }

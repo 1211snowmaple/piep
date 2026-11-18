@@ -83,6 +83,7 @@ export interface AdminStatus {
   version: string;
   apiVersion: number;
   works: number | null;
+  libraryV2?: { libraryId: string; syncEpoch: string; works: string };
   devices: Device[];
   sync: SyncStatus | null;
   publicUrl: string | null;

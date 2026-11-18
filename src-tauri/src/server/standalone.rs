@@ -66,7 +66,11 @@ pub struct ReaderShelfConfig {
 }
 
 impl ReaderShelfConfig {
-    fn open(&self, paths: &ServerPaths, store: Arc<ServerStore>) -> Result<Router, String> {
+    fn open(
+        &self,
+        paths: &ServerPaths,
+        store: Arc<ServerStore>,
+    ) -> Result<Arc<super::v2::Context>, String> {
         let library = Arc::new(
             crate::library::Library::open_matching(&paths.native_library(), self.library_id.get())
                 .map_err(|error| format!("新しい棚を開けません: {error}"))?,
@@ -77,7 +81,7 @@ impl ReaderShelfConfig {
         }
         let context = super::v2::Context::new(library, authority, self.sync_epoch)
             .map_err(|error| error.to_string())?;
-        Ok(super::v2::router(Arc::new(context)))
+        Ok(Arc::new(context))
     }
 }
 
@@ -865,15 +869,11 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
         .and_then(|material| material.fingerprint.clone());
     let tls_config = material.map(|material| material.config);
     let parts = assemble(&paths, config.public_url(), fingerprint)?;
-    let native_reader = config
-        .library_v2
-        .as_ref()
-        .map(|settings| settings.open(&paths, Arc::clone(&parts.context.store)))
-        .transpose()?;
-    let with_native_reader = |router: Router| match &native_reader {
-        Some(native) => router.merge(native.clone()),
-        None => router,
-    };
+    if let Some(settings) = &config.library_v2 {
+        parts
+            .context
+            .set_reader_shelf(settings.open(&paths, Arc::clone(&parts.context.store))?)?;
+    }
     parts.receiver.start_index_catch_up();
     note_started(&paths, &parts.context.store);
     let handle = axum_server::Handle::new();
@@ -899,8 +899,8 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
     let mut tasks = tokio::task::JoinSet::new();
     match config.admin_listen {
         Some(admin_address) => {
-            let read = with_native_reader(reader_router(Arc::clone(&parts.context)));
-            let admin = with_native_reader(admin_router(Arc::clone(&parts.context)));
+            let read = reader_router(Arc::clone(&parts.context));
+            let admin = admin_router(Arc::clone(&parts.context));
             tasks.spawn(run_listener(
                 config.listen,
                 tls_config.clone(),
@@ -924,13 +924,13 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
             tasks.spawn(run_listener(
                 config.listen,
                 tls_config,
-                with_native_reader(router),
+                router,
                 handle.clone(),
             ));
             log::info!("待ち受け: {}", config.listen);
             if let Some(local) = local {
                 // 開けなくても携帯は困らないので、サーバーは止めない。
-                let admin = with_native_reader(admin_router(Arc::clone(&parts.context)));
+                let admin = admin_router(Arc::clone(&parts.context));
                 let local_handle = handle.clone();
                 tasks.spawn(async move {
                     if let Err(error) = run_listener(local, None, admin, local_handle).await {
@@ -1276,6 +1276,19 @@ mod tests {
         fs::create_dir_all(paths.state()).unwrap();
         let library = crate::library::Library::create(&paths.native_library()).unwrap();
         let id = Id::new(library.id).unwrap();
+        library
+            .save_readable_work(
+                crate::library::WorkSave {
+                    request: uuid::Uuid::now_v7(),
+                    provider: "pixiv",
+                    key: "1",
+                    route: "test",
+                    data: &serde_json::json!({"detail":{"title":"配信中の作品"},"text":"本文"}),
+                    assets: vec![],
+                },
+                None,
+            )
+            .unwrap();
         drop(library);
         let epoch = Id::new(uuid::Uuid::now_v7()).unwrap();
         let subject = Id::new(uuid::Uuid::now_v7()).unwrap();
@@ -1301,13 +1314,20 @@ mod tests {
         assert!(wrong.open(&paths, Arc::clone(&store)).is_err());
         // 開き直しても設定した epoch と許可を使う。
         drop(settings.open(&paths, Arc::clone(&store)).unwrap());
-        let router = reader_router(Arc::clone(&parts.context))
-            .merge(settings.open(&paths, Arc::clone(&store)).unwrap());
+        parts
+            .context
+            .set_reader_shelf(settings.open(&paths, Arc::clone(&store)).unwrap())
+            .unwrap();
+        let router = combined_router(Arc::clone(&parts.context));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/api/v2/identity", listener.local_addr().unwrap());
+        let base = format!("http://{}", listener.local_addr().unwrap());
         let serving = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let get = |token: &str| client.get(&url).bearer_auth(token);
+        let get = |token: &str| {
+            client
+                .get(format!("{base}/api/v2/identity"))
+                .bearer_auth(token)
+        };
         assert_eq!(
             get(&other.token).send().await.unwrap().status(),
             StatusCode::UNAUTHORIZED
@@ -1324,6 +1344,36 @@ mod tests {
         assert_eq!(identity.library_id, id);
         assert_eq!(identity.subject_id, subject);
         assert_eq!(identity.sync_epoch, epoch);
+        let admin_ticket = store
+            .issue_pairing(Role::Admin, Duration::from_secs(60))
+            .unwrap();
+        let administrator = store.consume_pairing(&admin_ticket, "管理端末").unwrap();
+        let status = |token: &str| {
+            client
+                .get(format!("{base}/api/v1/admin/status"))
+                .bearer_auth(token)
+        };
+        assert_eq!(
+            status(&granted.token).send().await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let details: serde_json::Value = status(&administrator.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            details["libraryV2"],
+            serde_json::json!({"libraryId":id,"syncEpoch":epoch,"works":"1"})
+        );
+        assert_eq!(
+            get(&administrator.token).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
         assert!(store.revoke_device(&granted.device_id).unwrap());
         assert_eq!(
             get(&granted.token).send().await.unwrap().status(),

@@ -103,6 +103,7 @@ pub struct ServerContext {
     pub public_url: Option<String>,
     /// 自己署名で待ち受けているときの証明書の指紋。
     pub fingerprint: Option<String>,
+    reader_shelf: OnceLock<Arc<super::v2::Context>>,
     /// 自己更新の係。`install` で置いた単独サーバーにだけある。
     update: OnceLock<Arc<UpdateController>>,
     /// 管理画面。管理者の口を持つ単独サーバーにだけある。
@@ -203,6 +204,7 @@ impl ServerContext {
             receiver,
             public_url,
             fingerprint,
+            reader_shelf: OnceLock::new(),
             update: OnceLock::new(),
             web: OnceLock::new(),
             started_at: chrono::Utc::now().to_rfc3339(),
@@ -221,6 +223,12 @@ impl ServerContext {
 
     pub fn set_update(&self, controller: Arc<UpdateController>) {
         let _ = self.update.set(controller);
+    }
+
+    pub(super) fn set_reader_shelf(&self, shelf: Arc<super::v2::Context>) -> Result<(), String> {
+        self.reader_shelf
+            .set(shelf)
+            .map_err(|_| "新しい棚は既に設定されています".into())
     }
 
     pub fn set_admin_web(&self, web: AdminWeb) {
@@ -379,7 +387,7 @@ where
 }
 
 fn read_routes(ctx: Ctx) -> Router {
-    Router::new()
+    let routes = Router::new()
         .route("/api/v1/about", get(about))
         .route("/api/v1/works/search", post(search))
         .route("/api/v1/search/suggest", get(search_suggest))
@@ -412,7 +420,11 @@ fn read_routes(ctx: Ctx) -> Router {
         .route("/api/v1/pair", post(pair))
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .layer(middleware::from_fn(read_timeout))
-        .with_state(ctx)
+        .with_state(Arc::clone(&ctx));
+    match ctx.reader_shelf.get() {
+        Some(shelf) => routes.merge(super::v2::router(Arc::clone(shelf))),
+        None => routes,
+    }
 }
 
 fn admin_routes(ctx: Ctx) -> Router {
@@ -1618,6 +1630,8 @@ struct AdminStatus {
     version: &'static str,
     api_version: u32,
     works: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    library_v2: Option<super::v2::ShelfStatus>,
     devices: Vec<super::store::DeviceSummary>,
     sync: Option<super::sync_receive::ReceiverStatus>,
     public_url: Option<String>,
@@ -1641,11 +1655,25 @@ async fn admin_status(
         .map_err(|_| ApiError::internal())?,
         None => None,
     };
+    let library_v2 = if let Some(shelf) = ctx.reader_shelf.get().cloned() {
+        Some(
+            tokio::task::spawn_blocking(move || shelf.shelf_status())
+                .await
+                .map_err(|_| ApiError::internal())?
+                .map_err(|error| {
+                    log::error!("新しい棚の配信状態を確認できません: {error}");
+                    ApiError::internal()
+                })?,
+        )
+    } else {
+        None
+    };
     let devices = ctx.store.list_devices().map_err(|_| ApiError::internal())?;
     Ok(Json(AdminStatus {
         version: super::update::VERSION,
         api_version: API_VERSION,
         works,
+        library_v2,
         devices,
         sync: ctx.receiver.as_ref().map(|receiver| receiver.status()),
         public_url: ctx.public_url.clone(),
