@@ -1,0 +1,16 @@
+[package]
+name = "piep-reader-render"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+publish = false
+description = "Builds reader HTML and pages from saved work data, shared by piep desktop and Android"
+
+[dependencies]
+piep-storage = { path = "../piep-storage", version = "0.1.0" }
+regex = "1"
+unicode-normalization = "0.1"
+url = "2.5"
+serde = { version = "1", features = ["derive"] }
+# 取得元の JSON のキーの順を保つ。端末ごとに組み上がりが変わらないように両方で揃える。
+serde_json = { version = "1", features = ["preserve_order"] }

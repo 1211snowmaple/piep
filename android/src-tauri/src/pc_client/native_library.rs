@@ -5,8 +5,9 @@ use super::{
 };
 use piep_library_protocol::{
     Id, LibraryIdentity, MAX_IDENTITY_BYTES, MAX_MANIFEST_BYTES, ReaderBundle, ReaderWorkPage,
-    ResourceScope,
+    ResourceReference, ResourceScope, WorkReadingView,
 };
+use piep_storage::Fingerprint;
 use reqwest::{Response, StatusCode, header::HeaderMap};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -36,6 +37,29 @@ fn header_is(headers: &HeaderMap, name: &str, expected: &str) -> bool {
 }
 
 impl NativeLibraryScope {
+    /// 同じ接続の同じ棚・利用者か。
+    pub(super) fn same_as(&self, other: &Self) -> bool {
+        self.library_id == other.library_id
+            && self.subject_id == other.subject_id
+            && self.sync_epoch == other.sync_epoch
+            && self.connection_generation == other.connection_generation
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_tests(
+        library_id: Id,
+        subject_id: Id,
+        sync_epoch: Id,
+        connection_generation: u64,
+    ) -> Self {
+        Self {
+            library_id,
+            subject_id,
+            sync_epoch,
+            connection_generation,
+        }
+    }
+
     fn matches(&self, headers: &HeaderMap) -> bool {
         header_is(
             headers,
@@ -134,14 +158,33 @@ async fn read<T>(
     endpoint: &str,
     parse: impl FnOnce(&[u8]) -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
+    read_bounded(
+        state,
+        scope,
+        endpoint,
+        MAX_MANIFEST_BYTES,
+        REQUEST_TIMEOUT,
+        parse,
+    )
+    .await
+}
+
+async fn read_bounded<T>(
+    state: &PcClientState,
+    scope: NativeLibraryScope,
+    endpoint: &str,
+    maximum: usize,
+    timeout: Duration,
+    parse: impl FnOnce(&[u8]) -> Result<T, ClientError>,
+) -> Result<T, ClientError> {
     let (generation, saved) = state.connection_snapshot()?;
     if generation != scope.connection_generation {
         return Err(library_changed());
     }
     let saved = saved.ok_or_else(ClientError::invalid_pairing)?;
     let client = state.client(&saved)?;
-    let response = get(&client, &saved, endpoint, REQUEST_TIMEOUT).await?;
-    let bytes = bounded_response_bytes(check_scope(response, scope)?, MAX_MANIFEST_BYTES).await?;
+    let response = get(&client, &saved, endpoint, timeout).await?;
+    let bytes = bounded_response_bytes(check_scope(response, scope)?, maximum).await?;
     let result = parse(&bytes)?;
     state.with_connection(generation, || Ok(result))
 }
@@ -179,24 +222,51 @@ pub async fn pc_native_works(
     .await
 }
 
-#[tauri::command]
-pub async fn pc_native_bundle(
-    state: State<'_, PcClientState>,
-    scope: NativeLibraryScope,
-    entity: Id,
-    view: ResourceScope,
-) -> Result<ReaderBundle, ClientError> {
+fn view_path(scope: NativeLibraryScope, entity: Id, view: &ResourceScope) -> String {
     let (kind, id) = match view {
         ResourceScope::Snapshot(id) => ("snapshot", id),
         ResourceScope::Edit(id) => ("edit", id),
     };
-    let endpoint = format!(
-        "/api/v2/libraries/{}/entities/{}/views/{kind}/{}/bundle",
+    format!(
+        "/api/v2/libraries/{}/entities/{}/views/{kind}/{}",
         scope.library_id.get(),
         entity.get(),
         id.get(),
+    )
+}
+
+/// 取得元と作品の鍵から、この利用者が今読む版。棚に無ければ誤り。
+pub(super) async fn lookup(
+    state: &PcClientState,
+    scope: NativeLibraryScope,
+    provider: &str,
+    key: &str,
+) -> Result<WorkReadingView, ClientError> {
+    if provider.is_empty() || provider.len() > 128 || key.is_empty() || key.len() > 4096 {
+        return Err(ClientError::remote());
+    }
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("provider", provider)
+        .append_pair("key", key)
+        .finish();
+    let endpoint = format!(
+        "/api/v2/libraries/{}/works/lookup?{query}",
+        scope.library_id.get()
     );
-    read(&state, scope, &endpoint, |bytes| {
+    read(state, scope, &endpoint, |bytes| {
+        serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())
+    })
+    .await
+}
+
+pub(super) async fn bundle(
+    state: &PcClientState,
+    scope: NativeLibraryScope,
+    entity: Id,
+    view: ResourceScope,
+) -> Result<ReaderBundle, ClientError> {
+    let endpoint = format!("{}/bundle", view_path(scope, entity, &view));
+    read(state, scope, &endpoint, |bytes| {
         let bundle = ReaderBundle::parse(bytes).map_err(|_| ClientError::protocol())?;
         if bundle.library_id != scope.library_id
             || bundle.entity_id != entity
@@ -207,6 +277,49 @@ pub async fn pc_native_bundle(
         Ok(bundle)
     })
     .await
+}
+
+/// 資産の部分実体を、保存したときの圧縮のまま受け取る。中身の確認は呼び手が行う。
+pub(super) async fn chunk(
+    state: &PcClientState,
+    scope: NativeLibraryScope,
+    entity: Id,
+    view: &ResourceScope,
+    resource: &ResourceReference,
+    file: Fingerprint,
+    ordinal: usize,
+) -> Result<Vec<u8>, ClientError> {
+    let (kind, slot) = match resource {
+        ResourceReference::Media { slot } => ("media", slot),
+        ResourceReference::File { slot } => ("file", slot),
+        _ => return Err(ClientError::remote()),
+    };
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("slot", slot)
+        .finish();
+    let endpoint = format!(
+        "{}/resources/{kind}/files/{file}/chunks/{ordinal}?{query}",
+        view_path(scope, entity, view)
+    );
+    read_bounded(
+        state,
+        scope,
+        &endpoint,
+        piep_storage::MAX_ENCODED_CHUNK_BYTES as usize,
+        super::ASSET_TIMEOUT,
+        |bytes| Ok(bytes.to_vec()),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn pc_native_bundle(
+    state: State<'_, PcClientState>,
+    scope: NativeLibraryScope,
+    entity: Id,
+    view: ResourceScope,
+) -> Result<ReaderBundle, ClientError> {
+    bundle(&state, scope, entity, view).await
 }
 
 #[cfg(test)]

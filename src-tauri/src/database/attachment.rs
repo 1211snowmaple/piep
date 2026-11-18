@@ -36,7 +36,7 @@ pub struct ImportedAttachment {
 /// FANBOX が使わない型にしてあるので、`p` と `header` だけを読む検索用の平文には
 /// 入らない。**「この先は取り込んだ本文だ」と読み手に伝えるための一行であって、
 /// 作品の一部ではない。**
-pub const NOTICE_BLOCK_TYPE: &str = "piep_attachment_notice";
+pub use piep_reader_render::NOTICE_BLOCK_TYPE;
 
 /// 保存済みの投稿へ、添付から取り出した本文を差し込む。
 ///

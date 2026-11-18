@@ -1,6 +1,6 @@
 use super::{Error, Result, SourceBody};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+
 use serde_json::Value;
 use std::{collections::BTreeSet, sync::LazyLock};
 
@@ -16,35 +16,8 @@ fn insert(set: &mut BTreeSet<BodyAssetReference>, reference: BodyAssetReference)
 }
 
 /// 本文に書かれた指定。取得 URL・保存名・OS のパスを識別子に使わない。
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BodyAssetReference {
-    PixivUploaded {
-        image_id: String,
-    },
-    /// 本文のページ番号は 1 始まりのまま保持する。
-    PixivIllustration {
-        illustration_id: String,
-        page: u32,
-    },
-    ArticleImage {
-        key: String,
-    },
-    ArticleFile {
-        key: String,
-    },
-    ArticleImageAt {
-        index: u32,
-    },
-    ArticleFileAt {
-        index: u32,
-    },
-}
-impl BodyAssetReference {
-    pub(crate) fn is_image(&self) -> bool {
-        !matches!(self, Self::ArticleFile { .. } | Self::ArticleFileAt { .. })
-    }
-}
+pub use piep_reader_render::document::BodyAssetReference;
+
 static PIXIV_IMAGE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[(uploadedimage|pixivimage):([0-9]+)(?:-([0-9]+))?\]").unwrap());
 

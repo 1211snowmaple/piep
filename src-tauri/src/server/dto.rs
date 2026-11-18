@@ -17,10 +17,8 @@ pub use piep_mobile_api::{
     MobileMetadata, MobilePage, MobilePerson, MobileRevision, MobileSearchPage,
     MobileSeriesMembership, MobileVersion, MobileWork,
 };
-use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::LazyLock;
 
 /// Keep numbered-page jumps within the same work budget as the desktop UI.
 const MAX_NUMBERED_OFFSET: i64 = 5_000;
@@ -384,21 +382,6 @@ impl From<ReaderMetadata> for MobileMetadata {
     }
 }
 
-static HTML_TAG: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<!--.*?-->|<[a-z][a-z0-9:-]*\b(?:[^"'<>]|"[^"]*"|'[^']*')*>"#)
-        .expect("valid tag regex")
-});
-
-static HTML_ATTRIBUTE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)(\s+)([^\s/="'<>`]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"#)
-        .expect("valid attribute regex")
-});
-
-static ATTACHMENT_ORIGINAL_BUTTON: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)\s*<button\b[^>]*\battachment-original\b[^>]*>.*?</button>"#)
-        .expect("valid button regex")
-});
-
 /// PC 版が付けたファイルパスを、当該作品の画像 ID に置き換える。
 /// 未知の参照はそのまま返さない。添付の「原本を見る」は携帯では開けないので外す。
 /// 端末へ渡す本文を作る。`dimensions` は挿絵の縦横を返す。
@@ -414,44 +397,13 @@ pub fn mobile_page(
         .iter()
         .map(|asset| (escape_html_attribute(&asset.local_path), asset))
         .collect();
-    let mut missing = false;
-    let readable = ATTACHMENT_ORIGINAL_BUTTON.replace_all(&page.html, "");
-    let html = HTML_TAG
-        .replace_all(&readable, |captures: &regex::Captures<'_>| {
-            let tag = &captures[0];
-            if tag.starts_with("<!--") {
-                return tag.to_string();
-            }
-            // 属性を値ごとに読む。本文の単語や、alt/title の値に書かれた
-            // data-local-path は画像の参照として扱わない。
-            HTML_ATTRIBUTE
-                .replace_all(tag, |attribute: &regex::Captures<'_>| {
-                    if !attribute[2].eq_ignore_ascii_case("data-local-path") {
-                        return attribute[0].to_string();
-                    }
-                    let path = attribute
-                        .get(3)
-                        .or_else(|| attribute.get(4))
-                        .or_else(|| attribute.get(5));
-                    let Some(asset) = path.and_then(|path| asset_ids.get(path.as_str())) else {
-                        missing = true;
-                        return String::new();
-                    };
-                    let reference = match dimensions(asset) {
-                        Some((width, height)) => format!(
-                            r#"data-asset-id="{}" width="{width}" height="{height}""#,
-                            asset.id
-                        ),
-                        None => format!(r#"data-asset-id="{}""#, asset.id),
-                    };
-                    format!("{}{reference}", &attribute[1])
-                })
-                .into_owned()
+    let html = piep_reader_render::mobile::mobile_html(&page.html, |path| {
+        let asset = asset_ids.get(path)?;
+        Some(piep_reader_render::mobile::MobileAsset {
+            id: asset.id,
+            dimensions: dimensions(asset),
         })
-        .into_owned();
-    if missing {
-        return Err("本文の画像を解決できません".into());
-    }
+    })?;
     Ok(MobilePage {
         page: page.page,
         page_count: page.page_count,

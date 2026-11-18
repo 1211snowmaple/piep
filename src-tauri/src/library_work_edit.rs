@@ -243,7 +243,7 @@ impl Library {
             .map(|snapshot| snapshot.revision)
             .ok_or(Error::ResourceUnavailable)?;
         let (html, assets) = match self.reader_document(work, ResourceScope::Snapshot(base)) {
-            Ok(document) => (render_html(&document), bound_assets(&document).0),
+            Ok(document) => (render_html(&document)?, bound_assets(&document)?),
             // 本文の無い作品（公開範囲の外の投稿など）は空の本文から書く。
             Err(Error::ResourceUnavailable) => (String::new(), Vec::new()),
             Err(error) => return Err(error),

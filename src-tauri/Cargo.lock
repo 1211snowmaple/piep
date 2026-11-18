@@ -4841,6 +4841,7 @@ dependencies = [
  "pdfium-render",
  "piep-library-protocol",
  "piep-mobile-api",
+ "piep-reader-render",
  "piep-storage",
  "r2d2",
  "r2d2_sqlite",
@@ -4897,6 +4898,18 @@ name = "piep-mobile-api"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "piep-reader-render"
+version = "0.1.0"
+dependencies = [
+ "piep-storage",
+ "regex",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
+ "url",
 ]
 
 [[package]]

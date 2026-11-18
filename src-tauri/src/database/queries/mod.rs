@@ -22,21 +22,30 @@ use super::models::*;
 use super::schema;
 // 本文を組み立てるエスケープは、取り込み側と同じものを使う。同じ規則を二か所に
 // 書いていたので、片方だけ直すとリーダーとエディタで表示が食い違う余地があった。
-use super::parser::escape_html as escape_editor_html;
-use super::parser::expand_pixiv_inline_notation;
 use super::search::{
     generate_ngrams_limited, make_match_highlights, match_fields_and_score, normalize_search_text,
     normalized_levenshtein, parse_search_query, query_ngrams, ParsedSearchQuery, SearchDocument,
 };
 use super::search_normalization::index_text;
 
+pub(crate) use piep_reader_render::blocks::{
+    block_source_ref, blocks_to_fanbox_blocks, blocks_to_html, blocks_to_pixiv_text,
+    blocks_to_plain_text, BLOCK_GAP_KEY, BLOCK_MISSING_KEY, BLOCK_SOURCE_REF_KEY,
+    EDITOR_IMAGE_ASSET_TYPE, MAX_BLOCK_GAP,
+};
+pub(crate) use piep_reader_render::pages::{paginate_reader_html, plain_text_from_reader_html};
+#[cfg(test)]
+use piep_reader_render::{
+    blocks::{block_gap, block_image_reference},
+    pages::READER_PAGE_TARGET_BYTES,
+};
 mod acquisition_audit;
 mod original_images;
 pub use original_images::{ReducedImageReplacement, ReducedPixivImage};
 mod assist_inputs;
 /// 作品コレクションは `Database` の非公開内部へ触れるため、子モジュールに置く。
 mod reader;
-pub(crate) use reader::{reader_outline, search_reader_pages};
+pub(crate) use piep_reader_render::pages::{reader_outline, search_reader_pages};
 mod work_inspection;
 pub(crate) use work_inspection::revision_metadata;
 pub(crate) use work_inspection::RevisionAsset;
@@ -14123,50 +14132,6 @@ enum SourceLine {
     Boundary,
 }
 
-/// ブロックの前にあった空行の数を憶えておく鍵。
-///
-/// 段落の切れ目は取得元によって形が違う（pixiv は空行 1 つ、FANBOX は
-/// ブロックの境界そのもので空行なし）。**数として持っておけば**、書き戻す
-/// ときに元の見え方をそのまま再現できる。持たずに書き戻していたころは、
-/// 編集画面を開いて何も変えずに反映するだけで、本文全体が 1 行に潰れた。
-const BLOCK_GAP_KEY: &str = "gap";
-
-/// 画像ブロックが元の本文で名乗っていた参照。EPUB へ書き出すときに、
-/// 同じ絵をもう一度指すために使う。
-const BLOCK_SOURCE_REF_KEY: &str = "sourceRef";
-
-/// 取り込んだときに絵が見つからなかった画像ブロックの印。編集画面がそれと
-/// 名乗り、手元の画像で埋めるよう促すのに使う。
-const BLOCK_MISSING_KEY: &str = "missing";
-
-/// 空行の上限。壊れた値や悪意のある値で本文が縦に伸び続けないようにする。
-const MAX_BLOCK_GAP: usize = 64;
-
-fn block_attrs(block: &WorkBlock) -> Option<serde_json::Value> {
-    block
-        .attrs_json
-        .as_deref()
-        .and_then(|attrs| serde_json::from_str::<serde_json::Value>(attrs).ok())
-        .filter(serde_json::Value::is_object)
-}
-
-fn block_gap(block: &WorkBlock) -> Option<usize> {
-    block_attrs(block)
-        .and_then(|attrs| attrs.get(BLOCK_GAP_KEY).and_then(serde_json::Value::as_u64))
-        .map(|gap| (gap as usize).min(MAX_BLOCK_GAP))
-}
-
-fn block_source_ref(block: &WorkBlock) -> Option<String> {
-    block_attrs(block)
-        .and_then(|attrs| {
-            attrs
-                .get(BLOCK_SOURCE_REF_KEY)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .filter(|value| !value.trim().is_empty())
-}
-
 fn attrs_with(attrs: Option<String>, key: &str, value: serde_json::Value) -> Option<String> {
     let mut object = attrs
         .as_deref()
@@ -14525,19 +14490,6 @@ fn hash_blocks(blocks: &[WorkBlockInput]) -> String {
         .collect()
 }
 
-fn blocks_to_plain_text(blocks: &[WorkBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|block| match block.block_type.as_str() {
-            "image" | "separator" | "page_break" => None,
-            _ => block.text.as_deref(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-const READER_PAGE_TARGET_BYTES: usize = 128 * 1024;
-
 fn reader_version_path(
     download: &DownloadEntry,
     versions: &[DownloadVersion],
@@ -14654,9 +14606,6 @@ fn assets_for_version_path(assets: &[AssetEntry], json_path: &Path) -> Vec<Asset
         .collect()
 }
 
-/// 編集画面の「画像を追加」で取り込んだ絵の種別。
-pub(crate) const EDITOR_IMAGE_ASSET_TYPE: &str = "editor_image";
-
 /// 編集のブロックが指せる絵。元にした版の絵に、編集画面で足した絵を加える。
 ///
 /// 足した絵は版の置き場ではなく `editor-assets/` に入る。版の絵だけを渡して
@@ -14747,335 +14696,6 @@ fn reader_source_content(
         &download.source,
         &version_assets,
     ))
-}
-
-/// 転送用のページの大きさとして数える長さ。画像・添付の置き場（`data-local-path` の値）は数えない。
-///
-/// 置き場の長さは本文と関係がない（旧棚は保存先のフォルダーを含むパス、新しい棚はファイルの
-/// 識別子）。数えていたころは、同じ本文でも保存先を移したり棚を替えたりするだけでページの
-/// 切れ目が動き、「何ページ目の何行目」で憶えた読書位置としおりが別の行を指していた。
-fn transport_len(html: &str) -> usize {
-    static PLACE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r#"data-local-path="[^"]*""#).expect("valid local path regex")
-    });
-    html.len()
-        - PLACE
-            .find_iter(html)
-            .map(|found| found.len())
-            .sum::<usize>()
-}
-
-/// Converts source-level boundaries into reasonably sized transport pages.
-/// Boundaries always sit between complete source blocks, so a page can be
-/// sanitized independently without producing malformed markup.
-pub(crate) fn paginate_reader_html(html: &str, source: &str) -> (Vec<String>, Vec<usize>) {
-    if html.trim().is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-    let marker = if source.eq_ignore_ascii_case("pixiv") {
-        "<!-- newpage -->"
-    } else {
-        "<!-- content-block -->"
-    };
-    let blocks = html
-        .split(marker)
-        .map(str::trim)
-        .filter(|part| !part.is_empty());
-    let mut pages = Vec::new();
-    // pixiv の [newpage] が作る「原稿のページ」が、転送用の何ページ目から
-    // 始まるか。長い原稿ページは転送のために割られるので、この対応表が無いと
-    // `[jump:5]` が 5 ページ目ではない場所へ飛ぶ。
-    let mut source_page_starts = Vec::new();
-    let mut current = String::new();
-    let mut current_len = 0usize;
-    for block in blocks {
-        // Pixiv's [newpage] is user-visible page semantics and must never be
-        // coalesced. A source page can nevertheless be several megabytes long;
-        // break that one transport response at generated line boundaries so a
-        // single IPC message does not have to carry the entire novel.
-        if source.eq_ignore_ascii_case("pixiv") {
-            source_page_starts.push(pages.len());
-            let mut chunk = String::new();
-            let mut chunk_len = 0usize;
-            for line in block.split_inclusive("<br />\n") {
-                let line_len = transport_len(line);
-                if !chunk.is_empty()
-                    && chunk_len.saturating_add(line_len) > READER_PAGE_TARGET_BYTES
-                {
-                    pages.push(std::mem::take(&mut chunk));
-                    chunk_len = 0;
-                }
-                chunk.push_str(line);
-                chunk_len += line_len;
-            }
-            if !chunk.trim().is_empty() {
-                pages.push(chunk);
-            }
-            continue;
-        }
-        let block_len = transport_len(block);
-        if !current.is_empty() && current_len.saturating_add(block_len) > READER_PAGE_TARGET_BYTES {
-            pages.push(std::mem::take(&mut current));
-            current_len = 0;
-        }
-        if !current.is_empty() {
-            current.push('\n');
-            current_len += 1;
-        }
-        current.push_str(block);
-        current_len += block_len;
-    }
-    if !current.trim().is_empty() {
-        pages.push(current);
-    }
-    if pages.is_empty() {
-        pages.push(html.to_string());
-    }
-    // 割られなかった原稿ページは、転送用のページとそのまま 1 対 1。
-    if source_page_starts.is_empty() {
-        source_page_starts = (0..pages.len()).collect();
-    }
-    (pages, source_page_starts)
-}
-
-fn plain_text_from_reader_html(html: &str) -> String {
-    static TAGS: std::sync::LazyLock<Regex> =
-        std::sync::LazyLock::new(|| Regex::new(r"(?s)<[^>]*>").expect("valid HTML tag regex"));
-    let separated = html
-        .replace("<br />", "\n")
-        .replace("<br>", "\n")
-        .replace("</p>", "\n")
-        .replace("</h2>", "\n")
-        .replace("</blockquote>", "\n");
-    TAGS.replace_all(&separated, "")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#x27;", "'")
-        .trim()
-        .to_string()
-}
-
-/// 編集したブロックを、読書画面が受け取る HTML へ戻す。
-///
-/// 取り込んだ本文と**同じ組み方**で書く。行の終わりごとに `<br />` を置き、
-/// 空行のぶんだけ足す。ただ連結していたころは行の区切りがどこにも残らず、
-/// 「編集画面を開いて何も変えずに反映する」だけで作品全体がひと続きの塊に
-/// なっていた。
-///
-/// ここが吐く HTML は取り込み直されない（版があるときブロックは DB から
-/// 読む）ので、`html_to_editor_blocks` が知らない `<figure>` を使ってよい。
-pub(crate) fn blocks_to_html(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
-    let mut html = String::new();
-    for (index, block) in blocks.iter().enumerate() {
-        let gap = block_gap(block).unwrap_or(if index == 0 { 0 } else { 1 });
-        if index == 0 {
-            for _ in 0..gap {
-                html.push_str("<br />\n");
-            }
-        } else {
-            // 直前の行を閉じる 1 つと、空行の数だけの `<br />`。
-            for _ in 0..=gap {
-                html.push_str("<br />\n");
-            }
-            // FANBOX の読書画面はこの印でページを切り出す。
-            html.push_str("<!-- content-block -->\n");
-        }
-        html.push_str(&block_to_html(block, assets));
-    }
-    html
-}
-
-/// このブロックが指す絵を、取得元の本文が使っていた名前で呼ぶ。
-///
-/// 取り込んだときに控えた参照を第一に使い、編集画面から足した絵は
-/// ファイル名から引く。EPUB のビルダーはどちらの形でも実ファイルへ辿れる。
-fn block_image_reference(block: &WorkBlock, assets: &[AssetEntry]) -> Option<String> {
-    let asset = block
-        .asset_id
-        .and_then(|id| assets.iter().find(|asset| asset.id == id));
-    // 編集で足した画像を選んだブロックは、その画像を指す。元の参照は
-    // 選び直す前の絵（取得できなかった絵を含む）を名乗っているので、
-    // 優先すると EPUB に古い絵が出るか、何も出なかった。
-    let added = asset.is_some_and(|asset| asset.asset_type == EDITOR_IMAGE_ASSET_TYPE);
-    if !added {
-        if let Some(reference) = block_source_ref(block) {
-            return Some(reference);
-        }
-    }
-    let asset = asset?;
-    Path::new(&asset.filename)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(str::to_string)
-}
-
-fn block_link_label(block: &WorkBlock) -> Option<String> {
-    block_attrs(block)
-        .and_then(|attrs| {
-            attrs
-                .get("label")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .filter(|label| !label.trim().is_empty())
-}
-
-/// 反映済みの編集を、pixiv の本文記法へ組み直す。
-///
-/// 平文へ均していたころは、`blocks_to_plain_text` が画像・区切り・改ページを
-/// 落とし、見出しをただの行にしていた。編集した作品の EPUB には挿絵が 1 枚も
-/// 入らず、章も改ページも消えていた。
-pub(crate) fn blocks_to_pixiv_text(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
-        let gap = block_gap(block).unwrap_or(if index == 0 { 0 } else { 1 });
-        for _ in 0..gap {
-            lines.push(String::new());
-        }
-        let text = block.text.as_deref().unwrap_or("");
-        match block.block_type.as_str() {
-            "heading" => lines.push(format!("[chapter:{}]", text.trim())),
-            "page_break" => lines.push("[newpage]".to_string()),
-            "separator" => lines.push(super::parser::EDITOR_SEPARATOR_NOTATION.to_string()),
-            "image" => {
-                if let Some(reference) = block_image_reference(block, assets) {
-                    // 取り込んだ挿絵は、元の記法（`[pixivimage:…]`）ごと控えてある。
-                    // それをさらに包んでいたので、`[uploadedimage:[pixivimage:…]]`
-                    // という誰も読めない参照になり、**編集した作品の EPUB からは
-                    // 挿絵が 1 枚残らず消えていた**。
-                    lines.push(if reference.starts_with('[') {
-                        reference
-                    } else {
-                        format!("[uploadedimage:{reference}]")
-                    });
-                }
-            }
-            "link" => {
-                let url = text.trim();
-                if !url.is_empty() {
-                    let label = block_link_label(block).unwrap_or_else(|| url.to_string());
-                    lines.push(format!("[[jumpuri:{label}>{url}]]"));
-                }
-            }
-            _ => lines.extend(text.split('\n').map(str::to_string)),
-        }
-    }
-    lines.join("\n")
-}
-
-/// 反映済みの編集を、FANBOX の本文ブロックへ組み直す。
-pub(crate) fn blocks_to_fanbox_blocks(
-    blocks: &[WorkBlock],
-    assets: &[AssetEntry],
-) -> Vec<serde_json::Value> {
-    let blank = || serde_json::json!({ "type": "p", "text": "" });
-    let mut out = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
-        let gap = block_gap(block).unwrap_or(if index == 0 { 0 } else { 1 });
-        for _ in 0..gap {
-            out.push(blank());
-        }
-        let text = block.text.as_deref().unwrap_or("");
-        match block.block_type.as_str() {
-            "heading" => out.push(serde_json::json!({ "type": "header", "text": text.trim() })),
-            "image" => {
-                if let Some(reference) = block_image_reference(block, assets) {
-                    out.push(serde_json::json!({ "type": "image", "imageId": reference }));
-                }
-            }
-            "separator" | "page_break" => out.push(blank()),
-            "link" => {
-                let url = text.trim();
-                if !url.is_empty() {
-                    let label = block_link_label(block).unwrap_or_else(|| url.to_string());
-                    // FANBOX のリンクは本文の範囲で表す。長さは UTF-16 の単位。
-                    out.push(serde_json::json!({
-                        "type": "p",
-                        "text": label,
-                        "links": [{ "url": url, "offset": 0, "length": label.encode_utf16().count() }],
-                    }));
-                }
-            }
-            _ => out.push(serde_json::json!({ "type": "p", "text": text })),
-        }
-    }
-    out
-}
-
-fn block_to_html(block: &WorkBlock, assets: &[AssetEntry]) -> String {
-    match block.block_type.as_str() {
-        "heading" => format!(
-            "<h2>{}</h2>",
-            expand_pixiv_inline_notation(&escape_editor_html(block.text.as_deref().unwrap_or("")))
-        ),
-        "image" => {
-            let asset = block
-                .asset_id
-                .and_then(|id| assets.iter().find(|asset| asset.id == id));
-            let Some(asset) = asset else {
-                // 取り込んだときから絵が無かったものは、どの絵だったかを残す。
-                return match block_source_ref(block) {
-                    Some(reference) => format!(
-                        r#"<div class="missing-image-placeholder" role="note" data-image-reference="{}" data-image-missing="true">取得できなかった画像 {}</div>"#,
-                        escape_editor_html(&reference),
-                        escape_editor_html(&reference)
-                    ),
-                    None => "<div class=\"missing-image-placeholder\">画像が見つかりません</div>"
-                        .to_string(),
-                };
-            };
-            let caption = block
-                .text
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
-            let image = format!(
-                r#"<img class="novel-image" data-local-path="{}" alt="{}" />"#,
-                escape_editor_html(&asset.local_path),
-                escape_editor_html(caption.unwrap_or(&asset.filename))
-            );
-            // 書いた説明が読書画面にも EPUB にも出ないまま捨てられていた。
-            match caption {
-                Some(caption) => format!(
-                    r#"<figure class="novel-figure">{}<figcaption>{}</figcaption></figure>"#,
-                    image,
-                    escape_editor_html(caption)
-                ),
-                None => image,
-            }
-        }
-        "separator" => "<hr />".to_string(),
-        "page_break" => "<!-- newpage -->".to_string(),
-        "quote" => format!(
-            "<blockquote>{}</blockquote>",
-            expand_pixiv_inline_notation(&escape_editor_html(block.text.as_deref().unwrap_or("")))
-                .replace('\n', "<br />\n")
-        ),
-        "link" => {
-            let url = block.text.as_deref().unwrap_or("");
-            let label = block_attrs(block)
-                .and_then(|attrs| {
-                    attrs
-                        .get("label")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                })
-                .filter(|label| !label.trim().is_empty())
-                .unwrap_or_else(|| url.to_string());
-            format!(
-                r#"<a href="{}" target="_blank" rel="noopener noreferrer" class="novel-link-card"><span class="link-card-icon">🔗</span><span class="link-card-info"><span class="link-card-title">{}</span><span class="link-card-host">{}</span></span></a>"#,
-                escape_editor_html(url),
-                escape_editor_html(&label),
-                escape_editor_html(url)
-            )
-        }
-        // 地の文。書いた記法をそのまま開く ―― 取り込みと同じ関数を通すので、
-        // 編集画面で足したルビも読書画面でルビになる。
-        _ => expand_pixiv_inline_notation(&escape_editor_html(block.text.as_deref().unwrap_or("")))
-            .replace('\n', "<br />\n"),
-    }
 }
 
 fn active_edit_plain_text_locked(

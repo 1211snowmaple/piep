@@ -24,6 +24,9 @@ serde = { version = "1", features = ["derive"] }
 # サーバーから受け取るデータの型。サーバーと同じ定義を使う。
 piep-mobile-api = { path = "../../crates/piep-mobile-api" }
 piep-library-protocol = { path = "../../crates/piep-library-protocol" }
+# 本文の組み立て。デスクトップと同じものを使い、ページの切れ目を揃える。
+piep-reader-render = { path = "../../crates/piep-reader-render" }
+piep-storage = { path = "../../crates/piep-storage" }
 serde_json = "1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "gzip"] }
 rustls = { version = "0.23", features = ["ring"] }

@@ -40,7 +40,16 @@ impl Library {
     /// 一つの保存状態（または編集）を読むのに要る文書と、渡してよい全資産の file 記述。
     /// 編集の基準の保存版の資産は、その保存版の view で取る形で載せる。未保存の資産は載せない。
     pub fn reader_bundle(&self, entity: LibraryId, scope: ResourceScope) -> Result<ReaderBundle> {
-        let document = self.reader_document(entity, scope)?;
+        self.bundle_of(&self.reader_document(entity, scope)?, None)
+    }
+
+    /// 文書から読書用の一式を組む。`reading` は文書の `reading` に入れる読み方の情報。
+    pub fn bundle_of(
+        &self,
+        document: &super::ReaderDocument,
+        reading: Option<serde_json::Value>,
+    ) -> Result<ReaderBundle> {
+        let (entity, scope) = (document.entity, document.scope);
         let mut files = Vec::new();
         let manifests = std::iter::once(&document.resources).chain(document.base_resources.iter());
         for manifest in manifests {
@@ -61,7 +70,13 @@ impl Library {
             library_id: Id::new(self.id)?,
             entity_id: Id::new(entity)?,
             scope: wire_scope(scope)?,
-            document: serde_json::to_value(&document)?,
+            document: {
+                let mut value = serde_json::to_value(document)?;
+                if let (Some(reading), Some(object)) = (reading, value.as_object_mut()) {
+                    object.insert("reading".into(), reading);
+                }
+                value
+            },
             files,
         };
         bundle.validate()?;

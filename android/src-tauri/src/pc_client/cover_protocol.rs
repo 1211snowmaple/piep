@@ -30,10 +30,26 @@ const ENTITY_REFRESH_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, PartialEq, Eq)]
 enum Route {
-    Remote { endpoint: String, refreshes: bool },
-    SavedCover { work_id: i64 },
-    SavedEntity { work_id: i64, kind: String },
-    SavedCollection { work_id: i64, collection_id: String },
+    Remote {
+        endpoint: String,
+        refreshes: bool,
+    },
+    SavedCover {
+        work_id: i64,
+    },
+    SavedEntity {
+        work_id: i64,
+        kind: String,
+    },
+    SavedCollection {
+        work_id: i64,
+        collection_id: String,
+    },
+    /// 新しい棚の本文の画像。開いた文書の鍵と、その文書の中の画像の番号。
+    Native {
+        key: String,
+        asset: usize,
+    },
 }
 
 /// 取り直しを新しい要求から順に回す。速くスクロールすると、画面から消えた行の要求が
@@ -315,6 +331,15 @@ fn parse_route(path: &str) -> Option<Route> {
             endpoint: format!("/api/v1/collections/{id}/cover/{slot}"),
             refreshes: false,
         }),
+        ["native", entity, kind @ ("snapshot" | "edit"), view, asset] => {
+            let entity = uuid::Uuid::parse_str(entity).ok()?;
+            let view = uuid::Uuid::parse_str(view).ok()?;
+            let asset: usize = asset.parse().ok().filter(|asset| *asset < 1_000_000)?;
+            Some(Route::Native {
+                key: format!("{entity}/{kind}/{view}"),
+                asset,
+            })
+        }
         ["saved", id, _generation] => Some(Route::SavedCover {
             work_id: positive(id)?,
         }),
@@ -476,6 +501,62 @@ async fn serve_remote<R: Runtime>(
     }
 }
 
+fn sniffed_mime(bytes: &[u8]) -> Option<&'static str> {
+    Some(match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Jpeg => "image/jpeg",
+        image::ImageFormat::Png => "image/png",
+        image::ImageFormat::WebP => "image/webp",
+        image::ImageFormat::Gif => "image/gif",
+        _ => return None,
+    })
+}
+
+/// 新しい棚の本文の画像。開いた文書の一式に載っているファイルだけを取りに行く。
+/// 中身のハッシュで決まるので、接続先とハッシュで残す（改稿で古い絵が出ることはない）。
+async fn serve_native<R: Runtime>(
+    app: &AppHandle<R>,
+    key: &str,
+    asset: usize,
+) -> Response<Vec<u8>> {
+    use super::native_reader::{NativeReaderState, fetch_image, image_target};
+    let Some(target) = image_target(&app.state::<NativeReaderState>(), key, asset) else {
+        return failure(StatusCode::NOT_FOUND);
+    };
+    if target.file.length > MAX_ASSET_BYTES as u64 {
+        return failure(StatusCode::BAD_GATEWAY);
+    }
+    let cache = app.state::<CoverCacheState>();
+    let state = app.state::<PcClientState>();
+    let Ok((generation, Some(saved))) = state.connection_snapshot() else {
+        return failure(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let file = cache_path(&cache.dir, &saved.url, &format!("native/{}", target.id()));
+    let Ok(cached) = state.with_connection(generation, || Ok(read_cached(&file))) else {
+        return failure(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    if let Some((mime, bytes)) = cached {
+        return respond(StatusCode::OK, Some(&mime), bytes);
+    }
+    let _permit = cache.limiter.acquire().await;
+    let Ok(bytes) = fetch_image(&state, &target).await else {
+        return failure(StatusCode::BAD_GATEWAY);
+    };
+    let Some(mime) = sniffed_mime(&bytes) else {
+        return failure(StatusCode::BAD_GATEWAY);
+    };
+    if validate_display_image(&bytes, mime).is_err() {
+        return failure(StatusCode::BAD_GATEWAY);
+    }
+    let stored = state.with_connection(generation, || {
+        cache.write(&file, mime, &bytes);
+        Ok(())
+    });
+    if stored.is_err() {
+        return failure(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    respond(StatusCode::OK, Some(mime), bytes)
+}
+
 async fn serve<R: Runtime>(app: &AppHandle<R>, path: &str) -> Response<Vec<u8>> {
     use super::offline::{OfflineState, saved_collection_cover, saved_cover, saved_entity_cover};
     let Some(route) = parse_route(path) else {
@@ -486,6 +567,7 @@ async fn serve<R: Runtime>(app: &AppHandle<R>, path: &str) -> Response<Vec<u8>> 
             endpoint,
             refreshes,
         } => return serve_remote(app, path, &endpoint, refreshes).await,
+        Route::Native { key, asset } => return serve_native(app, &key, asset).await,
         Route::SavedCover { work_id } => saved_cover(&app.state::<OfflineState>(), work_id).await,
         Route::SavedEntity { work_id, kind } => {
             saved_entity_cover(&app.state::<OfflineState>(), work_id, &kind).await

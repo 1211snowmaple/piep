@@ -29,6 +29,7 @@ pub(crate) mod device_db;
 mod image_validation;
 pub(crate) mod local_reading;
 pub(crate) mod native_library;
+pub(crate) mod native_reader;
 pub(crate) mod offline;
 pub(crate) mod reading_sync;
 

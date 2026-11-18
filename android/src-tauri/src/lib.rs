@@ -43,6 +43,7 @@ pub fn run() {
                 records.clone(),
             ));
             app.manage(records);
+            app.manage(pc_client::native_reader::NativeReaderState::default());
             let covers = pc_client::cover_protocol::CoverCacheState::new(
                 app.path().app_cache_dir()?.join("covers"),
             );
@@ -71,6 +72,8 @@ pub fn run() {
             pc_client::pc_get_page,
             pc_client::native_library::pc_native_works,
             pc_client::native_library::pc_native_bundle,
+            pc_client::native_reader::pc_native_open,
+            pc_client::native_reader::pc_native_page,
             pc_client::pc_get_outline,
             pc_client::reading_sync::reading_record,
             pc_client::reading_sync::reading_sync,

@@ -1,6 +1,7 @@
 use super::*;
 use crate::library::{
-    Capture, CapturedAttachment, CapturedMedia, EntityKind, Fingerprint, ReaderBinding, SourceBody,
+    BodyAssetReference, Capture, CapturedAttachment, CapturedMedia, EntityKind, Fingerprint,
+    ReaderBinding, SourceBody,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -313,6 +314,19 @@ fn attachment_bodies_are_inserted_for_reading_and_search_alike() {
     let document = library.search_document(saved.entity_id).unwrap().unwrap();
     assert!(document.body.contains("取り込む本文"), "{}", document.body);
     assert_eq!(rendered.text_chars, document.body.chars().count());
+    // 携帯は添付を読み解けないので、渡す文書には差し込み済みの本文と字数が入る。携帯が
+    // その文書から組んだページは、デスクトップの読む画面と同じになる。
+    let bundle = library
+        .reading_bundle(saved.entity_id, ResourceScope::Snapshot(saved.snapshot_id))
+        .unwrap();
+    let parsed = piep_library_protocol::ReaderBundle::parse(&bundle.encode().unwrap()).unwrap();
+    let view = ReaderView::from_value(parsed.document).unwrap();
+    let reading = view.reading.clone().unwrap();
+    assert_eq!(reading.provider, "fanbox");
+    assert_eq!(reading.text_chars, rendered.text_chars);
+    let (pages, starts) = piep_reader_render::document::render_pages(&view, &reading.provider);
+    assert_eq!(pages, rendered.pages);
+    assert_eq!(starts, rendered.source_page_starts);
 }
 
 /// PDF の添付は「原本を見る」から紙面を開ける。ボタンは一時に書き出した場所ではなく
@@ -777,7 +791,7 @@ fn an_edit_is_laid_out_line_for_line_like_the_old_shelf() {
     let entity = LibraryId::now_v7();
     let scope = ResourceScope::Edit(LibraryId::now_v7());
     let document = ReaderDocument {
-        format: "test",
+        format: piep_reader_render::document::READER_DOCUMENT_FORMAT,
         entity,
         scope,
         metadata: BTreeMap::new(),
@@ -817,7 +831,7 @@ fn an_edit_is_laid_out_line_for_line_like_the_old_shelf() {
         file_size_bytes: 0,
     }];
     assert_eq!(
-        render_html(&document),
+        render_html(&document).unwrap(),
         crate::database::queries::blocks_to_html(&old_blocks, &old_assets)
     );
 }

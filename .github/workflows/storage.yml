@@ -21,12 +21,16 @@ jobs:
           workspaces: |
             crates/piep-storage
             crates/piep-library-protocol
+            crates/piep-reader-render
       - run: cargo +1.98.1 test --manifest-path crates/piep-storage/Cargo.toml --locked
       - run: cargo +1.98.1 clippy --manifest-path crates/piep-storage/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo +1.98.1 fmt --manifest-path crates/piep-storage/Cargo.toml -- --check
       - run: cargo +1.98.1 test --manifest-path crates/piep-library-protocol/Cargo.toml --locked
       - run: cargo +1.98.1 clippy --manifest-path crates/piep-library-protocol/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo +1.98.1 fmt --manifest-path crates/piep-library-protocol/Cargo.toml -- --check
+      - run: cargo +1.98.1 test --manifest-path crates/piep-reader-render/Cargo.toml --locked
+      - run: cargo +1.98.1 clippy --manifest-path crates/piep-reader-render/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo +1.98.1 fmt --manifest-path crates/piep-reader-render/Cargo.toml -- --check
 
   storage-android:
     runs-on: ubuntu-latest
@@ -50,7 +54,10 @@ jobs:
           workspaces: |
             crates/piep-storage
             crates/piep-library-protocol
+            crates/piep-reader-render
       - run: cargo +1.98.1 test --manifest-path crates/piep-storage/Cargo.toml --locked --target aarch64-linux-android --no-run
       - run: cargo +1.98.1 test --manifest-path crates/piep-storage/Cargo.toml --locked --target x86_64-linux-android --no-run
       - run: cargo +1.98.1 test --manifest-path crates/piep-library-protocol/Cargo.toml --locked --target aarch64-linux-android --no-run
       - run: cargo +1.98.1 test --manifest-path crates/piep-library-protocol/Cargo.toml --locked --target x86_64-linux-android --no-run
+      - run: cargo +1.98.1 test --manifest-path crates/piep-reader-render/Cargo.toml --locked --target aarch64-linux-android --no-run
+      - run: cargo +1.98.1 test --manifest-path crates/piep-reader-render/Cargo.toml --locked --target x86_64-linux-android --no-run

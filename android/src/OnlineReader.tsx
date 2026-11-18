@@ -18,6 +18,7 @@ import { readerKeyDirection } from "./readerKeyboard";
 import { readRemotePosition, recordReading, refreshReading, refreshReadingWithin, remoteStart, sendReading, type ReadingWrite, type RemoteStart } from "./readingSync";
 import { forgetWorkPages, fetchPage, prefetchPage } from "./pageCache";
 import { illustrationUrl } from "./images";
+import { nativeImageUrl, nativePage, openNative, type NativeOpened } from "./nativeReading";
 import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcMetadata, getPcOutline, getPcWorkCollections, pcErrorMessage, saveOfflineWork, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
 import type { ReaderBehavior, ReaderFont, ReaderType } from "./readerPrefs";
 
@@ -129,6 +130,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   const dismissedRemote = useRef(0);
   const currentPage = useRef(pageIndex);
   currentPage.current = pageIndex;
+  // 新しい棚で開けた作品は、本文・目次・挿絵をそこから読む。開けなければ今までどおり。
+  const native = useRef<NativeOpened | null>(null);
   const readingWork = detailWork ?? work;
   const loadMetadata = async () => readerMetadataForVersion(await getPcMetadata(work.id), selectedVersion);
   const positionKey = activeEditHash === undefined ? null : readingKey(readingWork, activeEditHash);
@@ -170,6 +173,18 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
    * サーバーが版を本文に添えるので、確かめるための往復は増えない。添えない古いサーバーにだけ一度尋ねる。
    */
   const readPage = async (target: number): Promise<PcPage | null> => {
+    const opened = native.current;
+    if (opened) {
+      try {
+        return await nativePage(opened, target);
+      } catch {
+        // 端末で組んだものは数冊ぶんしか覚えていない。消えていたら開き直す。
+        const again = await openNative(readingWork, true);
+        if (!again) throw new Error("本文を読み込めませんでした。もう一度読み込んでください");
+        native.current = again;
+        return nativePage(again, target);
+      }
+    }
     const next = await fetchPage(work.id, target, selectedVersion);
     const revision = next.revision;
     if (revision && revision.currentVersion === readingWork.currentVersion && revision.contentHash === readingWork.contentHash && revision.activeEditHash === activeEditHash) return next;
@@ -183,13 +198,13 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
 
   /** 次に読まれるページを先に受け取る。今のページの描画が済んでから。 */
   const prefetchNext = (shown: PcPage) => {
-    if (offline || shown.page + 1 >= shown.pageCount) return;
+    if (offline || native.current || shown.page + 1 >= shown.pageCount) return;
     window.setTimeout(() => prefetchPage(work.id, shown.page + 1, selectedVersion), PREFETCH_DELAY_MS);
   };
 
   const imageSource = (assetId: number, width: number, generation: string | null): string | Promise<string> => {
     if (offline) return getOfflineAsset(work.id, assetId, generation!).then((asset) => `data:${asset.mimeType};base64,${asset.base64}`);
-    const url = illustrationUrl(work.id, assetId, width, readingWork.currentVersion, readingWork.contentHash);
+    const url = native.current ? nativeImageUrl(native.current, assetId) : illustrationUrl(work.id, assetId, width, readingWork.currentVersion, readingWork.contentHash);
     if (!url) throw new Error("画像を読み込めません");
     return url;
   };
@@ -199,10 +214,16 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     let alive = true;
     // 版と同期の確認を待つあいだに本文も受け取っておく。位置が同じなら待ち時間がなくなる。
     prefetchPage(work.id, selectedVersion === null ? savedPage(work, null) : 0, selectedVersion);
-    void Promise.all([getPcMetadata(work.id), selectedVersion === null ? refreshReadingWithin(SYNC_WAIT_MS) : Promise.resolve()]).then(async ([original]) => {
+    void Promise.all([
+      getPcMetadata(work.id),
+      selectedVersion === null ? refreshReadingWithin(SYNC_WAIT_MS) : Promise.resolve(),
+      // 前の版を選んで読むときは今までどおり。新しい棚から開くのは今の版だけ。
+      selectedVersion === null ? openNative(work) : Promise.resolve(null),
+    ]).then(async ([original, , opened]) => {
       const metadata = readerMetadataForVersion(original, selectedVersion);
       const start = selectedVersion === null ? await remoteStartFor(metadata.work, metadata.activeEditHash) : null;
       if (!alive) return;
+      native.current = opened;
       setSourceMetadata(original);
       setDetailWork(metadata.work);
       setIsEdited(metadata.isEdited);
@@ -537,6 +558,10 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     let alive = true;
     void (async () => {
       try {
+        if (!offline && native.current) {
+          setOutline(native.current.outline);
+          return;
+        }
         const entries = await (offline ? getOfflineOutline(work.id, offlineGeneration!) : getPcOutline(work.id, selectedVersion));
         if (!alive) return;
         if (!offline) {

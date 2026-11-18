@@ -103,24 +103,7 @@ fn short_url_digest(url: &str) -> String {
         .collect()
 }
 
-/// ファイル名サニタイザー
-/// OS依存の禁止文字 (< > : " / \ | ? *) や、ディレクトリトラバーサルを示す ".." を安全な文字列に置換する
-pub fn sanitize_filename(name: &str) -> String {
-    let mut cleaned = name.replace("..", "__");
-
-    // Windowsの不正文字をアンダースコアに置換
-    let invalid_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
-    for &c in &invalid_chars {
-        cleaned = cleaned.replace(c, "_");
-    }
-
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        "asset_file".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
+pub use piep_reader_render::sanitize_filename;
 
 /// Authentication is supplied manually rather than through a cookie jar, so
 /// it must never follow an arbitrary asset URL from post JSON. Keep this list

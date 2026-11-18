@@ -20,11 +20,15 @@ use super::{
     WorkEditRevision, READER_CACHE_MAX_BYTES, READER_CACHE_MAX_DOCUMENTS, READER_CACHE_TICK,
     READER_CONTENT_CACHE,
 };
+#[cfg(test)]
+pub(super) use piep_reader_render::pages::folded_match_positions;
+pub(super) use piep_reader_render::pages::{
+    fold_for_reader_search, reader_outline, search_reader_pages,
+};
 use rusqlite::{params, OptionalExtension};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::Arc;
-use unicode_normalization::UnicodeNormalization;
 
 fn reader_asset_stamp(assets: &[super::AssetEntry]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -43,138 +47,6 @@ fn reader_asset_stamp(assets: &[super::AssetEntry]) -> u64 {
         }
     }
     hasher.finish()
-}
-
-/// 本文内検索のための、**1 文字を 1 文字へ**畳む正規化。
-///
-/// 棚の検索は形態素解析まで通して表記ゆれを吸収するのに、本文内検索だけが
-/// `to_lowercase` の部分一致だった。同じアプリの中で探し方の水準が二段違って
-/// いたので、「カタカナ」で書かれた語を「かたかな」で探すと出てこなかった。
-///
-/// ここで畳み方を 1 対 1 に留めているのは、見つけた位置をそのまま元の本文の
-/// 文字位置として使うため。長さが変わる畳み方（半角カナの濁点など）は
-/// 扱わない ―― 位置がずれるほうが、少し見つからないことより困る。
-pub(super) fn fold_char(ch: char) -> char {
-    if ch == '\u{3000}' {
-        return ' ';
-    }
-    // 全角英数などは NFKC で半角へ。1 文字に収まるものだけを受け取る。
-    let single = ch.to_string();
-    let compat = {
-        let mut chars = single.nfkc();
-        match (chars.next(), chars.next()) {
-            (Some(only), None) => only,
-            _ => ch,
-        }
-    };
-    let lowered = {
-        let mut chars = compat.to_lowercase();
-        match (chars.next(), chars.next()) {
-            (Some(only), None) => only,
-            _ => compat,
-        }
-    };
-    // カタカナはひらがなへ寄せる。ヴ（U+30F4）までを対象にする。
-    match lowered {
-        'ァ'..='ヶ' => char::from_u32(lowered as u32 - 0x60).unwrap_or(lowered),
-        other => other,
-    }
-}
-
-static READER_HEADING: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"(?is)<h2\b[^>]*>(.*?)</h2>").expect("valid heading regex")
-});
-
-pub(super) fn fold_for_reader_search(query: &str) -> String {
-    query.chars().map(fold_char).collect()
-}
-
-/// 畳んだ本文の中で、畳んだ検索語が始まる文字位置をすべて返す。
-///
-/// 重なる一致は数えない。「ああ」を「あああ」から 2 件と数えると、画面側が
-/// 入れ子の印を描くことになり、一覧の件数と本文の印がずれる。
-pub(super) fn folded_match_positions(haystack: &[char], needle: &str) -> Vec<usize> {
-    let needle = needle.chars().collect::<Vec<_>>();
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return Vec::new();
-    }
-    let mut positions = Vec::new();
-    let mut start = 0;
-    while start + needle.len() <= haystack.len() {
-        if haystack[start..start + needle.len()] == needle[..] {
-            positions.push(start);
-            start += needle.len();
-        } else {
-            start += 1;
-        }
-    }
-    positions
-}
-
-/// 作品全体の見出しと、それが載っているページ（1 から）。旧棚と新しい棚の読む画面で共通。
-pub(crate) fn reader_outline(pages: &[String]) -> Vec<ReaderOutlineEntry> {
-    let mut entries = Vec::new();
-    for (page, html) in pages.iter().enumerate() {
-        for (index, captures) in READER_HEADING.captures_iter(html).enumerate() {
-            let title = plain_text_from_reader_html(&captures[1]);
-            let title = title.trim();
-            if title.is_empty() {
-                continue;
-            }
-            entries.push(ReaderOutlineEntry {
-                page: page + 1,
-                index,
-                title: title.to_string(),
-            });
-            // 目次が本文より長くなっては意味がない。
-            if entries.len() >= 2_000 {
-                return entries;
-            }
-        }
-    }
-    entries
-}
-
-/// 本文内検索。ページ（1 から）ごとに、一致の数と最初の一致のまわりを返す。旧棚と新しい棚で共通。
-pub(crate) fn search_reader_pages(
-    pages: &[String],
-    query: &str,
-    limit: usize,
-) -> Vec<ReaderSearchHit> {
-    let needle = fold_for_reader_search(query.trim());
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    let mut hits = Vec::new();
-    for (page, html) in pages.iter().enumerate() {
-        let plain = plain_text_from_reader_html(html);
-        let chars = plain.chars().collect::<Vec<_>>();
-        // 1 文字が 1 文字に対応する畳み方なので、畳んだ側で見つけた位置は
-        // そのまま元の本文の文字位置になる。
-        let folded = chars.iter().map(|ch| fold_char(*ch)).collect::<Vec<_>>();
-        let positions = folded_match_positions(&folded, &needle);
-        if positions.is_empty() {
-            continue;
-        }
-        let char_index = positions[0];
-        let start = char_index.saturating_sub(42);
-        let end = (char_index + needle.chars().count() + 70).min(chars.len());
-        let snippet = format!(
-            "{}{}{}",
-            if start > 0 { "…" } else { "" },
-            chars[start..end].iter().collect::<String>(),
-            if end < chars.len() { "…" } else { "" }
-        );
-        hits.push(ReaderSearchHit {
-            page: page + 1,
-            snippet,
-            count: positions.len(),
-        });
-        if hits.len() >= limit.clamp(1, 200) {
-            break;
-        }
-    }
-    hits
 }
 
 impl Database {

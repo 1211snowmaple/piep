@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use piep_reader_render::pages::{ReaderOutlineEntry, ReaderSearchHit};
+pub use piep_reader_render::{AssetEntry, WorkBlock};
+
 /// ダウンロードエントリ（DB行に対応）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,20 +132,6 @@ pub struct EntityVersion {
     pub change_summary: Option<String>,
 }
 
-/// アセットエントリ（DB行に対応）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AssetEntry {
-    pub id: i64,
-    pub download_id: i64,
-    pub asset_type: String,
-    pub filename: String,
-    pub local_path: String,
-    pub original_url: Option<String>,
-    pub mime_type: Option<String>,
-    pub file_size_bytes: i64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScoreReason {
@@ -185,19 +174,6 @@ pub struct WorkEditRevision {
     pub content_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-}
-
-/// A block in the local editor document.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkBlock {
-    pub id: i64,
-    pub edit_revision_id: i64,
-    pub order: i64,
-    pub block_type: String,
-    pub text: Option<String>,
-    pub asset_id: Option<i64>,
-    pub attrs_json: Option<String>,
 }
 
 /// Input shape for saving editor blocks from the frontend.
@@ -297,26 +273,6 @@ pub struct EditedSourceForm {
     /// 編集画面で足した絵。版の置き場の外（`editor-assets/`）にあるので、
     /// 本文が指していても書き出す側からは見えない。書き出す側が本へ加える。
     pub added_images: Vec<AssetEntry>,
-}
-
-/// 作品全体の見出し 1 つ。読書画面の目次が使う。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReaderOutlineEntry {
-    /// 1 起点のページ番号。
-    pub page: usize,
-    /// そのページの中で何番目の見出しか（0 起点）。
-    pub index: usize,
-    pub title: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReaderSearchHit {
-    /// One-based transport/source page number for direct navigation.
-    pub page: usize,
-    pub snippet: String,
-    pub count: usize,
 }
 
 /// Runtime measurements used by the large-library diagnostics screen.  The

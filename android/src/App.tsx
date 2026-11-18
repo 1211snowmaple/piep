@@ -25,6 +25,7 @@ import { flushLocalReading } from "./localReading";
 import { setReadingServer, useLocalReadingsReady } from "./recentReading";
 import { statusQueryKey } from "./workList";
 import { forgetFavoriteChanges, useFavoriteNotice } from "./favorites";
+import { adoptNativeLibrary } from "./nativeReading";
 import { defaultPcSearch, getPcStatus, type OfflineWork, type PcConnectionStatus, type PcSearchCriteria, type PcWork } from "./pcApi";
 import { handleReaderKeyboard } from "./readerKeyboard";
 import { PullIndicator, usePullToRefresh } from "./pullToRefresh";
@@ -138,6 +139,8 @@ function App() {
     refetchInterval: (query) => query.state.data?.reachable ? false : 15_000,
   });
   const pcConnection = statusQuery.data ?? null;
+  // 本文を新しい棚から読めるかは、接続の状態が決める。読む画面が開く前に揃える。
+  adoptNativeLibrary(pcConnection);
   const setPcConnection = useCallback((next: PcConnectionStatus | null | ((old: PcConnectionStatus | null) => PcConnectionStatus | null)) => {
     queryClient.setQueryData<PcConnectionStatus | null>(statusQueryKey, (old) => typeof next === "function" ? next(old ?? null) : next);
   }, [queryClient]);

@@ -506,7 +506,7 @@ async fn bundle(
         let _permit = permit;
         authorize_reader_view(&ctx, principal.subject, entity, scope)?;
         ctx.library
-            .reader_bundle(entity, scope)
+            .reading_bundle(entity, scope)
             .map_err(library_error)?
             .encode()
             .map_err(|_| internal())

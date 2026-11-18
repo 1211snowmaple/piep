@@ -8,11 +8,11 @@
 //! （仮の名前は、旧棚の変換がその指定に対して探す名前そのもの）。
 
 use crate::database::models::AssetEntry;
-use crate::database::parser::{escape_html, parse_fanbox_value_to_html, parse_pixiv_value_to_html};
 use crate::library::{
-    BodyAssetReference, ContentFile, EditContent, Fingerprint, Library, LibraryId, ReaderBody,
-    ReaderDocument, ResourceInfo, ResourceReference, ResourceScope, Result,
+    ContentFile, EditContent, Fingerprint, Library, LibraryId, ReaderBody, ReaderDocument,
+    ResourceReference, ResourceScope, Result,
 };
+use piep_reader_render::document::ReaderView;
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::json;
@@ -180,25 +180,39 @@ impl Library {
         }
     }
 
-    /// 版（または有効な編集）の本文を、画面のページに分けた HTML にする。
-    pub fn render_document(
+    /// 読む画面へ渡す文書と、本文の平文の字数。デスクトップの読む画面と携帯へ渡す文書が通す。
+    ///
+    /// FANBOX の保存版は、旧棚と同じく添付の PDF・テキストの本文を添付の位置へ差し込む。
+    /// 検索の文書と同じ関数を通すので、読める本文と検索に入る本文が食い違わない。携帯は添付を
+    /// 読み解けないので、差し込んだ文書を渡す。字数は旧棚の読む画面と同じく、HTML ではなく
+    /// 本文の平文（検索に使う本文、添付から取り込んだ本文を含む）で数える。
+    ///
+    /// 取得元の応答に本文が無い作品（公開範囲の外の投稿など）は、旧棚と同じく空の本文にする。
+    pub fn reading_document(
         &self,
         work: LibraryId,
         scope: ResourceScope,
         provider: &str,
-    ) -> Result<RenderedDocument> {
-        let document = match self.reader_document(work, scope) {
+    ) -> Result<(ReaderDocument, usize)> {
+        let mut document = match self.reader_document(work, scope) {
             Ok(document) => document,
-            // 取得元の応答に本文が無い作品（公開範囲の外の投稿など）。旧棚と同じく空の本文にする。
-            Err(crate::library::Error::ResourceUnavailable) if matches!(scope, ResourceScope::Snapshot(snapshot) if self.source_body(work, snapshot)?.is_none()) =>
+            Err(crate::library::Error::ResourceUnavailable) if matches!(scope, ResourceScope::Snapshot(snapshot) if matches!(self.source_body(work, snapshot), Ok(None))) =>
             {
-                return Ok(RenderedDocument::default());
+                let document = ReaderDocument {
+                    format: piep_reader_render::document::READER_DOCUMENT_FORMAT,
+                    entity: work,
+                    scope,
+                    metadata: BTreeMap::new(),
+                    body: ReaderBody::PlainText(String::new()),
+                    resources: self.resource_manifest(work, scope)?,
+                    base_resources: None,
+                    bindings: Vec::new(),
+                    bindings_hash: None,
+                };
+                return Ok((document, 0));
             }
             Err(error) => return Err(error),
         };
-        let mut document = document;
-        // FANBOX の保存版は、旧棚と同じく添付の PDF・テキストの本文を添付の位置へ差し込む。
-        // 検索の文書と同じ関数を通すので、読める本文と検索に入る本文が食い違わない。
         let mut inserted_text = None;
         if let (ReaderBody::Article(body), ResourceScope::Snapshot(snapshot)) =
             (&mut document.body, scope)
@@ -211,20 +225,52 @@ impl Library {
             ));
             *body = post["body"].take();
         }
-        let html = render_html(&document);
-        let (pages, source_page_starts) =
-            crate::database::queries::paginate_reader_html(&html, provider);
-        // 旧棚の読む画面と同じく、HTML ではなく本文の平文（検索に使う本文、添付から取り込んだ
-        // 本文を含む）の字数。
         let text_chars = match inserted_text {
             Some(text) => text.chars().count(),
             None => self.work_text(work, scope)?.chars().count(),
         };
+        Ok((document, text_chars))
+    }
+
+    /// 版（または有効な編集）の本文を、画面のページに分けた HTML にする。
+    pub fn render_document(
+        &self,
+        work: LibraryId,
+        scope: ResourceScope,
+        provider: &str,
+    ) -> Result<RenderedDocument> {
+        let (document, text_chars) = self.reading_document(work, scope, provider)?;
+        let (pages, source_page_starts) =
+            piep_reader_render::document::render_pages(&view(&document)?, provider);
         Ok(RenderedDocument {
             pages,
             source_page_starts,
             text_chars,
         })
+    }
+
+    /// 携帯へ渡す読書用の文書と資産の一覧。文書には添付の本文を差し込み、取得元と字数を添える
+    /// （携帯はこれで同じページに組む）。
+    pub fn reading_bundle(
+        &self,
+        work: LibraryId,
+        scope: ResourceScope,
+    ) -> Result<piep_library_protocol::ReaderBundle> {
+        let provider: String = self.reader()?.query_row(
+            "SELECT provider FROM work_current_projection WHERE work_id=?1",
+            rusqlite::params![work.as_bytes().as_slice()],
+            |r| r.get(0),
+        )?;
+        let (document, text_chars) = self.reading_document(work, scope, &provider)?;
+        self.bundle_of(
+            &document,
+            Some(serde_json::to_value(
+                piep_reader_render::document::ReadingInfo {
+                    provider,
+                    text_chars,
+                },
+            )?),
+        )
     }
 }
 
@@ -238,241 +284,20 @@ fn edit_text(content: &EditContent) -> String {
         .join("\n\n")
 }
 
+/// 共通の組み立てが読む形にする。携帯がサーバーから受け取る文書と同じ JSON を通す。
+fn view(document: &ReaderDocument) -> Result<ReaderView> {
+    ReaderView::from_value(serde_json::to_value(document)?)
+        .map_err(crate::library::Error::Integrity)
+}
+
 /// 本文を HTML にする。画像は `data-local-path` にファイルの識別子を入れる。
-pub fn render_html(document: &ReaderDocument) -> String {
-    match &document.body {
-        ReaderBody::PixivText(text) => {
-            parse_pixiv_value_to_html(&json!({ "text": text }), &bound_assets(document).0)
-        }
-        ReaderBody::Article(body) => {
-            let (assets, marks) = bound_assets(document);
-            let mut body = body.clone();
-            let restore = marks.apply(&mut body);
-            let mut html = parse_fanbox_value_to_html(&json!({ "body": body }), &assets);
-            // 照合のために置いた画像の印は、画像の説明（alt）と参照にそのまま出る。旧棚と同じく
-            // 取得元の画像の ID に戻す（ID の無い項目は空）。
-            for (token, original) in restore {
-                html = html.replace(&token, &escape_html(&original));
-            }
-            html
-        }
-        ReaderBody::PlainText(text) => plain_html(text),
-        ReaderBody::Edit(content) => edit_html(content, document),
-    }
+pub fn render_html(document: &ReaderDocument) -> Result<String> {
+    Ok(piep_reader_render::document::render_html(&view(document)?))
 }
 
-fn plain_html(text: &str) -> String {
-    escape_html(text).replace('\n', "<br />\n")
-}
-
-/// 置き場（`local_path`）の形。画面は最初の `/` の前をファイルの識別子として読む。
-/// 添付は印（`file_token`）を後ろに付ける。
-fn local_path(info: &ResourceInfo, key: Option<&str>) -> Option<String> {
-    let file = info.file.as_ref()?;
-    Some(match key {
-        Some(key) => format!("{}/{key}", file.id),
-        None => file.id.to_string(),
-    })
-}
-
-/// 本文に付ける印。旧棚の変換は添付を「名前が一致する」か「置き場に取得元の ID を含む」で
-/// 探す。置き場の 16 進は短い ID（`f1` など）をたまたま含むので、別の画像や添付に当たる。
-/// 画像だけ・添付だけの投稿の配列（`images`・`files`）は項目に ID が無いこともある。
-/// そこで新しい棚の対応が結んだ項目の ID を、16 進に現れない文字（`z`）で囲んだ印に
-/// 置き換え、その印で照合させる。
-#[derive(Default)]
-pub(crate) struct Marks {
-    /// `blocks` の `fileId` と `fileMap` の鍵 → 印。
-    file_keys: BTreeMap<String, String>,
-    /// `images` の何番目 → 印。
-    images_at: BTreeMap<usize, String>,
-    /// `files` の何番目 → 印。
-    files_at: BTreeMap<usize, String>,
-}
-
-impl Marks {
-    fn next(&self, kind: &str) -> String {
-        let count = self.file_keys.len() + self.images_at.len() + self.files_at.len();
-        format!("piep-{kind}-z{count}z")
-    }
-
-    /// 印を置く。画像の印と元の ID の組を返す（組んだ HTML の中で元に戻すため）。
-    fn apply(&self, body: &mut serde_json::Value) -> Vec<(String, String)> {
-        use serde_json::Value;
-        // 印へ置き換える ID。`blocks` の投稿は `fileMap` の鍵、`files` の投稿は項目の ID。
-        // 添付の本文を差し込んだ `files` の投稿は、`files` から組んだ `blocks` と `fileMap` が
-        // 項目の元の ID で添付を指すので、その ID も印にする。
-        let mut keys = self.file_keys.clone();
-        let mut restore = Vec::new();
-        for (name, marks) in [("images", &self.images_at), ("files", &self.files_at)] {
-            let Some(items) = body.get_mut(name).and_then(Value::as_array_mut) else {
-                continue;
-            };
-            for (index, item) in items.iter_mut().enumerate() {
-                let Some(object) = item.as_object_mut() else {
-                    continue;
-                };
-                // 結ばれていない項目は、保存された別の画像に当たらないよう置き場の手がかりを外す。
-                object.remove("localPath");
-                if let Some(token) = marks.get(&index) {
-                    let original = object.get("id").and_then(Value::as_str).unwrap_or("");
-                    if name == "files" && !original.is_empty() {
-                        keys.insert(original.to_string(), token.clone());
-                    } else if name == "images" {
-                        restore.push((token.clone(), original.to_string()));
-                    }
-                    object.insert("id".into(), json!(token));
-                }
-            }
-        }
-        if let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut) {
-            for block in blocks {
-                let token = block
-                    .get("fileId")
-                    .and_then(Value::as_str)
-                    .and_then(|id| keys.get(id));
-                if let Some(token) = token {
-                    block["fileId"] = json!(token);
-                }
-            }
-        }
-        if let Some(map) = body.get_mut("fileMap").and_then(Value::as_object_mut) {
-            let renamed: serde_json::Map<String, Value> = std::mem::take(map)
-                .into_iter()
-                .map(|(key, value)| (keys.get(&key).cloned().unwrap_or(key), value))
-                .collect();
-            *map = renamed;
-        }
-        restore
-    }
-}
-
-/// 新しい棚の対応から、旧棚の変換が探す名前の仮の添付を作る。本文に付ける印も返す。
-pub(crate) fn bound_assets(document: &ReaderDocument) -> (Vec<AssetEntry>, Marks) {
-    let mut assets = Vec::new();
-    let mut marks = Marks::default();
-    for binding in &document.bindings {
-        let Some(resource) = &binding.resource else {
-            continue;
-        };
-        let (filename, key, asset_type) = match &binding.reference {
-            BodyAssetReference::PixivUploaded { image_id } => {
-                (format!("inline_{image_id}.img"), None, "illustration")
-            }
-            BodyAssetReference::PixivIllustration {
-                illustration_id,
-                page,
-            } => (
-                format!("{illustration_id}_p{}.img", page.saturating_sub(1)),
-                None,
-                "illustration",
-            ),
-            BodyAssetReference::ArticleImage { key } => {
-                (format!("{key}.img"), None, "illustration")
-            }
-            BodyAssetReference::ArticleFile { key } => {
-                if resource.file.is_none() {
-                    continue;
-                }
-                let token = marks.next("file");
-                marks.file_keys.insert(key.clone(), token.clone());
-                (token.clone(), Some(token), "file")
-            }
-            BodyAssetReference::ArticleImageAt { index } => {
-                if resource.file.is_none() {
-                    continue;
-                }
-                let token = marks.next("image");
-                marks.images_at.insert(*index as usize, token.clone());
-                (format!("{token}.img"), None, "illustration")
-            }
-            BodyAssetReference::ArticleFileAt { index } => {
-                if resource.file.is_none() {
-                    continue;
-                }
-                let token = marks.next("file");
-                marks.files_at.insert(*index as usize, token.clone());
-                (token.clone(), Some(token), "file")
-            }
-        };
-        let Some(path) = local_path(resource, key.as_deref()) else {
-            continue;
-        };
-        assets.push(AssetEntry {
-            id: assets.len() as i64,
-            download_id: 0,
-            asset_type: asset_type.into(),
-            filename,
-            local_path: path,
-            original_url: None,
-            mime_type: resource.mime_type.clone(),
-            file_size_bytes: resource.file.as_ref().map_or(0, |file| file.length as i64),
-        });
-    }
-    (assets, marks)
-}
-
-/// 編集の本文。旧棚の編集と同じ関数（`blocks_to_html`）で組む。
-///
-/// 段の間の空行の数（`gap`）、見出し・引用・リンク・画像の説明の組み方、段の切れ目の印が旧棚と
-/// 同じでなければ、「何ページ目の何行目」で憶えた読書位置としおりが別の行を指す。前は新しい棚で
-/// 組み直していて、段の間を一律に一行にしていたので、編集した作品だけ行の数が違っていた。
-/// 移した編集は段の種類・属性・画像の枠（`legacy-asset:旧い番号`）を旧棚のまま持っている。
-fn edit_html(content: &EditContent, document: &ReaderDocument) -> String {
-    use crate::database::models::WorkBlock;
-    // 枠 → (ファイルの識別子, 名前)。取り込んだ画像と、基準の版の画像。
-    let mut files: BTreeMap<&str, (String, String)> = BTreeMap::new();
-    for info in document
-        .base_resources
-        .iter()
-        .flat_map(|manifest| manifest.resources.iter())
-    {
-        if let (ResourceReference::Media { slot }, Some(file)) = (&info.reference, &info.file) {
-            files.insert(slot.as_str(), (file.id.to_string(), slot.clone()));
-        }
-    }
-    for media in &content.media {
-        files.insert(
-            media.slot.as_str(),
-            (media.file.to_string(), media.original_name.clone()),
-        );
-    }
-    let mut assets: Vec<AssetEntry> = Vec::new();
-    let mut asset_of: BTreeMap<&str, i64> = BTreeMap::new();
-    let blocks: Vec<WorkBlock> = content
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(index, block)| {
-            let asset_id = block.media_slot.as_deref().and_then(|slot| {
-                let (file, name) = files.get(slot)?;
-                Some(*asset_of.entry(slot).or_insert_with(|| {
-                    let id = assets.len() as i64 + 1;
-                    assets.push(AssetEntry {
-                        id,
-                        download_id: 0,
-                        asset_type: "illustration".into(),
-                        filename: name.clone(),
-                        local_path: file.clone(),
-                        original_url: None,
-                        mime_type: None,
-                        file_size_bytes: 0,
-                    });
-                    id
-                }))
-            });
-            WorkBlock {
-                id: index as i64,
-                edit_revision_id: 0,
-                order: block.ordinal,
-                block_type: block.kind.clone(),
-                text: block.text.clone(),
-                asset_id,
-                attrs_json: (!block.attrs.is_null()).then(|| block.attrs.to_string()),
-            }
-        })
-        .collect();
-    crate::database::queries::blocks_to_html(&blocks, &assets)
+/// 旧棚の変換が探す名前の仮の添付。
+pub(crate) fn bound_assets(document: &ReaderDocument) -> Result<Vec<AssetEntry>> {
+    Ok(piep_reader_render::document::bound_assets(&view(document)?).0)
 }
 
 #[cfg(test)]
