@@ -12,6 +12,16 @@ export interface PcConnectionStatus {
   deviceName: string | null;
   issue: "offline" | "certificate_changed" | "certificate_untrusted" | "secret_lost" | "protocol_mismatch" | "revoked" | "not_ready" | "remote_error" | null;
   capabilities: string[];
+  nativeLibrary?: {
+    scope: {
+      libraryId: string;
+      subjectId: string;
+      syncEpoch: string;
+      connectionGeneration: number;
+    };
+    worksList: boolean;
+    readerBundle: boolean;
+  };
 }
 
 export const pcConnectionIssueText: Record<NonNullable<PcConnectionStatus["issue"]>, string> = {

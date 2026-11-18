@@ -69,6 +69,8 @@ pub fn run() {
             pc_client::pc_set_favorite,
             pc_client::pc_get_metadata,
             pc_client::pc_get_page,
+            pc_client::native_library::pc_native_works,
+            pc_client::native_library::pc_native_bundle,
             pc_client::pc_get_outline,
             pc_client::reading_sync::reading_record,
             pc_client::reading_sync::reading_sync,
