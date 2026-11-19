@@ -144,7 +144,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
   const isOpen = (id: GroupId) => openGroups?.[id] ?? DEFAULT_OPEN[id];
 
   const shelf = activeShelf(location.pathname, location.searchParams);
-  const activeSavedId = Number.parseInt(location.searchParams.get("saved") ?? "", 10);
+  const activeSavedId = location.searchParams.get("saved") || null;
   // Collections are a library tab now, so a collection screen keeps the
   // library section highlighted rather than needing an entry of its own.
   const onAttention = location.pathname === "/library" && Boolean(parseAcquisitionFilter(location.searchParams.get("acquisition")));
@@ -222,7 +222,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
               {shelfRows}
               {attentionRow}
             </NavGroup>
-            <NavGroup id="saved" label="保存した検索" icon={Icons.savedSearch} open={isOpen("saved")} onToggle={toggle} active={Number.isSafeInteger(activeSavedId)}>
+            <NavGroup id="saved" label="保存した検索" icon={Icons.savedSearch} open={isOpen("saved")} onToggle={toggle} active={Boolean(activeSavedId)}>
               {saved.length === 0
                 ? <Text px="sm" size="xs" c="dimmed" py={4}>検索条件を保存すると、ここから開けます。</Text>
                 : savedRows}

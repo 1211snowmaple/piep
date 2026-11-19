@@ -21,11 +21,10 @@ use crate::database::{
     EntityFacetScope, EntityProfileRepairStatus, EntitySeriesPage, EntityVersion, FacetCount,
     FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
     PersonEntry, ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit,
-    SavedSearch, SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus,
-    SearchSuggestParams, SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry,
-    UpdateCredentials, UpdateTarget, UpdateTargetInput, WorkBlockInput, WorkCollection,
-    WorkCollectionInput, WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision,
-    WorkKey,
+    SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams, SearchSuggestResult,
+    SearchV2Params, SearchV2Result, SeriesEntry, UpdateCredentials, UpdateTarget,
+    UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
+    WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision, WorkKey,
 };
 use crate::AppState;
 use sha2::{Digest, Sha256};
@@ -45,6 +44,9 @@ static ENTITY_REFRESH_LOCK: LazyLock<AsyncMutex<Option<Instant>>> =
     LazyLock::new(|| AsyncMutex::new(None));
 #[path = "database_profile_shelf.rs"]
 mod profile_shelf;
+#[path = "database_saved_search_shelf.rs"]
+mod saved_search_shelf;
+use saved_search_shelf::{SavedSearchView, SavedSearchViewInput};
 static ENTITY_PROFILE_REPAIR_RUNNING: AtomicBool = AtomicBool::new(false);
 static ENTITY_PROFILE_REPAIR_CANCEL: AtomicBool = AtomicBool::new(false);
 static SEARCH_REBUILD_JOBS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
@@ -949,25 +951,55 @@ pub async fn db_list_entity_tags(
     .await
 }
 
-/// 保存した検索の一覧を返す。
+/// 保存した検索の一覧を返す。ID は文字列（切り替えた棚では検索の UUID）。
 #[tauri::command]
-pub async fn db_list_saved_searches(app: tauri::AppHandle) -> Result<Vec<SavedSearch>, String> {
-    run_db_blocking(app, move |state| state.db.list_saved_searches()).await
+pub async fn db_list_saved_searches(app: tauri::AppHandle) -> Result<Vec<SavedSearchView>, String> {
+    run_db_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return saved_search_shelf::list(&library);
+        }
+        Ok(state
+            .db
+            .list_saved_searches()?
+            .into_iter()
+            .map(saved_search_shelf::legacy_view)
+            .collect())
+    })
+    .await
 }
 
 /// 検索を保存する。同じ名前があれば上書きし、保存後の姿を返す。
 #[tauri::command]
 pub async fn db_upsert_saved_search(
     app: tauri::AppHandle,
-    input: SavedSearchInput,
-) -> Result<SavedSearch, String> {
-    run_library_write_blocking(app, move |state| state.db.upsert_saved_search(&input)).await
+    input: SavedSearchViewInput,
+) -> Result<SavedSearchView, String> {
+    run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return saved_search_shelf::upsert(&library, input);
+        }
+        let input = saved_search_shelf::legacy_input(input)?;
+        state
+            .db
+            .upsert_saved_search(&input)
+            .map(saved_search_shelf::legacy_view)
+    })
+    .await
 }
 
 /// 保存した検索を消す。`false` は「その ID が無かった」を意味する。
 #[tauri::command]
-pub async fn db_delete_saved_search(app: tauri::AppHandle, id: i64) -> Result<bool, String> {
-    run_library_write_blocking(app, move |state| state.db.delete_saved_search(id)).await
+pub async fn db_delete_saved_search(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+    run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return saved_search_shelf::delete(&library, &id);
+        }
+        match id.parse::<i64>() {
+            Ok(id) => state.db.delete_saved_search(id),
+            Err(_) => Ok(false),
+        }
+    })
+    .await
 }
 
 /// コレクションの一覧を、要約だけで返す。

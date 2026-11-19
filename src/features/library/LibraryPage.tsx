@@ -542,7 +542,7 @@ function openSaveSearchModal(defaultName: string, onConfirm: (name: string) => v
 
 const MANAGE_SEARCH_MODAL = "manage-saved-searches";
 
-function openManageSavedSearches(saved: SavedSearchRecord[], onDelete: (id: number) => void) {
+function openManageSavedSearches(saved: SavedSearchRecord[], onDelete: (id: string) => void) {
   modals.open({
     modalId: MANAGE_SEARCH_MODAL,
     title: "保存した検索を整理",
@@ -726,7 +726,7 @@ export default function LibraryPage() {
     entitySortOrder?: LibrarySortOrder;
     collectionSortBy?: CollectionSortBy | null;
     collectionSortOrder?: LibrarySortOrder;
-    saved?: number | null;
+    saved?: string | null;
     searchMode?: "smart" | "exact" | "semantic" | null;
     versionScope?: LibraryVersionScope;
     membershipShelf?: SavedMembershipShelf;
@@ -1291,7 +1291,7 @@ export default function LibraryPage() {
     onError: (error) => notifications.show({ color: "red", title: "検索を保存できません", message: errorMessage(error) }),
   });
   const deleteSavedMutation = useMutation({
-    mutationFn: (id: number) => deleteSavedSearch(id),
+    mutationFn: (id: string) => deleteSavedSearch(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["saved-searches"] });
       notifications.show({ color: "gray", message: "保存した検索を削除しました" });
@@ -1334,10 +1334,10 @@ export default function LibraryPage() {
   // A saved search reached by URL - from the sidebar, a deep link or the back
   // button - is expanded into the visible conditions once, so what is on screen
   // always matches what the controls say.
-  const savedIdParam = Number.parseInt(urlParams.get("saved") ?? "", 10);
-  const appliedSavedRef = useRef<number | null>(null);
+  const savedIdParam = urlParams.get("saved") || null;
+  const appliedSavedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!Number.isSafeInteger(savedIdParam)) {
+    if (!savedIdParam) {
       appliedSavedRef.current = null;
       return;
     }

@@ -529,7 +529,8 @@ export interface LibraryShelfCounts {
 }
 
 export interface SavedSearchRecord {
-  id: number;
+  /** 切り替えた棚では検索の UUID、旧棚では番号の文字列。中身を解釈しない。 */
+  id: string;
   name: string;
   query: string | null;
   paramsJson: string;
@@ -539,7 +540,7 @@ export interface SavedSearchRecord {
 
 export interface SavedSearchInput {
   /** Omitted for a new entry; reusing a name replaces that entry. */
-  id?: number | null;
+  id?: string | null;
   name: string;
   query?: string | null;
   paramsJson: string;

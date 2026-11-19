@@ -250,7 +250,7 @@ describe("LibraryPage search", () => {
     window.location.hash = "#/library?tab=people&saved=41&ewatch=watched&emin=8&edone=1&esort=name&eorder=asc&csort=name&corder=asc&sort=title&order=desc";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(["saved-searches"], [{
-      id: 41,
+      id: "41",
       name: "更新の多いコレクション",
       query: null,
       paramsJson: JSON.stringify({
@@ -284,7 +284,7 @@ describe("LibraryPage search", () => {
     window.location.hash = "#/library?saved=43&revised=1";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(["saved-searches"], [{
-      id: 43,
+      id: "43",
       name: "読みかけの長編",
       query: null,
       paramsJson: JSON.stringify({
@@ -324,7 +324,7 @@ describe("LibraryPage search", () => {
     window.location.hash = "#/library?tab=series&saved=42&csort=name&corder=desc&esort=name&eorder=desc&ewatch=watched&emin=9&edone=1";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(["saved-searches"], [{
-      id: 42,
+      id: "42",
       name: "停止中の短いシリーズ",
       query: null,
       paramsJson: JSON.stringify({
