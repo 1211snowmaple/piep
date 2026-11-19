@@ -51,10 +51,10 @@ import { CollectionAddWorksModal } from "./CollectionAddWorksModal";
 import { CollectionAdditionsModal } from "./CollectionAdditionsModal";
 import { CollectionCoverModal } from "./CollectionCoverModal";
 import { CollectionRenameModal } from "./CollectionRenameModal";
-import { CollectionMemberList } from "./CollectionMemberList";
+import { collectionMemberKey, CollectionMemberList } from "./CollectionMemberList";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import { Locked } from "@/components/Locked";
-import type { ShelfCollectionChange } from "@/services/libraryV2Api";
+import { libraryV2ImportEditImage, type ShelfCollectionChange } from "@/services/libraryV2Api";
 import {
   SHELF_NOT_YET,
   SHELF_READ_ONLY,
@@ -185,13 +185,14 @@ function shelfChange(action: MemberAction): ShelfCollectionChange {
 
 function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, writable = false, onEdit, onChanged }: { collection: WorkCollection; readOnly: boolean; shelf?: boolean; writable?: boolean; onEdit: (assist?: boolean) => void; onChanged: (collection: WorkCollection) => void }) {
   // 新しい棚は、正本に切り替えるまで読むだけ。書き換える操作は同じ場所に押せない形で置き、
-  // 理由を添える。切り替えた棚でも、表紙・EPUB・分け方の手伝い・複数選択はまだつないでいない
-  // （合う作品を探す・名前の案は切り替えた棚でも使える）。
+  // 理由を添える。切り替えた棚でも、EPUB と分け方の手伝いはまだつないでいない。
   const onShelf = shelf && writable;
   const readOnly = previewOnly || (shelf && !writable);
   const locked = shelf && !writable ? SHELF_READ_ONLY : null;
   const pending = shelf ? (writable ? SHELF_NOT_YET : SHELF_READ_ONLY) : null;
   const pendingOff = previewOnly || shelf;
+  // 表紙と複数選択は、切り替えた棚でも使える（読むだけの棚では押せない）。
+  const editOff = readOnly;
   const editOnShelf = async (change: ShelfCollectionChange): Promise<WorkCollection> => {
     const value = await editShelfCollection(collection.id, change);
     if (!value) throw new Error("コレクションが見つかりません");
@@ -209,7 +210,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
   const [additionsOpened, additionsModal] = useDisclosure(false);
   const [view, setView] = useViewMode("collection-members");
   const [selectionMode, setSelectionMode] = useState(false);
-  const [selected, setSelected] = useState<number[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   const ordered = collection.collectionKind === "ordered";
 
@@ -331,7 +332,14 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
   });
 
   const coverMutation = useMutation({
-    mutationFn: upsertWorkCollection,
+    mutationFn: ({ input, coverWork }: { input: WorkCollectionInput; coverWork: { source: string; sourceId: string } | null }) => onShelf
+      ? editOnShelf({
+          kind: "look",
+          cover_work: input.coverMode === "single" && coverWork ? workKey(coverWork) : null,
+          cover_mode: input.coverMode ?? null,
+          cover_image: input.coverImagePath ?? null,
+        })
+      : upsertWorkCollection(input),
     onSuccess: (value) => {
       onChanged(value);
       coverModal.close();
@@ -453,7 +461,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
   // 外すときだけ、押した瞬間に消えていた。並びも一緒に失われる。
   const removeSelected = () => {
     const chosen = collection.members
-      .filter((member) => member.downloadId !== null && selectedSet.has(member.downloadId));
+      .filter((member) => selectedSet.has(collectionMemberKey(member)));
     if (chosen.length === 0) return;
     modals.openConfirmModal({
       title: "選んだ作品をこのコレクションから外しますか？",
@@ -509,7 +517,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
             <div className="collection-hero__cover">
               <CollectionCover collection={collection} variant="detail" />
               <Locked reason={pending} label="表紙を変える">
-                <Button variant="subtle" size="compact-xs" color="gray" disabled={pendingOff} onClick={coverModal.open}>表紙を変える</Button>
+                <Button variant="subtle" size="compact-xs" color="gray" disabled={editOff} onClick={coverModal.open}>表紙を変える</Button>
               </Locked>
             </div>
             <Stack gap={6} flex={1} miw={0}>
@@ -520,7 +528,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
                 <Badge variant="light" color={ordered ? "piep" : "gray"}>{ordered ? "順序付き" : "順序なし"}</Badge>
                 <Text size="sm" c="dimmed">{formatNumber(collection.memberCount)}作品 · {formatNumber(collection.totalTextLength)}字</Text>
                 {missingCount > 0 && <Badge color="orange" variant="light">収録できない {formatNumber(missingCount)}作品</Badge>}
-                {shelf && <Tooltip label={writable ? "新しい棚から読み書きしています。表紙・EPUB・分け方の手伝いはまだ旧棚だけです。" : "新しい棚（試験中）から読んでいます。正本に切り替えるまで、ここからは何も書き換えません。"}><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}
+                {shelf && <Tooltip label={writable ? "新しい棚から読み書きしています。EPUB と分け方の手伝いはまだ旧棚だけです。" : "新しい棚（試験中）から読んでいます。正本に切り替えるまで、ここからは何も書き換えません。"}><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}
               </Group>
               {/* 主操作の「作品を追加」は右端。「合う作品を探す」はその隣に置く。
                   どちらも束へ作品を入れる操作で、違うのは**誰が探すか**だけである。 */}
@@ -576,7 +584,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
                     <Menu.Item leftSection={<Icons.sort size={IconSize.menu} />} disabled={readOnly || !ordered || collection.members.length < 2} onClick={() => sortBy("published")}>投稿日順に整列</Menu.Item>
                     <Menu.Item leftSection={<Icons.sort size={IconSize.menu} />} disabled={readOnly || !ordered || collection.members.length < 2} onClick={() => sortBy("episode")}>題名の連番順に整列</Menu.Item>
                     <Menu.Divider />
-                    <Menu.Item leftSection={<Icons.select size={IconSize.menu} />} disabled={pendingOff || collection.availableCount === 0} aria-label={pending ? `複数選択して外す（${pending}）` : undefined} onClick={() => { setSelectionMode(true); setSelected([]); }}>複数選択して外す</Menu.Item>
+                    <Menu.Item leftSection={<Icons.select size={IconSize.menu} />} disabled={editOff || collection.availableCount === 0} onClick={() => { setSelectionMode(true); setSelected([]); }}>複数選択して外す</Menu.Item>
                     <Menu.Divider />
                     {/* 削除は最下部に大きく置いていた。押す機会より、押して
                         しまう機会のほうが多い場所だった。 */}
@@ -684,12 +692,13 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
         busy={mutation.isPending || addFromSuggestions.isPending}
         onAdd={(candidates) => addFromSuggestions.mutate(candidates)}
       />}
-      {!pendingOff && <CollectionCoverModal
+      {!editOff && <CollectionCoverModal
         opened={coverOpened}
         onClose={coverModal.close}
         collection={collection}
         busy={coverMutation.isPending}
-        onSave={(input) => coverMutation.mutate(input)}
+        importImage={onShelf ? async (path) => (await libraryV2ImportEditImage(path)).file : undefined}
+        onSave={(input, coverWork) => coverMutation.mutate({ input, coverWork })}
       />}
       {!pendingOff && <CollectionSplitAssist
         opened={splitOpened}

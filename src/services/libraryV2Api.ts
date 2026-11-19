@@ -204,6 +204,11 @@ export function libraryV2AdoptDevicePositions(positions: [number, number][]): Pr
   return invoke<[number, string][]>("library_v2_adopt_device_positions", { positions });
 }
 
+/** 読みかけから外す（読書位置を消す。正本に切り替えた棚だけ）。外した数を返す。 */
+export function libraryV2ClearReadingPositions(works: string[]): Promise<number> {
+  return invoke<number>("library_v2_clear_reading_positions", { works });
+}
+
 /** 作品を棚から外す（正本に切り替えた棚だけ）。 */
 export function libraryV2RemoveWork(work: string): Promise<void> {
   return invoke<void>("library_v2_remove_work", { request: crypto.randomUUID(), work });
@@ -433,6 +438,11 @@ export type ShelfSeriesSort =
 /** 取得元の ID から作者・シリーズの頭を引く。棚に無ければ null。 */
 export function libraryV2Entity(kind: "person" | "series", provider: string, key: string): Promise<ShelfEntityHead | null> {
   return invoke<ShelfEntityHead | null>("library_v2_entity", { kind, provider, key });
+}
+
+/** 取得元と作品の番号から、棚に載っている作品を引く（本文のリンクの宛先）。無ければ null。 */
+export function libraryV2FindWork(provider: string, key: string): Promise<{ id: string; title: string } | null> {
+  return invoke<{ id: string; title: string } | null>("library_v2_find_work", { provider, key });
 }
 
 /** 作者・シリーズの作品に付いたタグ。多い順。 */
@@ -694,7 +704,7 @@ export interface ShelfWorkKey {
 export type ShelfCollectionChange =
   | { kind: "create"; title: string; description: string | null; ordered: boolean; works: ShelfWorkKey[] }
   | { kind: "describe"; title: string; description: string | null; ordered: boolean; name_source: string | null }
-  | { kind: "look"; cover_work: ShelfWorkKey | null; cover_mode: string | null }
+  | { kind: "look"; cover_work: ShelfWorkKey | null; cover_mode: string | null; cover_image: string | null }
   | { kind: "add"; works: ShelfWorkKey[] }
   | { kind: "remove"; works: ShelfWorkKey[] }
   | { kind: "reorder"; works: ShelfWorkKey[] }

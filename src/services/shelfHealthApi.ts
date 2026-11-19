@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DashboardSummary, LibraryMaintenanceResult, LibraryShelfCounts, SearchIndexOptimizationResult, SearchIndexStatus } from "@/types/library";
+import type { DashboardSummary, FacetCount, FilterFacets, LibraryMaintenanceResult, LibraryShelfCounts, SearchIndexOptimizationResult, SearchIndexStatus } from "@/types/library";
 
 /**
  * 新しい棚の数と手入れ。`src-tauri/src/commands/library_health.rs` と対になる。
@@ -78,4 +78,14 @@ export function libraryV2Verify(): Promise<number> {
 
 export function libraryV2Reclaim(): Promise<ShelfReclaimReport> {
   return invoke<ShelfReclaimReport>("library_v2_reclaim");
+}
+
+/** 一覧の絞り込みの選択肢（タグ・作者・種別・添付）。作者・シリーズの束ねは含めない。 */
+export function libraryV2FilterFacets(): Promise<FilterFacets> {
+  return invoke<FilterFacets>("library_v2_filter_facets");
+}
+
+/** 絞り込みの選択肢を名前で探す。 */
+export function libraryV2SearchFilterFacets(kind: "tags" | "authors", query: string | null, limit = 30): Promise<FacetCount[]> {
+  return invoke<FacetCount[]>("library_v2_search_filter_facets", { kind, query: query?.trim() || null, limit });
 }

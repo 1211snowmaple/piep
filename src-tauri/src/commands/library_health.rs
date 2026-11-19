@@ -8,10 +8,11 @@
 
 use super::library_v2::LibraryV2;
 use crate::database::models::{
-    DashboardSummary, LibraryMaintenanceResult, LibraryShelfCounts, SearchIndexOptimizationResult,
-    SearchIndexStatus,
+    DashboardSummary, FacetCount, FilterFacets, LibraryMaintenanceResult, LibraryShelfCounts,
+    SearchIndexOptimizationResult, SearchIndexStatus,
 };
 use crate::library::{Library, LibraryId, ReclaimReport};
+use crate::library_facets::FacetKind;
 use crate::library_health::{ReadingSet, ShelfDiagnostics};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -283,6 +284,60 @@ pub async fn library_v2_reclaim(state: State<'_, Arc<LibraryV2>>) -> Result<Recl
     let state = Arc::clone(&state);
     on_switched(&state, |library| {
         library.reclaim_now().map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// 一覧の絞り込みの選択肢（タグ・作者・種別・添付）と件数。
+#[tauri::command]
+pub async fn library_v2_filter_facets(
+    state: State<'_, Arc<LibraryV2>>,
+) -> Result<FilterFacets, String> {
+    let state = Arc::clone(&state);
+    on_library(&state, |library| {
+        library.filter_facets().map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// 絞り込みの選択肢を名前で探す（`kind` は `tags` か `authors`）。
+#[tauri::command]
+pub async fn library_v2_search_filter_facets(
+    state: State<'_, Arc<LibraryV2>>,
+    kind: String,
+    query: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<FacetCount>, String> {
+    let state = Arc::clone(&state);
+    on_library(&state, move |library| {
+        let kind = FacetKind::parse(&kind).map_err(|e| e.to_string())?;
+        library
+            .search_filter_facets(kind, query.as_deref(), limit.unwrap_or(30))
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// 棚に載っている作品の ID と題名。
+#[derive(Serialize)]
+pub struct ListedWorkRef {
+    pub id: LibraryId,
+    pub title: String,
+}
+
+/// 本文のリンクが指す作品が棚に載っていれば、その ID と題名（外した作品は引かない）。
+#[tauri::command]
+pub async fn library_v2_find_work(
+    state: State<'_, Arc<LibraryV2>>,
+    provider: String,
+    key: String,
+) -> Result<Option<ListedWorkRef>, String> {
+    let state = Arc::clone(&state);
+    on_library(&state, move |library| {
+        Ok(library
+            .find_listed_work(&provider, &key)
+            .map_err(|e| e.to_string())?
+            .map(|(id, title)| ListedWorkRef { id, title }))
     })
     .await
 }

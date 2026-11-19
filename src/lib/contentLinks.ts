@@ -4,6 +4,8 @@ import { useAppNavigate } from "@/app/router";
 import { contentLinkTarget, normalizeContentLinkUrl } from "@shared/contentLinkTarget";
 import type { ContentLinkTarget } from "@shared/contentLinkTarget";
 import { getDownloadBySource, getPerson, getSeries, isTauriRuntime } from "@/services/dbApi";
+import { libraryV2Entity, libraryV2FindWork } from "@/services/libraryV2Api";
+import { SHELF_V2_PREFERENCE_KEY } from "@/features/library/shelfV2";
 import { openExternalUrl } from "@/services/openerApi";
 
 /**
@@ -17,12 +19,43 @@ import { openExternalUrl } from "@/services/openerApi";
  */
 /** 手元にあると分かったもの。作品だけは、行き先が画面によって変わる。 */
 type ResolvedLink =
-  | { kind: "work"; downloadId: number; title: string }
+  | { kind: "work"; downloadId: number | string; title: string }
   | { kind: "path"; path: string }
   | null;
 
+/** 一覧を新しい棚から出しているか（端末ごとの好み）。 */
+function shelfPreferred(): boolean {
+  try {
+    return localStorage.getItem(SHELF_V2_PREFERENCE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 新しい棚で引く。作品は棚の ID、作者・シリーズは同じ画面の住所。棚がまだ開けなければ
+ * `undefined`（旧棚で引く）。
+ */
+async function resolveOnShelf(target: ContentLinkTarget): Promise<ResolvedLink | undefined> {
+  try {
+    if (target.kind === "work") {
+      const found = await libraryV2FindWork(target.source, target.sourceId);
+      return found ? { kind: "work", downloadId: found.id, title: found.title } : null;
+    }
+    const head = await libraryV2Entity(target.kind, target.source, target.sourceKey);
+    const route = target.kind === "person" ? "people" : "series";
+    return head ? { kind: "path", path: `/${route}/${encodeURIComponent(target.source)}/${encodeURIComponent(target.sourceKey)}` } : null;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Whether the library actually holds it, without turning a miss into an error. */
 async function resolveTarget(target: ContentLinkTarget): Promise<ResolvedLink> {
+  if (shelfPreferred()) {
+    const onShelf = await resolveOnShelf(target);
+    if (onShelf !== undefined) return onShelf;
+  }
   try {
     if (target.kind === "work") {
       const saved = await getDownloadBySource<{ id: number; title?: string }>(target.source, target.sourceId);
@@ -58,7 +91,8 @@ const RESOLVE_TTL_MS = 120_000;
 const resolveCache = new Map<string, { at: number; value: Promise<ResolvedLink> }>();
 
 function cachedResolve(target: ContentLinkTarget): Promise<ResolvedLink> {
-  const key = contentLinkKey(target);
+  // どちらの棚で引いた答えかも鍵に含める（棚を切り替えたら引き直す）。
+  const key = `${shelfPreferred() ? "v2" : "v1"}:${contentLinkKey(target)}`;
   const hit = resolveCache.get(key);
   if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return hit.value;
   const value = resolveTarget(target);
@@ -73,7 +107,7 @@ export function forgetContentLinkResolutions(): void {
   resolveCache.clear();
 }
 
-async function resolveInApp(target: ContentLinkTarget, workRoute: (id: number) => string): Promise<string | null> {
+async function resolveInApp(target: ContentLinkTarget, workRoute: (id: number | string) => string): Promise<string | null> {
   const resolved = await cachedResolve(target);
   if (!resolved) return null;
   return resolved.kind === "work" ? workRoute(resolved.downloadId) : resolved.path;
@@ -91,7 +125,7 @@ export function useContentLinkNavigation(options: {
    * following "前編はこちら" mid-chapter wants to keep reading, not to be handed
    * a detail screen.
    */
-  workRoute?: (id: number) => string;
+  workRoute?: (id: number | string) => string;
 } = {}) {
   const navigate = useAppNavigate();
   // 既定の行き先は毎レンダー新しい関数になる。そのまま依存に置くと、
@@ -110,7 +144,7 @@ export function useContentLinkNavigation(options: {
     const runtime = isTauriRuntime();
     const target = contentLinkTarget(raw);
     if (target && runtime) {
-      const workRoute = workRouteRef.current ?? ((id: number) => `/works/${id}`);
+      const workRoute = workRouteRef.current ?? ((id: number | string) => `/works/${id}`);
       const path = await resolveInApp(target, workRoute);
       if (path) {
         navigate(path);

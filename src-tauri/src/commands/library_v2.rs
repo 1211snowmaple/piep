@@ -509,6 +509,44 @@ pub async fn library_v2_set_reading_position(
     .map_err(|e| e.to_string())?
 }
 
+/// 読みかけから外す（読書位置を消す。正本に切り替えた棚だけ）。位置の無い作品は何もしない。
+/// 外した作品の数を返す。
+#[tauri::command]
+pub async fn library_v2_clear_reading_positions(
+    state: State<'_, Arc<LibraryV2>>,
+    works: Vec<LibraryId>,
+) -> Result<usize, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.writable()?;
+        let mut cleared = 0;
+        for work in works {
+            let current = library
+                .reading_position(work, library.id)
+                .map_err(|e| e.to_string())?;
+            if current.location.is_none() {
+                continue;
+            }
+            library
+                .set_reading_position(crate::library::ReadingUpdate {
+                    request: LibraryId::now_v7(),
+                    work,
+                    user: library.id,
+                    device: desktop_device(&library),
+                    expected: current.generation,
+                    location: None,
+                    finished: false,
+                })
+                .map_err(|e| e.to_string())?;
+            cleared += 1;
+        }
+        state.forget_derived();
+        Ok(cleared)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 端末に旧棚の番号で残した読書位置を、切り替えた棚へ引き取る。番号に当たる作品の ID を返し、
 /// 画面は端末の記録をその ID で書き直す。棚に位置がない作品だけ、そのページの頭として書く
 /// （端末の細かい位置は px なので割合にできない。この端末では端末の記録のほうを使う）。
@@ -1373,9 +1411,12 @@ pub enum CollectionChangeInput {
         ordered: bool,
         name_source: Option<String>,
     },
+    /// `cover_image` は表紙に選んだ画像ファイルの識別子（取り込んだもの）。渡したとおりに書く。
     Look {
         cover_work: Option<WorkKeyInput>,
         cover_mode: Option<String>,
+        #[serde(default)]
+        cover_image: Option<String>,
     },
     Add {
         works: Vec<WorkKeyInput>,
@@ -1430,9 +1471,16 @@ fn collection_change(
         CollectionChangeInput::Look {
             cover_work,
             cover_mode,
+            cover_image,
         } => CollectionEdit::Look {
             cover_work: cover_work.map(one).transpose()?,
             cover_mode,
+            cover_image: Some(
+                cover_image
+                    .map(|file| crate::library::Fingerprint::parse(&file))
+                    .transpose()
+                    .map_err(|e| e.to_string())?,
+            ),
         },
         CollectionChangeInput::Add { works } => CollectionEdit::Add { works: all(works)? },
         CollectionChangeInput::Remove { works } => CollectionEdit::Remove { works: all(works)? },

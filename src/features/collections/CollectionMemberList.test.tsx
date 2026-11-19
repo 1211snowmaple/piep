@@ -42,7 +42,7 @@ function renderList(props: Partial<React.ComponentProps<typeof CollectionMemberL
     view: "compact",
     busy: false,
     selectionMode: false,
-    selected: new Set<number>(),
+    selected: new Set<string>(),
     onSelect: vi.fn(),
     onMove: vi.fn(),
     onDropAt: vi.fn(),

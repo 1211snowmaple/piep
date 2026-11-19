@@ -461,7 +461,7 @@ describe("LibraryPage search", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
-    await waitFor(() => expect(client.getQueryData(["library-facets"])).toBeDefined());
+    await waitFor(() => expect(client.getQueryData(["library-facets", false])).toBeDefined());
     fireEvent.change(within(spotlight).getByRole("textbox", { name: "条件を検索" }), { target: { value: "青葉" } });
     // jsdom cannot position the non-portaled dropdown, so Mantine keeps its
     // options hidden even though the same store is open in a real window.

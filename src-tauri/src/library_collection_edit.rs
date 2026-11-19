@@ -5,7 +5,9 @@
 //! 作る ID で、送り直しても二度書かない。
 
 use crate::database::collection_rules::episode_order;
-use crate::library::{CollectionMember, CollectionSave, Error, Library, LibraryId, Result};
+use crate::library::{
+    CollectionMember, CollectionSave, Error, Fingerprint, Library, LibraryId, Result,
+};
 use rusqlite::{params, OptionalExtension};
 use serde::Deserialize;
 use std::cmp::Ordering;
@@ -39,9 +41,11 @@ pub enum CollectionEdit {
         name_source: Option<String>,
     },
     /// 表紙。`cover_work` が None なら作品の表紙を使わない。`cover_mode` は渡したときだけ変える。
+    /// `cover_image`（表紙に選んだ画像ファイル）は `Some` のときだけ変える（`Some(None)` で外す）。
     Look {
         cover_work: Option<LibraryId>,
         cover_mode: Option<String>,
+        cover_image: Option<Option<Fingerprint>>,
     },
     /// 末尾に足す。もう入っている作品は飛ばす。
     Add {
@@ -64,6 +68,7 @@ pub enum CollectionEdit {
 struct Head {
     describe: Option<(String, Option<String>, bool)>,
     cover: Option<Option<LibraryId>>,
+    cover_image: Option<Option<Fingerprint>>,
     cover_mode: Option<String>,
     name_source: Option<String>,
 }
@@ -266,6 +271,7 @@ impl Library {
                     Head {
                         describe: Some((title, description, ordered)),
                         cover: None,
+                        cover_image: None,
                         cover_mode: None,
                         name_source,
                     },
@@ -274,6 +280,7 @@ impl Library {
             CollectionEdit::Look {
                 cover_work,
                 cover_mode,
+                cover_image,
             } => {
                 return self.write_collection_head(
                     request,
@@ -282,6 +289,7 @@ impl Library {
                     Head {
                         describe: None,
                         cover: Some(cover_work),
+                        cover_image,
                         cover_mode,
                         name_source: None,
                     },
@@ -444,9 +452,25 @@ impl Library {
                 params![key.as_slice(), cover.map(|w| w.as_bytes().to_vec())],
             )?;
         }
+        if let Some(image) = head.cover_image {
+            if let Some(file) = image {
+                tx.query_row(
+                    "SELECT 1 FROM content_files WHERE id=?1",
+                    [file.0.as_slice()],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .ok_or_else(|| Error::Integrity("表紙の画像が棚にありません".into()))?;
+            }
+            tx.execute(
+                "UPDATE collections SET cover_file_id=?2 WHERE id=?1",
+                params![key.as_slice(), image.map(|f| f.0.to_vec())],
+            )?;
+        }
         let payload = serde_json::json!({
             "describe": head.describe,
             "cover": head.cover,
+            "cover_image": head.cover_image.map(|image| image.map(|f| f.to_string())),
             "cover_mode": head.cover_mode,
             "name_source": head.name_source,
         });

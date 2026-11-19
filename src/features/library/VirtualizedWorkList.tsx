@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { WorkCard } from "@/components/WorkCard";
-import type { ListedWork } from "@/types/library";
+import type { ListedWork, ShelfEntry } from "@/types/library";
 import { isShelfEntry } from "@/features/library/shelfV2";
 
 type WorkListView = "gallery" | "compact";
@@ -12,6 +12,9 @@ interface VirtualizedWorkListProps {
   selectionMode?: boolean;
   selected?: ReadonlySet<number>;
   onSelect?: (id: number, selected: boolean) => void;
+  /** 新しい棚の作品の選択（ID は UUID なので番号の集合と分けて持つ）。 */
+  shelfSelected?: ReadonlySet<string>;
+  onSelectShelf?: (work: ShelfEntry, selected: boolean) => void;
   onToggleFavorite?: (id: number, favorite: boolean) => void;
   onToggleWatch?: (id: number, watch: boolean) => void;
   /** 未保存の改稿がある作品の ID（作品の画面と同じ文字列）。 */
@@ -62,6 +65,8 @@ export function VirtualizedWorkList({
   selectionMode = false,
   selected,
   onSelect,
+  shelfSelected,
+  onSelectShelf,
   onToggleFavorite,
   onToggleWatch,
   revisedIds,
@@ -137,8 +142,9 @@ export function VirtualizedWorkList({
       work={work}
       revised={revisedIds?.has(String(work.id))}
       selectionMode={selectionMode}
-      selected={legacyId !== null && selected?.has(legacyId)}
+      selected={legacyId !== null ? selected?.has(legacyId) : shelfSelected?.has(String(work.id))}
       onSelect={onSelect}
+      onSelectShelf={onSelectShelf}
       onToggleFavorite={onToggleFavorite}
       onToggleWatch={onToggleWatch}
     />

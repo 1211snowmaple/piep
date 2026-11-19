@@ -2753,48 +2753,7 @@ impl Database {
                 }
             }
 
-            let query_grams = query_ngrams(&normalized_query);
-            let mut scored = facets
-                .into_iter()
-                .filter_map(|facet| {
-                    let normalized_name = normalize_search_text(&facet.name);
-                    let mut score = if normalized_name == normalized_query {
-                        1000.0
-                    } else if normalized_name.starts_with(&normalized_query) {
-                        800.0
-                    } else if normalized_name.contains(&normalized_query) {
-                        650.0
-                    } else {
-                        let name_grams = generate_ngrams_limited(&normalized_name, 512);
-                        let overlap = query_grams
-                            .iter()
-                            .filter(|gram| name_grams.contains(*gram))
-                            .count();
-                        let ratio = if query_grams.is_empty() {
-                            0.0
-                        } else {
-                            overlap as f64 / query_grams.len() as f64
-                        };
-                        let fuzzy = normalized_levenshtein(&normalized_name, &normalized_query);
-                        (ratio * 430.0).max(if fuzzy >= 0.72 { fuzzy * 360.0 } else { 0.0 })
-                    };
-
-                    if score <= 0.0 {
-                        return None;
-                    }
-                    score += (facet.count as f64 + 1.0).ln() * 12.0;
-                    Some((score, facet))
-                })
-                .collect::<Vec<(f64, FacetCount)>>();
-
-            scored.sort_by(|a, b| {
-                b.0.partial_cmp(&a.0)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| b.1.count.cmp(&a.1.count))
-                    .then_with(|| a.1.name.cmp(&b.1.name))
-            });
-            scored.truncate(limit);
-            scored.into_iter().map(|(_, facet)| facet).collect()
+            rank_facets(facets, &normalized_query, limit)
         };
         if let Ok(mut cache) = self.facet_cache.lock() {
             cache.insert(
@@ -15855,3 +15814,56 @@ mod search_integration_tests;
 #[cfg(test)]
 #[path = "editor_roundtrip_tests.rs"]
 mod editor_roundtrip_tests;
+
+/// 絞り込みの選択肢を、問いに近い順に並べて `limit` 件に切る（旧棚と新しい棚で共通）。
+///
+/// `normalized_query` は `normalize_search_text` を通したもの。一致・前方一致・部分一致のあとに、
+/// 文字の重なりと編集距離で読みの揺れを拾い、使われている数を少し足す。
+pub(crate) fn rank_facets(
+    facets: Vec<FacetCount>,
+    normalized_query: &str,
+    limit: usize,
+) -> Vec<FacetCount> {
+    let query_grams = query_ngrams(normalized_query);
+    let mut scored = facets
+        .into_iter()
+        .filter_map(|facet| {
+            let normalized_name = normalize_search_text(&facet.name);
+            let mut score = if normalized_name == normalized_query {
+                1000.0
+            } else if normalized_name.starts_with(normalized_query) {
+                800.0
+            } else if normalized_name.contains(normalized_query) {
+                650.0
+            } else {
+                let name_grams = generate_ngrams_limited(&normalized_name, 512);
+                let overlap = query_grams
+                    .iter()
+                    .filter(|gram| name_grams.contains(*gram))
+                    .count();
+                let ratio = if query_grams.is_empty() {
+                    0.0
+                } else {
+                    overlap as f64 / query_grams.len() as f64
+                };
+                let fuzzy = normalized_levenshtein(&normalized_name, normalized_query);
+                (ratio * 430.0).max(if fuzzy >= 0.72 { fuzzy * 360.0 } else { 0.0 })
+            };
+
+            if score <= 0.0 {
+                return None;
+            }
+            score += (facet.count as f64 + 1.0).ln() * 12.0;
+            Some((score, facet))
+        })
+        .collect::<Vec<(f64, FacetCount)>>();
+
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| b.1.count.cmp(&a.1.count))
+            .then_with(|| a.1.name.cmp(&b.1.name))
+    });
+    scored.truncate(limit);
+    scored.into_iter().map(|(_, facet)| facet).collect()
+}

@@ -13,6 +13,7 @@ pub mod library_collection_edit;
 pub mod library_collections;
 pub mod library_entity;
 pub mod library_entity_list;
+pub mod library_facets;
 pub mod library_health;
 pub mod library_search;
 pub mod library_suggest;
@@ -345,6 +346,7 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_import_edit_image,
             commands::library_v2::library_v2_reading_position,
             commands::library_v2::library_v2_set_reading_position,
+            commands::library_v2::library_v2_clear_reading_positions,
             commands::library_v2::library_v2_adopt_device_positions,
             commands::library_v2::library_v2_search,
             commands::library_v2::library_v2_decorations,
@@ -372,6 +374,9 @@ pub fn run() -> tauri::Result<()> {
             commands::library_health::library_v2_optimize_search_index,
             commands::library_health::library_v2_verify,
             commands::library_health::library_v2_reclaim,
+            commands::library_health::library_v2_filter_facets,
+            commands::library_health::library_v2_search_filter_facets,
+            commands::library_health::library_v2_find_work,
             commands::library_v2::library_v2_collections,
             commands::library_v2::library_v2_collection,
             commands::library_v2::library_v2_revision_snapshot,

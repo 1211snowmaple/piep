@@ -19,8 +19,9 @@ interface MemberListProps {
   view: MemberView;
   busy: boolean;
   selectionMode: boolean;
-  selected: ReadonlySet<number>;
-  onSelect: (downloadId: number, selected: boolean) => void;
+  /** 選んだ回。鍵は `取得元:作品の番号`（旧棚・新しい棚で同じ）。 */
+  selected: ReadonlySet<string>;
+  onSelect: (memberKey: string, selected: boolean) => void;
   onMove: (index: number, delta: number) => void | boolean | Promise<boolean>;
   onDropAt: (from: number, to: number) => void | boolean | Promise<boolean>;
   onRemove: (member: WorkCollectionMember) => void;
@@ -279,8 +280,8 @@ export function CollectionMemberList({
                 work={member.work}
                 compact={view === "compact"}
                 selectionMode={selectionMode}
-                selected={member.downloadId ? selected.has(member.downloadId) : false}
-                onSelect={onSelect}
+                selected={selected.has(collectionMemberKey(member))}
+                onToggleSelect={(next) => onSelect(collectionMemberKey(member), next)}
               />
             ) : (
               <MissingMemberCard member={member} />
@@ -407,4 +408,9 @@ function EditionFold({ member }: { member: WorkCollectionMember }) {
       </Collapse>
     </div>
   );
+}
+
+/** コレクションの回を選ぶときの鍵（旧棚・新しい棚で同じ）。 */
+export function collectionMemberKey(member: { source: string; sourceId: string }): string {
+  return `${member.source}:${member.sourceId}`;
 }

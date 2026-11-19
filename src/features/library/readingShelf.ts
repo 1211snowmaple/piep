@@ -266,7 +266,7 @@ export async function adoptDeviceReadingKeys(
 }
 
 /** Drops the recorded position for a work, used when it leaves the library. */
-export function forgetReadingPositions(workId: number): void {
+export function forgetReadingPositions(workId: ReadingWorkKey): void {
   const store = storage();
   if (!store) return;
   const prefix = `${POSITION_PREFIX}${workId}.`;

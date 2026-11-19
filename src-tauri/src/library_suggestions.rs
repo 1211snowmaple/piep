@@ -716,6 +716,7 @@ impl Library {
             CollectionEdit::Look {
                 cover_work: works.first().copied(),
                 cover_mode: Some("mosaic".into()),
+                cover_image: None,
             },
         )
         .map_err(err)?;

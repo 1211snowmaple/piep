@@ -108,11 +108,13 @@ fn one_edit_at_a_time_creates_reorders_sorts_dresses_and_deletes_a_collection() 
     assert!(edit(CollectionEdit::Look {
         cover_work: Some(first),
         cover_mode: Some("single".into()),
+        cover_image: None,
     })
     .is_err());
     edit(CollectionEdit::Look {
         cover_work: Some(second),
         cover_mode: Some("single".into()),
+        cover_image: None,
     })
     .unwrap();
     let summary = library.list_collections().unwrap().remove(0);
@@ -120,6 +122,39 @@ fn one_edit_at_a_time_creates_reorders_sorts_dresses_and_deletes_a_collection() 
     assert!(!summary.ordered);
     assert_eq!(summary.cover_mode, "single");
     assert_eq!(summary.member_count, 2);
+
+    // 表紙の画像は棚に取り込んだファイルだけ。外すと表紙の画像は無くなる。
+    let missing = crate::library::Fingerprint::of(b"not stored");
+    assert!(edit(CollectionEdit::Look {
+        cover_work: None,
+        cover_mode: Some("file".into()),
+        cover_image: Some(Some(missing)),
+    })
+    .is_err());
+    let image = std::env::temp_dir().join(format!("piep-cover-{}.png", LibraryId::now_v7()));
+    std::fs::write(&image, b"PNG cover").unwrap();
+    let stored = library
+        .store_original(&crate::library::CaptureSource::File(image.clone()))
+        .unwrap();
+    let _ = std::fs::remove_file(&image);
+    edit(CollectionEdit::Look {
+        cover_work: None,
+        cover_mode: Some("file".into()),
+        cover_image: Some(Some(stored.id)),
+    })
+    .unwrap();
+    let summary = library.list_collections().unwrap().remove(0);
+    assert_eq!(summary.cover_image, Some(stored.id.to_string()));
+    edit(CollectionEdit::Look {
+        cover_work: None,
+        cover_mode: Some("mosaic".into()),
+        cover_image: Some(None),
+    })
+    .unwrap();
+    assert_eq!(
+        library.list_collections().unwrap().remove(0).cover_image,
+        None
+    );
 
     edit(CollectionEdit::Delete).unwrap();
     assert!(library.list_collections().unwrap().is_empty());
