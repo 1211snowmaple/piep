@@ -2613,6 +2613,7 @@ fn unnumbered_opening_leads_and_mentions_do_not_reorder_episodes() {
     // 第2話を種にしても、無印の初回が先頭に来る。
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![second],
             limit: Some(20),
         })
@@ -2663,6 +2664,7 @@ fn sharing_an_anthology_shelf_yields_no_bundle() {
             .unwrap();
     }
     let result = db.generate_collection_suggestion(&CollectionSuggestionRequest {
+        seed_works: Vec::new(),
         seed_download_ids: vec![seed],
         limit: Some(20),
     });
@@ -2682,6 +2684,7 @@ fn sharing_an_anthology_shelf_yields_no_bundle() {
     }
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![seed],
             limit: Some(20),
         })
@@ -2927,6 +2930,7 @@ fn sharing_a_series_shelf_is_not_evidence_of_a_bundle() {
 
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![seed],
             limit: Some(20),
         })
@@ -3530,6 +3534,7 @@ fn notices_neither_join_a_bundle_nor_bridge_one() {
 
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![seed],
             limit: Some(20),
         })
@@ -3571,6 +3576,7 @@ fn collection_suggestions_use_title_parts_and_learn_rejection() {
     );
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![first],
             limit: Some(20),
         })
@@ -3588,6 +3594,7 @@ fn collection_suggestions_use_title_parts_and_learn_rejection() {
         .unwrap());
 
     let after_rejection = db.generate_collection_suggestion(&CollectionSuggestionRequest {
+        seed_works: Vec::new(),
         seed_download_ids: vec![first],
         limit: Some(20),
     });
@@ -3608,6 +3615,7 @@ fn collection_suggestions_use_title_parts_and_learn_rejection() {
         .unwrap();
     let reconsidered = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![first],
             limit: Some(20),
         })
@@ -3651,6 +3659,7 @@ fn collection_suggestion_keeps_strong_same_author_candidate_after_1200_rows() {
 
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![seed],
             limit: Some(20),
         })
@@ -3730,6 +3739,7 @@ fn collection_suggestions_walk_the_whole_link_component_from_either_end() {
         .unwrap();
     let from_first = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![first],
             limit: Some(20),
         })
@@ -3760,6 +3770,7 @@ fn collection_suggestions_walk_the_whole_link_component_from_either_end() {
         .unwrap();
     let from_last = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![fourth],
             limit: Some(20),
         })

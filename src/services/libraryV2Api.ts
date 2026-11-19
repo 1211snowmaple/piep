@@ -561,6 +561,11 @@ export function libraryV2EntityCollections(kind: "person" | "series", entity: st
   return invoke<ShelfCollectionSummary[]>("library_v2_entity_collections", { kind, entity });
 }
 
+/** 作品の入ったコレクション（作品の画面の「コレクションに追加」）。 */
+export function libraryV2WorkCollections(work: string): Promise<ShelfCollectionSummary[]> {
+  return invoke<ShelfCollectionSummary[]>("library_v2_work_collections", { work });
+}
+
 /** コレクションの一回（旧棚の `WorkCollectionMember`）。 */
 export interface ShelfCollectionMember {
   provider: string;

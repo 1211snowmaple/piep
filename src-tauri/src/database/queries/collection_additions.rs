@@ -104,166 +104,172 @@ impl Database {
         &self,
         collection_id: &str,
     ) -> Result<CollectionAdditionResult, String> {
-        let collection_id = validate_collection_id(collection_id)?.to_string();
-        let conn = self.read_conn()?;
+        collection_additions(self, validate_collection_id(collection_id)?)
+    }
+}
 
-        let (collection_name, member_ids) = load_collection_shape(&conn, &collection_id)?;
-        let empty = |note: &str| CollectionAdditionResult {
-            collection_id: collection_id.clone(),
-            collection_name: collection_name.clone(),
-            candidates: Vec::new(),
-            semantic_used: false,
-            note: Some(note.to_string()),
-            eligible_count: 0,
-        };
-        if member_ids.is_empty() {
-            return Ok(empty(
-                "この束にはまだ棚の作品が入っていないので、似ているものを測る起点がありません。",
-            ));
-        }
+/// 束にあとから入れるとよさそうな作品を探す（出どころは旧棚か新しい棚の作業用の表）。
+pub(crate) fn collection_additions(
+    src: &dyn SuggestionSource,
+    collection_id: &str,
+) -> Result<CollectionAdditionResult, String> {
+    let collection_id = collection_id.to_string();
+    let conn = src.corpus()?;
 
-        let works = load_addition_works(&conn)?;
-        let member_id_set = member_ids.iter().copied().collect::<HashSet<_>>();
-        let members = works
-            .iter()
-            .filter(|work| member_id_set.contains(&work.id))
-            .cloned()
-            .collect::<Vec<_>>();
-        if members.is_empty() {
-            return Ok(empty(
-                "このコレクションの作品が棚に見つかりません。保存し直すと候補を探せます。",
-            ));
-        }
+    let (collection_name, member_ids) = load_collection_shape(&conn, &collection_id)?;
+    let empty = |note: &str| CollectionAdditionResult {
+        collection_id: collection_id.clone(),
+        collection_name: collection_name.clone(),
+        candidates: Vec::new(),
+        semantic_used: false,
+        note: Some(note.to_string()),
+        eligible_count: 0,
+    };
+    if member_ids.is_empty() {
+        return Ok(empty(
+            "この束にはまだ棚の作品が入っていないので、似ているものを測る起点がありません。",
+        ));
+    }
 
-        // 規則の材料をまとめて読む。1件ずつ問い合わせると、候補の数だけ
-        // 往復が増えて棚の大きさに比例して遅くなる。
-        let profile = MemberProfile::load(&conn, &works, &members, &member_ids)?;
-        let seeds = pick_seed_members(&members);
+    let works = load_addition_works(&conn)?;
+    let member_id_set = member_ids.iter().copied().collect::<HashSet<_>>();
+    let members = works
+        .iter()
+        .filter(|work| member_id_set.contains(&work.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if members.is_empty() {
+        return Ok(empty(
+            "このコレクションの作品が棚に見つかりません。保存し直すと候補を探せます。",
+        ));
+    }
 
-        // 意味索引は「あれば使う」。無い棚でも規則だけで答えは出る。
-        let wanted = works.iter().map(|work| work.id).collect::<HashSet<_>>();
-        let (centroids, semantic_note) = match crate::database::semantic_index::work_centroids(
-            &self.storage_dir,
-            &wanted,
-        ) {
-            Ok(values) if values.len() >= 2 => (values, None),
-            Ok(_) => (
+    // 規則の材料をまとめて読む。1件ずつ問い合わせると、候補の数だけ
+    // 往復が増えて棚の大きさに比例して遅くなる。
+    let profile = MemberProfile::load(&conn, &works, &members, &member_ids)?;
+    let seeds = pick_seed_members(&members);
+
+    // 意味索引は「あれば使う」。無い棚でも規則だけで答えは出る。
+    let wanted = works.iter().map(|work| work.id).collect::<HashSet<_>>();
+    let (centroids, semantic_note) = match src.centroids(&wanted) {
+        Ok(values) if values.len() >= 2 => (values, None),
+        Ok(_) => (
+            HashMap::new(),
+            Some(
+                "本文の意味の索引がまだ足りないので、題名・作者・タグ・リンクだけで探しました。"
+                    .to_string(),
+            ),
+        ),
+        Err(error) => {
+            log::warn!("Collection additions ran without semantic index: {error}");
+            (
                 HashMap::new(),
                 Some(
-                    "本文の意味の索引がまだ足りないので、題名・作者・タグ・リンクだけで探しました。"
+                    "意味索引が読めないので、題名・作者・タグ・リンクだけで探しました。"
                         .to_string(),
                 ),
-            ),
-            Err(error) => {
-                log::warn!("Collection additions ran without semantic index: {error}");
-                (
-                    HashMap::new(),
-                    Some(
-                        "意味索引が読めないので、題名・作者・タグ・リンクだけで探しました。"
-                            .to_string(),
-                    ),
-                )
-            }
-        };
-        let baseline = (!centroids.is_empty()).then(|| shelf_baseline(&centroids));
-        let seed_vectors = seeds
-            .iter()
-            .filter_map(|work| centroids.get(&work.id))
-            .collect::<Vec<_>>();
+            )
+        }
+    };
+    let baseline = (!centroids.is_empty()).then(|| shelf_baseline(&centroids));
+    let seed_vectors = seeds
+        .iter()
+        .filter_map(|work| centroids.get(&work.id))
+        .collect::<Vec<_>>();
 
-        let mut scored = Vec::new();
-        let mut semantic_used = false;
-        for work in &works {
-            if member_id_set.contains(&work.id) {
-                continue;
-            }
-            if collection_rules::is_administrative_post(
-                &work.title,
-                &work.content_type,
-                work.text_length,
-            ) {
-                continue;
-            }
-            // 「この二作は同じ束ではない」と言われた組は、そのまま尊重する。
-            if profile.rejected_against_members(work) {
-                continue;
-            }
-            let rules = rule_confidence(work, &profile);
-            let semantic = match (&baseline, centroids.get(&work.id)) {
-                (Some(baseline), Some(vector)) if !seed_vectors.is_empty() => {
-                    let mut total = 0.0;
-                    let mut compared = 0usize;
-                    for seed in &seed_vectors {
-                        if let Some(value) = cosine(seed, vector) {
-                            total += value;
-                            compared += 1;
-                        }
-                    }
-                    // 平均を採る。走査の `similar_works` は最大を採るが、それは
-                    // 「1作にだけ似ていればよい」という規則である。束へ足すなら
-                    // **束全体に馴染むか**を見たいので、最大では緩すぎる。
-                    if compared == 0 {
-                        None
-                    } else {
-                        semantic_used = true;
-                        let z = baseline.z(total / compared as f64);
-                        (z >= THEME_MIN_Z).then(|| (theme_strength(z), z))
+    let mut scored = Vec::new();
+    let mut semantic_used = false;
+    for work in &works {
+        if member_id_set.contains(&work.id) {
+            continue;
+        }
+        if collection_rules::is_administrative_post(
+            &work.title,
+            &work.content_type,
+            work.text_length,
+        ) {
+            continue;
+        }
+        // 「この二作は同じ束ではない」と言われた組は、そのまま尊重する。
+        if profile.rejected_against_members(work) {
+            continue;
+        }
+        let rules = rule_confidence(work, &profile);
+        let semantic = match (&baseline, centroids.get(&work.id)) {
+            (Some(baseline), Some(vector)) if !seed_vectors.is_empty() => {
+                let mut total = 0.0;
+                let mut compared = 0usize;
+                for seed in &seed_vectors {
+                    if let Some(value) = cosine(seed, vector) {
+                        total += value;
+                        compared += 1;
                     }
                 }
-                _ => None,
-            };
-
-            let Some((confidence, reason, evidence)) = combine(rules, semantic) else {
-                continue;
-            };
-            if confidence < MIN_ADDITION_CONFIDENCE {
-                continue;
+                // 平均を採る。走査の `similar_works` は最大を採るが、それは
+                // 「1作にだけ似ていればよい」という規則である。束へ足すなら
+                // **束全体に馴染むか**を見たいので、最大では緩すぎる。
+                if compared == 0 {
+                    None
+                } else {
+                    semantic_used = true;
+                    let z = baseline.z(total / compared as f64);
+                    (z >= THEME_MIN_Z).then(|| (theme_strength(z), z))
+                }
             }
-            scored.push(ScoredCandidate {
-                work: work.clone(),
-                confidence,
-                reason,
-                evidence,
-            });
-        }
-
-        let eligible_count = scored.len() as i64;
-        let candidates = select_candidates(scored)
-            .into_iter()
-            .map(|scored| CollectionAdditionCandidate {
-                source: scored.work.source,
-                source_id: scored.work.source_id,
-                download_id: scored.work.id,
-                title: scored.work.title,
-                author_name: scored.work.author_name,
-                cover_path: scored.work.cover_path,
-                text_length: scored.work.text_length,
-                published_at: scored.work.published_at,
-                confidence: scored.confidence,
-                reason: scored.reason,
-                evidence: scored.evidence,
-            })
-            .collect::<Vec<_>>();
-        let semantic_note = if semantic_used {
-            None
-        } else {
-            semantic_note.or_else(|| {
-                Some(
-                    "このコレクションと候補の本文の近さを比べられなかったので、題名・作者・タグ・リンクだけで探しました。"
-                        .to_string(),
-                )
-            })
+            _ => None,
         };
 
-        Ok(CollectionAdditionResult {
-            collection_id,
-            collection_name,
-            candidates,
-            semantic_used,
-            note: semantic_note,
-            eligible_count,
-        })
+        let Some((confidence, reason, evidence)) = combine(rules, semantic) else {
+            continue;
+        };
+        if confidence < MIN_ADDITION_CONFIDENCE {
+            continue;
+        }
+        scored.push(ScoredCandidate {
+            work: work.clone(),
+            confidence,
+            reason,
+            evidence,
+        });
     }
+
+    let eligible_count = scored.len() as i64;
+    let candidates = select_candidates(scored)
+        .into_iter()
+        .map(|scored| CollectionAdditionCandidate {
+            source: scored.work.source,
+            source_id: scored.work.source_id,
+            download_id: scored.work.id,
+            work: None,
+            title: scored.work.title,
+            author_name: scored.work.author_name,
+            cover_path: scored.work.cover_path,
+            text_length: scored.work.text_length,
+            published_at: scored.work.published_at,
+            confidence: scored.confidence,
+            reason: scored.reason,
+            evidence: scored.evidence,
+        })
+        .collect::<Vec<_>>();
+    let semantic_note = if semantic_used {
+        None
+    } else {
+        semantic_note.or_else(|| {
+            Some(
+                "このコレクションと候補の本文の近さを比べられなかったので、題名・作者・タグ・リンクだけで探しました。"
+                    .to_string(),
+            )
+        })
+    };
+
+    Ok(CollectionAdditionResult {
+        collection_id,
+        collection_name,
+        candidates,
+        semantic_used,
+        note: semantic_note,
+        eligible_count,
+    })
 }
 
 /// 束の名前と、いま入っている作品。

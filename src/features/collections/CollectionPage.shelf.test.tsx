@@ -29,11 +29,18 @@ vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
 const legacy = vi.hoisted(() => ({
   getWorkCollection: vi.fn(),
   listWorkCollections: vi.fn(),
+}));
+// 提案の命令は旧棚と同じ名前で、切り替えた棚では裏で新しい棚へ分かれる。
+const suggest = vi.hoisted(() => ({
   listCollectionSuggestions: vi.fn(),
+  suggestCollectionAdditions: vi.fn(),
+  generateShelfCollectionSuggestion: vi.fn(),
+  generateCollectionSuggestion: vi.fn(),
 }));
 vi.mock("@/services/collectionApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/collectionApi")>()),
   ...legacy,
+  ...suggest,
 }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
@@ -176,15 +183,16 @@ describe("collections on the new shelf", () => {
     beforeEach(() => {
       api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
       api.libraryV2EditCollection.mockResolvedValue(detail);
+      suggest.listCollectionSuggestions.mockResolvedValue([]);
     });
 
     it("edits the collection on the new shelf and keeps what is not connected yet locked", async () => {
       renderWith(<CollectionPage />, "#/collections/c-old");
       expect(await screen.findByRole("heading", { name: "雨の束" })).toBeInTheDocument();
-      // 表紙・EPUB・探す は、切り替えた棚でもまだ押せない（理由が変わる）。
+      // 表紙・EPUB は、切り替えた棚でもまだ押せない（理由が変わる）。合う作品を探すは押せる。
       await waitFor(() => expect(screen.getByRole("button", { name: "一冊のEPUB（新しい棚ではまだ使えません）" })).toHaveAttribute("data-disabled", "true"));
       expect(screen.getByRole("button", { name: "表紙を変える（新しい棚ではまだ使えません）" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "合う作品を探す（新しい棚ではまだ使えません）" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "合う作品を探す" })).not.toHaveAttribute("data-disabled");
 
       // 並べ替えは作品の鍵で、画面の ID（旧棚の ID）のまま送る。
       fireEvent.click(screen.getByRole("button", { name: "前の話を一つ後へ" }));
@@ -202,11 +210,40 @@ describe("collections on the new shelf", () => {
       for (const [name, call] of Object.entries(legacy)) expect(call, name).not.toHaveBeenCalled();
     });
 
+    it("adds the works found for the collection by their keys", async () => {
+      suggest.suggestCollectionAdditions.mockResolvedValue({
+        collectionId: "c-old", collectionName: "雨の束", semanticUsed: false, eligibleCount: 1, note: null,
+        candidates: [{
+          source: "pixiv", sourceId: "9", downloadId: 0, work: "0195f1c2-0000-7000-8000-000000000009",
+          title: "次の話", authorName: "作者一", coverPath: COVER, textLength: 900, publishedAt: "2026-01-05T00:00:00Z",
+          confidence: 0.9, reason: "同じシリーズの作品です", evidence: [],
+        }],
+      });
+      renderWith(<CollectionPage />, "#/collections/c-old");
+      expect(await screen.findByRole("heading", { name: "雨の束" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "合う作品を探す" }));
+      await waitFor(() => expect(suggest.suggestCollectionAdditions).toHaveBeenCalledWith("c-old"));
+      fireEvent.click(await screen.findByRole("button", { name: "1作品を追加" }));
+      await waitFor(() => expect(api.libraryV2EditCollection).toHaveBeenCalledWith("c-old", {
+        kind: "add", works: [{ source: "pixiv", sourceId: "9" }],
+      }));
+      for (const [name, call] of Object.entries(legacy)) expect(call, name).not.toHaveBeenCalled();
+    });
+
+    it("seeds a suggestion from the work the work page sent by its shelf UUID", async () => {
+      const seed = "0195f1c2-0000-7000-8000-000000000001";
+      suggest.generateShelfCollectionSuggestion.mockResolvedValue({});
+      renderWith(<CollectionsPanel />, `#/library?tab=collections&suggest=${seed}`);
+      await waitFor(() => expect(suggest.generateShelfCollectionSuggestion).toHaveBeenCalledWith([seed]));
+      expect(suggest.generateCollectionSuggestion).not.toHaveBeenCalled();
+      await waitFor(() => expect(window.location.hash).not.toContain("suggest="));
+    });
+
     it("makes a new collection on the new shelf", async () => {
       renderWith(<CollectionsPanel />, "#/library?tab=collections");
       expect(await screen.findByText("雨の束")).toBeInTheDocument();
       await waitFor(() => expect(screen.getByRole("button", { name: "新しいコレクション" })).not.toHaveAttribute("aria-disabled"));
-      expect(screen.getByRole("button", { name: "まとまりを探す（新しい棚ではまだ使えません）" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "まとまりを探す" })).not.toHaveAttribute("data-disabled");
       fireEvent.click(screen.getByRole("button", { name: "新しいコレクション" }));
       fireEvent.change(await screen.findByRole("textbox", { name: "名前" }), { target: { value: "新しい束" } });
       fireEvent.click(screen.getByRole("button", { name: "保存" }));

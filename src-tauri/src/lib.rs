@@ -15,6 +15,8 @@ pub mod library_entity;
 pub mod library_entity_list;
 pub mod library_search;
 pub mod library_suggest;
+pub mod library_suggestion_corpus;
+pub mod library_suggestions;
 pub mod library_view;
 pub mod library_work_edit;
 mod logging;
@@ -359,6 +361,7 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_entity_original,
             commands::library_v2::library_v2_entities,
             commands::library_v2::library_v2_entity_collections,
+            commands::library_v2::library_v2_work_collections,
             commands::library_v2::library_v2_collections,
             commands::library_v2::library_v2_collection,
             commands::library_v2::library_v2_revision_snapshot,

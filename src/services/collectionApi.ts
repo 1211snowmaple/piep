@@ -69,6 +69,13 @@ export function generateCollectionSuggestion(seedDownloadIds: number[], limit = 
   });
 }
 
+/** 新しい棚の作品（UUID）を種に候補を作る。正本に切り替えた棚だけ。 */
+export function generateShelfCollectionSuggestion(seedWorks: string[], limit = 60): Promise<CollectionSuggestion> {
+  return invoke<CollectionSuggestion>("db_generate_collection_suggestion", {
+    request: { seedWorks, limit },
+  });
+}
+
 /**
  * すでにあるコレクションに、名前の案を出し直す。
  *
@@ -120,8 +127,14 @@ export function acceptCollectionSuggestion(input: {
   name?: string | null;
   collectionKind?: CollectionKind | null;
   memberKeys?: WorkKey[] | null;
-}): Promise<WorkCollection> {
-  return invoke<WorkCollection>("db_accept_collection_suggestion", { input });
+}): Promise<AcceptedCollection> {
+  return invoke<AcceptedCollection>("db_accept_collection_suggestion", { input });
+}
+
+/** 候補を採って作ったコレクション。新しい棚では ID が UUID。 */
+export interface AcceptedCollection {
+  id: string;
+  name: string;
 }
 
 /** 既定の案をそのまま採るときは名前を送らない。名前を常に送ると backend は

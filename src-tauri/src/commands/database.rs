@@ -1196,6 +1196,10 @@ pub async fn db_propose_collection_names(
     collection_id: String,
 ) -> Result<Vec<CollectionNameCandidate>, String> {
     run_db_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            let target = super::library_v2::collection_target(&library, &collection_id)?;
+            return library.collection_name_proposals_on_shelf(target);
+        }
         state.db.collection_name_proposals(&collection_id)
     })
     .await
@@ -1212,10 +1216,15 @@ pub async fn db_name_collection_with_model(
     engine: crate::assist::AssistEngine,
 ) -> Result<crate::assist::GeneratedAssist<crate::assist::NamedBundle>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let works =
-        tokio::task::spawn_blocking(move || state.db.collection_naming_works_for(&collection_id))
-            .await
-            .map_err(|e| format!("Database task failed: {e}"))??;
+    let works = tokio::task::spawn_blocking(move || {
+        if let Some(library) = state.library_v2.switched() {
+            let target = super::library_v2::collection_target(&library, &collection_id)?;
+            return library.collection_naming_works_on_shelf(target);
+        }
+        state.db.collection_naming_works_for(&collection_id)
+    })
+    .await
+    .map_err(|e| format!("Database task failed: {e}"))??;
     let provenance = crate::assist::generation_provenance(
         &engine,
         crate::assist::FEATURE_COLLECTION_NAMING,
@@ -1237,9 +1246,19 @@ pub async fn db_try_naming_engine(
     collection_id: Option<String>,
 ) -> Result<crate::assist::TrialResult, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let works = tokio::task::spawn_blocking(move || match collection_id {
-        Some(id) => state.db.collection_naming_works_for(&id),
-        None => state.db.sample_naming_works(),
+    let works = tokio::task::spawn_blocking(move || {
+        if let Some(library) = state.library_v2.switched() {
+            return match collection_id {
+                Some(id) => library.collection_naming_works_on_shelf(
+                    super::library_v2::collection_target(&library, &id)?,
+                ),
+                None => library.sample_naming_works_on_shelf(),
+            };
+        }
+        match collection_id {
+            Some(id) => state.db.collection_naming_works_for(&id),
+            None => state.db.sample_naming_works(),
+        }
     })
     .await
     .map_err(|e| format!("Database task failed: {e}"))??;
@@ -1262,6 +1281,25 @@ pub async fn db_name_collection_suggestion(
     // 材料を読むところと、外へ送るところを分ける。送っているあいだ
     // ライブラリの錠を握ったままにしない。
     let state = app.state::<Arc<AppState>>().inner().clone();
+    if let Some(library) = state.library_v2.switched() {
+        let works = {
+            let library = library.clone();
+            let suggestion_id = suggestion_id.clone();
+            tokio::task::spawn_blocking(move || library.suggestion_naming_works(&suggestion_id))
+                .await
+                .map_err(|e| format!("Database task failed: {e}"))??
+        };
+        let provenance = crate::assist::generation_provenance(
+            &engine,
+            crate::assist::FEATURE_COLLECTION_NAMING,
+            &works,
+        )?;
+        let named = crate::assist::name_bundle(&engine, &works).await?;
+        return run_library_write_blocking(app, move |_| {
+            library.attach_llm_name_to_suggestion(&suggestion_id, &named, &provenance)
+        })
+        .await;
+    }
     let ids = {
         let suggestion_id = suggestion_id.clone();
         let state = state.clone();
@@ -1309,7 +1347,13 @@ pub async fn db_name_collection_suggestion(
 /// 走査で出た候補を、まとめて閉じる。`track` を渡すとその系統だけ。
 #[tauri::command]
 pub async fn db_dismiss_swept_suggestions(app: tauri::AppHandle) -> Result<usize, String> {
-    run_library_write_blocking(app, move |state| state.db.dismiss_swept_suggestions()).await
+    run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library.dismiss_swept_collection_suggestions();
+        }
+        state.db.dismiss_swept_suggestions()
+    })
+    .await
 }
 
 /// 棚全体を走査して、束の候補を作り直す。
@@ -1320,7 +1364,13 @@ pub async fn db_dismiss_swept_suggestions(app: tauri::AppHandle) -> Result<usize
 pub async fn db_sweep_collection_candidates(
     app: tauri::AppHandle,
 ) -> Result<CollectionSweepResult, String> {
-    run_library_write_blocking(app, move |state| state.db.sweep_collection_candidates()).await
+    run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library.sweep_collection_suggestions();
+        }
+        state.db.sweep_collection_candidates()
+    })
+    .await
 }
 
 /// すでにある束へ、あとから入れるとよさそうな作品を探す。
@@ -1332,6 +1382,10 @@ pub async fn db_suggest_collection_additions(
     collection_id: String,
 ) -> Result<CollectionAdditionResult, String> {
     run_db_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            let target = super::library_v2::collection_target(&library, &collection_id)?;
+            return library.collection_additions_on_shelf(target);
+        }
         state.db.suggest_collection_additions(&collection_id)
     })
     .await
@@ -1435,6 +1489,23 @@ pub async fn db_generate_collection_suggestion(
     request: CollectionSuggestionRequest,
 ) -> Result<CollectionSuggestion, String> {
     run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            let seeds = request
+                .seed_works
+                .iter()
+                .map(|work| {
+                    work.parse::<crate::library::LibraryId>()
+                        .map_err(|_| "基準の作品の ID が不正です".to_string())
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            if seeds.is_empty() {
+                return Err("At least one seed work is required".to_string());
+            }
+            if seeds.len() > 20 {
+                return Err("A suggestion can use at most 20 seed works".to_string());
+            }
+            return library.seed_collection_suggestion(&seeds, request.limit);
+        }
         state.db.generate_collection_suggestion(&request)
     })
     .await
@@ -1449,6 +1520,9 @@ pub async fn db_list_collection_suggestions(
     state_filter: Option<String>,
 ) -> Result<Vec<CollectionSuggestion>, String> {
     run_db_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library.collection_suggestion_views(state_filter.as_deref());
+        }
         state
             .db
             .list_collection_suggestions(state_filter.as_deref())
@@ -1466,12 +1540,24 @@ pub async fn db_dismiss_collection_suggestion(
     suggestion_id: String,
 ) -> Result<bool, String> {
     run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library.dismiss_collection_suggestion_view(&suggestion_id);
+        }
         state.db.dismiss_collection_suggestion(&suggestion_id)
     })
     .await
 }
 
-/// 候補を採り、コレクションを作って返す。
+/// 採って作ったコレクション。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptedCollection {
+    /// 旧棚ではコレクションの ID、切り替えた棚ではコレクションの UUID。
+    pub id: String,
+    pub name: String,
+}
+
+/// 候補を採り、コレクションを作る。作ったコレクションの ID と名前を返す。
 ///
 /// **候補の段階で並べ替えはできない。** 順序を直すのは採ったあと、
 /// `db_reorder_work_collection_members` で行う。
@@ -1479,9 +1565,26 @@ pub async fn db_dismiss_collection_suggestion(
 pub async fn db_accept_collection_suggestion(
     app: tauri::AppHandle,
     input: AcceptCollectionSuggestionInput,
-) -> Result<WorkCollection, String> {
+) -> Result<AcceptedCollection, String> {
     run_library_write_blocking(app, move |state| {
-        state.db.accept_collection_suggestion(&input)
+        let name = input.name.clone();
+        if let Some(library) = state.library_v2.switched() {
+            let id = library.accept_collection_suggestion_view(&input)?;
+            let name = library
+                .collection_detail(id)
+                .map(|detail| detail.summary.name)
+                .or_else(|_| name.ok_or(()))
+                .unwrap_or_default();
+            return Ok(AcceptedCollection {
+                id: id.to_string(),
+                name,
+            });
+        }
+        let collection = state.db.accept_collection_suggestion(&input)?;
+        Ok(AcceptedCollection {
+            id: collection.summary.id,
+            name: collection.summary.name,
+        })
     })
     .await
 }
@@ -1497,6 +1600,10 @@ pub async fn db_reject_collection_suggestion(
     member_keys: Option<Vec<WorkKey>>,
 ) -> Result<bool, String> {
     run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library
+                .reject_collection_suggestion_view(&suggestion_id, member_keys.as_deref());
+        }
         state
             .db
             .reject_collection_suggestion(&suggestion_id, member_keys.as_deref())

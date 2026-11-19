@@ -17,8 +17,9 @@ import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode } from "@/components/ListPager";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
-import { generateCollectionSuggestion, listCollectionSuggestions, upsertWorkCollection } from "@/services/collectionApi";
+import { generateCollectionSuggestion, generateShelfCollectionSuggestion, listCollectionSuggestions, upsertWorkCollection } from "@/services/collectionApi";
 import { isTauriRuntime } from "@/services/dbApi";
+import { SHELF_WORK_ID as SHELF_WORK } from "@/services/libraryV2Api";
 import { demoSuggestions } from "@/mocks/demoData";
 import type { CollectionSortBy, WorkCollectionInput, WorkCollectionSummary } from "@/types/collections";
 import { invalidateCollectionViews, workCollectionsQueryOptions } from "./collectionQueries";
@@ -26,7 +27,7 @@ import { CollectionCard } from "./CollectionCard";
 import { CollectionFormModal } from "./CollectionFormModal";
 import { CollectionSweepModal } from "./CollectionSweepModal";
 import { Locked } from "@/components/Locked";
-import { SHELF_NOT_YET, SHELF_READ_ONLY, editShelfCollection, invalidateShelf, useShelfMode, useShelfWritable } from "@/features/library/shelfV2";
+import { SHELF_READ_ONLY, editShelfCollection, invalidateShelf, useShelfMode, useShelfWritable } from "@/features/library/shelfV2";
 
 /** The collection list as it appears inside the library, beside 作品 /
  *  作者・クリエイター / シリーズ. The detail screen stays on its own route. */
@@ -60,13 +61,14 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useAppSearchParams();
   const [formOpened, form] = useDisclosure(false);
-  const generatedSeed = useRef<number | null>(null);
+  const generatedSeed = useRef<string | null>(null);
   // 新しい棚では一覧を新しい棚から読む。作るのは正本に切り替えた棚だけで、探す（まとまりの
   // 候補）はまだ新しい棚につないでいない。押せない操作は同じ場所に押せない形で残す。
   const { shelfMode, deciding } = useShelfMode(runtime);
   const writable = useShelfWritable(runtime);
   const locked = shelfMode && !writable ? SHELF_READ_ONLY : null;
-  const sweepLocked = shelfMode ? (writable ? SHELF_NOT_YET : SHELF_READ_ONLY) : null;
+  // 候補は正本に切り替えた棚で作る。切り替える前の写しでは探さない（候補を書く先が無い）。
+  const suggestOn = !deciding && (!shelfMode || writable);
   const collectionsQuery = useQuery({ ...workCollectionsQueryOptions(shelfMode), enabled: !deciding });
   const invalidate = () => {
     if (shelfMode) { void invalidateShelf(queryClient); return; }
@@ -91,21 +93,22 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
     onError: (error) => notifications.show({ color: "red", title: "コレクションを保存できません", message: errorMessage(error) }),
   });
   const suggestionMutation = useMutation({
-    mutationFn: (seedId: number) => generateCollectionSuggestion([seedId]),
+    mutationFn: (seed: string) => shelfMode ? generateShelfCollectionSuggestion([seed]) : generateCollectionSuggestion([Number(seed)]),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["collection-suggestions"] }); notifications.show({ color: "green", message: "関連作品のひな型を作成しました" }); },
     onError: (error) => notifications.show({ color: "red", title: "ひな型を作成できません", message: errorMessage(error) }),
   });
 
-  // 作品詳細の「関連作品からひな型を作る」からは ?suggest=<id> で来る。
+  // 作品詳細の「関連作品からひな型を作る」からは ?suggest=<id> で来る（新しい棚では作品の UUID）。
   useEffect(() => {
-    const seed = Number(searchParams.get("suggest"));
-    if (!runtime || shelfMode || deciding || !Number.isSafeInteger(seed) || seed <= 0 || generatedSeed.current === seed) return;
+    const seed = searchParams.get("suggest") ?? "";
+    const valid = shelfMode ? SHELF_WORK.test(seed) : Number.isSafeInteger(Number(seed)) && Number(seed) > 0;
+    if (!runtime || !suggestOn || !valid || generatedSeed.current === seed) return;
     generatedSeed.current = seed;
     suggestionMutation.mutate(seed);
     const next = new URLSearchParams(searchParams);
     next.delete("suggest");
     setSearchParams(next, { replace: true });
-  }, [runtime, shelfMode, deciding, searchParams, setSearchParams, suggestionMutation]);
+  }, [runtime, shelfMode, suggestOn, searchParams, setSearchParams, suggestionMutation]);
 
   // 上のツールバーはこのタブでも出したままにする（タブを移るたびに画面が
    // 飛ばないため）。出ている以上、検索も並べ替えもここに効かせる。
@@ -142,7 +145,7 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
   const pendingSuggestions = useQuery({
     queryKey: ["collection-suggestions", "pending"],
     queryFn: () => (runtime ? listCollectionSuggestions("pending") : Promise.resolve(demoSuggestions)),
-    enabled: !shelfMode && !deciding,
+    enabled: suggestOn,
   });
   const pendingCount = pendingSuggestions.data?.length ?? 0;
   return (
@@ -157,7 +160,7 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
           <Text size="sm" c="dimmed">{formatNumber(collections.length)}件</Text>
         </Group>
         <Group gap="xs" wrap="nowrap">
-          <Locked reason={sweepLocked} label="まとまりを探す">
+          <Locked reason={shelfMode && !writable ? SHELF_READ_ONLY : null} label="まとまりを探す">
           <Button
             variant="subtle"
             leftSection={<Icons.search size={IconSize.action} />}
@@ -195,7 +198,7 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
       <CollectionFormModal opened={formOpened} onClose={form.close} onSave={(input) => saveMutation.mutate(input)} />
       {/* 候補は一箇所にまとめる。1作から広げたものと棚の走査で出たものを
           別の場所に置くと、同じ束が二度出てくるように見える。 */}
-      {!shelfMode && !deciding && <CollectionSweepModal opened={sweepOpened} onClose={sweepModal.close} />}
+      {suggestOn && <CollectionSweepModal opened={sweepOpened} onClose={sweepModal.close} />}
     </Stack>
   );
 }

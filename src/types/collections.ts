@@ -141,6 +141,8 @@ export interface CollectionSuggestionEvidence {
 
 export interface CollectionSuggestionMember extends WorkKey {
   downloadId: number | null;
+  /** 新しい棚の作品（UUID）。旧棚の候補には無い。 */
+  work?: string | null;
   title: string;
   authorName: string;
   coverPath: string | null;
@@ -202,7 +204,10 @@ export interface CollectionSweepResult {
 export interface CollectionAdditionCandidate {
   source: string;
   sourceId: string;
+  /** 旧棚の作品の番号。新しい棚では 0 で、作品は `work` で指す。 */
   downloadId: number;
+  /** 新しい棚の作品（UUID）。 */
+  work?: string | null;
   title: string;
   authorName: string;
   coverPath: string | null;

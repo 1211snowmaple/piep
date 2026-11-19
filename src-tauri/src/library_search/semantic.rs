@@ -65,7 +65,7 @@ const PREVIOUS_ID_SQL: &str = "SELECT CAST(m.source_key AS INTEGER) FROM migrati
 impl Library {
     /// 意味検索の索引の置き場（旧棚の関数に渡す `storage_dir`）。索引そのものはこの親の
     /// `search/semantic-v2/` にできるので、`derived/search/semantic-v2/` になる。
-    pub(super) fn semantic_storage(&self) -> PathBuf {
+    pub(crate) fn semantic_storage(&self) -> PathBuf {
         self.search_storage().join("semantic")
     }
 

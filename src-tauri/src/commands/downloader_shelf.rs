@@ -505,9 +505,14 @@ pub(super) async fn save_to_shelf(
     shelf.forget_derived();
     {
         let library = Arc::clone(&library);
+        let work = result.entity_id;
         blocking(move || {
             if let Err(error) = library.sync_search_index(&mut |_, _| {}) {
                 log::error!("保存した作品を検索の索引へ入れられません: {error}");
+            }
+            // まとまりの提案が使う本文リンクを、保存した版から取り直す。
+            if let Err(error) = library.refresh_shelf_work_links(work) {
+                log::warn!("保存した作品の本文リンクを取れません: {error}");
             }
             Ok(())
         })

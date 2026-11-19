@@ -25,6 +25,9 @@ const api = vi.hoisted(() => ({
   libraryV2EditHistory: vi.fn(),
   libraryV2EditPointer: vi.fn(),
   libraryV2SetUserState: vi.fn(),
+  libraryV2Collections: vi.fn(),
+  libraryV2WorkCollections: vi.fn(),
+  libraryV2EditCollection: vi.fn(),
 }));
 vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
@@ -213,6 +216,49 @@ describe("ShelfWorkPage", () => {
     await waitFor(() => expect(button).toBeEnabled());
     fireEvent.click(button);
     await waitFor(() => expect(runSingleCheck).toHaveBeenCalledWith({ kind: "work", workId: WORK, label: work.title }, expect.any(Function)));
+  });
+
+  it("adds this work to a collection of the switched shelf and seeds a suggestion from it", async () => {
+    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    const summary = (id: string, name: string) => ({
+      id, legacy_id: null, name, description: null, ordered: true, cover: null, cover_image: null, cover_mode: "mosaic",
+      name_source: "manual", track: "manual", tiles: [], revision: 1, member_count: 1, available_count: 1,
+      total_text_length: 10, created_at: 0, updated_at: 0,
+    });
+    const IN = "0195f1c2-0000-7000-8000-0000000000d1";
+    const OUT = "0195f1c2-0000-7000-8000-0000000000d2";
+    api.libraryV2Collections.mockResolvedValue([summary(IN, "入っている束"), summary(OUT, "まだの束")]);
+    api.libraryV2WorkCollections.mockResolvedValue([summary(IN, "入っている束")]);
+    api.libraryV2EditCollection.mockResolvedValue({ ...summary(OUT, "まだの束"), members: [] });
+    renderPage(`#/works/${WORK}`);
+    const menu = await screen.findByRole("button", { name: "コレクション（1件に追加済み）" });
+    await waitFor(() => expect(api.libraryV2Collections).toHaveBeenCalled());
+    fireEvent.click(menu);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "まだの束" }));
+    expect(screen.getByRole("menuitem", { name: "入っている束（追加済み）", hidden: true })).toBeDisabled();
+    await waitFor(() => expect(api.libraryV2EditCollection).toHaveBeenCalledWith(OUT, {
+      kind: "add", works: [{ source: "pixiv", sourceId: "12345" }],
+    }));
+  });
+
+  it("seeds a collection suggestion from this work by its shelf UUID", async () => {
+    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    api.libraryV2Collections.mockResolvedValue([]);
+    api.libraryV2WorkCollections.mockResolvedValue([]);
+    renderPage(`#/works/${WORK}`);
+    const menu = await screen.findByRole("button", { name: "コレクションに追加" });
+    await waitFor(() => expect(api.libraryV2Collections).toHaveBeenCalled());
+    fireEvent.click(menu);
+    fireEvent.click(await screen.findByRole("menuitem", { name: "関連作品からひな型を作る" }));
+    await waitFor(() => expect(window.location.hash).toBe(`#/library?tab=collections&suggest=${WORK}`));
+  });
+
+  it("keeps the collection menu shut on a read-only copy", async () => {
+    renderPage(`#/works/${WORK}`);
+    expect(await screen.findByRole("button", { name: "コレクションに追加（新しい棚では変えられません）" })).toHaveAttribute("data-disabled", "true");
+    expect(api.libraryV2Collections).not.toHaveBeenCalled();
   });
 
   it("changes this work's watching flag on the switched shelf and reloads the saved state", async () => {

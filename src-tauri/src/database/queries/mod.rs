@@ -65,8 +65,16 @@ mod collection_additions;
 mod collection_sweep;
 mod collections;
 mod server_support;
+mod suggestion_source;
 mod tag_recommendations;
 mod work_link_evidence;
+pub(crate) use collection_additions::collection_additions;
+pub(crate) use collection_sweep::{sweep_identity, sweep_plan, PreparedSweep};
+pub(crate) use collections::{
+    accepted_suggestion_name_source, name_proposals_in, naming_works_in, sample_bundle_like_ids_in,
+    seed_suggestion_plan,
+};
+pub(crate) use suggestion_source::{Corpus, SuggestionSource};
 pub use tag_recommendations::RelatedTagCandidate;
 
 #[derive(Debug, Clone)]
@@ -9962,7 +9970,7 @@ struct SuggestionWork {
     content_type: String,
 }
 
-const COLLECTION_SUGGEST_RULE_VERSION: &str = "collection-suggest-v3";
+pub(crate) const COLLECTION_SUGGEST_RULE_VERSION: &str = "collection-suggest-v3";
 const LINK_TRAVERSAL_MAX_DEPTH: usize = 8;
 const LINK_TRAVERSAL_MAX_WORKS: usize = 240;
 const LINK_INCOMING_SEARCH_LIMIT: usize = 40;
@@ -10137,7 +10145,7 @@ fn load_link_edges_touching(
 /// work URL, and all budgets are bounded so a suggestion cannot reparse the
 /// entire library while holding up normal saves.
 fn discover_linked_collection_component(
-    db: &Database,
+    src: &dyn SuggestionSource,
     seeds: &[SuggestionWork],
     already_refreshed: &mut HashSet<i64>,
 ) -> Result<HashMap<i64, LinkTraversalEvidence>, String> {
@@ -10159,7 +10167,7 @@ fn discover_linked_collection_component(
     // 種は利用者が明示的に選んだものなので、この制限から外す。
     let seed_ids = seeds.iter().map(|seed| seed.id).collect::<HashSet<_>>();
     let hubs = {
-        let conn = db.read_conn()?;
+        let conn = src.corpus()?;
         load_link_hub_ids(&conn)?
     };
 
@@ -10170,12 +10178,14 @@ fn discover_linked_collection_component(
 
         // Outgoing links from every newly discovered work are authoritative
         // enough to parse first and usually reveal the next hop immediately.
-        for download_id in &frontier {
+        // 新しい棚は保存のたびにリンクを取るので、取り直さない。
+        let backfill = src.link_backfill();
+        for download_id in frontier.iter().filter(|_| backfill.is_some()) {
             if refresh_budget == 0 || !already_refreshed.insert(*download_id) {
                 continue;
             }
             refresh_budget -= 1;
-            if let Err(error) = db.refresh_work_links(*download_id) {
+            if let Err(error) = backfill.unwrap().refresh_work_links(*download_id) {
                 log::debug!("Collection link refresh skipped for {download_id}: {error}");
             }
         }
@@ -10183,9 +10193,9 @@ fn discover_linked_collection_component(
         // Backfill incoming one-way links for older data. Search hits are not
         // accepted as members by themselves; after refresh they still need an
         // actual normalized work-link edge to enter the component below.
-        if refresh_budget > 0 {
+        if let Some(db) = backfill.filter(|_| refresh_budget > 0) {
             let frontier_works = {
-                let conn = db.read_conn()?;
+                let conn = src.corpus()?;
                 load_suggestion_works(&conn, &frontier)?
             };
             for work in frontier_works {
@@ -10225,7 +10235,7 @@ fn discover_linked_collection_component(
 
         let frontier_set = frontier.iter().copied().collect::<HashSet<_>>();
         let edges = {
-            let conn = db.read_conn()?;
+            let conn = src.corpus()?;
             load_link_edges_touching(&conn, &frontier)?
         };
         let mut next = Vec::new();
@@ -11261,16 +11271,16 @@ fn save_pair_feedback(
 }
 
 #[derive(Debug, Clone)]
-struct ExtractedWorkLink {
-    to_source: String,
-    to_source_id: String,
-    relation_type: String,
-    anchor_text: Option<String>,
-    context_text: Option<String>,
-    confidence: f64,
+pub(crate) struct ExtractedWorkLink {
+    pub(crate) to_source: String,
+    pub(crate) to_source_id: String,
+    pub(crate) relation_type: String,
+    pub(crate) anchor_text: Option<String>,
+    pub(crate) context_text: Option<String>,
+    pub(crate) confidence: f64,
 }
 
-fn extract_work_link_evidence(
+pub(crate) fn extract_work_link_evidence(
     text: &str,
     from_source: &str,
     from_source_id: &str,

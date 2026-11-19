@@ -1225,6 +1225,24 @@ pub async fn library_v2_entity_collections(
     .map_err(|e| e.to_string())?
 }
 
+/// 作品の入ったコレクション（作品の画面の「コレクションに追加」で、入っているものに印を付ける）。
+#[tauri::command]
+pub async fn library_v2_work_collections(
+    state: State<'_, Arc<LibraryV2>>,
+    work: LibraryId,
+) -> Result<Vec<CollectionSummary>, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        state
+            .library()?
+            .work_collections(work)
+            .map(|found| found.into_iter().map(|(summary, _)| summary).collect())
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// ライブラリの「コレクション」タブの一覧（更新の新しい順。並べ替えと絞り込みは画面が持つ）。
 #[tauri::command]
 pub async fn library_v2_collections(
@@ -1274,7 +1292,7 @@ pub async fn library_v2_collection(
 }
 
 /// 画面の ID（旧棚から移したものは旧棚の ID、ほかは新しい棚の ID）からコレクションを引く。
-fn collection_target(library: &Library, id: &str) -> Result<LibraryId, String> {
+pub(crate) fn collection_target(library: &Library, id: &str) -> Result<LibraryId, String> {
     match library
         .collection_by_legacy_id(id)
         .map_err(|e| e.to_string())?

@@ -45,7 +45,7 @@ import { getDemoCollection } from "@/mocks/demoData";
 import { openSingleDialog } from "@/services/dialogApi";
 import { exportCollectionEpub } from "@/services/epubApi";
 import { readExportSettings, toCompressOptions } from "@/features/epub/exportSettings";
-import type { WorkCollection, WorkCollectionInput, WorkCollectionMember, WorkKey } from "@/types/collections";
+import type { CollectionAdditionCandidate, WorkCollection, WorkCollectionInput, WorkCollectionMember, WorkKey } from "@/types/collections";
 import type { ListedWork } from "@/types/library";
 import { CollectionAddWorksModal } from "./CollectionAddWorksModal";
 import { CollectionAdditionsModal } from "./CollectionAdditionsModal";
@@ -185,7 +185,8 @@ function shelfChange(action: MemberAction): ShelfCollectionChange {
 
 function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, writable = false, onEdit, onChanged }: { collection: WorkCollection; readOnly: boolean; shelf?: boolean; writable?: boolean; onEdit: (assist?: boolean) => void; onChanged: (collection: WorkCollection) => void }) {
   // 新しい棚は、正本に切り替えるまで読むだけ。書き換える操作は同じ場所に押せない形で置き、
-  // 理由を添える。切り替えた棚でも、表紙・EPUB・探す・AI・複数選択はまだつないでいない。
+  // 理由を添える。切り替えた棚でも、表紙・EPUB・分け方の手伝い・複数選択はまだつないでいない
+  // （合う作品を探す・名前の案は切り替えた棚でも使える）。
   const onShelf = shelf && writable;
   const readOnly = previewOnly || (shelf && !writable);
   const locked = shelf && !writable ? SHELF_READ_ONLY : null;
@@ -279,17 +280,19 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
     onError: (error) => notifications.show({ color: "red", title: "分けられません", message: errorMessage(error) }),
   });
 
-  // 探して選んだ作品を束へ入れる。棚の id をそのまま渡す経路が既にあるので、
-  // 作品鍵へ組み直さない。
+  // 探して選んだ作品を束へ入れる。旧棚は棚の id をそのまま渡す経路を使い、新しい棚は
+  // 作品の鍵で一回の編集として足す。
   const addFromSuggestions = useMutation({
     scope: { id: `work-collection:${collection.id}` },
-    mutationFn: (downloadIds: number[]) => addDownloadsToCollection(collection.id, downloadIds),
-    onSuccess: (value, downloadIds) => {
+    mutationFn: (candidates: CollectionAdditionCandidate[]) => onShelf
+      ? editOnShelf({ kind: "add", works: candidates.map(({ source, sourceId }) => ({ source, sourceId })) })
+      : addDownloadsToCollection(collection.id, candidates.map((candidate) => candidate.downloadId)),
+    onSuccess: (value, candidates) => {
       onChanged(value);
       additionsModal.close();
       notifications.show({
         color: "green",
-        message: `${formatNumber(downloadIds.length)}作品をコレクションに入れました`,
+        message: `${formatNumber(candidates.length)}作品をコレクションに入れました`,
       });
     },
     onError: (error) => notifications.show({ color: "red", title: "コレクションに入れられません", message: errorMessage(error) }),
@@ -474,8 +477,8 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
       id: "collection_naming",
       label: "名前を考えてもらう",
       description: "題名とタグを見て名前と説明を提案します",
-      enabled: !pendingOff && Boolean(namingEngine),
-      unavailableReason: pending ? pending : readOnly ? "このコレクションは編集できません" : "設定で「コレクションの命名」を有効にすると使えます",
+      enabled: !readOnly && Boolean(namingEngine),
+      unavailableReason: locked ? locked : readOnly ? "このコレクションは編集できません" : "設定で「コレクションの命名」を有効にすると使えます",
       onSelect: () => onEdit(true),
     },
     {
@@ -517,7 +520,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
                 <Badge variant="light" color={ordered ? "piep" : "gray"}>{ordered ? "順序付き" : "順序なし"}</Badge>
                 <Text size="sm" c="dimmed">{formatNumber(collection.memberCount)}作品 · {formatNumber(collection.totalTextLength)}字</Text>
                 {missingCount > 0 && <Badge color="orange" variant="light">収録できない {formatNumber(missingCount)}作品</Badge>}
-                {shelf && <Tooltip label={writable ? "新しい棚から読み書きしています。表紙・EPUB・AIの手伝いはまだ旧棚だけです。" : "新しい棚（試験中）から読んでいます。正本に切り替えるまで、ここからは何も書き換えません。"}><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}
+                {shelf && <Tooltip label={writable ? "新しい棚から読み書きしています。表紙・EPUB・分け方の手伝いはまだ旧棚だけです。" : "新しい棚（試験中）から読んでいます。正本に切り替えるまで、ここからは何も書き換えません。"}><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}
               </Group>
               {/* 主操作の「作品を追加」は右端。「合う作品を探す」はその隣に置く。
                   どちらも束へ作品を入れる操作で、違うのは**誰が探すか**だけである。 */}
@@ -529,11 +532,11 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
                   <Button variant="default" leftSection={<Icons.epub size={IconSize.action} />} loading={epubMutation.isPending} disabled={pendingOff || exportableCount <= 0} onClick={startEpubExport}>一冊のEPUB</Button>
                 </Locked>
                 {!headerHosted && <AssistLauncher items={assistItems} />}
-                <Locked reason={pending} label="合う作品を探す">
+                <Locked reason={locked} label="合う作品を探す">
                   <Button
                     variant="default"
                     leftSection={<Icons.collectionSuggest size={IconSize.action} />}
-                    disabled={pendingOff || collection.availableCount === 0}
+                    disabled={readOnly || collection.availableCount === 0}
                     onClick={additionsModal.open}
                   >
                     合う作品を探す
@@ -674,12 +677,12 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
         shelf={shelf}
         onAdd={(works) => mutation.mutate({ type: "add", works })}
       />}
-      {!pendingOff && <CollectionAdditionsModal
+      {!readOnly && <CollectionAdditionsModal
         opened={additionsOpened}
         onClose={additionsModal.close}
         collection={collection}
-        busy={mutation.isPending}
-        onAdd={(downloadIds) => addFromSuggestions.mutate(downloadIds)}
+        busy={mutation.isPending || addFromSuggestions.isPending}
+        onAdd={(candidates) => addFromSuggestions.mutate(candidates)}
       />}
       {!pendingOff && <CollectionCoverModal
         opened={coverOpened}

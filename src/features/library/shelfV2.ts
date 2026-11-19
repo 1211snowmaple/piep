@@ -12,6 +12,7 @@ import {
   type ShelfCollectionChange,
   libraryV2Collections,
   libraryV2EntityCollections,
+  libraryV2WorkCollections,
   type ShelfCollection,
   type ShelfCollectionSummary,
   type ShelfEntityHead,
@@ -510,6 +511,11 @@ export function shelfEntityFacet(row: ShelfEntityRow): ShelfEntityFacet {
 /** 作者・シリーズに関わるコレクションを、カードが読む形にする（新しい順）。 */
 export async function shelfEntityCollections(kind: "person" | "series", entity: string): Promise<WorkCollectionSummary[]> {
   return (await libraryV2EntityCollections(kind, entity)).map(shelfCollectionSummary);
+}
+
+/** 作品の入ったコレクション。 */
+export async function shelfWorkCollections(work: string): Promise<WorkCollectionSummary[]> {
+  return (await libraryV2WorkCollections(work)).map(shelfCollectionSummary);
 }
 
 /**

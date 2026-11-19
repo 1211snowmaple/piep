@@ -13,6 +13,8 @@ import {
   Grid,
   Group,
   Image,
+  Indicator,
+  Menu,
   Paper,
   Select,
   SimpleGrid,
@@ -24,7 +26,7 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { modals } from "@mantine/modals";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notifications } from "@mantine/notifications";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { ActionBar } from "@/components/ActionBar";
@@ -62,7 +64,9 @@ import {
   type ShelfMedia,
   type ShelfVersion,
 } from "@/services/libraryV2Api";
-import { invalidateShelf, shelfEntry, useShelfWritable } from "@/features/library/shelfV2";
+import { editShelfCollection, invalidateShelf, shelfEntry, shelfWorkCollections, useShelfWritable } from "@/features/library/shelfV2";
+import { workCollectionsQueryOptions } from "@/features/collections/collectionQueries";
+import { Locked } from "@/components/Locked";
 import { ContentPagination, Info, parseWorkTab } from "@/features/library/workPageParts";
 import { ActionRow } from "@/components/ActionRow";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
@@ -131,6 +135,26 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   const favoriteLabel = !writable ? `お気に入り（${READ_ONLY}）` : work?.favorite ? "お気に入りを解除" : "お気に入りに追加";
   const editLabel = writable ? "編集" : `編集（${READ_ONLY}）`;
   const checkLabel = writable ? "更新を確認" : `更新を確認（${READ_ONLY}）`;
+  // コレクションに入れる・関連作品からひな型を作る（旧棚の作品の画面と同じ入口）。書けるのは
+  // 正本に切り替えた棚だけ。
+  const allCollectionsQuery = useQuery({ ...workCollectionsQueryOptions(true), enabled: runtime && writable });
+  const workCollectionsQuery = useQuery({
+    queryKey: ["library-v2-work-collections", workId],
+    queryFn: () => shelfWorkCollections(workId),
+    enabled: runtime && writable,
+  });
+  const collectionCount = workCollectionsQuery.data?.length ?? 0;
+  const collectionLabel = collectionCount ? `コレクション（${collectionCount}件に追加済み）` : "コレクションに追加";
+  const addToCollection = useMutation({
+    mutationFn: async (collectionId: string) => {
+      if (!work) throw new Error("作品を読み込めていません");
+      const saved = await editShelfCollection(collectionId, { kind: "add", works: [{ source: work.provider, sourceId: work.external_key }] });
+      if (!saved) throw new Error("コレクションが見つかりません");
+      return saved;
+    },
+    onSuccess: (saved) => { void invalidateShelf(queryClient); notifications.show({ color: "green", message: `「${saved.name}」に追加しました` }); },
+    onError: (error) => notifications.show({ color: "red", title: "コレクションに追加できません", message: errorMessage(error) }),
+  });
   const [checking, setChecking] = useState(false);
   const [watchingChange, setWatchingChange] = useState<boolean | null>(null);
   const changeWatching = async (watching: boolean) => {
@@ -387,6 +411,23 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
                   </Group>
                   <Group gap={6} wrap="nowrap" role="group" aria-label="手元の印">
                     <Tooltip label={favoriteLabel}><ActionIcon className="work-hero__action" size={38} variant="default" style={work.favorite ? { "--ai-color": "var(--flag-favorite)", "--ai-bg": "var(--flag-favorite-bg)" } : undefined} aria-label={favoriteLabel} aria-pressed={work.favorite} disabled={!writable} onClick={toggleFavorite}><Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
+                    {writable ? (
+                      <Menu position="bottom-end" width={280}>
+                        <Menu.Target><Tooltip label={collectionLabel}><Indicator disabled={!collectionCount} label={collectionCount} size={16} offset={3} color="gray"><ActionIcon className="work-hero__action" variant="default" size={38} aria-label={collectionLabel}><Icons.collection size={IconSize.action} /></ActionIcon></Indicator></Tooltip></Menu.Target>
+                        <Menu.Dropdown>
+                          <Menu.Label>コレクションに追加</Menu.Label>
+                          {(allCollectionsQuery.data ?? []).length === 0 ? <Menu.Item disabled>コレクションがありません</Menu.Item> : (allCollectionsQuery.data ?? []).map((collection) => {
+                            const included = workCollectionsQuery.data?.some((value) => value.id === collection.id) ?? false;
+                            return <Menu.Item key={collection.id} disabled={included || addToCollection.isPending} leftSection={included ? <Icons.confirm size={IconSize.menu} /> : <Icons.collection size={IconSize.menu} />} onClick={() => addToCollection.mutate(collection.id)}>{collection.name}{included ? "（追加済み）" : ""}</Menu.Item>;
+                          })}
+                          <Menu.Divider />
+                          <Menu.Item leftSection={<Icons.collectionSuggest size={IconSize.menu} />} onClick={() => navigate(`/library?tab=collections&suggest=${workId}`)}>関連作品からひな型を作る</Menu.Item>
+                          <Menu.Item leftSection={<Icons.add size={IconSize.menu} />} onClick={() => navigate("/library?tab=collections")}>新しいコレクションを作る</Menu.Item>
+                        </Menu.Dropdown>
+                      </Menu>
+                    ) : (
+                      <Locked reason={READ_ONLY} label="コレクションに追加"><ActionIcon className="work-hero__action" variant="default" size={38}><Icons.collection size={IconSize.action} /></ActionIcon></Locked>
+                    )}
                   </Group>
                 </Group>
               </div>

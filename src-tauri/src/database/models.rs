@@ -665,6 +665,9 @@ pub struct CollectionSuggestionMember {
     pub source: String,
     pub source_id: String,
     pub download_id: Option<i64>,
+    /// 新しい棚の作品 ID（UUID）。旧棚の候補では None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<String>,
     pub title: String,
     pub author_name: String,
     pub cover_path: Option<String>,
@@ -727,6 +730,9 @@ pub struct CollectionAdditionCandidate {
     pub source: String,
     pub source_id: String,
     pub download_id: i64,
+    /// 新しい棚の作品 ID（UUID）。旧棚の候補では None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<String>,
     pub title: String,
     pub author_name: String,
     pub cover_path: Option<String>,
@@ -787,7 +793,11 @@ pub struct CollectionNameCandidate {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CollectionSuggestionRequest {
+    #[serde(default)]
     pub seed_download_ids: Vec<i64>,
+    /// 切り替えた棚の種の作品（UUID）。
+    #[serde(default)]
+    pub seed_works: Vec<String>,
     pub limit: Option<i64>,
 }
 

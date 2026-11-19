@@ -17,7 +17,7 @@ fn evidence(kind: &str, label: String) -> CollectionSuggestionEvidence {
 }
 
 pub(super) fn contextualize(
-    db: &Database,
+    src: &dyn SuggestionSource,
     bundles: &mut Vec<SweepBundle>,
     works: &HashMap<i64, SweepWork>,
     aliases: &HashMap<i64, i64>,
@@ -28,7 +28,7 @@ pub(super) fn contextualize(
     let mut membership: HashMap<i64, HashSet<String>> = HashMap::new();
     let mut series: HashMap<String, (String, HashSet<i64>)> = HashMap::new();
     {
-        let conn = db.read_conn()?;
+        let conn = src.corpus()?;
         let mut stmt = conn
             .prepare("SELECT download_id,series_source,series_key,title FROM download_series")
             .map_err(|e| e.to_string())?;
@@ -137,14 +137,8 @@ pub(super) fn contextualize(
                 }
                 for id in [a, b] {
                     body_cache.entry(id).or_insert_with(|| {
-                        db.get_reader_document(id, None)
-                            .ok()
-                            .map(|doc| {
-                                doc.plain_text
-                                    .nfkc()
-                                    .filter(|c| !c.is_whitespace())
-                                    .collect()
-                            })
+                        src.plain_text(id)
+                            .map(|text| text.nfkc().filter(|c| !c.is_whitespace()).collect())
                             .unwrap_or_default()
                     });
                 }
