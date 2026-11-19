@@ -39,7 +39,7 @@ import { Note } from "@/components/Note";
 import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { Icons, IconSize } from "@/lib/icons";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
-import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatNumber } from "@/lib/format";
+import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatFreshness, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
 import { isTauriRuntime } from "@/services/dbApi";
@@ -69,6 +69,7 @@ import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import { EditStatusStrip } from "@/features/library/EditStatusStrip";
 import type { WorkEditRevision } from "@/types/library";
 import { runSingleCheck } from "@/features/updates/startSingleCheck";
+import { listPendingRevisionsCommand, previewPendingRevisionCommand } from "@/services/updateJobApi";
 
 const READ_ONLY = "新しい棚では変えられません";
 
@@ -217,9 +218,34 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
     queryFn: () => libraryV2Original(workId, originalSnapshot),
     enabled: runtime && tab === "json",
   });
+  // 取り込んでいない改稿は作品の属性ではなく、更新確認が見つけた事実なので
+  // 作品の行には入っていない。画面側で一度だけ引いて突き合わせる。
+  const pendingRevisions = useQuery({
+    queryKey: ["pending-revisions"],
+    queryFn: () => runtime ? listPendingRevisionsCommand() : Promise.resolve([]),
+    // 無効化は更新確認の側から届く（invalidateAfterUpdateJob）。
+    staleTime: 30_000,
+  });
+  const pendingRevision = pendingRevisions.data?.find((entry) => entry.work === workId);
+  // 未保存の改稿があれば、まずそれと保存済みの現在の版を比べる。版を選べばそちらへ移る。
+  const [pendingChosen, setPendingChosen] = useState<boolean | null>(null);
+  const showPending = Boolean(pendingRevision) && (pendingChosen ?? true);
+  const pendingPreview = useQuery({
+    queryKey: ["pending-revision-preview", workId],
+    queryFn: () => previewPendingRevisionCommand(workId),
+    enabled: runtime && tab === "history" && showPending,
+    staleTime: 0,
+  });
+  const chooseVersion = (snapshot: string) => {
+    setSelectedSnapshot(snapshot);
+    setPendingChosen(false);
+  };
   // 履歴は、選んだ版と一つ前の版を比べる。何も選んでいなければ現在の版。
-  const selected = versions.find((version) => version.snapshot === selectedSnapshot) ?? versions[0] ?? null;
-  const previous = selected ? versions.find((version) => version.version < selected.version) ?? null : null;
+  // 未保存の改稿を比べるときは、保存済みの現在の版を手前に置く。
+  const selected = showPending
+    ? versions.find((version) => version.snapshot === work?.snapshot_id) ?? versions[0] ?? null
+    : versions.find((version) => version.snapshot === selectedSnapshot) ?? versions[0] ?? null;
+  const previous = selected && !showPending ? versions.find((version) => version.version < selected.version) ?? null : null;
   const selectedText = useQuery({
     queryKey: ["library-v2-revision-snapshot", workId, selected?.snapshot],
     queryFn: () => libraryV2RevisionSnapshot(workId, selected!.snapshot),
@@ -435,6 +461,10 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
           {edited && <Alert color="blue" mb="md">編集しても取得元の版は増えません。編集版は{work.editBaseVersion === null ? "取得元の版" : ` v${work.editBaseVersion} `}の上に重ねて保存してあり、いま読む本文に使います。</Alert>}
           <div className="history-layout">
             <nav className="history-layout__versions" aria-label="保存した版">
+              {pendingRevision && <Paper component="button" type="button" p="xs" withBorder className="version-row" data-source-newer data-active={showPending || undefined} onClick={() => setPendingChosen(true)} title={`保存済み v${current?.version ?? "?"} と比較できます。開くだけでは保存されません`}>
+                <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>取得元の改稿</Text><Badge size="xs" color="yellow">未保存</Badge></Group>
+                <Text size="xs" c="dimmed">{formatFreshness(pendingRevision.foundAt)}に検出</Text>
+              </Paper>}
               {editHistory?.active && <Paper p="xs" withBorder className="version-row version-row--static">
                 <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>編集版</Text><Badge size="xs" color="blue">現在</Badge></Group>
                 <Text size="xs" c="dimmed">v{editHistory.active.baseVersion} をもとに</Text>
@@ -458,7 +488,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
                   <DangerButton mt={4} size="compact-xs" fullWidth loading={changing === `forget-${revision.id}`} onClick={() => confirmForget(revision)}>一覧から外す</DangerButton>
                 </>}
               </Paper>)}
-              {versions.map((version) => <Paper component="button" type="button" key={version.snapshot} p="xs" withBorder className="version-row" data-active={selected?.snapshot === version.snapshot || undefined} onClick={() => setSelectedSnapshot(version.snapshot)}>
+              {versions.map((version) => <Paper component="button" type="button" key={version.snapshot} p="xs" withBorder className="version-row" data-active={(!showPending && selected?.snapshot === version.snapshot) || undefined} onClick={() => chooseVersion(version.snapshot)}>
                 <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>v{version.version}</Text>{version.snapshot === current?.snapshot && <Badge size="xs">{edited ? "取得元の最新版" : "現在"}</Badge>}</Group>
                 <Text size="xs" c="dimmed">{versionDate(version)}</Text>
                 {version.text_length !== null && <Text size="xs" c="dimmed">{formatNumber(version.text_length)}字</Text>}
@@ -467,6 +497,22 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
             <Card p="lg" className="version-preview">
               {!selected
                 ? <Alert color="gray">保存した版がありません。</Alert>
+                : showPending
+                  ? selectedText.isLoading || pendingPreview.isLoading
+                    ? <LoadingState label="変更内容を読み込んでいます" />
+                    : selectedText.error || pendingPreview.error
+                      ? <ErrorState error={selectedText.error ?? pendingPreview.error} retry={() => { selectedText.refetch(); pendingPreview.refetch(); }} />
+                      : <RevisionDiff
+                        beforeVersion={selected.version}
+                        afterVersion={selected.version + 1}
+                        beforeLabel={`保存済み v${selected.version}`}
+                        afterLabel="取得元の改稿（未保存）"
+                        beforeText={selectedText.data?.text ?? ""}
+                        beforeMetadata={selectedText.data?.metadata}
+                        afterMetadata={pendingPreview.data?.metadata}
+                        afterText={pendingPreview.data?.text ?? ""}
+                        actions={<Button size="xs" variant="default" onClick={() => navigate("/updates")}>新作・改稿の画面で保存</Button>}
+                      />
                 : selectedText.isLoading || (previous && previousText.isLoading)
                   ? <LoadingState label="変更内容を読み込んでいます" />
                   : selectedText.error || previousText.error

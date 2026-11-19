@@ -271,10 +271,10 @@ export const WorkCard = memo(function WorkCard({
     // 無効化は更新確認の側から届く（invalidateAfterUpdateJob）。
     // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
     staleTime: 30_000,
-    enabled: revisedFromList === undefined && legacyId !== null,
+    enabled: revisedFromList === undefined,
   });
-  const revised = legacyId !== null && (revisedFromList
-    ?? (pendingRevisions.data ?? []).some((entry) => entry.downloadId === legacyId));
+  const revised = revisedFromList
+    ?? (pendingRevisions.data ?? []).some((entry) => entry.work === String(work.id));
   const excerpt = work.excerpt ? summaryText(work.excerpt) : "";
   const select = useCallback((next: boolean) => {
     if (onToggleSelect) onToggleSelect(next);

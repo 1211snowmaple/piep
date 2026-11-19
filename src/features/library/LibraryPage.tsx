@@ -1063,7 +1063,7 @@ export default function LibraryPage() {
   // 「改稿あり」は確認待ちだけではなく、手元の版数が実際に増えた作品も含む。
   // 補完だけの保存コピーは取得元の改稿に数えず、DB側で同じ定義を使う。
   const pendingRevisionIds = useMemo(
-    () => new Set((pendingRevisions.data ?? []).map((entry) => entry.downloadId)),
+    () => new Set((pendingRevisions.data ?? []).map((entry) => entry.work)),
     [pendingRevisions.data],
   );
 

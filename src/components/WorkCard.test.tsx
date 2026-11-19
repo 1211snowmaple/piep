@@ -230,13 +230,23 @@ describe("WorkCard", () => {
   });
 
   it("labels and deep-links an unsaved rewrite separately from saved history", async () => {
-    updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ downloadId: 101, foundAt: "2026-09-01T00:00:00Z" }]);
+    updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ work: "101", foundAt: "2026-09-01T00:00:00Z" }]);
     renderCard({ work: { ...demoWorks[0], currentVersion: 2 } });
 
     expect(await screen.findByRole("button", { name: /未保存の改稿を比較/ })).toHaveTextContent("未保存の改稿");
     expect(screen.getByRole("button", { name: /バージョン履歴/ })).toHaveTextContent("履歴 2版");
     fireEvent.click(screen.getByRole("button", { name: /未保存の改稿を比較/ }));
     expect(window.location.hash).toBe("#/works/101?tab=history&compare=pending");
+  });
+
+  it("marks an unsaved rewrite of a shelf work by its UUID", async () => {
+    const shelfId = "0195f1c2-0000-7000-8000-000000000001";
+    updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ work: shelfId, foundAt: "2026-09-01T00:00:00Z" }]);
+    const { id: _legacy, ...rest } = demoWorks[0];
+    renderCard({ work: { ...rest, id: shelfId, shelf: "v2", coverUrl: null, coverPath: null, legacyId: null } });
+
+    fireEvent.click(await screen.findByRole("button", { name: /未保存の改稿を比較/ }));
+    expect(window.location.hash).toBe(`#/works/${shelfId}?tab=history&compare=pending`);
   });
 
   it("uses the shared no-cover treatment and keeps the provider visible", () => {
@@ -248,20 +258,20 @@ describe("WorkCard", () => {
   });
 
   it("shows a work of the new shelf read-only, by its own id and cover", async () => {
-    updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ downloadId: 101, foundAt: "2026-09-01T00:00:00Z" }]);
+    updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ work: "101", foundAt: "2026-09-01T00:00:00Z" }]);
     window.location.hash = "#/library";
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     const { id: _legacy, ...rest } = demoWorks[0];
     renderCard({ work: { ...rest, id: shelfId, shelf: "v2", coverUrl: "http://piep-library.localhost/abc", coverPath: null, legacyId: null } });
 
     expect(screen.getByAltText("雨上がりの図書室での表紙")).toHaveAttribute("src", "http://piep-library.localhost/abc");
-    // 書き換える操作は押せない。改稿の印は旧棚の番号で照らすので出さない。
+    // 書き換える操作は押せない。改稿の印は棚の作品 ID で照らすので、旧棚の番号の改稿は出さない。
     expect(screen.getByRole("button", { name: /お気に入り（新しい棚では変えられません）/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /更新監視（新しい棚では変えられません）/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /EPUBキュー（新しい棚ではまだ使えません）/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /雨上がりの図書室で：読む$/ })).toBeEnabled();
+    await vi.waitFor(() => expect(updateJobApi.listPendingRevisionsCommand).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: /未保存の改稿を比較/ })).toBeNull();
-    expect(updateJobApi.listPendingRevisionsCommand).not.toHaveBeenCalled();
 
     fireEvent.keyDown(screen.getByRole("link", { name: /雨上がりの図書室でを開く/ }), { key: "Enter" });
     expect(window.location.hash).toBe(`#/works/${shelfId}`);

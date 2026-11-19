@@ -14,7 +14,8 @@ interface VirtualizedWorkListProps {
   onSelect?: (id: number, selected: boolean) => void;
   onToggleFavorite?: (id: number, favorite: boolean) => void;
   onToggleWatch?: (id: number, watch: boolean) => void;
-  revisedIds?: ReadonlySet<number>;
+  /** 未保存の改稿がある作品の ID（作品の画面と同じ文字列）。 */
+  revisedIds?: ReadonlySet<string>;
 }
 
 // Entity pages keep a shared author/series detail rail. At the default desktop
@@ -127,14 +128,14 @@ export function VirtualizedWorkList({
   const virtualRows = virtualizer.getVirtualItems();
 
   const renderWork = (work: ListedWork) => {
-    // 新しい棚の作品は旧棚の番号を持たないので、番号の集合（改稿の印・選択）とは照らさない。
+    // 新しい棚の作品は旧棚の番号を持たないので、番号の集合（選択）とは照らさない。
     const legacyId = isShelfEntry(work) ? null : work.id;
     return (
     <WorkCard
       key={work.id}
       compact={view === "compact"}
       work={work}
-      revised={legacyId === null ? false : revisedIds?.has(legacyId)}
+      revised={revisedIds?.has(String(work.id))}
       selectionMode={selectionMode}
       selected={legacyId !== null && selected?.has(legacyId)}
       onSelect={onSelect}

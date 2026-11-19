@@ -34,6 +34,11 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
 }));
+const updates = vi.hoisted(() => ({ listPendingRevisionsCommand: vi.fn(), previewPendingRevisionCommand: vi.fn() }));
+vi.mock("@/services/updateJobApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/updateJobApi")>()),
+  ...updates,
+}));
 const runSingleCheck = vi.hoisted(() => vi.fn());
 vi.mock("@/features/updates/startSingleCheck", () => ({ runSingleCheck }));
 
@@ -92,6 +97,8 @@ describe("ShelfWorkPage", () => {
     for (const fn of Object.values(api)) fn.mockReset();
     window.localStorage.clear();
     runSingleCheck.mockReset().mockResolvedValue(undefined);
+    updates.listPendingRevisionsCommand.mockReset().mockResolvedValue([]);
+    updates.previewPendingRevisionCommand.mockReset();
     api.libraryV2Work.mockResolvedValue(work);
     api.libraryV2EditHistory.mockResolvedValue({ generation: 0, active: null, draft: null, archived: [] });
     api.libraryV2Content.mockImplementation(async (_work: string, _snapshot: string | null, page: number) => ({
@@ -132,6 +139,25 @@ describe("ShelfWorkPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "この版の本文を見る" }));
     await waitFor(() => expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, FIRST, 0));
     expect(await screen.findByText("保存済み v1")).toBeInTheDocument();
+  });
+
+  it("compares an unsaved rewrite with the current saved version without saving it", async () => {
+    updates.listPendingRevisionsCommand.mockResolvedValue([{ work: WORK, foundAt: "2026-09-01T00:00:00Z" }]);
+    updates.previewPendingRevisionCommand.mockResolvedValue({ work: WORK, baseVersion: 2, text: "二行目と追記", textLength: 6 });
+    renderPage(`#/works/${WORK}?tab=history&compare=pending`);
+
+    expect(await screen.findByText("保存済み v2 → 取得元の改稿（未保存） の変更")).toBeInTheDocument();
+    expect(updates.previewPendingRevisionCommand).toHaveBeenCalledWith(WORK);
+    expect(api.libraryV2RevisionSnapshot).toHaveBeenCalledWith(WORK, SECOND);
+    expect(api.libraryV2RevisionSnapshot).not.toHaveBeenCalledWith(WORK, FIRST);
+    expect(screen.getByRole("button", { name: /取得元の改稿/ })).toHaveAttribute("data-active");
+    expect(Array.from(document.querySelectorAll('ins[data-kind="added"]')).map((node) => node.textContent).join("")).toContain("追記");
+
+    // 保存した版を選べば、いつもの版どうしの比較へ戻る。
+    fireEvent.click(screen.getByRole("button", { name: /^v2/ }));
+    await waitFor(() => expect(api.libraryV2RevisionSnapshot).toHaveBeenCalledWith(WORK, FIRST));
+    expect(screen.getByRole("button", { name: /取得元の改稿/ })).not.toHaveAttribute("data-active");
+    expect(updates.previewPendingRevisionCommand).toHaveBeenCalledTimes(1);
   });
 
   it("shows metadata and saved image changes even when source text is identical", async () => {

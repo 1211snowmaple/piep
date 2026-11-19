@@ -285,8 +285,8 @@ export async function restoreDismissedUpdateCandidatesCommand(): Promise<number>
 
 /** まだ取り込んでいない改稿。 */
 export interface PendingRevision {
-  /** 手元の作品ID。棚の絞り込みにも、1件の判定にも、同じこれで足りる。 */
-  downloadId: number;
+  /** 作品の画面と同じ ID の文字列（切り替えた棚では作品 UUID、旧棚では番号）。 */
+  work: string;
   /** 更新確認がこの改稿を見つけた時刻。取得元が直した日そのものは持っていない。 */
   foundAt: string;
 }
@@ -294,7 +294,7 @@ export interface PendingRevision {
 /** A provider revision fetched for comparison but not accepted into history. */
 export interface PendingRevisionPreview {
   metadata?: import("./workInspectionApi").RevisionMetadata;
-  downloadId: number;
+  work: string;
   baseVersion: number;
   text: string;
   textLength: number;
@@ -314,10 +314,10 @@ export async function listPendingRevisionsCommand(): Promise<
 
 /** Fetch the pending provider body without creating a saved version. */
 export async function previewPendingRevisionCommand(
-  downloadId: number,
+  work: string,
 ): Promise<PendingRevisionPreview> {
   return invoke<PendingRevisionPreview>("preview_pending_revision", {
-    downloadId,
+    work,
     credentials: await getUpdateJobCredentials(),
   });
 }

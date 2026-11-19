@@ -29,6 +29,8 @@ mod reclaim;
 mod renditions;
 mod repository;
 mod resources;
+mod save_repairs;
+pub use save_repairs::MAX_INCOMPLETE_SAVE_REPAIRS;
 mod saved_state;
 mod schema;
 mod searches;

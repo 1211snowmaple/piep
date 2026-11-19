@@ -217,7 +217,7 @@ function LegacyWorkPage() {
     // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
     staleTime: 30_000,
   });
-  const pendingRevision = pendingRevisions.data?.find((entry) => entry.downloadId === id);
+  const pendingRevision = pendingRevisions.data?.find((entry) => entry.work === String(id));
   useEffect(() => {
     if (tab !== "history" || !documentQuery.data || pendingRevisions.isLoading) return;
     setSelectedVersion((current) => {
@@ -321,8 +321,8 @@ function LegacyWorkPage() {
   const pendingRevisionPreview = useQuery({
     queryKey: ["pending-revision-preview", id],
     queryFn: () => runtime
-      ? previewPendingRevisionCommand(id)
-      : Promise.resolve<import("@/services/updateJobApi").PendingRevisionPreview>({ downloadId: id, baseVersion: documentQuery.data?.download.currentVersion ?? 1, text: getDemoReader(id).plainText, textLength: getDemoReader(id).plainText.length }),
+      ? previewPendingRevisionCommand(String(id))
+      : Promise.resolve<import("@/services/updateJobApi").PendingRevisionPreview>({ work: String(id), baseVersion: documentQuery.data?.download.currentVersion ?? 1, text: getDemoReader(id).plainText, textLength: getDemoReader(id).plainText.length }),
     enabled: validId && tab === "history" && selectedVersion === "pending" && Boolean(pendingRevision),
     staleTime: 0,
   });

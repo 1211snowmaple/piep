@@ -1711,19 +1711,25 @@ pub async fn list_incomplete_save_repair_works(
     limit: i64,
 ) -> Result<Vec<IncompleteSaveRepairWork>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    tokio::task::spawn_blocking(move || state.db.list_incomplete_save_repair_works(limit))
-        .await
-        .map_err(|error| format!("補完する作品を読み取れません: {error}"))?
-        .map(|works| {
-            works
-                .into_iter()
-                .map(|(source_id, title)| IncompleteSaveRepairWork {
-                    source: "pixiv",
-                    source_id,
-                    title,
-                })
-                .collect()
-        })
+    let library = state.library_v2.switched();
+    tokio::task::spawn_blocking(move || match library {
+        Some(library) => library
+            .incomplete_save_repairs(limit.clamp(1, 500) as usize)
+            .map_err(|error| error.to_string()),
+        None => state.db.list_incomplete_save_repair_works(limit),
+    })
+    .await
+    .map_err(|error| format!("補完する作品を読み取れません: {error}"))?
+    .map(|works| {
+        works
+            .into_iter()
+            .map(|(source_id, title)| IncompleteSaveRepairWork {
+                source: "pixiv",
+                source_id,
+                title,
+            })
+            .collect()
+    })
 }
 
 /// 補完の保存ジョブへ渡した作品を、今の版で試したと記録する。
@@ -1733,8 +1739,13 @@ pub async fn record_incomplete_save_repair_attempts(
     source_ids: Vec<String>,
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    tokio::task::spawn_blocking(move || {
-        state.db.record_incomplete_save_repair_attempts(&source_ids)
+    let library = state.library_v2.switched();
+    tokio::task::spawn_blocking(move || match library {
+        Some(library) => library
+            .record_incomplete_save_attempts(&source_ids, chrono::Utc::now().timestamp_millis())
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => state.db.record_incomplete_save_repair_attempts(&source_ids),
     })
     .await
     .map_err(|error| format!("補完の記録を書けません: {error}"))?
@@ -2062,16 +2073,52 @@ pub async fn count_dismissed_update_candidates(app: tauri::AppHandle) -> Result<
     state.candidates().count_dismissed_update_candidates()
 }
 
-/// まだ取り込んでいない改稿がある作品の鍵（`{source}:{sourceId}`）。
+/// まだ取り込んでいない改稿がある作品。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingRevisionWork {
+    /// 作品の画面と同じ ID。切り替えた棚では作品 UUID、そうでなければ旧棚の番号。
+    pub work: String,
+    /// 更新確認がこの改稿を見つけた時刻。取得元が直した日そのものは持っていない。
+    pub found_at: String,
+}
+
+/// まだ取り込んでいない改稿がある作品。
 ///
 /// 画面はこれを一度だけ引いて、手元にある作品と突き合わせる。作品の一覧に
 /// 列を足さないのは、これが作品の属性ではなく更新側が見つけた事実だから。
 #[tauri::command]
 pub async fn list_pending_revisions(
     app: tauri::AppHandle,
-) -> Result<Vec<crate::database::PendingRevision>, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.pending_revision_keys()
+) -> Result<Vec<PendingRevisionWork>, String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    tokio::task::spawn_blocking(move || {
+        if let Some(library) = state.library_v2.switched() {
+            return library
+                .pending_revisions()
+                .map_err(|error| error.to_string())
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|(work, found)| PendingRevisionWork {
+                            work: work.to_string(),
+                            found_at: chrono::DateTime::from_timestamp_millis(found)
+                                .unwrap_or_default()
+                                .to_rfc3339(),
+                        })
+                        .collect()
+                });
+        }
+        state.db.pending_revision_keys().map(|rows| {
+            rows.into_iter()
+                .map(|row| PendingRevisionWork {
+                    work: row.download_id.to_string(),
+                    found_at: row.found_at,
+                })
+                .collect()
+        })
+    })
+    .await
+    .map_err(|error| format!("改稿の一覧を読み取れません: {error}"))?
 }
 
 /// A provider revision fetched only for comparison. It is deliberately not
@@ -2081,7 +2128,8 @@ pub async fn list_pending_revisions(
 #[serde(rename_all = "camelCase")]
 pub struct PendingRevisionPreview {
     pub metadata: crate::database::queries::RevisionMetadata,
-    pub download_id: i64,
+    /// 作品の画面と同じ ID（`list_pending_revisions` の `work`）。
+    pub work: String,
     pub base_version: i64,
     pub text: String,
     pub text_length: i64,
@@ -2096,33 +2144,59 @@ pub struct PendingRevisionPreview {
 #[tauri::command]
 pub async fn preview_pending_revision(
     app: tauri::AppHandle,
-    download_id: i64,
+    work: String,
     credentials: UpdateCredentials,
 ) -> Result<PendingRevisionPreview, String> {
-    let state = app.state::<Arc<AppState>>();
-    if !state
-        .db
-        .pending_revision_keys()?
-        .iter()
-        .any(|revision| revision.download_id == download_id)
-    {
-        return Err("この作品には未保存の改稿がありません".to_string());
-    }
+    const NONE: &str = "この作品には未保存の改稿がありません";
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let lookup_state = state.clone();
+    let lookup_work = work.clone();
+    let (source, source_id, base_version) = tokio::task::spawn_blocking(move || {
+        if let Some(library) = lookup_state.library_v2.switched() {
+            let id = crate::library::LibraryId::parse_str(&lookup_work)
+                .map_err(|_| "作品の指定が不正です".to_string())?;
+            if !library
+                .has_pending_revision(id)
+                .map_err(|error| error.to_string())?
+            {
+                return Err(NONE.to_string());
+            }
+            let card = library.work_card(id).map_err(|error| error.to_string())?;
+            return Ok((card.provider, card.external_key, card.version_number as i64));
+        }
+        let download_id: i64 = lookup_work
+            .parse()
+            .map_err(|_| "作品の指定が不正です".to_string())?;
+        if !lookup_state
+            .db
+            .pending_revision_keys()?
+            .iter()
+            .any(|revision| revision.download_id == download_id)
+        {
+            return Err(NONE.to_string());
+        }
+        let download = lookup_state.db.get_download(download_id)?;
+        Ok((
+            download.source,
+            download.source_id,
+            download.current_version,
+        ))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
 
-    let download = state.db.get_download(download_id)?;
-    let value = match download.source.as_str() {
+    let value = match source.as_str() {
         "pixiv" => {
             let token = pixiv_token(&credentials)
                 .ok_or_else(|| "差分を取るには、設定でpixivに接続してください".to_string())?;
-            let novel =
-                super::downloader::fetch_pixiv_novel(download.source_id.clone(), token).await?;
+            let novel = super::downloader::fetch_pixiv_novel(source_id.clone(), token).await?;
             serde_json::to_value(novel).map_err(|error| error.to_string())?
         }
         "fanbox" => {
             let cookie = fanbox_cookie(&credentials)
                 .ok_or_else(|| "差分を取るには、設定でFANBOXに接続してください".to_string())?;
             super::downloader::fetch_fanbox_post(
-                download.source_id.clone(),
+                source_id.clone(),
                 cookie,
                 fanbox_user_agent(&credentials),
             )
@@ -2130,15 +2204,15 @@ pub async fn preview_pending_revision(
         }
         _ => return Err("この取得元の改稿比較には対応していません".to_string()),
     };
-    let text = super::downloader::fetched_plain_text(&value, &download.source);
-    if !super::downloader::fetched_has_material_content(&value, &download.source) {
+    let text = super::downloader::fetched_plain_text(&value, &source);
+    if !super::downloader::fetched_has_material_content(&value, &source) {
         return Err("取得元から比較できる本文・画像・添付を取得できませんでした".to_string());
     }
     let text_length = text.chars().count() as i64;
     Ok(PendingRevisionPreview {
-        metadata: crate::database::queries::revision_metadata(&value, &download.source, None),
-        download_id,
-        base_version: download.current_version,
+        metadata: crate::database::queries::revision_metadata(&value, &source, None),
+        work,
+        base_version,
         text,
         text_length,
     })
