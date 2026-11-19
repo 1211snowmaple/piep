@@ -210,6 +210,45 @@ export interface MobileShelfFavorite {
   generation: string;
 }
 
+/** 新しい棚の読書位置の場所。`view_kind` は `snapshot`（版の写し）か `edit`（編集）で、 */
+/** `view_id` はその UUID。ページは本文の区切り（pixiv の `[newpage]`、編集の改ページ）で数えた */
+/** 0 からの番号、`ratio_ppm` はそのページの中のスクロールの割合（百万分率）。 */
+export interface MobileShelfReadingLocation {
+  viewKind: string;
+  viewId: string;
+  page: number;
+  ratioPpm: number;
+}
+
+/** 新しい棚の作品の読書位置（認証した利用者のもの）。`location` が空なのは、消した位置か、 */
+/** ページで表せない位置。`mine` はこの端末が書いた位置か。`updated_at` は棚が受けた時刻 */
+/** （ミリ秒）。`generation` は更新世代（十進の文字列。まだ位置が無ければ "0"）。 */
+export interface MobileShelfReading {
+  work: string;
+  location: MobileShelfReadingLocation | null;
+  finished: boolean;
+  mine: boolean;
+  updatedAt: number | null;
+  generation: string;
+}
+
+/** 読書位置の一覧の一ページ。初めは `cursor` を空で頼み、返った `cursor` を次へ渡す。 */
+/** `more` なら続きがある。続きが無くなったあとも、同じ `cursor` で変わった分だけを受け取れる。 */
+export interface MobileShelfReadingPage {
+  items: MobileShelfReading[];
+  cursor: string;
+  more: boolean;
+}
+
+/** 新しい棚の作品の読書位置を書く。`request_id` は端末が作る UUID で、送り直しても一度だけ */
+/** 効く。`expected` は手元の更新世代（十進の文字列）。違えば 409 で今の位置が返る。 */
+export interface MobileShelfReadingUpdate {
+  requestId: string;
+  expected: string;
+  location: MobileShelfReadingLocation;
+  finished: boolean;
+}
+
 /** 新しい棚の一覧の一ページ。続きは `next_cursor` を変えずに次の要求へ渡す。 */
 export interface MobileShelfPage {
   items: MobileShelfWork[];

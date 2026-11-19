@@ -25,6 +25,8 @@ let favoriteWritable = false;
 let groupsReadable = false;
 /** 検索欄の候補と、作品の以前の版も新しい棚から出せる接続か。 */
 let suggestReadable = false;
+/** 読書位置を新しい棚と受け渡せる接続か。 */
+let readingWritable = false;
 const opened = new Map<string, Promise<NativeOpened | null>>();
 
 /** 新しい棚の作品ではまだ使えない操作の理由。押せない形にして添える。 */
@@ -45,6 +47,8 @@ export function adoptNativeLibrary(status: PcConnectionStatus | null): void {
   favoriteWritable = listable && Boolean(status?.nativeLibrary?.favoriteWrite);
   groupsReadable = listable && Boolean(status?.nativeLibrary?.groups);
   suggestReadable = listable && Boolean(status?.nativeLibrary?.suggest);
+  // 位置は読む画面で開いた本（棚の作品の ID と版の写し）に結ぶので、一覧を棚から出せなくても使える。
+  readingWritable = Boolean(next && status?.nativeLibrary?.reading);
   if (same) return;
   scope = next;
   opened.clear();
@@ -86,6 +90,12 @@ export function nativeShelfKey(): string | null {
 export function groupShelf(): NativeScope | null {
   const shelf = nativeShelf();
   return shelf && groupsReadable ? shelf : null;
+}
+
+/** 読書位置を受け渡す新しい棚。受け渡せない接続では null（旧 API の同期のまま）。 */
+export function readingShelf(): NativeScope | null {
+  const shelf = nativeShelf();
+  return shelf && readingWritable ? shelf : null;
 }
 
 /** 検索欄の候補と以前の版を出す新しい棚。出せない接続では null（候補は旧 API、版は今の版だけ）。 */

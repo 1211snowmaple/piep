@@ -123,7 +123,7 @@ fn phone_reading_positions_move_as_pages_without_guessing_and_favorite_copies_ar
             ratio_ppm: 250_000
         }
     );
-    assert_eq!(paged.device, Some(device_id("phone")));
+    assert_eq!(paged.device, Some(crate::library::server_device("phone")));
     assert_eq!(paged.updated_at, Some(1_700_000_000_000));
     assert_eq!(paged.generation, 1);
 
@@ -194,7 +194,13 @@ fn a_server_folder_without_user_rows_needs_nothing_and_unknown_entries_stay_unre
 
 #[test]
 fn legacy_devices_map_to_the_same_new_device_every_time() {
-    assert_eq!(device_id("phone"), device_id("phone"));
-    assert_ne!(device_id("phone"), device_id("tablet"));
-    assert_eq!(device_id("phone").get_version_num(), 8);
+    assert_eq!(
+        crate::library::server_device("phone"),
+        crate::library::server_device("phone")
+    );
+    assert_ne!(
+        crate::library::server_device("phone"),
+        crate::library::server_device("tablet")
+    );
+    assert_eq!(crate::library::server_device("phone").get_version_num(), 8);
 }

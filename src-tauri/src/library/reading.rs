@@ -182,40 +182,142 @@ impl Library {
             [work.as_bytes().as_slice()],
             |_| Ok(()),
         )?;
-        let raw = conn.query_row(
-            "SELECT snapshot_id,edit_id,anchor_json,finished,device_id,updated_at,generation FROM reading_positions WHERE work_id=?1 AND user_id=?2",
-            params![work.as_bytes().as_slice(),user.as_bytes().as_slice()], |r|Ok((
-                r.get::<_,Option<Vec<u8>>>(0)?,r.get::<_,Option<Vec<u8>>>(1)?,r.get::<_,Option<String>>(2)?,r.get(3)?,r.get::<_,Vec<u8>>(4)?,r.get(5)?,r.get(6)?
-            )),
-        ).optional()?;
-        let Some((snapshot, edit, anchor, finished, device, updated_at, generation)) = raw else {
-            return Ok(ReadingPosition::default());
-        };
-        let id = |b: Vec<u8>| {
-            LibraryId::from_slice(&b)
-                .map_err(|_| Error::Integrity("読書位置の識別子が不正です".into()))
-        };
-        let location = match (snapshot, edit, anchor) {
-            (Some(s), None, Some(a)) => Some(ReadingLocation::Source {
-                snapshot: id(s)?,
-                anchor: serde_json::from_str(&a)?,
-            }),
-            (None, Some(e), Some(a)) => Some(ReadingLocation::Edit {
-                edit: id(e)?,
-                anchor: serde_json::from_str(&a)?,
-            }),
-            (None, None, None) => None,
-            _ => return Err(invalid_anchor()),
-        };
-        Ok(ReadingPosition {
-            location,
-            finished,
-            device: Some(id(device)?),
-            updated_at: Some(updated_at),
-            generation,
-        })
+        let raw = conn
+            .query_row(
+                &format!("SELECT {POSITION_COLUMNS} FROM reading_positions WHERE work_id=?1 AND user_id=?2"),
+                params![work.as_bytes().as_slice(), user.as_bytes().as_slice()],
+                position_row,
+            )
+            .optional()?;
+        raw.map_or(Ok(ReadingPosition::default()), position_from_row)
     }
 
+    /// 読書位置の変更の記録（outbox）の最後の番号。変更が無ければ 0。
+    pub fn reading_sequence(&self) -> Result<i64> {
+        let conn = self.reader()?;
+        Ok(conn.query_row(
+            "SELECT coalesce(max(sequence),0) FROM outbox WHERE operation='reading_position'",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// 利用者の読書位置を作品の ID の順に、`after` の次から `limit` 件。
+    pub fn reading_positions_after(
+        &self,
+        user: LibraryId,
+        after: Option<LibraryId>,
+        limit: usize,
+    ) -> Result<Vec<(LibraryId, ReadingPosition)>> {
+        let conn = self.reader()?;
+        let mut query = conn.prepare_cached(&format!(
+            "SELECT work_id,{POSITION_COLUMNS} FROM reading_positions WHERE user_id=?1 AND work_id>?2 ORDER BY work_id LIMIT ?3"
+        ))?;
+        let after = after.map_or_else(Vec::new, |work| work.as_bytes().to_vec());
+        let rows = query.query_map(
+            params![
+                user.as_bytes().as_slice(),
+                after,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, position_row_at(r, 1)?)),
+        )?;
+        let mut found = Vec::new();
+        for row in rows {
+            let (work, raw) = row?;
+            found.push((reading_id(work)?, position_from_row(raw)?));
+        }
+        Ok(found)
+    }
+
+    /// `since` の番号より後に読書位置が変わった作品を、最後に変わった番号の順に `limit` 件。
+    /// 利用者を問わない（呼び手がその利用者の位置を引き直す）。
+    pub fn reading_changes(&self, since: i64, limit: usize) -> Result<Vec<(LibraryId, i64)>> {
+        let conn = self.reader()?;
+        let mut query = conn.prepare_cached(
+            "SELECT entity_id,max(sequence) AS last FROM outbox WHERE operation='reading_position' AND sequence>?1 GROUP BY entity_id ORDER BY last LIMIT ?2",
+        )?;
+        let rows = query.query_map(
+            params![since, i64::try_from(limit).unwrap_or(i64::MAX)],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        let mut found = Vec::new();
+        for row in rows {
+            let (work, sequence) = row?;
+            found.push((reading_id(work)?, sequence));
+        }
+        Ok(found)
+    }
+}
+
+const POSITION_COLUMNS: &str =
+    "snapshot_id,edit_id,anchor_json,finished,device_id,updated_at,generation";
+
+type PositionRow = (
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    Option<String>,
+    bool,
+    Vec<u8>,
+    i64,
+    i64,
+);
+
+fn position_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PositionRow> {
+    position_row_at(r, 0)
+}
+
+fn position_row_at(r: &rusqlite::Row<'_>, at: usize) -> rusqlite::Result<PositionRow> {
+    Ok((
+        r.get(at)?,
+        r.get(at + 1)?,
+        r.get(at + 2)?,
+        r.get(at + 3)?,
+        r.get(at + 4)?,
+        r.get(at + 5)?,
+        r.get(at + 6)?,
+    ))
+}
+
+fn reading_id(bytes: Vec<u8>) -> Result<LibraryId> {
+    LibraryId::from_slice(&bytes).map_err(|_| Error::Integrity("読書位置の識別子が不正です".into()))
+}
+
+/// 配信用サーバーの端末の識別子（登録の ID）から、棚に書く端末の識別子を決める。同じ端末は
+/// 必ず同じ値になる（旧 API の読書位置を移すときも、携帯が新しい棚へ書くときも同じ）。
+pub fn server_device(device: &str) -> LibraryId {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("piep-server-device\0{device}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_custom_bytes(bytes).into_uuid()
+}
+
+fn position_from_row(raw: PositionRow) -> Result<ReadingPosition> {
+    let (snapshot, edit, anchor, finished, device, updated_at, generation) = raw;
+    let id = reading_id;
+    let location = match (snapshot, edit, anchor) {
+        (Some(s), None, Some(a)) => Some(ReadingLocation::Source {
+            snapshot: id(s)?,
+            anchor: serde_json::from_str(&a)?,
+        }),
+        (None, Some(e), Some(a)) => Some(ReadingLocation::Edit {
+            edit: id(e)?,
+            anchor: serde_json::from_str(&a)?,
+        }),
+        (None, None, None) => None,
+        _ => return Err(invalid_anchor()),
+    };
+    Ok(ReadingPosition {
+        location,
+        finished,
+        device: Some(id(device)?),
+        updated_at: Some(updated_at),
+        generation,
+    })
+}
+
+impl Library {
     pub fn set_reading_position(&self, update: ReadingUpdate) -> Result<ReadingPosition> {
         let ReadingUpdate {
             request,

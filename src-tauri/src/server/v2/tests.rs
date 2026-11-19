@@ -1543,6 +1543,7 @@ async fn search_suggestions_come_from_the_shelf_in_the_v1_shape() {
     let works = grouped_shelf(&server.library);
     let identity = server.get("/api/v2/identity").send().await.unwrap();
     assert_eq!(identity.headers()["x-piep-suggest"], "1");
+    assert_eq!(identity.headers()["x-piep-reading"], "1");
 
     // 作者は取得元と ID、作品の多い順。一致した名前は先に出る。
     let found: piep_mobile_api::MobileSearchSuggestions =
@@ -1600,4 +1601,258 @@ async fn search_suggestions_come_from_the_shelf_in_the_v1_shape() {
         let response = server.get(&server.shelf(&rest)).send().await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+}
+
+impl Server {
+    fn reading_as(
+        &self,
+        work: uuid::Uuid,
+        body: serde_json::Value,
+        token: &str,
+    ) -> reqwest::RequestBuilder {
+        self.client
+            .put(format!(
+                "{}/api/v2/libraries/{}/works/{work}/reading",
+                self.base, self.library.id
+            ))
+            .bearer_auth(token)
+            .json(&body)
+    }
+    async fn reading_page(
+        &self,
+        cursor: &str,
+        limit: usize,
+        token: &str,
+    ) -> piep_mobile_api::MobileShelfReadingPage {
+        self.client
+            .get(format!(
+                "{}/api/v2/libraries/{}/reading",
+                self.base, self.library.id
+            ))
+            .query(&[("cursor", cursor), ("limit", &limit.to_string())])
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn reading_positions_are_written_once_refuse_stale_generations_and_come_back_as_changes() {
+    let server = Server::start().await;
+    let mut paged = capture("north", None);
+    paged.body = Some(crate::library::SourceBody::PixivText(
+        "一[newpage]二".into(),
+    ));
+    let north = save(&server.library, paged);
+    let south = save(&server.library, capture("south", None));
+    let epoch = server.context.sync_epoch.get();
+    let at = |snapshot: uuid::Uuid, page: u64, ratio: u32| json!({"viewKind": "snapshot", "viewId": snapshot.to_string(), "page": page, "ratioPpm": ratio});
+
+    // まだ何も無い。全部を返し終えたら、差分の印になる。
+    let empty = server.reading_page("", 200, "fixture").await;
+    assert!(empty.items.is_empty() && !empty.more);
+    assert_eq!(empty.cursor, format!("{epoch}.s.0"));
+
+    // 一度目で書け、同じ要求を送り直しても世代は進まない。
+    let request = uuid::Uuid::now_v7().to_string();
+    let body = json!({"requestId": request, "expected": "0", "location": at(north.snapshot_id, 1, 500_000), "finished": false});
+    for _ in 0..2 {
+        let stored: piep_mobile_api::MobileShelfReading = server
+            .reading_as(north.entity_id, body.clone(), "fixture")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(stored.generation, "1");
+        assert!(stored.mine && !stored.finished);
+        assert_eq!(
+            stored.location,
+            Some(piep_mobile_api::MobileShelfReadingLocation {
+                view_kind: "snapshot".into(),
+                view_id: north.snapshot_id.to_string(),
+                page: 1,
+                ratio_ppm: 500_000,
+            })
+        );
+    }
+    // 棚に書いた端末は、旧 API の位置を移すときと同じ識別子。
+    let position = server
+        .library
+        .reading_position(north.entity_id, server.library.id)
+        .unwrap();
+    assert_eq!(
+        position.device,
+        Some(crate::library::server_device("phone"))
+    );
+
+    // 古い世代からの書き込みは断り、今の位置を返す。
+    let stale = server
+        .reading_as(
+            north.entity_id,
+            json!({"requestId": uuid::Uuid::now_v7().to_string(), "expected": "0", "location": at(north.snapshot_id, 0, 0), "finished": false}),
+            "fixture",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let conflict: serde_json::Value = stale.json().await.unwrap();
+    assert_eq!(conflict["error"], "reading_conflict");
+    assert_eq!(conflict["current"]["generation"], "1");
+    assert_eq!(conflict["current"]["location"]["page"], 1);
+
+    // 本文に無いページ・別の作品の版・形の崩れ・知らない作品・権限の無い端末は断る。
+    let fresh = || uuid::Uuid::now_v7().to_string();
+    for (work, body, status) in [
+        (
+            north.entity_id,
+            json!({"requestId": fresh(), "expected": "1", "location": at(north.snapshot_id, 2, 0), "finished": false}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            north.entity_id,
+            json!({"requestId": fresh(), "expected": "1", "location": at(south.snapshot_id, 0, 0), "finished": false}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            north.entity_id,
+            json!({"requestId": fresh(), "expected": "1", "location": at(north.snapshot_id, 0, 1_000_001), "finished": false}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            north.entity_id,
+            json!({"requestId": fresh(), "expected": "1", "location": {"viewKind": "other", "viewId": north.snapshot_id.to_string(), "page": 0, "ratioPpm": 0}, "finished": false}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            north.entity_id,
+            json!({"requestId": fresh(), "expected": "01", "location": at(north.snapshot_id, 0, 0), "finished": false}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            north.entity_id,
+            json!({"requestId": fresh(), "expected": "1", "location": at(north.snapshot_id, 0, 0), "finished": false, "extra": 1}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            north.entity_id,
+            json!({"requestId": uuid::Uuid::nil().to_string(), "expected": "1", "location": at(north.snapshot_id, 0, 0), "finished": false}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            uuid::Uuid::now_v7(),
+            json!({"requestId": fresh(), "expected": "0", "location": at(north.snapshot_id, 0, 0), "finished": false}),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        assert_eq!(
+            server
+                .reading_as(work, body.clone(), "fixture")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            status,
+            "{body}"
+        );
+    }
+    assert_eq!(
+        server
+            .reading_as(north.entity_id, json!({"requestId": fresh(), "expected": "1", "location": at(north.snapshot_id, 0, 0), "finished": false}), "nobody")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // デスクトップが同じ利用者として書いた位置も届く（この端末のものではない）。
+    server
+        .library
+        .set_reading_position(crate::library::ReadingUpdate {
+            request: uuid::Uuid::now_v7(),
+            work: south.entity_id,
+            user: server.library.id,
+            device: uuid::Uuid::now_v7(),
+            expected: 0,
+            location: Some(crate::library::ReadingLocation::Source {
+                snapshot: south.snapshot_id,
+                anchor: crate::library::ReadingAnchor::Page {
+                    page: 0,
+                    ratio_ppm: 250_000,
+                },
+            }),
+            finished: true,
+        })
+        .unwrap();
+    let changes = server.reading_page(&empty.cursor, 200, "fixture").await;
+    let works: Vec<_> = changes.items.iter().map(|item| item.work.clone()).collect();
+    assert_eq!(
+        works,
+        [north.entity_id.to_string(), south.entity_id.to_string()]
+    );
+    assert!(!changes.items[1].mine && changes.items[1].finished);
+    // 差分の続きは、また変わるまで空。
+    let quiet = server.reading_page(&changes.cursor, 200, "fixture").await;
+    assert!(quiet.items.is_empty());
+    assert_eq!(quiet.cursor, changes.cursor);
+
+    // 全部を一件ずつ返し、最後に差分の印へ移る。
+    let first = server.reading_page("", 1, "fixture").await;
+    assert!(first.more && first.items.len() == 1);
+    let second = server.reading_page(&first.cursor, 1, "fixture").await;
+    assert!(!second.more && second.items.len() == 1);
+    assert_ne!(first.items[0].work, second.items[0].work);
+    assert_eq!(second.cursor, changes.cursor);
+
+    // ほかの利用者には、この利用者の位置を出さない。
+    let other = server.reading_page("", 200, "second").await;
+    assert!(other.items.is_empty());
+    let other = server.reading_page(&empty.cursor, 200, "second").await;
+    assert!(other.items.is_empty());
+
+    // 別の写しの印や崩れた印は断る（端末は空の印から取り直す）。
+    for cursor in [
+        format!("{}.s.0", uuid::Uuid::now_v7()),
+        format!("{epoch}.s.01"),
+        "x".into(),
+    ] {
+        let response = server
+            .client
+            .get(format!(
+                "{}/api/v2/libraries/{}/reading",
+                server.base, server.library.id
+            ))
+            .query(&[("cursor", cursor.as_str())])
+            .bearer_auth("fixture")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{cursor}");
+    }
+
+    // 棚から外した作品には書けない。
+    server
+        .library
+        .remove_work(uuid::Uuid::now_v7(), north.entity_id, 1)
+        .unwrap();
+    assert_eq!(
+        server
+            .reading_as(north.entity_id, json!({"requestId": fresh(), "expected": "1", "location": at(north.snapshot_id, 0, 0), "finished": false}), "fixture")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }

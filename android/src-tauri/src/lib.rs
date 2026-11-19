@@ -42,6 +42,9 @@ pub fn run() {
             app.manage(pc_client::reading_sync::ReadingSyncState::new(
                 records.clone(),
             ));
+            app.manage(pc_client::shelf_reading::ShelfReadingState::new(
+                records.clone(),
+            ));
             app.manage(records);
             app.manage(pc_client::native_reader::NativeReaderState::default());
             let covers = pc_client::cover_protocol::CoverCacheState::new(
@@ -90,6 +93,9 @@ pub fn run() {
             pc_client::reading_sync::reading_record,
             pc_client::reading_sync::reading_sync,
             pc_client::reading_sync::reading_get,
+            pc_client::shelf_reading::pc_native_reading_record,
+            pc_client::shelf_reading::pc_native_reading_sync,
+            pc_client::shelf_reading::pc_native_reading_get,
             pc_client::local_reading::reading_local_get,
             pc_client::local_reading::reading_local_put,
             pc_client::local_reading::reading_local_shelf,

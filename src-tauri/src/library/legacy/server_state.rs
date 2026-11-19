@@ -16,7 +16,6 @@ use crate::library::{
     Error, Library, LibraryId, Result,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const READING: &str = "server_state.reading";
@@ -56,14 +55,6 @@ struct LegacyReading {
     finished: bool,
     device_id: String,
     device_time: i64,
-}
-
-/// 旧い端末の識別子から、新しい棚の端末の識別子を決める。同じ端末は必ず同じ値になる。
-fn device_id(legacy: &str) -> LibraryId {
-    let digest = Sha256::digest(format!("piep-server-device\0{legacy}").as_bytes());
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    uuid::Builder::from_custom_bytes(bytes).into_uuid()
 }
 
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
@@ -167,7 +158,7 @@ impl LegacyImporter {
                             edit,
                             serde_json::to_string(anchor)?,
                             reading.finished,
-                            device_id(&reading.device_id).as_bytes().as_slice(),
+                            crate::library::server_device(&reading.device_id).as_bytes().as_slice(),
                             reading.device_time,
                         ],
                     )?;

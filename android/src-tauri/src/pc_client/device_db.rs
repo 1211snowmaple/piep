@@ -12,7 +12,7 @@ use rusqlite::{Connection, Transaction};
 use std::path::Path;
 
 const DB_FILE: &str = "piep.sqlite3";
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// 版 1: 読書位置の同期。0.5.1 では `reading-sync.sqlite3` に置いていた。
 pub(super) const SYNC_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sync_meta (
@@ -188,6 +188,11 @@ impl DeviceDb {
             }
             if version < 4 {
                 tx.execute_batch(OFFLINE_KEY_SCHEMA)
+                    .map_err(records_error)?;
+            }
+            // 版 5: 新しい棚の読書位置の同期（作品は棚の UUID で見分ける）。
+            if version < 5 {
+                tx.execute_batch(super::shelf_reading::SHELF_READING_SCHEMA)
                     .map_err(records_error)?;
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)

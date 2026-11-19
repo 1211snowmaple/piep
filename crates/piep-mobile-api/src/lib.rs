@@ -283,6 +283,53 @@ pub struct MobileShelfFavorite {
     pub generation: String,
 }
 
+/// 新しい棚の読書位置の場所。`view_kind` は `snapshot`（版の写し）か `edit`（編集）で、
+/// `view_id` はその UUID。ページは本文の区切り（pixiv の `[newpage]`、編集の改ページ）で数えた
+/// 0 からの番号、`ratio_ppm` はそのページの中のスクロールの割合（百万分率）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfReadingLocation {
+    pub view_kind: String,
+    pub view_id: String,
+    pub page: u64,
+    pub ratio_ppm: u32,
+}
+
+/// 新しい棚の作品の読書位置（認証した利用者のもの）。`location` が空なのは、消した位置か、
+/// ページで表せない位置。`mine` はこの端末が書いた位置か。`updated_at` は棚が受けた時刻
+/// （ミリ秒）。`generation` は更新世代（十進の文字列。まだ位置が無ければ "0"）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfReading {
+    pub work: String,
+    pub location: Option<MobileShelfReadingLocation>,
+    pub finished: bool,
+    pub mine: bool,
+    pub updated_at: Option<i64>,
+    pub generation: String,
+}
+
+/// 読書位置の一覧の一ページ。初めは `cursor` を空で頼み、返った `cursor` を次へ渡す。
+/// `more` なら続きがある。続きが無くなったあとも、同じ `cursor` で変わった分だけを受け取れる。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfReadingPage {
+    pub items: Vec<MobileShelfReading>,
+    pub cursor: String,
+    pub more: bool,
+}
+
+/// 新しい棚の作品の読書位置を書く。`request_id` は端末が作る UUID で、送り直しても一度だけ
+/// 効く。`expected` は手元の更新世代（十進の文字列）。違えば 409 で今の位置が返る。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfReadingUpdate {
+    pub request_id: String,
+    pub expected: String,
+    pub location: MobileShelfReadingLocation,
+    pub finished: bool,
+}
+
 /// 新しい棚の一覧の一ページ。続きは `next_cursor` を変えずに次の要求へ渡す。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

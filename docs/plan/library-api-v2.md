@@ -5,8 +5,9 @@
 `server::v2::router` は接続情報、作品一覧、取得元の ID からの作品照合、読書 bundle、資産 manifest、
 圧縮した部分の転送を提供する。
 単独サーバーでは、設定で指定した棚を開いて既存の待ち受けにこの読取 API を載せる。
-利用者状態の書き込みは、棚の作品のお気に入りの付け外しだけを提供する（下の「お気に入りの付け外し」）。
-対応能力（`identity` の capabilities）には含めず、応答の `x-piep-favorite-write: 1` で知らせる。
+利用者状態の書き込みは、棚の作品のお気に入りの付け外しと読書位置を提供する（下の「お気に入りの付け外し」
+「読書位置」）。対応能力（`identity` の capabilities）には含めず、応答の `x-piep-favorite-write: 1`・
+`x-piep-reading: 1` で知らせる。
 携帯の作者・シリーズ・コレクションの画面の口も同じく、`x-piep-groups: 1` で知らせる。
 検索欄の候補の口と、作品の画面の版の一覧に版ごとの写しの ID を添えることは、`x-piep-suggest: 1` で知らせる。
 
@@ -69,6 +70,8 @@ piep-server activate-library --data <サーバーの置き場> --generation <準
 | `/api/v2/libraries/{library}/works/suggest?text&limit` | 検索欄の候補（旧 API の `search/suggest` と同じ形、既定 8・上限 12）。題の候補の `sourceKey` は棚の作品の ID |
 | `POST /api/v2/libraries/{library}/works/search` | 携帯の一覧：旧 API と同じ条件の形で、絞り込み・並べ替え・語の検索・ページ送り |
 | `PUT /api/v2/libraries/{library}/works/{work}/favorite` | 認証した利用者のお気に入りを付け外しする（下の「お気に入りの付け外し」） |
+| `PUT /api/v2/libraries/{library}/works/{work}/reading` | 認証した利用者の読書位置を書く（下の「読書位置」） |
+| `/api/v2/libraries/{library}/reading?cursor&limit` | 認証した利用者の読書位置。初めは全部、そのあとは変わった分（既定 200・上限 500） |
 | `/api/v2/libraries/{library}/works/{work}/collections` | 作品の入ったコレクションと、その中の位置 |
 | `/api/v2/libraries/{library}/{people\|series}?text&offset&limit&sort&order` | 作者・シリーズの一覧。並べる鍵と向きは旧 API と同じ語彙、続きは `nextOffset` |
 | `/api/v2/libraries/{library}/{people\|series}/detail?provider&key` | 作者・シリーズの画面の頭：説明・リンク・タグ・シリーズの数・コレクション |
@@ -148,3 +151,25 @@ file は利用者向けの attachment / document に限る。管理用原本の�
 - 単独サーバーは同じ変更を旧 API の変更の記録（`favorite_changes`）へも写し、デスクトップ版は
   今までどおり取り込む。旧 API で変えた値は新しい棚の利用者にも当て、写しを入れ替えたときは、
   デスクトップ版がまだ取り込んでいない変更を当て直す。
+
+## 読書位置
+
+位置は読む画面のページ（本文の区切りで数えた 0 からの番号）とその中の割合（百万分率）で、読んでいた
+版の写しか編集に結ぶ：`{"viewKind": "snapshot"|"edit", "viewId": "<UUID>", "page": n, "ratioPpm": n}`。
+デスクトップの読む画面と同じ形（`ReadingAnchor::Page`）なので、同じ利用者の位置はデスクトップと携帯で
+共通。
+
+- 書き込みの本文は `{"requestId", "expected", "location", "finished"}`。受領・世代・409 の扱いは
+  お気に入りと同じで、409 は `{"error": "reading_conflict", "current": <位置>}`。本文に無いページ・
+  別の作品の版・利用者が読めない編集は 400、棚に無い作品は 404。
+- 位置は `{"work", "location", "finished", "mine", "updatedAt", "generation"}`。`location` が空なのは
+  消した位置か、ページで表せない位置。`mine` は要求した端末が書いた位置か。端末の識別は登録の ID
+  から決まった UUID（旧 API の位置を移すときと同じ）。
+- 一覧は `cursor` を空で始めると利用者の位置を作品の順に全部返し、返し終えると変わった分の印になる。
+  印は棚の変更の記録（outbox）の番号で、返し始める前に控えるので途中で変わった位置も次で届く。印には
+  同期の世代を入れ、別の写しの印は 400 `reading_cursor_expired`（端末は空から取り直す）。
+- 携帯は書き込みを端末の SQLite に置いてから送る。409 の今の位置がこの端末のもの（応答の届かなかった
+  前の書き込み）なら今の世代で書き直し、ほかの端末のものなら捨てて、読む画面で続きの位置を案内する。
+  棚・利用者・同期の世代が変われば、端末の位置と未送信の書き込みを捨てる。
+- 単独サーバーの棚は配る写しなので、携帯が書いた位置は写しを入れ替えると消える。デスクトップの棚へ
+  取り込むのは、写しを送る仕組み（遠隔転送）と合わせて作る。

@@ -64,7 +64,7 @@ pub use reader::{
 };
 pub use reader_references::BodyAssetReference;
 pub use reading::{
-    ReadingAnchor, ReadingLocation, ReadingPosition, ReadingUpdate, PAGE_RATIO_SCALE,
+    server_device, ReadingAnchor, ReadingLocation, ReadingPosition, ReadingUpdate, PAGE_RATIO_SCALE,
 };
 pub use reclaim::{ReclaimOptions, ReclaimReport};
 pub use repository::{

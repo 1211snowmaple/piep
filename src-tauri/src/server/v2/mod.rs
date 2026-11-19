@@ -3,6 +3,7 @@ mod auth;
 mod favorite;
 mod groups;
 mod list;
+mod reading;
 pub use auth::{Authority, DeviceAuthority, Grant};
 pub use favorite::FavoriteMirror;
 
@@ -304,6 +305,8 @@ pub fn router(ctx: Arc<Context>) -> Router {
         .route("/api/v2/libraries/{library}/works/{work}",get(list::work))
         .route("/api/v2/libraries/{library}/works/{work}/cover",get(list::cover))
         .route("/api/v2/libraries/{library}/works/{work}/favorite",put(favorite::put))
+        .route("/api/v2/libraries/{library}/works/{work}/reading",put(reading::put))
+        .route("/api/v2/libraries/{library}/reading",get(reading::list))
         .route("/api/v2/libraries/{library}/works/{work}/collections",get(groups::work_collections))
         .route("/api/v2/libraries/{library}/people",get(groups::people))
         .route("/api/v2/libraries/{library}/people/detail",get(groups::person_detail))
@@ -355,6 +358,10 @@ async fn identity(
     response
         .headers_mut()
         .insert("x-piep-suggest", header::HeaderValue::from_static("1"));
+    // 読書位置を新しい棚と受け渡せる（要求 UUID と更新世代で書き、変わった分を受け取る）。
+    response
+        .headers_mut()
+        .insert("x-piep-reading", header::HeaderValue::from_static("1"));
     response
 }
 

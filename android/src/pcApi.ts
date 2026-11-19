@@ -29,6 +29,8 @@ export interface PcConnectionStatus {
     groups?: boolean;
     /** 検索欄の候補と、作品の以前の版を新しい棚から出せる。 */
     suggest?: boolean;
+    /** 読書位置を新しい棚と受け渡せる（要求 UUID と更新世代で書き、変わった分を受け取る）。 */
+    reading?: boolean;
     readerBundle: boolean;
   };
 }

@@ -15,7 +15,7 @@ import { PullIndicator, usePullToRefresh } from "./pullToRefresh";
 import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
 import { fillDocumentImages, safePageHtml } from "./readerDocument";
 import { readerKeyDirection } from "./readerKeyboard";
-import { readRemotePosition, recordReading, refreshReading, refreshReadingWithin, remoteStart, sendReading, type ReadingWrite, type RemoteStart } from "./readingSync";
+import { readRemotePosition, readShelfPosition, recordReading, recordShelfReading, refreshReading, refreshReadingWithin, remoteStart, sendReading, shelfLocation, shelfReadingFor, shelfStart, type ReadingWrite, type RemoteStart } from "./readingSync";
 import { forgetWorkPages, fetchPage, prefetchPage } from "./pageCache";
 import { illustrationUrl } from "./images";
 import { nativeImageUrl, nativePage, openNative, openNativeSnapshot, type NativeOpened } from "./nativeReading";
@@ -40,7 +40,10 @@ const SYNC_WAIT_MS = 600;
 const PREFETCH_DELAY_MS = 300;
 const WRITE_DELAY_MS = 3000;
 
-async function remoteStartFor(work: PcWork, editHash: string | null): Promise<RemoteStart | null> {
+/** 開始位置にするサーバーの位置。新しい棚から開いた本は棚の位置、ほかは旧 API の位置。 */
+async function remoteStartFor(work: PcWork, editHash: string | null, document: NativeOpened | null): Promise<RemoteStart | null> {
+  const shelf = shelfReadingFor(document);
+  if (shelf) return shelfStart(await readShelfPosition(shelf.entityId), localReadingTime(work, editHash), shelf);
   return remoteStart(await readRemotePosition(work.source, work.sourceId), localReadingTime(work, editHash), work.currentVersion, editHash);
 }
 
@@ -229,7 +232,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       const snapshot = selectedVersion === null ? null : readerVersions(original).find((entry) => entry.version === selectedVersion)?.snapshotId ?? null;
       const opened = snapshot ? await openNativeSnapshot(String(work.id), snapshot) : current;
       nativeSnapshot.current = opened && snapshot ? snapshot : null;
-      const start = selectedVersion === null ? await remoteStartFor(metadata.work, metadata.activeEditHash) : null;
+      const start = selectedVersion === null ? await remoteStartFor(metadata.work, metadata.activeEditHash, opened) : null;
       if (!alive) return;
       native.current = opened;
       setSourceMetadata(original);
@@ -290,7 +293,13 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     writeTimer.current = null;
     const write = queuedWrite.current;
     queuedWrite.current = null;
-    if (write) void recordReading(write).then(() => sendReading());
+    if (!write) return;
+    // 新しい棚から開いた本は、棚の作品の位置として書く（開いた版の写しか編集に結ぶ）。
+    const shelf = shelfReadingFor(native.current);
+    const recorded = shelf
+      ? recordShelfReading(shelf.entityId, shelfLocation(shelf, write.page, write.position), write.finished)
+      : recordReading(write);
+    void recorded.then(() => sendReading());
   };
 
   const queueReadingWrite = (pageNumber: number, ratio: number, pageCount: number) => {
@@ -338,7 +347,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     if (selectedVersion !== null || !positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
     let alive = true;
     const check = () => {
-      void refreshReading().then(() => remoteStartFor(readingWork, activeEditHash)).then((start) => {
+      void refreshReading().then(() => remoteStartFor(readingWork, activeEditHash, native.current)).then((start) => {
         if (!alive || !start || start.deviceTime <= dismissedRemote.current) return;
         const ratio = latestPosition.current?.page === currentPage.current ? latestPosition.current.ratio : 0;
         if (start.page === currentPage.current && Math.abs(start.ratio - ratio) < 0.02) return;

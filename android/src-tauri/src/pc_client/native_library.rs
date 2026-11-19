@@ -40,6 +40,8 @@ pub struct NativeLibraryStatus {
     groups: bool,
     /// 検索欄の候補と、作品の以前の版（版ごとの写し）を新しい棚から出せるか。
     suggest: bool,
+    /// 読書位置を新しい棚と受け渡せるか（要求 UUID と更新世代で書き、変わった分を受け取る）。
+    reading: bool,
     reader_bundle: bool,
 }
 
@@ -52,6 +54,19 @@ fn header_is(headers: &HeaderMap, name: &str, expected: &str) -> bool {
 impl NativeLibraryScope {
     pub(super) fn library_id(&self) -> Id {
         self.library_id
+    }
+
+    pub(super) fn subject_id(&self) -> Id {
+        self.subject_id
+    }
+
+    pub(super) fn sync_epoch(&self) -> Id {
+        self.sync_epoch
+    }
+
+    /// この接続（登録し直していない）か。
+    pub(super) fn connection_is(&self, generation: u64) -> bool {
+        self.connection_generation == generation
     }
 
     /// 同じ接続の同じ棚・利用者か。
@@ -77,7 +92,7 @@ impl NativeLibraryScope {
         }
     }
 
-    fn matches(&self, headers: &HeaderMap) -> bool {
+    pub(super) fn matches(&self, headers: &HeaderMap) -> bool {
         header_is(
             headers,
             "x-piep-library-id",
@@ -133,6 +148,7 @@ async fn parse_identity(
         favorite_write: header_is(&headers, "x-piep-favorite-write", "1"),
         groups: header_is(&headers, "x-piep-groups", "1"),
         suggest: header_is(&headers, "x-piep-suggest", "1"),
+        reading: header_is(&headers, "x-piep-reading", "1"),
         reader_bundle: identity.capabilities.reader_bundle,
     })
 }
@@ -148,14 +164,17 @@ pub(super) async fn discover(
     parse_identity(response, generation).await.ok()
 }
 
-fn library_changed() -> ClientError {
+pub(super) fn library_changed() -> ClientError {
     ClientError {
         code: "library_changed",
         message: "接続先の本棚が変わりました。一覧を開き直してください",
     }
 }
 
-fn check_scope(response: Response, scope: NativeLibraryScope) -> Result<Response, ClientError> {
+pub(super) fn check_scope(
+    response: Response,
+    scope: NativeLibraryScope,
+) -> Result<Response, ClientError> {
     if response.status() == StatusCode::CONFLICT {
         return Err(library_changed());
     }
@@ -244,7 +263,7 @@ async fn post_bounded<T>(
 }
 
 /// 十進の数字だけ（符号・空白・先頭の 0 の重ねを受け付けない）。
-fn canonical_generation(value: &str) -> bool {
+pub(super) fn canonical_generation(value: &str) -> bool {
     value
         .parse::<u64>()
         .is_ok_and(|parsed| parsed <= i64::MAX as u64 && parsed.to_string() == value)

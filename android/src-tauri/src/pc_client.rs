@@ -31,6 +31,7 @@ pub(crate) mod native_library;
 pub(crate) mod native_reader;
 pub(crate) mod offline;
 pub(crate) mod reading_sync;
+pub(crate) mod shelf_reading;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const ASSET_TIMEOUT: Duration = Duration::from_secs(60);
