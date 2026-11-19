@@ -71,6 +71,8 @@ pub struct LibraryV2 {
     /// 最近集計した作者・シリーズの一覧（条件・棚の世代・行）。ページをめくる・並べ替える・
     /// 件数を聞くたびに全作品を集め直さない（旧棚の一覧も同じく覚えている）。
     entity_rows: Mutex<VecDeque<CachedEntityRows>>,
+    /// 検索欄の候補の、正規化で足す名前の束（棚の世代ごと）。
+    suggestions: crate::library_suggest::SuggestionPool,
 }
 
 type CachedEntityRows = (String, i64, Arc<Vec<EntityRow>>);
@@ -91,6 +93,7 @@ impl Default for LibraryV2 {
             documents: Mutex::new(VecDeque::new()),
             legacy_numbers: Mutex::new(None),
             entity_rows: Mutex::new(VecDeque::new()),
+            suggestions: Default::default(),
         }
     }
 }
@@ -1018,6 +1021,25 @@ pub async fn library_v2_entity(
             .library()?
             .entity_head(kind, &provider, &key)
             .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 検索欄の候補（旧棚の `search_suggest` と同じ形）。題の候補の `sourceKey` は新しい棚の作品の ID。
+#[tauri::command]
+pub async fn library_v2_search_suggest(
+    state: State<'_, Arc<LibraryV2>>,
+    text: String,
+    limit: Option<i64>,
+) -> Result<crate::database::models::SearchSuggestResult, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let items = state
+            .library()?
+            .search_suggestions(&text, limit.unwrap_or(12), &state.suggestions)
+            .map_err(|e| e.to_string())?;
+        Ok(crate::database::models::SearchSuggestResult { items })
     })
     .await
     .map_err(|e| e.to_string())?

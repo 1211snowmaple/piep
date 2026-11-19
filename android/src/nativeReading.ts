@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
-import type { MobileCollection, MobileEntityDetail, MobileShelfCollectionDetail, MobileShelfPage, MobileShelfWork, MobileShelfWorkDetail } from "@shared/mobileApi";
-import type { PcCollection, PcCollectionDetail, PcConnectionStatus, PcEntityDetail, PcEntityPage, PcEntitySeriesPage, PcMetadata, PcOutlineEntry, PcPage, PcSearchPage, PcWork, PcWorkSearch } from "./pcApi";
+import type { MobileCollection, MobileEntityDetail, MobileSearchSuggestions, MobileShelfCollectionDetail, MobileShelfPage, MobileShelfWork, MobileShelfWorkDetail } from "@shared/mobileApi";
+import type { PcCollection, PcCollectionDetail, PcConnectionStatus, PcEntityDetail, PcEntityPage, PcEntitySeriesPage, PcMetadata, PcOutlineEntry, PcPage, PcSearchPage, PcWork, PcWorkSearch, SearchSuggestion } from "./pcApi";
 
 type NativeScope = NonNullable<PcConnectionStatus["nativeLibrary"]>["scope"];
 
@@ -23,6 +23,8 @@ let listable = false;
 let favoriteWritable = false;
 /** 作者・シリーズ・コレクションの画面も新しい棚から出せる接続か。 */
 let groupsReadable = false;
+/** 検索欄の候補と、作品の以前の版も新しい棚から出せる接続か。 */
+let suggestReadable = false;
 const opened = new Map<string, Promise<NativeOpened | null>>();
 
 /** 新しい棚の作品ではまだ使えない操作の理由。押せない形にして添える。 */
@@ -42,6 +44,7 @@ export function adoptNativeLibrary(status: PcConnectionStatus | null): void {
   listable = Boolean(next && status?.nativeLibrary?.worksSearch);
   favoriteWritable = listable && Boolean(status?.nativeLibrary?.favoriteWrite);
   groupsReadable = listable && Boolean(status?.nativeLibrary?.groups);
+  suggestReadable = listable && Boolean(status?.nativeLibrary?.suggest);
   if (same) return;
   scope = next;
   opened.clear();
@@ -83,6 +86,22 @@ export function nativeShelfKey(): string | null {
 export function groupShelf(): NativeScope | null {
   const shelf = nativeShelf();
   return shelf && groupsReadable ? shelf : null;
+}
+
+/** 検索欄の候補と以前の版を出す新しい棚。出せない接続では null（候補は旧 API、版は今の版だけ）。 */
+export function suggestShelf(): NativeScope | null {
+  const shelf = nativeShelf();
+  return shelf && suggestReadable ? shelf : null;
+}
+
+export async function shelfSuggestions(library: NativeScope, text: string): Promise<SearchSuggestion[]> {
+  const found = await invoke<MobileSearchSuggestions>("pc_native_suggest", { library, text });
+  return found.items;
+}
+
+/** 取得元と ID から棚の作品を引く。棚に無ければ失敗する。 */
+export async function lookupShelfWork(library: NativeScope, source: string, key: string): Promise<PcWork> {
+  return shelfWork(await invoke<MobileShelfWork>("pc_native_lookup_work", { library, provider: source, key }));
 }
 
 /** 作者・シリーズ・コレクションの問い合わせの鍵に足す。 */
@@ -164,8 +183,8 @@ export async function searchShelf(library: NativeScope, criteria: PcWorkSearch, 
 }
 
 /**
- * 作品の画面を新しい棚から引き、旧 API の作品の情報の形にする。以前の版を選んで読むのは
- * まだ旧 API だけなので、版の一覧は渡さない（読む画面は今の版を棚から開く）。
+ * 作品の画面を新しい棚から引き、旧 API の作品の情報の形にする。版の一覧は、以前の版を棚から
+ * 開ける接続だけで渡す（版ごとの写しの ID を添える）。開けない接続では今の版だけを読む。
  */
 export async function shelfMetadata(workId: string): Promise<PcMetadata> {
   const library = nativeShelf();
@@ -175,7 +194,15 @@ export async function shelfMetadata(workId: string): Promise<PcMetadata> {
     work: shelfWork(detail.work),
     people: detail.people,
     series: detail.series,
-    versions: [],
+    versions: suggestShelf() ? detail.versions.map((version) => ({
+      version: version.version,
+      // 旧 API の内容の印は新しい棚にない。版は写しの ID で見分ける。
+      contentHash: null,
+      textLength: version.textLength ?? 0,
+      assetCount: version.version === detail.work.currentVersion ? detail.work.assetCount : 0,
+      createdAt: version.savedAt,
+      snapshotId: version.snapshotId,
+    })) : [],
     isEdited: detail.work.edited,
     activeEditId: null,
     // 編集の中身の印は渡らない。編集の UUID で読書位置と保存版を分ける（編集し直せば別の本文）。
@@ -210,6 +237,23 @@ export function openNative(work: Pick<PcWork, "source" | "sourceId">, fresh = fa
     .catch(() => null);
   opened.set(id, next);
   // 開けなかったことは覚えない。次に開いたときに確かめ直す。
+  void next.then((result) => { if (!result && opened.get(id) === next) opened.delete(id); });
+  return next;
+}
+
+/**
+ * 作品の保存した版の一つ（版ごとの写し）を新しい棚で開く。`fresh` は開き直すとき。
+ * 以前の版を開けない接続では null。
+ */
+export function openNativeSnapshot(work: string, snapshot: string, fresh = false): Promise<NativeOpened | null> {
+  const current = suggestShelf();
+  if (!current) return Promise.resolve(null);
+  const id = `snapshot:${work}:${snapshot}`;
+  const found = opened.get(id);
+  if (found && !fresh) return found;
+  const next = invoke<NativeOpened>("pc_native_open_snapshot", { scope: current, work, snapshot })
+    .catch(() => null);
+  opened.set(id, next);
   void next.then((result) => { if (!result && opened.get(id) === next) opened.delete(id); });
   return next;
 }

@@ -1,10 +1,10 @@
 import type {
   MobileCollection, MobileCollectionMember, MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage,
-  MobileMetadata, MobilePage, MobilePerson, MobileRevision, MobileSearchPage, MobileSeriesMembership, MobileShelfWork, MobileWork,
+  MobileMetadata, MobilePage, MobilePerson, MobileRevision, MobileSearchPage, MobileSeriesMembership, MobileShelfWork, MobileVersion, MobileWork,
 } from "@shared/mobileApi";
 import { invoke } from "@tauri-apps/api/core";
 import { markFavoriteRead, nextFavoriteRevision } from "./favoriteFreshness";
-import { groupShelf, listShelfCollections, listShelfEntities, listShelfEntitySeries, nativeShelf, searchShelf, shelfCollectionDetail, shelfEntityDetail, shelfMetadata, shelfWork, shelfWorkCollections, SHELF_NOT_YET } from "./nativeReading";
+import { groupShelf, listShelfCollections, listShelfEntities, listShelfEntitySeries, lookupShelfWork, nativeShelf, searchShelf, shelfCollectionDetail, shelfEntityDetail, shelfMetadata, shelfSuggestions, shelfWork, shelfWorkCollections, suggestShelf, SHELF_NOT_YET } from "./nativeReading";
 
 export interface PcConnectionStatus {
   paired: boolean;
@@ -27,6 +27,8 @@ export interface PcConnectionStatus {
     favoriteWrite?: boolean;
     /** 作者・シリーズ・コレクションの画面を新しい棚から出せる。 */
     groups?: boolean;
+    /** 検索欄の候補と、作品の以前の版を新しい棚から出せる。 */
+    suggest?: boolean;
     readerBundle: boolean;
   };
 }
@@ -148,8 +150,12 @@ export type PcWorkSearch = Omit<PcSearchCriteria, "sort"> & { sort: PcWorkSort }
 
 export const defaultPcSearch: PcSearchCriteria = { text: "", source: "", contentType: "", author: "", authorExclude: "", favorite: false, tag: "", tagExclude: "", tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", revision: "", edit: "", cover: "", dateField: "downloaded_at", dateFrom: "", dateTo: "", sort: "remembered" };
 
-export type PcMetadata = Omit<MobileMetadata, "work" | "people" | "series"> & {
+/** 作品の保存した版。新しい棚の作品は、その版の写しの ID を添える（以前の版を棚から開く）。 */
+export type PcVersion = MobileVersion & { snapshotId?: string };
+
+export type PcMetadata = Omit<MobileMetadata, "work" | "people" | "series" | "versions"> & {
   work: PcWork;
+  versions: PcVersion[];
   people?: PcPerson[];
   series?: PcSeriesMembership[];
 };
@@ -277,11 +283,25 @@ export interface SearchSuggestion {
   label: string;
   value: string;
   count: number | null;
-  source?: string;
-  sourceKey?: string;
+  exactMatch?: boolean;
+  source?: string | null;
+  sourceKey?: string | null;
 }
-export const searchPcSuggestions = (text: string) => invoke<{ items: SearchSuggestion[] }>("pc_search_suggest", { text }).then((result) => result.items);
-export const lookupPcWork = (source: string, key: string) => invoke<PcWork | null>("pc_lookup_work", { source, key });
+/** 検索欄の候補。新しい棚の候補を出せる接続では棚から（題の候補の `sourceKey` は棚の作品の ID）。 */
+export const searchPcSuggestions = (text: string): Promise<SearchSuggestion[]> => {
+  const shelf = suggestShelf();
+  if (shelf) return shelfSuggestions(shelf, text);
+  return invoke<{ items: SearchSuggestion[] }>("pc_search_suggest", { text }).then((result) => result.items);
+};
+/**
+ * 取得元と ID から作品を引く（本文の中のリンク・題の候補）。新しい棚を出せる接続では棚の作品を
+ * 返す。棚に無いときは失敗になり、呼び手は旧 API で null のときと同じく他の手を探す。
+ */
+export const lookupPcWork = (source: string, key: string): Promise<PcWork | null> => {
+  const shelf = nativeShelf();
+  if (shelf) return lookupShelfWork(shelf, source, key);
+  return invoke<PcWork | null>("pc_lookup_work", { source, key });
+};
 /** Rust が返す保存版の一覧の行。新しい棚の作品は棚の一覧と同じ形で残っている。 */
 type StoredOfflineWork = Omit<OfflineWork, "work"> & { work: PcWork | MobileShelfWork };
 

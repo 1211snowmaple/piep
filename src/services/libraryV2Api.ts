@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import type { ReaderOutlineEntry, ReaderSearchHit, ScoreReason, SearchHighlight, WorkBlock, WorkBlockInput } from "@/types/library";
+import type { ReaderOutlineEntry, ReaderSearchHit, ScoreReason, SearchHighlight, SearchSuggestResult, WorkBlock, WorkBlockInput } from "@/types/library";
 import type { PdfPageImage } from "@/services/dbApi";
 import type { RevisionMetadata } from "@/services/workInspectionApi";
 
@@ -218,6 +218,13 @@ export interface ShelfEntityKey {
 
 export function libraryV2Search(search: ShelfTextSearch, query: ShelfListQuery, legacyWorks: number[] | null = null, person: ShelfEntityKey | null = null): Promise<ShelfSearchView> {
   return invoke<ShelfSearchView>("library_v2_search", { search, query, legacyWorks, person });
+}
+
+/** 検索欄の候補（旧棚の `search_suggest` と同じ形）。題の候補の `sourceKey` は新しい棚の作品の ID。 */
+export function libraryV2SearchSuggest(text: string, limit = 8): Promise<SearchSuggestResult> {
+  const trimmed = text.trim();
+  if (!trimmed) return Promise.resolve({ items: [] });
+  return invoke<SearchSuggestResult>("library_v2_search_suggest", { text: trimmed, limit });
 }
 
 export function libraryV2Decorations(text: string, matches: ShelfMatch[]): Promise<ShelfDecoration[]> {

@@ -26,7 +26,6 @@ use super::search::{
     generate_ngrams_limited, make_match_highlights, match_fields_and_score, normalize_search_text,
     normalized_levenshtein, parse_search_query, query_ngrams, ParsedSearchQuery, SearchDocument,
 };
-use super::search_normalization::index_text;
 
 pub(crate) use piep_reader_render::blocks::{
     block_source_ref, blocks_to_fanbox_blocks, blocks_to_html, blocks_to_pixiv_text,
@@ -1463,15 +1462,6 @@ struct CachedQueryResult<T> {
     last_used: u64,
 }
 
-#[derive(Clone)]
-struct NormalizedSuggestionCandidate {
-    item: SearchSuggestion,
-    normalized_label: String,
-    compact_label: String,
-    reading_kana: String,
-    reading_romaji: String,
-}
-
 struct BoundedQueryCache<T> {
     entries: HashMap<String, CachedQueryResult<T>>,
     tick: u64,
@@ -1710,7 +1700,7 @@ pub struct Database {
     facet_cache: Mutex<BoundedQueryCache<Vec<FacetCount>>>,
     entity_facet_cache: Mutex<BoundedQueryCache<Vec<EntityFacet>>>,
     suggest_cache: Mutex<BoundedQueryCache<SearchSuggestResult>>,
-    normalized_suggest_cache: Mutex<BoundedQueryCache<Vec<NormalizedSuggestionCandidate>>>,
+    normalized_suggest_cache: Mutex<BoundedQueryCache<Vec<crate::search_suggest::Candidate>>>,
     filter_facets_cache: Mutex<BoundedQueryCache<FilterFacets>>,
     search_snapshot_cache: Mutex<SearchSnapshotCache>,
 }
@@ -2829,7 +2819,7 @@ impl Database {
         // Suggestions are deliberately prefix based. Four `%term%` grouped
         // scans on every keystroke become the dominant cost in a six-figure
         // library; infix/full-body matching remains available on Enter.
-        let like = format!("{}%", text.replace('%', "\\%").replace('_', "\\_"));
+        let like = crate::search_suggest::like_prefix(text);
         let mut items = Vec::new();
 
         collect_suggestions(
@@ -2888,71 +2878,33 @@ impl Database {
             &mut items,
         )?;
 
-        let normalized_text = normalize_search_text(text);
-        for item in &mut items {
-            item.exact_match = normalize_search_text(&item.label) == normalized_text;
-        }
-        sort_suggestions(&mut items);
-        let direct_items = items.clone();
-        let mut additions = Vec::new();
-        let normalized_query = normalize_search_text(text);
-        // The prefix lookup remains the fast path. Only build/read the bounded
-        // normalization pool when it can fill a slot, and keep all direct
-        // candidates ahead of additions so the new matching never removes an
-        // option users saw before. The pool is cached for this library
+        // The prefix lookup remains the fast path. The normalization pool is
+        // only read when it can fill a slot, and is cached for this library
         // generation, avoiding a full label scan on every debounced keystroke.
-        if items.len() < limit as usize && normalized_query.chars().count() >= 2 {
+        let items = crate::search_suggest::assemble(text, limit, items, || {
             let cached = self
                 .normalized_suggest_cache
                 .lock()
                 .ok()
                 .and_then(|mut cache| cache.get("popular-labels-v1", generation));
-            let candidates = if let Some(cached) = cached {
-                cached
-            } else {
-                let loaded = load_normalized_suggestion_candidates(&conn)?;
-                if let Ok(mut cache) = self.normalized_suggest_cache.lock() {
-                    let bytes = loaded
-                        .iter()
-                        .map(|candidate| {
-                            candidate.item.label.len()
-                                + candidate.normalized_label.len()
-                                + candidate.reading_kana.len()
-                                + candidate.reading_romaji.len()
-                                + 128
-                        })
-                        .sum();
-                    cache.insert(
-                        "popular-labels-v1".to_string(),
-                        generation,
-                        loaded.clone(),
-                        bytes,
-                    );
-                }
-                loaded
-            };
-            let mut normalized_items = Vec::new();
-            collect_normalized_suggestion_fallbacks(
-                &candidates,
-                text,
-                limit,
-                &direct_items,
-                &mut normalized_items,
-            );
-            for item in &mut normalized_items {
-                item.exact_match = normalize_search_text(&item.label) == normalized_text;
+            if let Some(cached) = cached {
+                return Ok(cached);
             }
-            sort_suggestions(&mut normalized_items);
-            additions.extend(normalized_items);
-        }
-        items.extend(additions);
-        items.dedup_by(|left, right| {
-            left.kind == right.kind
-                && left.source == right.source
-                && left.source_key == right.source_key
-                && left.value == right.value
-        });
-        items.truncate(limit as usize);
+            let loaded = load_normalized_suggestion_candidates(&conn)?;
+            if let Ok(mut cache) = self.normalized_suggest_cache.lock() {
+                let bytes = loaded
+                    .iter()
+                    .map(crate::search_suggest::Candidate::bytes)
+                    .sum();
+                cache.insert(
+                    "popular-labels-v1".to_string(),
+                    generation,
+                    loaded.clone(),
+                    bytes,
+                );
+            }
+            Ok::<_, String>(loaded)
+        })?;
         let result = SearchSuggestResult { items };
         if let Ok(mut cache) = self.suggest_cache.lock() {
             cache.insert(
@@ -13162,22 +13114,9 @@ fn insert_bulk_match_entries(conn: &Connection, entries: &[DownloadEntry]) -> Re
     Ok(())
 }
 
-fn sort_suggestions(items: &mut [SearchSuggestion]) {
-    items.sort_by(|left, right| {
-        right
-            .exact_match
-            .cmp(&left.exact_match)
-            .then_with(|| {
-                suggestion_kind_priority(&left.kind).cmp(&suggestion_kind_priority(&right.kind))
-            })
-            .then_with(|| right.count.unwrap_or(0).cmp(&left.count.unwrap_or(0)))
-            .then_with(|| left.label.cmp(&right.label))
-    });
-}
-
 fn load_normalized_suggestion_candidates(
     conn: &Connection,
-) -> Result<Vec<NormalizedSuggestionCandidate>, String> {
+) -> Result<Vec<crate::search_suggest::Candidate>, String> {
     let candidates = [
         ("tag", "SELECT t.name, t.name, COUNT(dt.download_id), NULL, NULL FROM tags t JOIN download_tags dt ON dt.tag_id = t.id GROUP BY t.id, t.name ORDER BY COUNT(dt.download_id) DESC, t.name ASC LIMIT 400"),
         ("author", "SELECT d.author_name, d.author_name, COUNT(*), d.source, NULLIF(d.author_id, '') FROM downloads d WHERE d.author_name IS NOT NULL AND d.author_name != '' GROUP BY d.author_name, d.source, NULLIF(d.author_id, '') ORDER BY COUNT(*) DESC, d.author_name ASC LIMIT 400"),
@@ -13205,83 +13144,10 @@ fn load_normalized_suggestion_candidates(
             .map_err(|e| format!("Normalized suggestion query failed: {e}"))?;
         for row in rows {
             let item = row.map_err(|e| format!("Normalized suggestion row failed: {e}"))?;
-            let normalized_label = normalize_search_text(&item.label);
-            let compact_label = normalized_label
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            let indexed = if kind == "author" {
-                index_text(&item.label)
-            } else {
-                Default::default()
-            };
-            out.push(NormalizedSuggestionCandidate {
-                item,
-                normalized_label,
-                compact_label,
-                reading_kana: indexed
-                    .reading_kana
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect(),
-                reading_romaji: indexed
-                    .reading_romaji
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect(),
-            });
+            out.push(crate::search_suggest::Candidate::new(item));
         }
     }
     Ok(out)
-}
-
-fn collect_normalized_suggestion_fallbacks(
-    candidates: &[NormalizedSuggestionCandidate],
-    text: &str,
-    limit: i64,
-    existing: &[SearchSuggestion],
-    out: &mut Vec<SearchSuggestion>,
-) {
-    let query = normalize_search_text(text);
-    let compact_query = query
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>();
-    if compact_query.chars().count() < 2 {
-        return;
-    }
-    let allow_compact = !query.chars().any(char::is_whitespace);
-    for candidate in candidates {
-        if existing
-            .iter()
-            .filter(|item| item.kind == candidate.item.kind)
-            .count() as i64
-            >= limit
-        {
-            continue;
-        }
-        let surface_match = candidate.normalized_label.contains(&query)
-            || (allow_compact && candidate.compact_label.contains(&compact_query));
-        let reading_match = candidate.item.kind == "author"
-            && !surface_match
-            && (candidate.reading_kana.contains(&query)
-                || candidate.reading_romaji.contains(&query)
-                || (allow_compact
-                    && (candidate.reading_kana.contains(&compact_query)
-                        || candidate.reading_romaji.contains(&compact_query))));
-        if !surface_match && !reading_match {
-            continue;
-        }
-        if existing.iter().chain(out.iter()).any(|item| {
-            item.kind == candidate.item.kind
-                && item.source == candidate.item.source
-                && item.source_key == candidate.item.source_key
-                && item.value == candidate.item.value
-        }) {
-            continue;
-        }
-        out.push(candidate.item.clone());
-    }
 }
 
 fn collect_suggestions(
@@ -13312,16 +13178,6 @@ fn collect_suggestions(
         items.push(row.map_err(|e| format!("Suggest row read failed: {}", e))?);
     }
     Ok(())
-}
-
-fn suggestion_kind_priority(kind: &str) -> u8 {
-    match kind {
-        "author" => 0,
-        "series" => 1,
-        "title" => 2,
-        "tag" => 3,
-        _ => 4,
-    }
 }
 
 fn sort_key_select_expr(params: &SearchV2Params) -> String {

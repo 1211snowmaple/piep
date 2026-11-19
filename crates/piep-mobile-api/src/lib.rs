@@ -297,6 +297,8 @@ pub struct MobileShelfPage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileShelfVersion {
+    /// その版の写しの ID。以前の版を読むときはこの写しの本を引く。
+    pub snapshot_id: String,
     pub version: i64,
     pub text_length: Option<i64>,
     /// 保存日（ISO 8601）。
@@ -314,6 +316,28 @@ pub struct MobileShelfWorkDetail {
     pub versions: Vec<MobileShelfVersion>,
     /// 反映中の編集の基準の版。編集がなければ空。
     pub edit_base_version: Option<i64>,
+}
+
+/// 新しい棚の検索欄の候補（旧 API の `search/suggest` の一件と同じ形）。作者・シリーズは
+/// `source`・`source_key` が取得元と ID、題は `value` が取得元の ID で `source_key` が棚の
+/// 作品の ID、タグは `value` がタグ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileSearchSuggestion {
+    pub kind: String,
+    pub label: String,
+    pub value: String,
+    pub count: Option<i64>,
+    pub exact_match: bool,
+    pub source: Option<String>,
+    pub source_key: Option<String>,
+}
+
+/// 新しい棚の検索欄の候補の一覧。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileSearchSuggestions {
+    pub items: Vec<MobileSearchSuggestion>,
 }
 
 /// 新しい棚のコレクションの一回。棚に無い（未保存の）回は `work` が空で、入れた時の題と作者。

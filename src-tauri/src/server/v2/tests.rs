@@ -845,6 +845,11 @@ async fn the_work_screen_and_cover_come_from_the_current_version_of_a_shelved_wo
     assert!(detail.work.has_cover);
     assert_eq!(detail.versions.len(), 1);
     assert_eq!(detail.versions[0].version, 1);
+    // 以前の版を読むときに引く、版ごとの写しの ID。
+    assert_eq!(
+        detail.versions[0].snapshot_id,
+        covered.snapshot_id.to_string()
+    );
     assert_eq!(detail.edit_base_version, None);
 
     for size in ["", "?size=card", "?size=large"] {
@@ -1530,4 +1535,69 @@ async fn people_series_and_collections_come_from_the_shelf_in_the_v1_shapes() {
             .status(),
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn search_suggestions_come_from_the_shelf_in_the_v1_shape() {
+    let server = Server::start().await;
+    let works = grouped_shelf(&server.library);
+    let identity = server.get("/api/v2/identity").send().await.unwrap();
+    assert_eq!(identity.headers()["x-piep-suggest"], "1");
+
+    // 作者は取得元と ID、作品の多い順。一致した名前は先に出る。
+    let found: piep_mobile_api::MobileSearchSuggestions =
+        server.read("/works/suggest?text=p", "fixture").await;
+    let authors: Vec<_> = found.items.iter().filter(|i| i.kind == "author").collect();
+    assert_eq!(authors.len(), 2);
+    assert_eq!(authors[0].source_key.as_deref(), Some("p1"));
+    assert_eq!(authors[0].source.as_deref(), Some("pixiv"));
+    assert_eq!(authors[0].count, Some(2));
+    let exact: piep_mobile_api::MobileSearchSuggestions = server
+        .read("/works/suggest?text=p2%20%E3%81%AE%E5%90%8D", "fixture")
+        .await;
+    assert!(exact.items[0].exact_match);
+    assert_eq!(exact.items[0].source_key.as_deref(), Some("p2"));
+
+    // シリーズは「取得元:ID」、題は取得元の ID と棚の作品の ID、タグはタグ。
+    let series: piep_mobile_api::MobileSearchSuggestions =
+        server.read("/works/suggest?text=s1", "fixture").await;
+    assert_eq!(series.items[0].kind, "series");
+    assert_eq!(series.items[0].value, "pixiv:s1");
+    assert_eq!(series.items[0].count, Some(2));
+    let titles: piep_mobile_api::MobileSearchSuggestions =
+        server.read("/works/suggest?text=w3", "fixture").await;
+    assert_eq!(titles.items.len(), 1);
+    assert_eq!(titles.items[0].kind, "title");
+    assert_eq!(titles.items[0].value, "w3");
+    assert_eq!(
+        titles.items[0].source_key.as_deref(),
+        Some(works["w3"].to_string().as_str())
+    );
+    let tags: piep_mobile_api::MobileSearchSuggestions = server
+        .read("/works/suggest?text=a&limit=1", "fixture")
+        .await;
+    assert_eq!(tags.items.len(), 1);
+    assert_eq!(
+        (tags.items[0].kind.as_str(), tags.items[0].count),
+        ("tag", Some(3))
+    );
+
+    // 前方一致で足りなければ、名前の途中も拾う（旧棚と同じ）。
+    let infix: piep_mobile_api::MobileSearchSuggestions = server
+        .read("/works/suggest?text=%E3%81%AE%E9%A1%8C", "fixture")
+        .await;
+    assert!(infix.items.iter().any(|i| i.kind == "series"));
+
+    // 空の語は何も出さず、長すぎる語と知らない条件は断る。
+    let empty: piep_mobile_api::MobileSearchSuggestions =
+        server.read("/works/suggest?text=%20", "fixture").await;
+    assert!(empty.items.is_empty());
+    let long = "a".repeat(201);
+    for rest in [
+        format!("/works/suggest?text={long}"),
+        "/works/suggest?text=a&x=1".into(),
+    ] {
+        let response = server.get(&server.shelf(&rest)).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
 }

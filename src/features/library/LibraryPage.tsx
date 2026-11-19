@@ -80,6 +80,7 @@ import {
   upsertUpdateTarget,
 } from "@/services/dbApi";
 import { searchSuggest } from "@/services/searchApi";
+import { libraryV2SearchSuggest, SHELF_WORK_ID } from "@/services/libraryV2Api";
 import { deleteSavedSearch, listSavedSearches, upsertSavedSearch } from "@/services/shelfApi";
 import { forgetReadingPositions, readingWorkIds } from "@/features/library/readingShelf";
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
@@ -1719,7 +1720,7 @@ export default function LibraryPage() {
               pixels high against it. */}
           <Group wrap="nowrap" align="center" gap="sm" className="library-toolbar__row">
             <LibraryShelfMenu />
-            <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} versionScope={versionScope} method={tab === "works" ? resolvedSearchMode : undefined} onMethodChange={(mode) => writeUrl({ searchMode: mode })} /></Box><Group wrap="nowrap" align="center" gap="xs" className="library-toolbar__options">
+            <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} shelf={shelfMode} versionScope={versionScope} method={tab === "works" ? resolvedSearchMode : undefined} onMethodChange={(mode) => writeUrl({ searchMode: mode })} /></Box><Group wrap="nowrap" align="center" gap="xs" className="library-toolbar__options">
             <span className="library-toolbar__slot" data-inactive={tab === "collections" || undefined} inert={tab === "collections" || undefined} aria-hidden={tab === "collections" || undefined}>
               <Tooltip label="詳細フィルター">
                 <Indicator label={activeFilterCount} size={16} disabled={!activeFilterCount}>
@@ -2158,8 +2159,9 @@ export function searchSuggestionAction(item: SearchSuggestion): SearchSuggestion
   if (item.kind === "series" && source && sourceKey) {
     return { kind: "navigate", target: `/series/${encodeURIComponent(source)}/${encodeURIComponent(sourceKey)}` };
   }
-  if (item.kind === "title" && sourceKey && /^\d+$/.test(sourceKey)) {
-    return { kind: "navigate", target: `/works/${sourceKey}` };
+  // 題の候補の `sourceKey` は作品の ID（旧棚は番号、新しい棚は UUID）。
+  if (item.kind === "title" && sourceKey && (/^\d+$/.test(sourceKey) || SHELF_WORK_ID.test(sourceKey))) {
+    return { kind: "navigate", target: `/works/${sourceKey.toLowerCase()}` };
   }
   if (item.kind === "author") return { kind: "query", query: `author:${quotedFilterValue(item.label)}` };
   if (item.kind === "series") return { kind: "query", query: `series:${quotedFilterValue(item.label)}` };
@@ -2174,7 +2176,7 @@ const SUGGESTION_KIND_LABEL: Record<string, string> = {
   tag: "タグで絞る",
 };
 
-function LibrarySearch({ value, onChange, runtime, versionScope, method, onMethodChange }: { value: string; onChange: (value: string) => void; runtime: boolean; versionScope: LibraryVersionScope; method?: import("@/types/library").LibrarySearchMode; onMethodChange: (mode: import("@/types/library").LibrarySearchMode) => void }) {
+function LibrarySearch({ value, onChange, runtime, shelf, versionScope, method, onMethodChange }: { value: string; onChange: (value: string) => void; runtime: boolean; /** 新しい棚の一覧を出しているか。候補も棚から引く。 */ shelf: boolean; versionScope: LibraryVersionScope; method?: import("@/types/library").LibrarySearchMode; onMethodChange: (mode: import("@/types/library").LibrarySearchMode) => void }) {
   const navigate = useAppNavigate();
   const [composing, setComposing] = useState(false);
   const [debounced] = useDebouncedValue(value, 180);
@@ -2184,8 +2186,9 @@ function LibrarySearch({ value, onChange, runtime, versionScope, method, onMetho
   const suggestionQueryCurrent = suggestionText === value.trim();
   const combobox = useCombobox({ onDropdownClose: () => combobox.resetSelectedOption(), onDropdownOpen: () => combobox.resetSelectedOption() });
   const suggestions = useQuery({
-    queryKey: ["search-suggest", suggestionText],
+    queryKey: ["search-suggest", shelf, suggestionText],
     queryFn: async (): Promise<SearchSuggestion[]> => {
+      if (runtime && shelf) return (await libraryV2SearchSuggest(suggestionText, 8)).items;
       if (runtime) return (await searchSuggest({ text: suggestionText, limit: 8 })).items;
       const demoSuggestions: SearchSuggestion[] = [
         { kind: "tag", label: "創作", value: "創作", count: 2 },

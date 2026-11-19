@@ -176,12 +176,40 @@ pub async fn pc_native_open(
         Some(edit) => ResourceScope::Edit(edit),
         None => ResourceScope::Snapshot(found.snapshot_id),
     };
-    let entity = found.entity_id;
+    open_view(&state, &reader, scope, found.entity_id, view).await
+}
+
+/// 作品の保存した版の一つ（版ごとの写し）を開く。作品の画面の版の一覧の `snapshotId`。
+#[tauri::command]
+pub async fn pc_native_open_snapshot(
+    state: State<'_, PcClientState>,
+    reader: State<'_, NativeReaderState>,
+    scope: NativeLibraryScope,
+    work: Id,
+    snapshot: Id,
+) -> Result<NativeOpened, ClientError> {
+    open_view(
+        &state,
+        &reader,
+        scope,
+        work,
+        ResourceScope::Snapshot(snapshot),
+    )
+    .await
+}
+
+async fn open_view(
+    state: &PcClientState,
+    reader: &NativeReaderState,
+    scope: NativeLibraryScope,
+    entity: Id,
+    view: ResourceScope,
+) -> Result<NativeOpened, ClientError> {
     let document_key = view_key(entity, &view);
     let document = match reader.find(&document_key) {
         Some(document) if document.scope.same_as(&scope) => document,
         _ => {
-            let bundle = native_library::bundle(&state, scope, entity, view.clone()).await?;
+            let bundle = native_library::bundle(state, scope, entity, view.clone()).await?;
             let document = Arc::new(build(scope, bundle)?);
             reader.keep(Arc::clone(&document));
             document

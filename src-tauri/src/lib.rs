@@ -14,12 +14,14 @@ pub mod library_collections;
 pub mod library_entity;
 pub mod library_entity_list;
 pub mod library_search;
+pub mod library_suggest;
 pub mod library_view;
 pub mod library_work_edit;
 mod logging;
 /// 棚の実物で取り出しを確かめる example から触れるように公開している。
 pub mod pdf;
 pub mod pixiv_api;
+pub mod search_suggest;
 /// 単独サーバー `piep-server` からも使うので公開している。
 pub mod server;
 mod smoke_test;
@@ -352,6 +354,7 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_render_pdf_page,
             commands::library_v2::library_v2_entity,
             commands::library_v2::library_v2_entity_tags,
+            commands::library_v2::library_v2_search_suggest,
             commands::library_v2::library_v2_person_series,
             commands::library_v2::library_v2_entity_original,
             commands::library_v2::library_v2_entities,

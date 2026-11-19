@@ -8,6 +8,7 @@
 利用者状態の書き込みは、棚の作品のお気に入りの付け外しだけを提供する（下の「お気に入りの付け外し」）。
 対応能力（`identity` の capabilities）には含めず、応答の `x-piep-favorite-write: 1` で知らせる。
 携帯の作者・シリーズ・コレクションの画面の口も同じく、`x-piep-groups: 1` で知らせる。
+検索欄の候補の口と、作品の画面の版の一覧に版ごとの写しの ID を添えることは、`x-piep-suggest: 1` で知らせる。
 
 管理側は新ライブラリを開き、永続化した同期 epoch と認可器を `Context` に渡す。
 epoch は棚の復元・再作成時に変更し、要求や router の起動ごとには生成しない。
@@ -63,8 +64,9 @@ piep-server activate-library --data <サーバーの置き場> --generation <準
 | `/api/v2/identity` | 棚・利用者・同期 epoch・形式・上限・対応能力 |
 | `/api/v2/libraries/{library}/works` | 保存日の新しい順に、棚にある作品と現在の読書用の版を一ページ返す |
 | `/api/v2/libraries/{library}/works/lookup?provider={provider}&key={key}` | 取得元の作品 ID から、棚の作品と現在の読書用の版を照合 |
-| `/api/v2/libraries/{library}/works/{work}` | 携帯の作品の画面：今の版のカード・説明・作者とシリーズ・版の一覧 |
+| `/api/v2/libraries/{library}/works/{work}` | 携帯の作品の画面：今の版のカード・説明・作者とシリーズ・版の一覧（版ごとの写しの ID つき。以前の版はその写しの bundle で読む） |
 | `/api/v2/libraries/{library}/works/{work}/cover?size={card\|large}` | 今の版の表紙を携帯向けの WebP（320×480 / 640×960 に収める）で |
+| `/api/v2/libraries/{library}/works/suggest?text&limit` | 検索欄の候補（旧 API の `search/suggest` と同じ形、既定 8・上限 12）。題の候補の `sourceKey` は棚の作品の ID |
 | `POST /api/v2/libraries/{library}/works/search` | 携帯の一覧：旧 API と同じ条件の形で、絞り込み・並べ替え・語の検索・ページ送り |
 | `PUT /api/v2/libraries/{library}/works/{work}/favorite` | 認証した利用者のお気に入りを付け外しする（下の「お気に入りの付け外し」） |
 | `/api/v2/libraries/{library}/works/{work}/collections` | 作品の入ったコレクションと、その中の位置 |

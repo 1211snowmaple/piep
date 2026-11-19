@@ -655,6 +655,15 @@ describe("search suggestion actions", () => {
       .toEqual({ kind: "navigate", target: "/people/pixiv/creator%2F42" });
   });
 
+  it("opens a title suggestion by the old number or the new shelf's work id", () => {
+    expect(searchSuggestionAction({ kind: "title", label: "題", value: "42", source: "pixiv", sourceKey: "7" }))
+      .toEqual({ kind: "navigate", target: "/works/7" });
+    expect(searchSuggestionAction({ kind: "title", label: "題", value: "42", source: "pixiv", sourceKey: "0190A000-0000-7000-8000-000000000002" }))
+      .toEqual({ kind: "navigate", target: "/works/0190a000-0000-7000-8000-000000000002" });
+    expect(searchSuggestionAction({ kind: "title", label: "題", value: "42", source: "pixiv", sourceKey: "w3" }))
+      .toEqual({ kind: "query", query: "\"題\"" });
+  });
+
   it("turns non-entity suggestions into explicit filters", () => {
     expect(searchSuggestionAction({ kind: "tag", label: "長編 小説", value: "長編 小説" }))
       .toEqual({ kind: "query", query: "tag:\"長編 小説\"" });

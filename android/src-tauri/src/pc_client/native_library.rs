@@ -9,8 +9,8 @@ use piep_library_protocol::{
 };
 use piep_mobile_api::{
     MobileCollection, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage,
-    MobileShelfCollectionDetail, MobileShelfFavorite, MobileShelfFavoriteUpdate, MobileShelfPage,
-    MobileShelfWork, MobileShelfWorkDetail,
+    MobileSearchSuggestions, MobileShelfCollectionDetail, MobileShelfFavorite,
+    MobileShelfFavoriteUpdate, MobileShelfPage, MobileShelfWork, MobileShelfWorkDetail,
 };
 use piep_storage::Fingerprint;
 use reqwest::{Response, StatusCode, header::HeaderMap};
@@ -38,6 +38,8 @@ pub struct NativeLibraryStatus {
     favorite_write: bool,
     /// 作者・シリーズ・コレクションの画面を新しい棚から出せるか。
     groups: bool,
+    /// 検索欄の候補と、作品の以前の版（版ごとの写し）を新しい棚から出せるか。
+    suggest: bool,
     reader_bundle: bool,
 }
 
@@ -130,6 +132,7 @@ async fn parse_identity(
         works_search: header_is(&headers, "x-piep-works-search", "1"),
         favorite_write: header_is(&headers, "x-piep-favorite-write", "1"),
         groups: header_is(&headers, "x-piep-groups", "1"),
+        suggest: header_is(&headers, "x-piep-suggest", "1"),
         reader_bundle: identity.capabilities.reader_bundle,
     })
 }
@@ -493,6 +496,52 @@ fn kind_path(kind: &str) -> Result<&'static str, ClientError> {
     }
 }
 
+/// 候補の種類。押した先を決めるので、知らない種類は受け取らない。
+const SUGGESTION_KINDS: [&str; 4] = ["author", "series", "title", "tag"];
+
+fn valid_suggestions(found: &MobileSearchSuggestions) -> bool {
+    found.items.len() <= 12
+        && found.items.iter().all(|item| {
+            SUGGESTION_KINDS.contains(&item.kind.as_str())
+                && !item.label.is_empty()
+                && item.label.len() <= 4096
+                && item.value.len() <= 4096
+                && item.source.as_deref().is_none_or(|s| !s.is_empty() && s.len() <= 128)
+                && item.source_key.as_deref().is_none_or(|k| !k.is_empty() && k.len() <= 4096)
+                // 題の候補は棚の作品の ID で開く。
+                && (item.kind != "title"
+                    || item
+                        .source_key
+                        .as_deref()
+                        .is_some_and(|key| uuid::Uuid::parse_str(key).is_ok()))
+        })
+}
+
+/// 検索欄の候補を新しい棚から引く（旧 API の `search/suggest` と同じ形）。
+#[tauri::command]
+pub async fn pc_native_suggest(
+    state: State<'_, PcClientState>,
+    library: NativeLibraryScope,
+    text: String,
+) -> Result<MobileSearchSuggestions, ClientError> {
+    if text.chars().count() > 200 {
+        return Err(ClientError::remote());
+    }
+    let endpoint = format!(
+        "/api/v2/libraries/{}/works/suggest?{}",
+        library.library_id.get(),
+        query(&[("text", text.trim()), ("limit", "8")])
+    );
+    read(&state, library, &endpoint, |bytes| {
+        let found: MobileSearchSuggestions = parse_json(bytes)?;
+        if !valid_suggestions(&found) {
+            return Err(ClientError::protocol());
+        }
+        Ok(found)
+    })
+    .await
+}
+
 /// 作者・シリーズの一覧（ライブラリの「作者」「シリーズ」）を新しい棚から引く。
 #[tauri::command]
 pub async fn pc_native_entities(
@@ -718,6 +767,19 @@ fn view_path(scope: NativeLibraryScope, entity: Id, view: &ResourceScope) -> Str
 }
 
 /// 取得元と作品の鍵から、この利用者が今読む版。棚に無ければ誤り。
+/// 取得元と作品の鍵から、棚の作品（一覧と同じ形）を引く。本文の中のリンクと、検索欄の題の
+/// 候補から開くとき。棚に無い作品は 404 のまま返し、画面は旧 API と同じく他の手を探す。
+#[tauri::command]
+pub async fn pc_native_lookup_work(
+    state: State<'_, PcClientState>,
+    library: NativeLibraryScope,
+    provider: String,
+    key: String,
+) -> Result<MobileShelfWork, ClientError> {
+    let found = lookup(&state, library, &provider, &key).await?;
+    Ok(work_detail(&state, library, found.entity_id).await?.work)
+}
+
 pub(super) async fn lookup(
     state: &PcClientState,
     scope: NativeLibraryScope,
@@ -838,7 +900,7 @@ mod tests {
             let wire_headers = headers(&shelf);
             let body = serde_json::to_string(&shelf).unwrap();
             let advertised = format!(
-                "{wire_headers}X-Piep-Works-List: 1\r\nX-Piep-Works-Search: 1\r\nX-Piep-Groups: 1\r\n"
+                "{wire_headers}X-Piep-Works-List: 1\r\nX-Piep-Works-Search: 1\r\nX-Piep-Groups: 1\r\nX-Piep-Suggest: 1\r\n"
             );
             let connected = parse_identity(response("200 OK", &advertised, &body).await, 7)
                 .await
@@ -848,11 +910,11 @@ mod tests {
             assert_eq!(connected.scope.sync_epoch, shelf.sync_epoch);
             assert_eq!(connected.scope.connection_generation, 7);
             assert!(connected.works_list && connected.works_search && connected.reader_bundle);
-            assert!(connected.groups && !connected.favorite_write);
+            assert!(connected.groups && connected.suggest && !connected.favorite_write);
             let older = parse_identity(response("200 OK", &wire_headers, &body).await, 7)
                 .await
                 .unwrap();
-            assert!(!older.works_list && !older.works_search && !older.groups);
+            assert!(!older.works_list && !older.works_search && !older.groups && !older.suggest);
             let duplicate = format!(
                 "{wire_headers}X-Piep-Sync-Epoch: {}\r\n",
                 shelf.sync_epoch.get()
@@ -994,5 +1056,30 @@ mod tests {
                     && !canonical_generation(" 1")
             );
         });
+    }
+
+    #[test]
+    fn suggestions_refuse_unknown_kinds_and_titles_without_a_shelf_work() {
+        let item = |kind: &str, key: Option<&str>| piep_mobile_api::MobileSearchSuggestion {
+            kind: kind.into(),
+            label: "名".into(),
+            value: "1".into(),
+            count: Some(1),
+            exact_match: false,
+            source: Some("pixiv".into()),
+            source_key: key.map(Into::into),
+        };
+        let found = |items| MobileSearchSuggestions { items };
+        let work = "0190a000-0000-7000-8000-000000000002";
+        assert!(valid_suggestions(&found(vec![
+            item("author", Some("7")),
+            item("series", Some("9")),
+            item("title", Some(work)),
+            item("tag", None),
+        ])));
+        assert!(!valid_suggestions(&found(vec![item("title", Some("42"))])));
+        assert!(!valid_suggestions(&found(vec![item("title", None)])));
+        assert!(!valid_suggestions(&found(vec![item("other", None)])));
+        assert!(!valid_suggestions(&found(vec![item("tag", None); 13])));
     }
 }

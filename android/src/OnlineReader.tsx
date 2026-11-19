@@ -18,7 +18,7 @@ import { readerKeyDirection } from "./readerKeyboard";
 import { readRemotePosition, recordReading, refreshReading, refreshReadingWithin, remoteStart, sendReading, type ReadingWrite, type RemoteStart } from "./readingSync";
 import { forgetWorkPages, fetchPage, prefetchPage } from "./pageCache";
 import { illustrationUrl } from "./images";
-import { nativeImageUrl, nativePage, openNative, type NativeOpened } from "./nativeReading";
+import { nativeImageUrl, nativePage, openNative, openNativeSnapshot, type NativeOpened } from "./nativeReading";
 import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcMetadata, getPcOutline, getPcWorkCollections, pcErrorMessage, saveOfflineWork, v1WorkId, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
 import type { ReaderBehavior, ReaderFont, ReaderType } from "./readerPrefs";
 
@@ -132,6 +132,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   currentPage.current = pageIndex;
   // 新しい棚で開けた作品は、本文・目次・挿絵をそこから読む。開けなければ今までどおり。
   const native = useRef<NativeOpened | null>(null);
+  // 以前の版を新しい棚から開いたときの、その版の写しの ID（開き直すときに使う）。
+  const nativeSnapshot = useRef<string | null>(null);
   const readingWork = detailWork ?? work;
   const loadMetadata = async () => readerMetadataForVersion(await getPcMetadata(work.id), selectedVersion);
   const positionKey = activeEditHash === undefined ? null : readingKey(readingWork, activeEditHash);
@@ -179,7 +181,9 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
         return await nativePage(opened, target);
       } catch {
         // 端末で組んだものは数冊ぶんしか覚えていない。消えていたら開き直す。
-        const again = await openNative(readingWork, true);
+        const again = nativeSnapshot.current
+          ? await openNativeSnapshot(String(work.id), nativeSnapshot.current, true)
+          : await openNative(readingWork, true);
         if (!again) throw new Error("本文を読み込めませんでした。もう一度読み込んでください");
         native.current = again;
         return nativePage(again, target);
@@ -217,10 +221,14 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     void Promise.all([
       getPcMetadata(work.id),
       selectedVersion === null ? refreshReadingWithin(SYNC_WAIT_MS) : Promise.resolve(),
-      // 前の版を選んで読むときは今までどおり。新しい棚から開くのは今の版だけ。
+      // 前の版は、作品の情報で版の写しの ID が分かってから開く（下）。
       selectedVersion === null ? openNative(work) : Promise.resolve(null),
-    ]).then(async ([original, , opened]) => {
+    ]).then(async ([original, , current]) => {
       const metadata = readerMetadataForVersion(original, selectedVersion);
+      // 新しい棚の作品の以前の版は、その版の写しを棚から開く。写しの ID が無ければ今までどおり。
+      const snapshot = selectedVersion === null ? null : readerVersions(original).find((entry) => entry.version === selectedVersion)?.snapshotId ?? null;
+      const opened = snapshot ? await openNativeSnapshot(String(work.id), snapshot) : current;
+      nativeSnapshot.current = opened && snapshot ? snapshot : null;
       const start = selectedVersion === null ? await remoteStartFor(metadata.work, metadata.activeEditHash) : null;
       if (!alive) return;
       native.current = opened;

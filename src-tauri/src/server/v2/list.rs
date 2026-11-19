@@ -25,8 +25,8 @@ use axum::{
 };
 use chrono::{NaiveDate, SecondsFormat};
 use piep_mobile_api::{
-    MobilePerson, MobileSeriesMembership, MobileShelfPage, MobileShelfVersion, MobileShelfWork,
-    MobileShelfWorkDetail,
+    MobilePerson, MobileSearchSuggestion, MobileSearchSuggestions, MobileSeriesMembership,
+    MobileShelfPage, MobileShelfVersion, MobileShelfWork, MobileShelfWorkDetail,
 };
 use serde::Deserialize;
 use std::collections::VecDeque;
@@ -394,6 +394,7 @@ pub(super) async fn work(
                 .versions
                 .iter()
                 .map(|version| MobileShelfVersion {
+                    snapshot_id: version.snapshot.to_string(),
                     version: version.version,
                     text_length: version.text_length,
                     saved_at: iso(version.saved_at),
@@ -525,4 +526,58 @@ pub(super) fn image_response(bytes: Arc<Vec<u8>>, mime: &'static str) -> Respons
         header::HeaderValue::from_static("nosniff"),
     );
     response
+}
+
+/// 候補の既定の数と上限、語の長さの上限（旧 API の `search/suggest` と同じ）。
+const SUGGESTIONS: i64 = 8;
+const MAX_SUGGESTIONS: i64 = 12;
+const MAX_SUGGEST_CHARS: usize = 200;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SuggestQuery {
+    text: Option<String>,
+    limit: Option<i64>,
+}
+
+/// 検索欄の候補（旧 API の `search/suggest`）。題の候補の `sourceKey` は棚の作品の ID。
+pub(super) async fn suggest(
+    State(ctx): State<Arc<Context>>,
+    Extension(principal): Extension<Principal>,
+    path: Result<Path<Id>, axum::extract::rejection::PathRejection>,
+    query: Result<Query<SuggestQuery>, axum::extract::rejection::QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Path(library) = path.map_err(|_| invalid())?;
+    let Query(query) = query.map_err(|_| invalid())?;
+    if library != ctx.library_id {
+        return Err(not_found());
+    }
+    let text = query.text.unwrap_or_default();
+    if text.chars().count() > MAX_SUGGEST_CHARS {
+        return Err(invalid());
+    }
+    let limit = query.limit.unwrap_or(SUGGESTIONS).clamp(1, MAX_SUGGESTIONS);
+    let permit = read_permit(&ctx, &principal.device).await?;
+    let bytes = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let items = ctx
+            .library
+            .search_suggestions(&text, limit, &ctx.suggestions)
+            .map_err(library_error)?
+            .into_iter()
+            .map(|item| MobileSearchSuggestion {
+                kind: item.kind,
+                label: item.label,
+                value: item.value,
+                count: item.count,
+                exact_match: item.exact_match,
+                source: item.source,
+                source_key: item.source_key,
+            })
+            .collect();
+        serde_json::to_vec(&MobileSearchSuggestions { items }).map_err(|_| internal())
+    })
+    .await
+    .map_err(|_| internal())??;
+    Ok(super::representation(bytes, "application/json", false))
 }

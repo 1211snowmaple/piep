@@ -49,6 +49,8 @@ pub struct Context {
     covers: Mutex<list::Covers>,
     /// 作者・シリーズの一覧の集計（棚の世代と条件ごと）。
     entity_rows: Mutex<groups::EntityRows>,
+    /// 検索欄の候補の、正規化で足す名前の束（棚の世代ごと）。
+    suggestions: crate::library_suggest::SuggestionPool,
     /// 携帯のお気に入りを旧 API の変更の記録へ写す口（単独サーバーだけ）。
     favorite_mirror: OnceLock<FavoriteMirror>,
 }
@@ -79,6 +81,7 @@ impl Context {
             search_ready: AtomicBool::new(false),
             covers: Mutex::new(list::Covers::default()),
             entity_rows: Mutex::new(groups::EntityRows::default()),
+            suggestions: Default::default(),
             favorite_mirror: OnceLock::new(),
         })
     }
@@ -297,6 +300,7 @@ pub fn router(ctx: Arc<Context>) -> Router {
         .route("/api/v2/libraries/{library}/works",get(works))
         .route("/api/v2/libraries/{library}/works/lookup",get(work_lookup))
         .route("/api/v2/libraries/{library}/works/search",post(list::search))
+        .route("/api/v2/libraries/{library}/works/suggest",get(list::suggest))
         .route("/api/v2/libraries/{library}/works/{work}",get(list::work))
         .route("/api/v2/libraries/{library}/works/{work}/cover",get(list::cover))
         .route("/api/v2/libraries/{library}/works/{work}/favorite",put(favorite::put))
@@ -347,6 +351,10 @@ async fn identity(
     response
         .headers_mut()
         .insert("x-piep-groups", header::HeaderValue::from_static("1"));
+    // 検索欄の候補と、作品の以前の版（版ごとの写しの本）を新しい棚から出せる。
+    response
+        .headers_mut()
+        .insert("x-piep-suggest", header::HeaderValue::from_static("1"));
     response
 }
 
