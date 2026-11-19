@@ -44,7 +44,9 @@ import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { createWatchGroup, deleteUpdateTarget, deleteWatchGroup, isTauriRuntime, listUpdateTargets, listWatchGroups, renameWatchGroup, searchDownloadsV2, setUpdateTargetEnabled, setWatchGroupMembers, upsertUpdateTarget } from "@/services/dbApi";
 import { readingWorkIds } from "@/features/library/readingShelf";
-import { clearFinishedUpdateJobsCommand, countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, listUpdateJobHeldItemStatesCommand, listUpdateJobItemStatesCommand, restoreDismissedUpdateCandidatesCommand, type UpdateJobItemState } from "@/services/updateJobApi";
+import { clearFinishedUpdateJobsCommand, countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, listUpdateJobHeldItemStatesCommand, listUpdateJobItemStatesCommand, restoreDismissedUpdateCandidatesCommand, type UpdateJobItemState, type UpdateJobScope } from "@/services/updateJobApi";
+import { libraryV2Status } from "@/services/libraryV2Api";
+import { shelfWritable } from "@/features/library/shelfV2";
 import { loadSchedule, saveSchedule, type UpdateScheduleSettings } from "@/features/updates/updateSchedule";
 import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
 import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
@@ -102,6 +104,8 @@ const CANDIDATE_DISPLAY_PAGE_SIZE = 60;
  */
 export async function shelfWorkIds(scope: string): Promise<number[] | null> {
   if (scope !== "favorite" && scope !== "reading") return null;
+  // 切り替えた棚では、棚が自分の範囲で作品を選ぶ。旧棚の番号は集めない。
+  if (shelfWritable(await libraryV2Status().catch(() => undefined))) return null;
   const params = scope === "favorite"
     ? { favorite: true, limit: SHELF_SCOPE_LIMIT, projection: "bulk" as const }
     : { idsInclude: readingWorkIds().slice(0, SHELF_SCOPE_LIMIT), limit: SHELF_SCOPE_LIMIT, projection: "bulk" as const };
@@ -233,14 +237,15 @@ export default function UpdatesPage() {
       // 監視のオン・オフに関わらず、いま棚にあるものを見に行ける。
       const shelfIds = targetIds ? null : await shelfWorkIds(values.scope);
       if (shelfIds && !shelfIds.length) throw new Error("この棚には作品がありません");
+      const shelfScope = values.scope === "favorite" || values.scope === "reading";
       const schedule = await loadSchedule();
       await updateJobs.start({
-        scope: (targetIds ? "targets" : shelfIds ? "work" : values.scope) as "all" | "work" | "author" | "series" | "targets",
+        scope: (targetIds ? "targets" : shelfIds ? "work" : values.scope) as UpdateJobScope,
         mode: values.mode as "check_only" | "auto_save",
         workIds: shelfIds ?? (workId && !targetIds ? [workId] : null),
         targetIds,
         watchSaved: schedule.watchSaved,
-        newWorksOnly: values.depth === "new" && values.scope !== "work" && !shelfIds && !workId,
+        newWorksOnly: values.depth === "new" && values.scope !== "work" && !shelfScope && !workId,
       });
       await updateJobs.loadJobs();
     },

@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const searchMock = vi.fn();
+const statusMock = vi.fn();
+vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
+  libraryV2Status: () => statusMock(),
+}));
 const readingMock = vi.fn(() => [11, 12]);
 
 vi.mock("@/services/dbApi", async (importOriginal) => ({
@@ -18,6 +23,7 @@ const { isSavableCandidateStatus, isSettledCandidateStatus, parseWorkId, shelfWo
 
 beforeEach(() => {
   searchMock.mockReset();
+  statusMock.mockReset().mockResolvedValue({ state: "absent", path: "unused" });
   readingMock.mockReset();
   readingMock.mockReturnValue([11, 12]);
 });
@@ -66,6 +72,14 @@ describe("shelf-scoped update checks", () => {
     searchMock.mockResolvedValueOnce({ items: [{ id: 3 }, { id: 7 }] });
     await expect(shelfWorkIds("favorite")).resolves.toEqual([3, 7]);
     expect(searchMock).toHaveBeenCalledWith(expect.objectContaining({ favorite: true }));
+  });
+
+  // 切り替えた棚では、棚が自分の範囲で選ぶ。旧棚の番号は集めない。
+  it("lets a switched shelf choose the works of its own scope", async () => {
+    statusMock.mockResolvedValue({ state: "ready", switched: true });
+    await expect(shelfWorkIds("favorite")).resolves.toBeNull();
+    await expect(shelfWorkIds("reading")).resolves.toBeNull();
+    expect(searchMock).not.toHaveBeenCalled();
   });
 
   // 読みかけが空なら、取得しに行かずに「空の棚」と答える。

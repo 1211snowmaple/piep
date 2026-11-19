@@ -61,6 +61,9 @@ fn cards(library: &Library, filter: WorkFilter) -> Result<Vec<WorkCard>, String>
     }
 }
 
+/// 棚の範囲で確認する作品の上限。画面の `SHELF_SCOPE_LIMIT` と同じ。
+const SHELF_SCOPE_LIMIT: usize = 500;
+
 pub(super) fn work_items(
     library: &Library,
     request: &StartUpdateJobRequest,
@@ -108,6 +111,30 @@ pub(super) fn work_items(
             }
         };
         selected.extend(cards(library, filter)?);
+    }
+    // 棚の範囲（お気に入り・読みかけ）は、監視の有無に関わらず今その棚にある作品を見る。
+    // 画面が知らせる上限（SHELF_SCOPE_LIMIT）と同じ件数までにする。
+    let shelf = match request.scope.as_str() {
+        "favorite" => Some(WorkFilter {
+            favorite: Some(true),
+            ..Default::default()
+        }),
+        "reading" => Some(WorkFilter {
+            reading: Some(true),
+            ..Default::default()
+        }),
+        _ => None,
+    };
+    if let Some(filter) = shelf {
+        let page = library
+            .list_works(&WorkListQuery {
+                filter,
+                limit: SHELF_SCOPE_LIMIT,
+                count: false,
+                ..Default::default()
+            })
+            .map_err(|e| e.to_string())?;
+        selected.extend(page.items);
     }
     if matches!(request.scope.as_str(), "all" | "author") {
         for target in request
@@ -640,6 +667,81 @@ mod tests {
             )
             .unwrap();
         library.work_card(saved.entity_id).unwrap()
+    }
+
+    #[test]
+    fn favorite_and_reading_scopes_pick_the_shelf_works_whether_watched_or_not() {
+        use crate::library::{ReadingAnchor, ReadingLocation, ReadingUpdate};
+        let (_temp, state, library) = fixture();
+        let liked = save(
+            &library,
+            "pixiv",
+            "liked",
+            &data("pixiv", "本文", "77"),
+            false,
+        );
+        let read = save(
+            &library,
+            "fanbox",
+            "read",
+            &data("fanbox", "本文", "c"),
+            false,
+        );
+        save(
+            &library,
+            "pixiv",
+            "watched",
+            &data("pixiv", "本文", "77"),
+            true,
+        );
+        let user = library.user_state(liked.id, library.id).unwrap();
+        library
+            .set_user_state(
+                LibraryId::now_v7(),
+                liked.id,
+                library.id,
+                user.generation,
+                UserStateChange {
+                    favorite: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        library
+            .set_reading_position(ReadingUpdate {
+                request: LibraryId::now_v7(),
+                work: read.id,
+                user: library.id,
+                device: LibraryId::now_v7(),
+                expected: 0,
+                location: Some(ReadingLocation::Source {
+                    snapshot: read.snapshot_id,
+                    anchor: ReadingAnchor::Page {
+                        page: 0,
+                        ratio_ppm: 500_000,
+                    },
+                }),
+                finished: false,
+            })
+            .unwrap();
+        let keys = |scope: &str| {
+            build_initial_items(&state, &request(scope), Some(&library))
+                .unwrap()
+                .into_iter()
+                .filter_map(|i| i.source_id)
+                .collect::<Vec<_>>()
+        };
+        // 監視していなくても、その範囲にある作品だけを見る。監視中の作品や作者は混ぜない。
+        assert_eq!(keys("favorite"), ["liked"]);
+        assert_eq!(keys("reading"), ["read"]);
+        // 新作だけの確認は作品を見ない。
+        let req = StartUpdateJobRequest {
+            new_works_only: Some(true),
+            ..request("favorite")
+        };
+        assert!(build_initial_items(&state, &req, Some(&library))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

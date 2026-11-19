@@ -11,7 +11,7 @@ import { useLibraryV2Status } from "@/features/library/shelfV2";
 import { HISTORY_DETAIL_PAGE, HISTORY_PAGE, setStoredJobHidden, storedHistoryKey, storedJobHistory, storedJobItems, storedJobLogs, type StoredJobHistory } from "@/services/jobHistoryApi";
 
 function date(value: number): string { return formatDate(new Date(value).toISOString(), true); }
-function scope(value: string): string { return ({ all: "すべて", work: "作品", author: "作者", series: "シリーズ", targets: "選んだ対象", save: "まとめ保存" } as Record<string, string>)[value] ?? value; }
+function scope(value: string): string { return ({ all: "すべて", work: "作品", author: "作者", series: "シリーズ", targets: "選んだ対象", save: "まとめ保存", favorite: "お気に入り", reading: "読みかけ" } as Record<string, string>)[value] ?? value; }
 function mode(value: string): string { return ({ check_only: "確認のみ", auto_save: "自動保存", save: "保存", manual: "手動" } as Record<string, string>)[value] ?? value; }
 function counts(job: StoredJobHistory): string {
   return `${formatNumber(job.processed)}/${formatNumber(job.totals)}件 · 候補 ${formatNumber(job.candidate_count)} · 保存 ${formatNumber(job.saved_count)} · エラー ${formatNumber(job.error_count)}`;

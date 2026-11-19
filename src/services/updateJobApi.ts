@@ -14,7 +14,8 @@ export type UpdateJobStatus =
 
 /** `save` は「選んだ作品をまとめて保存する」ジョブ。監視対象は見に行かない。 */
 /** `targets` は監視グループの確認。`targetIds` に挙げた作者・シリーズだけを見る。 */
-export type UpdateJobScope = "all" | "work" | "author" | "series" | "targets" | "save";
+/** `favorite`・`reading` は切り替えた棚の範囲（棚が今その範囲にある作品を選ぶ）。 */
+export type UpdateJobScope = "all" | "work" | "author" | "series" | "targets" | "save" | "favorite" | "reading";
 export type UpdateJobMode = "check_only" | "auto_save" | "save";
 
 export interface UpdateJobCredentials {
