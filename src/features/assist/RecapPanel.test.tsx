@@ -22,7 +22,7 @@ it("reads the saved recap context without generating a new answer", async () => 
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<MantineProvider><QueryClientProvider client={client}><RecapPanel currentId={2} previous={{ id: 1, title: "前話" }} /></QueryClientProvider></MantineProvider>);
   expect(await screen.findByText((_, element) => element?.textContent === text)).toBeVisible();
-  expect(mocks.loadNote).toHaveBeenCalledWith("work", "2:1", "recap", null);
+  expect(mocks.loadNote).toHaveBeenCalledWith("work", "2:1", "recap", null, false);
   expect(screen.getByText("本文末尾の原文を確認").closest("details")).not.toHaveAttribute("open");
   expect(screen.getByText((_, element) => element?.textContent === "前話の末尾原文。 \t")).not.toBeVisible();
   expect(mocks.recapPrevious).not.toHaveBeenCalled();

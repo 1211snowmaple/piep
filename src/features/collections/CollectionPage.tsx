@@ -185,7 +185,7 @@ function shelfChange(action: MemberAction): ShelfCollectionChange {
 
 function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, writable = false, onEdit, onChanged }: { collection: WorkCollection; readOnly: boolean; shelf?: boolean; writable?: boolean; onEdit: (assist?: boolean) => void; onChanged: (collection: WorkCollection) => void }) {
   // 新しい棚は、正本に切り替えるまで読むだけ。書き換える操作は同じ場所に押せない形で置き、
-  // 理由を添える。切り替えた棚でも、EPUB と分け方の手伝いはまだつないでいない。
+  // 理由を添える。切り替えた棚でも、EPUB はまだつないでいない。
   const onShelf = shelf && writable;
   const readOnly = previewOnly || (shelf && !writable);
   const locked = shelf && !writable ? SHELF_READ_ONLY : null;
@@ -267,9 +267,24 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
   });
   // 分けた先は**新しい束**として作る。元の束は触らない — 分けるかどうかは
   // 案を見てから決めることで、押した瞬間に元が壊れてはいけない。
+  // 分けた塊は新しいコレクションとして作る（元はそのまま）。位置は一覧の並び順（0 始まり）。
   const splitMutation = useMutation({
-    mutationFn: ({ name, ids }: { name: string; ids: number[] }) =>
-      createCollectionFromDownloads(name, collection.collectionKind, ids),
+    mutationFn: async ({ name, positions }: { name: string; positions: number[] }) => {
+      const members = positions.map((position) => collection.members[position]).filter((member) => member !== undefined);
+      if (onShelf) {
+        const created = await editShelfCollection(crypto.randomUUID(), {
+          kind: "create",
+          title: name,
+          description: null,
+          ordered: collection.collectionKind === "ordered",
+          works: members.map(workKey),
+        });
+        if (!created) throw new Error("コレクションを作れません");
+        return created;
+      }
+      const ids = members.map((member) => member.downloadId).filter((id): id is number => typeof id === "number");
+      return createCollectionFromDownloads(name, collection.collectionKind, ids);
+    },
     onSuccess: (created) => {
       queryClient.invalidateQueries({ queryKey: ["work-collections"] });
       notifications.show({
@@ -493,8 +508,8 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
       id: "collection_split",
       label: "分け方を考えてもらう",
       description: "内容のまとまりから分割案を作ります",
-      enabled: !pendingOff && collection.availableCount >= 4 && Boolean(splitEngine),
-      unavailableReason: pending ? pending : collection.availableCount < 4 ? "4作品以上で利用できます" : "設定で「コレクションの分割案」を有効にすると使えます",
+      enabled: !editOff && collection.availableCount >= 4 && Boolean(splitEngine),
+      unavailableReason: locked ? locked : readOnly ? "このコレクションは編集できません" : collection.availableCount < 4 ? "4作品以上で利用できます" : "設定で「コレクションの分割案」を有効にすると使えます",
       onSelect: splitModal.open,
     },
   ];
@@ -528,7 +543,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
                 <Badge variant="light" color={ordered ? "piep" : "gray"}>{ordered ? "順序付き" : "順序なし"}</Badge>
                 <Text size="sm" c="dimmed">{formatNumber(collection.memberCount)}作品 · {formatNumber(collection.totalTextLength)}字</Text>
                 {missingCount > 0 && <Badge color="orange" variant="light">収録できない {formatNumber(missingCount)}作品</Badge>}
-                {shelf && <Tooltip label={writable ? "新しい棚から読み書きしています。EPUB と分け方の手伝いはまだ旧棚だけです。" : "新しい棚（試験中）から読んでいます。正本に切り替えるまで、ここからは何も書き換えません。"}><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}
+                {shelf && <Tooltip label={writable ? "新しい棚から読み書きしています。EPUB はまだ旧棚だけです。" : "新しい棚（試験中）から読んでいます。正本に切り替えるまで、ここからは何も書き換えません。"}><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}
               </Group>
               {/* 主操作の「作品を追加」は右端。「合う作品を探す」はその隣に置く。
                   どちらも束へ作品を入れる操作で、違うのは**誰が探すか**だけである。 */}
@@ -700,17 +715,19 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
         importImage={onShelf ? async (path) => (await libraryV2ImportEditImage(path)).file : undefined}
         onSave={(input, coverWork) => coverMutation.mutate({ input, coverWork })}
       />}
-      {!pendingOff && <CollectionSplitAssist
+      {!editOff && <CollectionSplitAssist
         opened={splitOpened}
         onClose={splitModal.close}
         collection={collection}
+        shelf={onShelf}
         onSplit={async (name, positions) => {
-          const ids = positions
-            .map((position) => collection.members[position]?.downloadId)
-            .filter((id): id is number => typeof id === "number");
-          if (ids.length === 0) return false;
+          const usable = positions.filter((position) => {
+            const member = collection.members[position];
+            return member !== undefined && (onShelf || typeof member.downloadId === "number");
+          });
+          if (usable.length === 0) return false;
           try {
-            await splitMutation.mutateAsync({ name, ids });
+            await splitMutation.mutateAsync({ name, positions: usable });
             return true;
           } catch {
             // 失敗は splitMutation の onError が知らせる。案は窓に残す。

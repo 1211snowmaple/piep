@@ -2072,6 +2072,7 @@ export default function LibraryPage() {
       <SearchAssistModal
         opened={searchAssistOpened}
         onClose={searchAssist.close}
+        shelf={shelfMode}
         onApply={(intent) => {
           // Existing filters and AI suggestions are separate conditions. A
           // single tagMode cannot represent two OR groups, so refuse a merge

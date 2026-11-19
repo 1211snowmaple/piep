@@ -9,6 +9,7 @@ pub mod epub;
 pub mod fanbox_api;
 /// 元ファイルを保持する新しいライブラリの保管・履歴モデル。
 pub mod library;
+pub mod library_assist;
 pub mod library_collection_edit;
 pub mod library_collections;
 pub mod library_entity;
@@ -479,6 +480,20 @@ pub fn run() -> tauri::Result<()> {
             commands::assist::assist_recap_previous,
             commands::assist::assist_load_note,
             commands::assist::assist_delete_note,
+            commands::assist_shelf::library_v2_assist_related_tags,
+            commands::assist_shelf::library_v2_assist_accept_related_tags,
+            commands::assist_shelf::library_v2_assist_remove_related_tag,
+            commands::assist_shelf::library_v2_assist_suggest_tags,
+            commands::assist_shelf::library_v2_assist_accept_tags,
+            commands::assist_shelf::library_v2_assist_work_tags,
+            commands::assist_shelf::library_v2_assist_remove_tag,
+            commands::assist_shelf::library_v2_assist_interpret_search,
+            commands::assist_shelf::library_v2_assist_describe_author,
+            commands::assist_shelf::library_v2_assist_propose_splits,
+            commands::assist_shelf::library_v2_assist_summarize_work,
+            commands::assist_shelf::library_v2_assist_recap_previous,
+            commands::assist_shelf::library_v2_assist_load_note,
+            commands::assist_shelf::library_v2_assist_delete_note,
             commands::database::db_try_naming_engine,
             commands::database::db_name_collection_suggestion,
             commands::database::db_remove_work_collection_members,

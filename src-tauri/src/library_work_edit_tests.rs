@@ -444,6 +444,7 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
              DROP TABLE job_history_visibility;
              DROP TABLE execution_logs;
              DROP TABLE incomplete_save_attempts;
+             DROP TABLE ai_notes;
              DROP TABLE asset_repair_state;
              DROP INDEX acquisition_attempt_entity;
              DROP TABLE job_import_evidence;

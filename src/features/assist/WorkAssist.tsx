@@ -20,21 +20,30 @@ import {
   summarizeWork,
   toEngine,
   workTags,
+  type AssistWork,
   type TagProposal,
   type RelatedTagCandidate,
 } from "@/services/assistApi";
+import { invalidateShelf, SHELF_READ_ONLY } from "@/features/library/shelfV2";
 import { isTauriRuntime } from "@/services/dbApi";
 import { usePageAssist } from "@/app/PageAssistContext";
 
 type WorkAssistAction = "synopsis" | "tags" | "related-tags";
 
-/** One contextual launcher owns every optional model action on a work page. */
-export function WorkAssist({ downloadId }: { downloadId: number }) {
+/**
+ * One contextual launcher owns every optional model action on a work page.
+ *
+ * `downloadId` は旧棚の番号か、新しい棚の作品の ID（文字列）。新しい棚で `writable` が偽
+ * （正本に切り替える前）なら、案や候補は見せるが、タグを付け外しする操作は押せない。
+ */
+export function WorkAssist({ downloadId, writable = true }: { downloadId: AssistWork; writable?: boolean }) {
   // 作品を切り替えたら選択状態と未完了要求の受け口を分離する。
-  return <WorkAssistForWork key={downloadId} downloadId={downloadId} />;
+  return <WorkAssistForWork key={downloadId} downloadId={downloadId} writable={writable} />;
 }
 
-function WorkAssistForWork({ downloadId }: { downloadId: number }) {
+function WorkAssistForWork({ downloadId, writable }: { downloadId: AssistWork; writable: boolean }) {
+  const shelf = typeof downloadId === "string";
+  const lockedReason = writable ? undefined : SHELF_READ_ONLY;
   const runtime = isTauriRuntime();
   const synopsis = useAssist("work_synopsis");
   const tagging = useAssist("work_tagging");
@@ -46,11 +55,18 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
   const noteKey = ["assist-note", "work", String(downloadId), "synopsis"] as const;
   const noteEngine = synopsis.settings ? toEngine(synopsis.settings, "work_synopsis") : null;
   const tagsKey = ["assist-tags", downloadId] as const;
+  // タグが変わると一覧・絞り込み・読む画面の情報も変わる。新しい棚は、出ている画面の問い合わせを
+  // まとめて読み直させる（どこに出ているかを一つずつ追わない）。
+  const refreshAfterTags = () => shelf
+    ? invalidateShelf(queryClient, tagsKey)
+    : Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["library"] }),
+        queryClient.invalidateQueries({ queryKey: ["reader-metadata", downloadId] }),
+      ]).then(() => undefined);
   const refreshTagQueries = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: tagsKey }),
-      queryClient.invalidateQueries({ queryKey: ["library"] }),
-      queryClient.invalidateQueries({ queryKey: ["reader-metadata", downloadId] }),
+      refreshAfterTags(),
     ]);
   };
   const reportTagUpdateError = async (error: unknown) => {
@@ -58,7 +74,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
     notifications.show({ color: "red", title: "タグの更新を確認してください", message: errorMessage(error) });
   };
 
-  const note = useQuery({ queryKey: [...noteKey, noteEngine], queryFn: () => loadNote("work", String(downloadId), "synopsis", noteEngine) });
+  const note = useQuery({ queryKey: [...noteKey, noteEngine], queryFn: () => loadNote("work", String(downloadId), "synopsis", noteEngine, shelf) });
   const tags = useQuery({ queryKey: tagsKey, queryFn: () => workTags(downloadId) });
   const assisted = (tags.data ?? []).filter((tag) => tag.source === "llm");
   const manuallyAdded = (tags.data ?? []).filter((tag) => tag.source === "manual");
@@ -72,7 +88,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
     onError: (error) => notifications.show({ color: "red", title: "あらすじを作れません", message: errorMessage(error) }),
   });
   const discard = useMutation({
-    mutationFn: () => deleteNote("work", String(downloadId), "synopsis"),
+    mutationFn: () => deleteNote("work", String(downloadId), "synopsis", shelf),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: noteKey }),
   });
   const propose = useMutation({
@@ -92,8 +108,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
       setProposals(null);
       setPicked(new Set());
       queryClient.setQueryData(tagsKey, next);
-      queryClient.invalidateQueries({ queryKey: ["library"] });
-      queryClient.invalidateQueries({ queryKey: ["reader-metadata", downloadId] });
+      void refreshAfterTags();
       notifications.show({ color: "green", message: "タグを付けました" });
     },
     onError: reportTagUpdateError,
@@ -102,8 +117,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
     mutationFn: (tag: string) => removeAssistedTag(downloadId, tag),
     onSuccess: (next) => {
       queryClient.setQueryData(tagsKey, next);
-      queryClient.invalidateQueries({ queryKey: ["library"] });
-      queryClient.invalidateQueries({ queryKey: ["reader-metadata", downloadId] });
+      void refreshAfterTags();
     },
     onError: reportTagUpdateError,
   });
@@ -124,8 +138,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
       related.reset();
       setRelatedPicked(new Set());
       queryClient.setQueryData(tagsKey, next);
-      queryClient.invalidateQueries({ queryKey: ["library"] });
-      queryClient.invalidateQueries({ queryKey: ["reader-metadata", downloadId] });
+      void refreshAfterTags();
       notifications.show({ color: "green", message: "選んだタグを手動で付けました" });
     },
     onError: reportTagUpdateError,
@@ -134,8 +147,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
     mutationFn: (tag: string) => removeManualTag(downloadId, tag),
     onSuccess: (next) => {
       queryClient.setQueryData(tagsKey, next);
-      queryClient.invalidateQueries({ queryKey: ["library"] });
-      queryClient.invalidateQueries({ queryKey: ["reader-metadata", downloadId] });
+      void refreshAfterTags();
     },
     onError: reportTagUpdateError,
   });
@@ -200,8 +212,8 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
         <Group gap={6} wrap="wrap">
           <Text size="xs" c="dimmed">モデルの案から採ったタグ</Text>
           {assisted.map((tag) => (
-            <Tooltip key={tag.name} label="モデルの案から付けたタグを外す">
-              <Badge component="button" type="button" aria-label={`モデルの案から付けたタグ「${tag.name}」を外す`} variant="light" color="grape" style={{ cursor: "pointer" }} onClick={() => remove.mutate(tag.name)}>{tag.name}</Badge>
+            <Tooltip key={tag.name} label={lockedReason ? `モデルの案から付けたタグ（${lockedReason}）` : "モデルの案から付けたタグを外す"}>
+              <Badge component="button" type="button" disabled={!writable} aria-label={lockedReason ? `モデルの案から付けたタグ「${tag.name}」（${lockedReason}）` : `モデルの案から付けたタグ「${tag.name}」を外す`} variant="light" color="grape" style={{ cursor: writable ? "pointer" : "default" }} onClick={() => remove.mutate(tag.name)}>{tag.name}</Badge>
             </Tooltip>
           ))}
         </Group>
@@ -210,8 +222,8 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
         <Group gap={6} wrap="wrap">
           <Text size="xs" c="dimmed">手動で追加したタグ</Text>
           {manuallyAdded.map((tag) => (
-            <Tooltip key={tag.name} label="手動タグを外す">
-              <Badge component="button" type="button" aria-label={`手動タグ「${tag.name}」を外す`} variant="light" color="teal" style={{ cursor: "pointer" }} onClick={() => removeManual.mutate(tag.name)}>{tag.name}</Badge>
+            <Tooltip key={tag.name} label={lockedReason ? `手動タグ（${lockedReason}）` : "手動タグを外す"}>
+              <Badge component="button" type="button" disabled={!writable} aria-label={lockedReason ? `手動タグ「${tag.name}」（${lockedReason}）` : `手動タグ「${tag.name}」を外す`} variant="light" color="teal" style={{ cursor: writable ? "pointer" : "default" }} onClick={() => removeManual.mutate(tag.name)}>{tag.name}</Badge>
             </Tooltip>
           ))}
         </Group>
@@ -245,7 +257,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
                 label={<span><Text component="span" size="sm" fw={650}>{proposal.tag}</Text><Text size="xs" c="dimmed">{proposal.reason}</Text></span>}
               />
             ))}
-            {proposals && proposals.length > 0 && <ActionRow><Button disabled={!picked.size} loading={accept.isPending} onClick={() => accept.mutate()}>選んだ{picked.size}件を付ける</Button></ActionRow>}
+            {proposals && proposals.length > 0 && <ActionRow><Tooltip label={lockedReason} disabled={!lockedReason}><Button disabled={!picked.size || !writable} aria-label={lockedReason ? `選んだ${picked.size}件を付ける（${lockedReason}）` : undefined} loading={accept.isPending} onClick={() => accept.mutate()}>選んだ{picked.size}件を付ける</Button></Tooltip></ActionRow>}
           </Stack>
         ) : active === "related-tags" ? (
           <Stack>
@@ -269,7 +281,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
                 label={<span><Text component="span" size="sm" fw={650}>{candidate.tag}</Text><Text size="xs" c="dimmed">{candidate.reason}</Text></span>}
               />
             ))}
-            {newRelatedCandidates && newRelatedCandidates.length > 0 && <ActionRow><Button disabled={!validRelatedPicked.length || related.isPending || related.isError} loading={acceptRelated.isPending} onClick={() => acceptRelated.mutate()}>選んだ{validRelatedPicked.length}件を手動で付ける</Button></ActionRow>}
+            {newRelatedCandidates && newRelatedCandidates.length > 0 && <ActionRow><Tooltip label={lockedReason} disabled={!lockedReason}><Button disabled={!validRelatedPicked.length || related.isPending || related.isError || !writable} aria-label={lockedReason ? `選んだ${validRelatedPicked.length}件を手動で付ける（${lockedReason}）` : undefined} loading={acceptRelated.isPending} onClick={() => acceptRelated.mutate()}>選んだ{validRelatedPicked.length}件を手動で付ける</Button></Tooltip></ActionRow>}
           </Stack>
         ) : null}
       </Modal>

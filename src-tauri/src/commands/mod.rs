@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod assist;
+pub mod assist_shelf;
 pub mod auth;
 pub mod browser;
 pub(crate) mod candidates;

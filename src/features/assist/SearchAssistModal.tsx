@@ -21,10 +21,13 @@ export function SearchAssistModal({
   opened,
   onClose,
   onApply,
+  shelf = false,
 }: {
   opened: boolean;
   onClose: () => void;
   onApply: (intent: SearchIntent) => boolean | void;
+  /** 新しい棚の一覧（タグの語彙と道具を新しい棚から読む）。 */
+  shelf?: boolean;
 }) {
   const { engine } = useAssist("search_interpretation");
   const [phrase, setPhrase] = useState("");
@@ -47,7 +50,7 @@ export function SearchAssistModal({
   const run = useMutation({
     mutationFn: (request: { phrase: string; revision: number }) => {
       if (!engine) return Promise.reject(new Error("モデルの手伝いが設定されていません"));
-      return interpretSearch(engine, request.phrase);
+      return interpretSearch(engine, request.phrase, shelf);
     },
     onSuccess: (result, request) => {
       if (request.revision === revision.current) setIntent(result);

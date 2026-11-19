@@ -801,7 +801,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
             <Tabs.Panel value="works" pt="lg">
               <Stack gap="sm">
                 {/* 作風のメモ。作者のときだけ、設定してあるときだけ出る。 */}
-                {kind === "person" && <AuthorAssist source={source} personKey={key} />}
+                {kind === "person" && <AuthorAssist source={source} personKey={key} shelf={shelfMode} />}
                 <Group gap="sm" wrap="nowrap" align="center">
                   <TextInput
                     flex={1}

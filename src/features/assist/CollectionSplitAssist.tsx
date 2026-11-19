@@ -23,11 +23,14 @@ export function CollectionSplitAssist({
   opened,
   onClose,
   collection,
+  shelf = false,
   onSplit,
 }: {
   opened: boolean;
   onClose: () => void;
   collection: WorkCollection;
+  /** 新しい棚のコレクション（案の材料も新しい棚から読む）。 */
+  shelf?: boolean;
   /**
    * 選んだ塊で新しい束を作る。位置は一覧の並び順（0 始まり）。
    *
@@ -49,7 +52,7 @@ export function CollectionSplitAssist({
   const run = useMutation({
     mutationFn: () => {
       if (!engine) return Promise.reject(new Error("モデルの手伝いが設定されていません"));
-      return proposeSplits(engine, collection.id);
+      return proposeSplits(engine, collection.id, shelf);
     },
     onSuccess: setSplits,
     onError: (error) => notifications.show({ color: "red", title: "案を出せません", message: errorMessage(error) }),

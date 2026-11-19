@@ -180,8 +180,8 @@ function ReadingContextCard({ context, neighbors, onOpen }: {
         {!context.sequential && <Text size="xs" c="dimmed">読む順は決まっていません。同じまとまりの作品です。</Text>}
         {/* 読む順があって、前の話があるときだけ。順序なしのまとまりで
             「前回のあらすじ」を出すと、無い連続性をあるように見せてしまう。 */}
-        {/* 前回のあらすじは旧棚の作品だけ（あらすじの記録が旧棚の番号で引くため）。 */}
-        {context.sequential && context.previous && typeof context.currentId === "number" && typeof context.previous.id === "number" && (
+        {/* 前回のあらすじは、読む話と前の話が同じ棚の作品のときだけ（覚え書きはその棚に残る）。 */}
+        {context.sequential && context.previous && typeof context.currentId === typeof context.previous.id && (
           <RecapPanel currentId={context.currentId} previous={{ id: context.previous.id, title: context.previous.title }} />
         )}
         {/* 題だけのボタンだったころは、どれが何の話か、どれだけの長さか、

@@ -42,10 +42,10 @@ import { WorkAssist } from "@/features/assist/WorkAssist";
 const proposal = { tag: "園芸", reason: "花壇の手入れが描かれています" };
 const relatedCandidate = { tag: "料理", reason: "他作品のタグ併用から見つかった候補", matchingWorkCount: 12, cooccurringWorkCount: 4 };
 
-function view(downloadId: number, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
+function view(downloadId: number | string, client = new QueryClient({ defaultOptions: { queries: { retry: false } } }), writable = true) {
   return {
     client,
-    element: <MantineProvider><QueryClientProvider client={client}><WorkAssist downloadId={downloadId} /></QueryClientProvider></MantineProvider>,
+    element: <MantineProvider><QueryClientProvider client={client}><WorkAssist downloadId={downloadId} writable={writable} /></QueryClientProvider></MantineProvider>,
   };
 }
 
@@ -260,5 +260,24 @@ describe("WorkAssist downloadId switch", () => {
     await user.click(screen.getByRole("button", { name: "モデルの案から付けたタグ「モデル候補」を外す" }));
     expect(mocks.removeAssistedTag).toHaveBeenCalledWith(31, "モデル候補");
     expect(mocks.removeManualTag).not.toHaveBeenCalledWith(31, "取得タグ");
+  });
+
+  it("新しい棚の作品は棚の ID で頼み、切り替える前は候補を見せても付けさせない", async () => {
+    const user = userEvent.setup();
+    const shelfWork = "0195f1c2-0000-7000-8000-000000000001";
+    mocks.useAssist.mockImplementation(() => ({ engine: null, settings: undefined, body: false, loading: false }));
+    mocks.workTags.mockResolvedValue([{ name: "手で付けた", source: "manual" }]);
+    render(view(shelfWork, undefined, false).element);
+
+    expect(await screen.findByRole("button", { name: "手動タグ「手で付けた」（新しい棚では変えられません）" })).toBeDisabled();
+    expect(mocks.workTags).toHaveBeenCalledWith(shelfWork);
+    expect(mocks.loadNote).toHaveBeenCalledWith("work", shelfWork, "synopsis", null, true);
+
+    await user.click(screen.getByRole("button", { name: "一緒に付くタグ" }));
+    await user.click(await screen.findByRole("button", { name: "候補を読み込む" }));
+    expect(mocks.relatedTagCandidates).toHaveBeenCalledWith(shelfWork);
+    await user.click(await screen.findByRole("checkbox", { name: /料理/ }));
+    expect(screen.getByRole("button", { name: "選んだ1件を手動で付ける（新しい棚では変えられません）" })).toBeDisabled();
+    expect(mocks.acceptRelatedTags).not.toHaveBeenCalled();
   });
 });
