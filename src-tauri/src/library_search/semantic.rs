@@ -363,6 +363,17 @@ impl Library {
         Ok(())
     }
 
+    /// 意味検索の索引を空にする（意味検索を切ったとき。計算もディスクも使わない）。
+    pub fn clear_semantic_index(&self) -> Result<()> {
+        let storage = self.semantic_storage();
+        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        if semantic_index::index_exists(&storage) {
+            semantic_index::clear_all_works(&storage).map_err(Error::Integrity)?;
+        }
+        conn.execute("DELETE FROM semantic_documents", [])?;
+        Ok(())
+    }
+
     /// 意味検索の索引の状態。
     pub fn semantic_index_state(&self) -> Result<SemanticIndexState> {
         let conn = self.reader()?;

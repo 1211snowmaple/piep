@@ -131,7 +131,7 @@ fn library_id(bytes: &[u8]) -> Result<LibraryId> {
 
 impl Library {
     /// 索引の置き場（旧棚の関数に渡す `storage_dir`）。
-    pub(super) fn search_storage(&self) -> PathBuf {
+    pub(crate) fn search_storage(&self) -> PathBuf {
         self.root().join("derived")
     }
 
@@ -379,6 +379,11 @@ impl Library {
     }
 
     /// 文書が無いか、作った時点の保存状態が今と違うもの。
+    /// いまの版の索引が追いついていない作品の数（診断・ホームの表示）。
+    pub fn search_index_pending(&self) -> Result<usize> {
+        Ok(self.stale_units(Space::Current)?.len())
+    }
+
     fn stale_units(&self, space: Space) -> Result<Vec<Unit>> {
         let conn = self.reader()?;
         let sql = match space {

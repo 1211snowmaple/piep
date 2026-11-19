@@ -13,6 +13,7 @@ pub mod library_collection_edit;
 pub mod library_collections;
 pub mod library_entity;
 pub mod library_entity_list;
+pub mod library_health;
 pub mod library_search;
 pub mod library_suggest;
 pub mod library_suggestion_corpus;
@@ -362,6 +363,15 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_entities,
             commands::library_v2::library_v2_entity_collections,
             commands::library_v2::library_v2_work_collections,
+            // 新しい棚の数と手入れ (commands::library_health)
+            commands::library_health::library_v2_search_index_status,
+            commands::library_health::library_v2_dashboard,
+            commands::library_health::library_v2_shelf_counts,
+            commands::library_health::library_v2_diagnostics,
+            commands::library_health::library_v2_maintain,
+            commands::library_health::library_v2_optimize_search_index,
+            commands::library_health::library_v2_verify,
+            commands::library_health::library_v2_reclaim,
             commands::library_v2::library_v2_collections,
             commands::library_v2::library_v2_collection,
             commands::library_v2::library_v2_revision_snapshot,

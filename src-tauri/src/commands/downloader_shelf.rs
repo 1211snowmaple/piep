@@ -514,6 +514,7 @@ pub(super) async fn save_to_shelf(
             if let Err(error) = library.refresh_shelf_work_links(work) {
                 log::warn!("保存した作品の本文リンクを取れません: {error}");
             }
+            crate::commands::library_health::schedule_semantic_sync(library);
             Ok(())
         })
         .await?;

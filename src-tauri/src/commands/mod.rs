@@ -7,6 +7,7 @@ pub mod database;
 pub mod downloader;
 pub mod epub;
 pub(crate) mod job_queue;
+pub mod library_health;
 pub mod library_v2;
 pub mod original_images;
 pub mod pdf;

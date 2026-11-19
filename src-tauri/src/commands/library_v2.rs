@@ -119,7 +119,10 @@ impl LibraryV2 {
     }
 
     /// 作品の旧棚での番号（移行の記録）。棚にある作品は約 3 万件なので、全部を一度に持つ。
-    fn legacy_numbers(&self, library: &Library) -> Result<Arc<HashMap<LibraryId, i64>>, String> {
+    pub(crate) fn legacy_numbers(
+        &self,
+        library: &Library,
+    ) -> Result<Arc<HashMap<LibraryId, i64>>, String> {
         let mut slot = self.legacy_numbers.lock().map_err(|e| e.to_string())?;
         if let Some(numbers) = slot.as_ref() {
             return Ok(Arc::clone(numbers));
@@ -147,7 +150,7 @@ impl LibraryV2 {
     }
 
     /// 書き込める棚。正本に切り替えるまでは誤り（旧棚から移した写しに書かない）。
-    fn writable(&self) -> Result<Arc<Library>, String> {
+    pub(crate) fn writable(&self) -> Result<Arc<Library>, String> {
         let library = self.library()?;
         match library.switched_at() {
             Ok(Some(_)) => Ok(library),
@@ -249,6 +252,10 @@ impl LibraryV2 {
             .activation_problems()
             .unwrap_or_else(|error| vec![format!("未解決の記録を読めません: {error}")]);
         let switched = matches!(library.switched_at(), Ok(Some(_)));
+        if switched {
+            // 保存のたびに合わせるが、前回の起動で残った分もここで追いつかせる。
+            super::library_health::schedule_semantic_sync(Arc::clone(&library));
+        }
         self.set(LibraryV2Status::Ready {
             path: path.into(),
             unresolved,
@@ -277,6 +284,7 @@ fn default_dir(app_data: &Path) -> PathBuf {
 
 /// 起動のときに呼ぶ。別のスレッドで開く。
 pub fn open_in_background(state: Arc<LibraryV2>, app_data: &Path) {
+    super::library_health::set_settings_dir(app_data);
     let path = library_dir(app_data);
     let spawned = std::thread::Builder::new()
         .name("piep-library-v2".into())
@@ -587,6 +595,7 @@ pub async fn library_v2_remove_work(
         if let Err(error) = library.sync_search_index(&mut |_, _| {}) {
             log::error!("外した作品を検索の索引から消せません: {error}");
         }
+        super::library_health::schedule_semantic_sync(Arc::clone(&library));
         Ok(())
     })
     .await
@@ -1487,7 +1496,7 @@ pub async fn library_v2_editor(
 }
 
 /// 編集した後の後始末。一覧の集計を捨て、本文の検索の索引を追いつかせる。
-fn after_edit(state: &LibraryV2, library: &Library, work: LibraryId) {
+fn after_edit(state: &LibraryV2, library: &Arc<Library>, work: LibraryId) {
     state.forget_derived();
     if let Err(error) = library.audit_pixiv_edit_images(work) {
         log::warn!("編集した作品の取得状態を見直せません: {error}");
@@ -1495,6 +1504,7 @@ fn after_edit(state: &LibraryV2, library: &Library, work: LibraryId) {
     if let Err(error) = library.sync_search_index(&mut |_, _| {}) {
         log::error!("編集を検索の索引へ反映できません: {error}");
     }
+    super::library_health::schedule_semantic_sync(Arc::clone(library));
 }
 
 /// 作品の編集のようす（下書き・反映中の版・以前の編集版）。読むだけなので切り替える前も開ける。

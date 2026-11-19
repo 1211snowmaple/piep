@@ -899,7 +899,7 @@ fn collect_diagnostic_file_stats(
     )
 }
 
-fn recursive_file_size(root: &Path) -> u64 {
+pub(crate) fn recursive_file_size(root: &Path) -> u64 {
     let mut no_known_assets = |_path: &Path| Ok(false);
     collect_diagnostic_file_stats(
         root,
@@ -1126,17 +1126,17 @@ fn current_process_memory_bytes() -> Option<u64> {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct ProcessResourceSnapshot {
-    working_set_bytes: Option<u64>,
-    private_bytes: Option<u64>,
-    process_count: u32,
-    webview_process_count: u32,
-    gpu_dedicated_bytes: Option<u64>,
-    gpu_shared_bytes: Option<u64>,
+pub(crate) struct ProcessResourceSnapshot {
+    pub(crate) working_set_bytes: Option<u64>,
+    pub(crate) private_bytes: Option<u64>,
+    pub(crate) process_count: u32,
+    pub(crate) webview_process_count: u32,
+    pub(crate) gpu_dedicated_bytes: Option<u64>,
+    pub(crate) gpu_shared_bytes: Option<u64>,
 }
 
 #[cfg(windows)]
-fn process_resource_snapshot() -> ProcessResourceSnapshot {
+pub(crate) fn process_resource_snapshot() -> ProcessResourceSnapshot {
     use std::collections::HashSet;
 
     #[repr(C)]
@@ -1351,7 +1351,7 @@ fn gpu_memory_for_processes(
 }
 
 #[cfg(not(windows))]
-fn process_resource_snapshot() -> ProcessResourceSnapshot {
+pub(crate) fn process_resource_snapshot() -> ProcessResourceSnapshot {
     ProcessResourceSnapshot {
         working_set_bytes: current_process_memory_bytes(),
         process_count: 1,

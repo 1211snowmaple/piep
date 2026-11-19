@@ -218,6 +218,18 @@ pub async fn search_rebuild_index(
         batch_size: None,
         include_semantic: None,
     });
+    let shelf = app.state::<Arc<AppState>>().library_v2.switched();
+    if let Some(library) = shelf {
+        if let Some(enabled) = options.include_semantic {
+            let target = Arc::clone(&library);
+            tokio::task::spawn_blocking(move || {
+                super::library_health::apply_semantic_enabled(&target, enabled)
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+        }
+        return spawn_shelf_index_job(app, library, "manual");
+    }
     let semantic_enabled = match options.include_semantic {
         Some(enabled) => {
             run_db_blocking(app.clone(), move |state| {
@@ -246,6 +258,12 @@ pub async fn search_set_semantic_enabled(
     enabled: bool,
 ) -> Result<SearchIndexStatus, String> {
     run_db_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            super::library_health::apply_semantic_enabled(&library, enabled)?;
+            return library
+                .search_index_status(enabled)
+                .map_err(|e| e.to_string());
+        }
         state.db.set_semantic_index_enabled(enabled)
     })
     .await
@@ -263,6 +281,23 @@ pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
         // Long enough for the first screen to settle; the work then competes
         // with nothing the user is waiting on.
         sleep(Duration::from_millis(1_200)).await;
+
+        // 新しい棚の意味検索の設定がまだなければ、旧棚の設定を一度だけ写す。
+        if !super::library_health::has_settings() {
+            match run_db_blocking(app.clone(), |state| state.db.semantic_index_enabled()).await {
+                Ok(enabled) => {
+                    if let Err(error) = super::library_health::store_semantic_enabled(enabled) {
+                        log::warn!("意味検索の設定を写せません: {error}");
+                    }
+                }
+                Err(error) => log::warn!("旧棚の意味検索の設定を読めません: {error}"),
+            }
+        }
+        // 正本に切り替えた棚は、開いたときと保存のたびに自分で追いつく。旧棚の索引は整えない。
+        if let Some(library) = app.state::<Arc<AppState>>().library_v2.switched() {
+            super::library_health::schedule_semantic_sync(library);
+            return;
+        }
 
         // 記録より先に実物を見る。索引が消えているのに「索引済み」の記録だけが
         // 残っていると、待っている件数は 0 と出て、この仕事は何もせずに帰る。
@@ -504,6 +539,116 @@ pub fn start_automatic_cover_repair(app: tauri::AppHandle) {
         }
         log::info!("代替表紙の修復を終了しました: {repaired_total}件");
     });
+}
+
+/// 正本に切り替えた棚の索引を追いつかせる（全文、続けて意味検索を入れていれば意味の索引）。
+/// 進み具合は旧棚の作り直しと同じ知らせで流し、走っている作り直しがあればそれに合流する。
+fn spawn_shelf_index_job(
+    app: tauri::AppHandle,
+    library: Arc<crate::library::Library>,
+    origin: &'static str,
+) -> Result<String, String> {
+    let job_id = format!(
+        "search-index-{}-{}",
+        chrono::Utc::now().timestamp_millis(),
+        SEARCH_REBUILD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut jobs = SEARCH_REBUILD_JOBS.lock().map_err(|e| e.to_string())?;
+        if let Some((existing, _)) = jobs.iter().next() {
+            return Ok(existing.clone());
+        }
+        jobs.insert(job_id.clone(), cancel.clone());
+    }
+    let job = job_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let started = Instant::now();
+        let progress_app = app.clone();
+        let progress_job = job.clone();
+        let task_library = Arc::clone(&library);
+        let outcome = tokio::task::spawn_blocking(move || {
+            let library = task_library;
+            let mut last = Instant::now() - Duration::from_secs(1);
+            let mut emit = |phase: &str, done: usize, total: usize| {
+                if done < total && last.elapsed() < Duration::from_millis(100) {
+                    return;
+                }
+                last = Instant::now();
+                let elapsed = started.elapsed().as_secs_f64();
+                let rate = (elapsed > 0.5).then(|| done as f64 / elapsed);
+                let _ = progress_app.emit(
+                    "search-index-progress",
+                    SearchRebuildProgress {
+                        job_id: progress_job.clone(),
+                        origin: origin.to_string(),
+                        status: "running".to_string(),
+                        total_downloads: 0,
+                        indexed_downloads: 0,
+                        pending_downloads: total.saturating_sub(done) as i64,
+                        is_complete: false,
+                        phase: phase.to_string(),
+                        processed: done as i64,
+                        processed_total: total as i64,
+                        failed: 0,
+                        embedding_provider: String::new(),
+                        gpu_enabled: false,
+                        throughput_per_sec: rate,
+                        eta_seconds: rate
+                            .filter(|r| *r > 0.0)
+                            .map(|r| total.saturating_sub(done) as f64 / r),
+                        error: None,
+                    },
+                );
+            };
+            let lexical = library
+                .sync_search_index(&mut |done, total| emit("indexing", done, total))
+                .map_err(|e| e.to_string())?;
+            let mut processed = lexical.indexed + lexical.history.indexed;
+            if super::library_health::semantic_enabled() && !cancel.load(Ordering::Relaxed) {
+                let _turn = super::library_health::SEMANTIC_TURN
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                let semantic = library
+                    .sync_semantic_index(
+                        None,
+                        &|| cancel.load(Ordering::Relaxed),
+                        &mut |done, total| emit("semantic", done, total),
+                    )
+                    .map_err(|e| e.to_string())?;
+                processed += semantic.indexed;
+            }
+            Ok::<_, String>((processed as i64, cancel.load(Ordering::Relaxed)))
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|result| result);
+        let status = library
+            .search_index_status(super::library_health::semantic_enabled())
+            .map_err(|e| e.to_string());
+        match (outcome, status) {
+            (Ok((processed, canceled)), Ok(status)) => emit_search_index_progress(
+                &app,
+                &job,
+                origin,
+                if canceled { "canceled" } else { "completed" },
+                status,
+                processed,
+                0,
+                started.elapsed().as_secs_f64(),
+            ),
+            (Err(error), _) | (_, Err(error)) => {
+                let _ = app.emit(
+                    "search-index-progress",
+                    serde_json::json!({ "jobId": job, "origin": origin, "status": "failed", "phase": "failed", "error": error }),
+                );
+            }
+        }
+        if let Ok(mut jobs) = SEARCH_REBUILD_JOBS.lock() {
+            jobs.remove(&job);
+        }
+    });
+    Ok(job_id)
 }
 
 fn spawn_rebuild_job(
@@ -1641,8 +1786,15 @@ pub async fn db_get_filter_facets(
 pub async fn db_get_search_index_status(
     app: tauri::AppHandle,
 ) -> Result<SearchIndexStatus, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_search_index_status()
+    run_db_blocking(app, |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library
+                .search_index_status(super::library_health::semantic_enabled())
+                .map_err(|e| e.to_string());
+        }
+        state.db.get_search_index_status()
+    })
+    .await
 }
 
 /// 作者やシリーズを、名前で探して返す。
@@ -3088,7 +3240,11 @@ pub async fn db_scan_fanbox_asset_gaps(app: tauri::AppHandle) -> Result<FanboxRe
 pub async fn db_get_entity_profile_repair_status(
     app: tauri::AppHandle,
 ) -> Result<EntityProfileRepairView, String> {
-    let status = run_db_blocking(app, |state| state.db.entity_profile_repair_status()).await?;
+    let status = run_db_blocking(app, |state| match state.library_v2.switched() {
+        Some(library) => library.profile_repair_status().map_err(|e| e.to_string()),
+        None => state.db.entity_profile_repair_status(),
+    })
+    .await?;
     Ok(EntityProfileRepairView {
         status,
         running: ENTITY_PROFILE_REPAIR_RUNNING.load(Ordering::Acquire),
@@ -3114,8 +3270,11 @@ pub async fn repair_incomplete_entity_profiles(
     let _run_guard = EntityProfileRepairRunGuard;
     ENTITY_PROFILE_REPAIR_CANCEL.store(false, Ordering::Release);
 
-    let targets =
-        run_db_blocking(app.clone(), |state| state.db.incomplete_entity_profiles()).await?;
+    let targets = run_db_blocking(app.clone(), |state| match state.library_v2.switched() {
+        Some(library) => library.incomplete_profiles().map_err(|e| e.to_string()),
+        None => state.db.incomplete_entity_profiles(),
+    })
+    .await?;
     let total = targets.len();
     let mut repaired = 0usize;
     let mut failed = 0usize;
@@ -3212,9 +3371,12 @@ pub async fn repair_incomplete_entity_profiles(
     }
 
     let canceled = ENTITY_PROFILE_REPAIR_CANCEL.load(Ordering::Acquire);
-    let remaining = run_db_blocking(app.clone(), |state| state.db.entity_profile_repair_status())
-        .await?
-        .total_count;
+    let remaining = run_db_blocking(app.clone(), |state| match state.library_v2.switched() {
+        Some(library) => library.profile_repair_status().map_err(|e| e.to_string()),
+        None => state.db.entity_profile_repair_status(),
+    })
+    .await?
+    .total_count;
     emit_profile_repair_progress(
         &app,
         EntityProfileRepairProgress {

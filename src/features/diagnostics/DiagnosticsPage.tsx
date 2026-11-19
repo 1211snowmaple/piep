@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Accordion,
   Alert,
@@ -21,7 +21,7 @@ import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ActionRow } from "@/components/ActionRow";
 import { DangerButton } from "@/components/DangerButton";
-import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
+import { Icons, IconSize } from "@/lib/icons";
 import { ErrorState } from "@/components/AsyncState";
 import { JobProgress } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
@@ -48,6 +48,9 @@ import { openFilesystemPath } from "@/services/openerApi";
 import type { LibraryDiagnostics, LibraryFileIssue } from "@/types/library";
 import { useLibraryDiagnostics } from "./useLibraryDiagnostics";
 import { OriginalImagesCard } from "./OriginalImagesCard";
+import { MaintenanceTaskCard, MetricCard } from "./diagnosticsParts";
+import { ShelfDiagnosticsSection } from "./ShelfDiagnostics";
+import { useShelfMode } from "@/features/library/shelfV2";
 
 export const previewDiagnostics: LibraryDiagnostics = {
   measuredAt: "2026-08-09T12:00:00.000Z", totalDownloads: 1284, totalAssets: 8241, totalVersions: 1392, totalTextLength: 31_400_000,
@@ -69,26 +72,6 @@ function scoreColor(ms: number | null) {
 function formatLatency(ms: number | null) {
   if (ms === null) return "—";
   return ms >= 1_000 ? `${(ms / 1_000).toFixed(2)} s` : `${ms.toFixed(1)} ms`;
-}
-
-function MetricCard({ label, value, detail, icon: Icon, color = "piep" }: { label: string; value: string; detail: string; icon: LucideIcon; color?: string }) {
-  return <Card p="lg"><Group wrap="nowrap" align="flex-start" gap="sm"><ThemeIcon size={38} variant="light" color={color} style={{ flex: "0 0 auto" }}><Icon size={18} /></ThemeIcon><Box miw={0} style={{ flex: "1 1 auto" }}><Text size="xs" c="dimmed" className="line-clamp-1">{label}</Text><Text fz="xl" fw={760} className="metric-card__value">{value}</Text><Text size="xs" c="dimmed" mt={4}>{detail}</Text></Box></Group></Card>;
-}
-
-function MaintenanceTaskCard({ icon: Icon, title, description, status, action }: { icon: LucideIcon; title: string; description: string; status: ReactNode; action: ReactNode }) {
-  return <Card p="lg" className="maintenance-task-card">
-    <Stack gap="md" h="100%">
-      <Group wrap="nowrap" align="flex-start" gap="sm">
-        <ThemeIcon size={40} variant="light" color="piep" style={{ flex: "0 0 auto" }}><Icon size={19} /></ThemeIcon>
-        <Box miw={0}>
-          <Text fw={720}>{title}</Text>
-          <Text size="xs" c="dimmed" mt={3}>{description}</Text>
-        </Box>
-      </Group>
-      <Box>{status}</Box>
-      <Box mt="auto"><ActionRow>{action}</ActionRow></Box>
-    </Stack>
-  </Card>;
 }
 
 /**
@@ -208,6 +191,10 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
   // in the cache is still shown - it is the *running* that waits to be asked
   // for, not the reading.
   const diagnostics = useLibraryDiagnostics(runtime, previewData);
+  // 新しい棚を見ているあいだは、計測・照合・手入れを新しい棚の仕組みで行う（保存フォルダーの
+  // 照合や再取り込みは旧棚だけのもの）。作者・シリーズ情報の修復と原寸画像はそのまま。
+  const { shelfMode, deciding: shelfDeciding } = useShelfMode(runtime);
+  const legacyView = !shelfMode && !shelfDeciding;
   const measurePhase = diagnostics.progress;
   /**
    * 取りこぼした FANBOX の添付。
@@ -218,7 +205,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
   const fanboxGaps = useQuery({
     queryKey: ["fanbox-asset-gaps"],
     queryFn: scanFanboxAssetGaps,
-    enabled: runtime,
+    enabled: runtime && !shelfMode && !shelfDeciding,
     staleTime: 60_000,
   });
   const repairFanboxAssets = useMutation({
@@ -514,7 +501,8 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     {/* Settings already carries one at the top of the screen. */}
     {!embedded && <RuntimeNotice />}
 
-    <Card p="lg" mt="lg">
+    {shelfMode && <ShelfDiagnosticsSection runtime={runtime} busy={profileRunning} />}
+    {legacyView && <Card p="lg" mt="lg">
       <Group justify="space-between" align="center" wrap="wrap">
         <Group gap="sm"><ThemeIcon variant="light" size={40}><Icons.diagnostics size={IconSize.feature} /></ThemeIcon><Box>
           <Text fw={700}>ライブラリの状態</Text>
@@ -523,9 +511,9 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         <Button size="sm" leftSection={<Icons.retry size={IconSize.menu} />} loading={diagnostics.isFetching} disabled={maintenance.isPending || indexOptimization.isPending} onClick={() => diagnostics.refetch()}>{data ? "再確認" : "診断する"}</Button>
       </Group>
       <Text size="xs" c="dimmed" mt="sm">診断は読み取りだけを行います。作品数が多い場合は時間がかかります。</Text>
-    </Card>
+    </Card>}
 
-    {Boolean(fanboxGaps.error || fanboxGaps.data?.workIds.length) && <Box mt="lg">        <MaintenanceTaskCard
+    {legacyView && Boolean(fanboxGaps.error || fanboxGaps.data?.workIds.length) && <Box mt="lg">        <MaintenanceTaskCard
           icon={Icons.epub}
           title="FANBOXの添付"
           description="保存データに記録された画像・添付が、実際に保存されているか確認します。"
@@ -586,7 +574,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
       </Box>}
     </Card>}
     <OriginalImagesCard runtime={runtime} disabled={maintenance.isPending || indexOptimization.isPending} />
-    {(diagnostics.isFetching || optimizePhase) && (
+    {legacyView && (diagnostics.isFetching || optimizePhase) && (
       <Card p="md" mt="md">
         {diagnostics.isFetching && (
           <JobProgress
@@ -609,7 +597,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         )}
       </Card>
     )}
-    {diagnostics.error ? <Box mt="lg"><ErrorState error={diagnostics.error} retry={() => diagnostics.refetch()} /></Box> : data && <Stack gap="lg" mt="xl">
+    {!legacyView ? null : diagnostics.error ? <Box mt="lg"><ErrorState error={diagnostics.error} retry={() => diagnostics.refetch()} /></Box> : data && <Stack gap="lg" mt="xl">
       {data.fragmentationPercent >= 20 && <Alert color={data.fragmentationPercent >= 70 ? "red" : "yellow"} icon={<Icons.warning size={IconSize.nav} />} title={`DBの${data.fragmentationPercent.toFixed(2)}%が使われていない領域です`}>
         <Group justify="space-between" align="flex-end"><Text size="sm" maw={720}>中身は約{formatBytes(data.liveDatabaseBytes)}ですが、ファイルは{formatBytes(data.databaseSizeBytes)}あります。検索結果には影響しませんが、バックアップの容量と読み書きが増えます。</Text><Button color="yellow" loading={maintenance.isPending} disabled={!runtime} onClick={confirmCompact}>空き容量を検査して圧縮</Button></Group>
       </Alert>}
@@ -666,7 +654,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
       </Accordion.Panel></Accordion.Item></Accordion>
       <Text size="xs" c="dimmed">最終計測: {new Date(data.measuredAt).toLocaleString("ja-JP")} · 計測値はこの端末から送信されません。</Text>
     </Stack>}
-    <Accordion variant="separated" mt="lg"><Accordion.Item value="maintenance"><Accordion.Control><Text fw={650} size="sm">最適化と復元</Text><Text size="xs" c="dimmed">DB・検索索引の整理、保存フォルダーからの復旧</Text></Accordion.Control><Accordion.Panel>
+    {legacyView && <Accordion variant="separated" mt="lg"><Accordion.Item value="maintenance"><Accordion.Control><Text fw={650} size="sm">最適化と復元</Text><Text size="xs" c="dimmed">DB・検索索引の整理、保存フォルダーからの復旧</Text></Accordion.Control><Accordion.Panel>
       <SimpleGrid cols={{ base: 1, md: 2 }}>
         <MaintenanceTaskCard
           icon={Icons.database}
@@ -687,7 +675,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
           action={<Button variant="light" color={data && data.lexicalIndexSegmentCount >= 16 ? "yellow" : "piep"} leftSection={<Icons.search size={IconSize.menu} />} loading={indexOptimization.isPending} disabled={!runtime || maintenance.isPending || profileRunning || !data || data.lexicalIndexSegmentCount <= 1} onClick={confirmIndexOptimization}>検索索引を最適化</Button>}
         />
       </SimpleGrid>
-    </Accordion.Panel></Accordion.Item></Accordion>
+    </Accordion.Panel></Accordion.Item></Accordion>}
 
   </div>;
 }

@@ -60,6 +60,8 @@ import {
 import { loginFanboxWebview, loginPixivWebview, verifyFanboxSession, verifyPixivToken } from "@/services/authApi";
 import type { FanboxUser, PixivUser } from "@/services/authApi";
 import { getSearchIndexStatus, getStats, isTauriRuntime, scanAndReimportDownloads } from "@/services/dbApi";
+import { libraryV2Dashboard } from "@/services/shelfHealthApi";
+import { useLibraryV2Status, useShelfMode } from "@/features/library/shelfV2";
 import type { SearchIndexStatus } from "@/types/library";
 import { openSingleDialog, saveDialog } from "@/services/dialogApi";
 import { openFilesystemPath } from "@/services/openerApi";
@@ -198,8 +200,12 @@ export default function SettingsPage() {
       return { pixiv: pixivUser ?? null, fanbox: fanboxUser ?? null };
     },
   });
-  const stats = useQuery({ queryKey: ["stats"], queryFn: () => runtime ? getStats() : Promise.resolve({ totalDownloads: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 }) });
-  const storagePath = useQuery({ queryKey: ["storage-path"], queryFn: () => runtime ? getStoragePath() : Promise.resolve("C:\\Users\\preview\\AppData\\Roaming\\io.github.u1211snowmaple.piep\\downloads") });
+  // 新しい棚を見ているあいだは、数と保存先も新しい棚のもの。
+  const { shelfMode, deciding } = useShelfMode(runtime);
+  const shelfStatus = useLibraryV2Status(shelfMode);
+  const stats = useQuery({ queryKey: ["stats", shelfMode], enabled: !deciding, queryFn: () => runtime ? (shelfMode ? libraryV2Dashboard().then((summary) => summary.stats) : getStats()) : Promise.resolve({ totalDownloads: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 }) });
+  const shelfPath = shelfStatus.data && "path" in shelfStatus.data ? shelfStatus.data.path : null;
+  const storagePath = useQuery({ queryKey: ["storage-path", shelfMode, shelfPath], enabled: !deciding && (!shelfMode || shelfPath !== null), queryFn: () => runtime ? (shelfMode && shelfPath ? Promise.resolve(shelfPath) : getStoragePath()) : Promise.resolve("C:\\Users\\preview\\AppData\\Roaming\\io.github.u1211snowmaple.piep\\downloads") });
   const nativeBackup = useQuery({
     queryKey: ["backup-export-running"],
     queryFn: backupExportRunning,

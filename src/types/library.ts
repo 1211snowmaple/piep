@@ -485,7 +485,8 @@ export interface DashboardSummary {
   pendingIndexCount: number;
   topTags: FacetCount[];
   topAuthors: FacetCount[];
-  recentDownloads: DownloadEntry[];
+  /** 新しい棚の集計では棚の作品（`ShelfEntry`）が入る。 */
+  recentDownloads: ListedWork[];
   sourceBreakdown: SourceBreakdown[];
   monthlyDownloads: DashboardTrendPoint[];
 }
