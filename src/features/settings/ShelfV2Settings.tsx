@@ -31,7 +31,7 @@ export function ShelfV2Settings() {
   return (
     <Card p="lg">
       <Group justify="space-between" align="flex-start" wrap="nowrap" gap="sm">
-        <Text fw={700}>新しい棚（試験中）</Text>
+        <Text fw={700}>{switched ? "新しい棚" : "新しい棚（試験中）"}</Text>
         <Badge variant="light" color={state.color}>{state.label}</Badge>
       </Group>
       <Text size="sm" c="dimmed" mt={4} mb="md">
@@ -40,11 +40,12 @@ export function ShelfV2Settings() {
           : "移行した時点の写しで、その後に保存した作品は入っていません。読むだけで、ここからは何も書き換えません。"}
       </Text>
       <Switch
-        checked={enabled}
+        checked={enabled || switched}
+        disabled={switched}
         onChange={(event) => setEnabled(event.currentTarget.checked)}
         label="ライブラリの作品の一覧を新しい棚から出す"
         description={switched
-          ? "作品の画面と読む画面も新しい棚で開きます。検索語での検索は、検索の準備が済んでから使えます。"
+          ? "正本に切り替えた棚なので、いつも新しい棚から出します。作品の画面と読む画面も新しい棚で開きます。"
           : "作品の画面と読む画面は読むだけで開けます。お気に入りなどの変更・編集・複数選択は、正本に切り替えるまで使えません。検索語での検索は、検索の準備が済んでから使えます。"}
       />
       {data.state === "failed" && <Text size="sm" c="red" mt="sm">{data.message}</Text>}

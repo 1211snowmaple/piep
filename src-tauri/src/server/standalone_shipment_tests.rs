@@ -185,6 +185,50 @@ fn a_shipped_shelf_is_served_after_restart_and_keeps_what_the_phone_wrote_on_the
 }
 
 #[test]
+fn a_shelf_holding_an_empty_file_ships() {
+    let temp = TestRoot::created("v2-shipment-empty");
+    let paths = paths_with_config(&temp.0);
+    let desktop = Library::create(&temp.0.join("desktop")).unwrap();
+    let staged = temp.0.join("staged");
+    fs::create_dir_all(&staged).unwrap();
+    let empty = staged.join("empty.txt");
+    fs::write(&empty, b"").unwrap();
+    desktop
+        .save_readable_work(
+            WorkSave {
+                request: LibraryId::now_v7(),
+                provider: "pixiv",
+                key: "1",
+                route: "test",
+                data: &serde_json::json!({"detail":{"title":"題"},"text":"本文"}),
+                assets: vec![crate::library::StagedAsset {
+                    role: "file".into(),
+                    name: "empty.txt".into(),
+                    path: empty,
+                    url: None,
+                    mime_type: Some("text/plain".into()),
+                }],
+            },
+            None,
+        )
+        .unwrap();
+    // 実際の棚にも空のファイルがあり、長さ 0 の実体を断って送れなかった。
+    let snapshot = temp.0.join("check.db");
+    let chunks = desktop.ship_snapshot(&snapshot).unwrap();
+    assert!(chunks.iter().any(|chunk| chunk.length == 0));
+    let shipments = ShelfShipments::new(paths.clone(), None);
+    ship(&shipments, &desktop, &temp.0);
+    apply_pending(&paths);
+    let config = load_config(&paths).unwrap().library_v2.unwrap();
+    let store = Arc::new(ServerStore::open(&paths.store()).unwrap());
+    let served = config.open(&paths, store).unwrap();
+    assert_eq!(
+        serde_json::to_value(served.shelf_status().unwrap()).unwrap()["works"],
+        "1"
+    );
+}
+
+#[test]
 fn a_shipment_from_another_shelf_is_refused_and_an_interrupted_one_resumes() {
     let temp = TestRoot::created("v2-shipment-refuse");
     let paths = paths_with_config(&temp.0);

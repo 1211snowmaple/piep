@@ -52,17 +52,17 @@ jobs:
           if ($relationship -notin @('ahead', 'identical')) {
             throw "Tagged commit $commit is not on main (compare status: $relationship)"
           }
-          for ($attempt = 0; $attempt -lt 60; $attempt++) {
+          for ($attempt = 0; $attempt -lt 120; $attempt++) {
             $runs = @(gh run list --workflow quality.yml --commit $commit --branch main --limit 100 --json conclusion,createdAt,event,headSha,status | ConvertFrom-Json)
             $latest = $runs | Where-Object { $_.headSha -eq $commit -and $_.event -eq 'push' } | Sort-Object createdAt -Descending | Select-Object -First 1
             if ($latest.status -eq 'completed') {
               if ($latest.conclusion -ne 'success') { throw "Quality for $commit ended with $($latest.conclusion)" }
               break
             }
-            if ($attempt -eq 59) { throw "Quality has not succeeded for $commit" }
+            if ($attempt -eq 119) { throw "Quality has not succeeded for $commit" }
             Start-Sleep -Seconds 30
           }
-          for ($attempt = 0; $attempt -lt 60; $attempt++) {
+          for ($attempt = 0; $attempt -lt 120; $attempt++) {
             $runs = @(gh run list --workflow docs.yml --commit $commit --branch main --limit 100 --json databaseId,createdAt,event,headSha | ConvertFrom-Json)
             $latest = $runs | Where-Object { $_.headSha -eq $commit -and $_.event -eq 'push' } | Sort-Object createdAt -Descending | Select-Object -First 1
             if ($latest) {
@@ -73,7 +73,7 @@ jobs:
                 break
               }
             }
-            if ($attempt -eq 59) { throw "Contract has not succeeded for $commit" }
+            if ($attempt -eq 119) { throw "Contract has not succeeded for $commit" }
             Start-Sleep -Seconds 30
           }
 
