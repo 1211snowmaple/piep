@@ -498,6 +498,7 @@ fn admin_routes(ctx: Ctx) -> Router {
         .route("/api/v1/admin/devices/{id}", delete(admin_revoke))
         .route("/api/v1/admin/favorites", get(admin_favorites))
         .route("/api/v1/admin/favorites/ack", post(admin_favorites_ack))
+        .route("/api/v1/admin/shelf/reading", get(admin_shelf_reading))
         .route("/api/v1/admin/sync/sessions", post(sync_open))
         .route("/api/v1/admin/sync/sessions/{id}", delete(sync_abort))
         .route(
@@ -1681,6 +1682,29 @@ async fn admin_favorites_ack(
             ApiError::internal()
         })?;
     Ok(Json(serde_json::json!({ "cursor": ack.cursor })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShelfReadingQuery {
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
+/// 携帯が新しい棚に書いた読書位置を、デスクトップ版が自分の棚へ取り込むために読む。
+/// 棚の持ち主の位置だけ。新しい棚を配っているサーバーにだけある。
+async fn admin_shelf_reading(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    Query(query): Query<ShelfReadingQuery>,
+) -> Result<Response, ApiError> {
+    require_admin(&ctx, &headers)?;
+    let shelf = ctx
+        .reader_shelf
+        .get()
+        .cloned()
+        .ok_or_else(ApiError::not_found)?;
+    Ok(shelf.owner_reading(query.cursor, query.limit).await)
 }
 
 async fn reading_put(

@@ -544,6 +544,7 @@ pub fn run() -> tauri::Result<()> {
             commands::backup_shelf::library_v2_backup,
             commands::backup_shelf::library_v2_export_entity_archive,
             commands::backup_shelf::library_v2_import_archive,
+            commands::reimport_shelf::library_v2_reimport_folders,
             commands::backup_shelf::library_v2_inspect_backup,
             commands::backup_shelf::library_v2_schedule_restore,
             commands::backup_shelf::library_v2_restore_state,

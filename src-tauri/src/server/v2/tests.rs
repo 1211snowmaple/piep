@@ -1856,3 +1856,174 @@ async fn reading_positions_are_written_once_refuse_stale_generations_and_come_ba
         StatusCode::NOT_FOUND
     );
 }
+
+/// デスクトップ版が管理の口から読む、持ち主の読書位置の一ページ。
+async fn owner_page(context: &Arc<Context>, cursor: Option<&str>) -> serde_json::Value {
+    let response = Arc::clone(context)
+        .owner_reading(cursor.map(str::to_owned), Some(1))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn phone_positions_and_favorites_on_the_served_copy_come_back_to_the_desktop_shelf() {
+    use crate::commands::library_v2::{adopt_remote_reading, follow_remote_favorite};
+    use crate::library::{ReadingAnchor, ReadingLocation, ReadingPosition, ReadingUpdate};
+    // デスクトップの棚と、その写しを配るサーバーの棚（同じ棚の ID・同じ作品の ID）。
+    let desktop_dir = Temp::new();
+    let desktop = Library::create(&desktop_dir.0).unwrap();
+    let mut paged = capture("north", None);
+    paged.body = Some(crate::library::SourceBody::PixivText(
+        "一[newpage]二".into(),
+    ));
+    let north = save(&desktop, paged);
+    let south = save(&desktop, capture("south", None));
+    let served_dir = Temp::new();
+    fs::create_dir_all(&served_dir.0).unwrap();
+    desktop.backup(&served_dir.0.join("shelf")).unwrap();
+    let served = Arc::new(Library::open(&served_dir.0.join("shelf")).unwrap());
+    assert_eq!(served.id, desktop.id);
+    let context = Arc::new(
+        Context::new(
+            Arc::clone(&served),
+            Arc::new(TestAuthority {
+                library: Id::new(served.id).unwrap(),
+                subject: Id::new(served.id).unwrap(),
+                other_subject: Id::new(uuid::Uuid::now_v7()).unwrap(),
+                active: AtomicBool::new(true),
+            }),
+            Id::new(uuid::Uuid::now_v7()).unwrap(),
+        )
+        .unwrap(),
+    );
+    let page = |snapshot: uuid::Uuid, page: u64| ReadingLocation::Source {
+        snapshot,
+        anchor: ReadingAnchor::Page {
+            page,
+            ratio_ppm: 250_000,
+        },
+    };
+    let write =
+        |library: &Library, work: uuid::Uuid, device: uuid::Uuid, location: ReadingLocation| {
+            let expected = library
+                .reading_position(work, library.id)
+                .unwrap()
+                .generation;
+            library
+                .set_reading_position(ReadingUpdate {
+                    request: uuid::Uuid::now_v7(),
+                    work,
+                    user: library.id,
+                    device,
+                    expected,
+                    location: Some(location),
+                    finished: false,
+                })
+                .unwrap()
+        };
+    let phone = crate::library::server_device("phone");
+    // 携帯は写しの north を読み進めた。south はそのあとデスクトップで読んだ（デスクトップが新しい）。
+    write(&served, north.entity_id, phone, page(north.snapshot_id, 1));
+    write(&served, south.entity_id, phone, page(south.snapshot_id, 0));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let mine = uuid::Uuid::now_v7();
+    write(&desktop, south.entity_id, mine, page(south.snapshot_id, 0));
+    let south_before = desktop
+        .reading_position(south.entity_id, desktop.id)
+        .unwrap();
+
+    // 一件ずつ（limit 1）読み、印をたどって全部をデスクトップの棚へ当てる。
+    let mut cursor: Option<String> = None;
+    let mut adopted = 0;
+    let mut seen = 0;
+    loop {
+        let body = owner_page(&context, cursor.as_deref()).await;
+        assert_eq!(body["libraryId"], served.id.to_string());
+        for item in body["items"].as_array().unwrap() {
+            seen += 1;
+            let work: uuid::Uuid = serde_json::from_value(item["work"].clone()).unwrap();
+            let position: ReadingPosition =
+                serde_json::from_value(item["position"].clone()).unwrap();
+            adopted += usize::from(adopt_remote_reading(&desktop, work, &position).unwrap());
+        }
+        cursor = Some(body["cursor"].as_str().unwrap().to_owned());
+        if !body["more"].as_bool().unwrap() {
+            break;
+        }
+    }
+    assert_eq!((seen, adopted), (2, 1));
+    let north_now = desktop
+        .reading_position(north.entity_id, desktop.id)
+        .unwrap();
+    assert_eq!(north_now.location, Some(page(north.snapshot_id, 1)));
+    // 書いた端末は携帯のまま（読む画面がほかの端末の位置として案内する）。
+    assert_eq!(north_now.device, Some(phone));
+    assert_eq!(
+        desktop
+            .reading_position(south.entity_id, desktop.id)
+            .unwrap(),
+        south_before,
+        "デスクトップのほうが新しい位置は変えない"
+    );
+
+    // 差分の印からは、そのあと変わった作品だけが届く。同じ位置は二度書かない。
+    let changes = owner_page(&context, cursor.as_deref()).await;
+    assert!(changes["items"].as_array().unwrap().is_empty());
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    write(&served, north.entity_id, phone, page(north.snapshot_id, 0));
+    let changes = owner_page(&context, cursor.as_deref()).await;
+    let items = changes["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    let position: ReadingPosition = serde_json::from_value(items[0]["position"].clone()).unwrap();
+    assert!(adopt_remote_reading(&desktop, north.entity_id, &position).unwrap());
+    assert!(!adopt_remote_reading(&desktop, north.entity_id, &position).unwrap());
+    assert_eq!(
+        desktop
+            .reading_position(north.entity_id, desktop.id)
+            .unwrap()
+            .location,
+        Some(page(north.snapshot_id, 0))
+    );
+
+    // 別の写しの印・崩れた印は初めから返す。
+    let restarted = owner_page(&context, Some("garbage")).await;
+    assert_eq!(restarted["items"].as_array().unwrap().len(), 1);
+    assert!(restarted["more"].as_bool().unwrap());
+
+    // デスクトップが書いた位置・棚に無い作品は写さない。
+    let own = ReadingPosition {
+        location: Some(page(south.snapshot_id, 0)),
+        finished: true,
+        device: Some(crate::commands::library_v2::desktop_device(&desktop)),
+        updated_at: Some(i64::MAX),
+        generation: 9,
+    };
+    assert!(!adopt_remote_reading(&desktop, south.entity_id, &own).unwrap());
+    let unknown = ReadingPosition {
+        device: Some(phone),
+        ..own.clone()
+    };
+    assert!(!adopt_remote_reading(&desktop, uuid::Uuid::now_v7(), &unknown).unwrap());
+    // 本文に無いページは写さず、止めもしない。
+    let beyond = ReadingPosition {
+        location: Some(page(south.snapshot_id, 5)),
+        ..unknown
+    };
+    assert!(!adopt_remote_reading(&desktop, south.entity_id, &beyond).unwrap());
+
+    // お気に入りは取得元の番号で持ち主に当てる。同じ値・棚に無い作品は書かない。
+    assert!(follow_remote_favorite(&desktop, "pixiv", "north", true).unwrap());
+    assert!(!follow_remote_favorite(&desktop, "pixiv", "north", true).unwrap());
+    assert!(
+        desktop
+            .user_state(north.entity_id, desktop.id)
+            .unwrap()
+            .favorite
+    );
+    assert!(!follow_remote_favorite(&desktop, "pixiv", "missing", true).unwrap());
+    desktop.verify().unwrap();
+}

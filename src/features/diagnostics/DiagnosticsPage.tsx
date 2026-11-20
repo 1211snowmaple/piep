@@ -192,7 +192,8 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
   // for, not the reading.
   const diagnostics = useLibraryDiagnostics(runtime, previewData);
   // 新しい棚を見ているあいだは、計測・照合・手入れを新しい棚の仕組みで行う（保存フォルダーの
-  // 照合や再取り込みは旧棚だけのもの）。作者・シリーズ情報の修復はそのまま。原寸画像の取り直しは見ている棚で行う。
+  // 照合は旧棚だけのもの。棚への再取り込みは設定の「保存とバックアップ」から）。作者・シリーズ情報の
+  // 修復はそのまま。原寸画像の取り直しは見ている棚で行う。
   const { shelfMode, deciding: shelfDeciding } = useShelfMode(runtime);
   const shelfWritable = useShelfWritable(runtime && shelfMode);
   const legacyView = !shelfMode && !shelfDeciding;

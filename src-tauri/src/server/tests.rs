@@ -851,6 +851,17 @@ async fn favorite_routes_keep_device_and_admin_authorization_separate() {
             .status(),
         StatusCode::NOT_FOUND,
     );
+    // 新しい棚を配っていなければ、読書位置の口は無い（デスクトップ版は何もしない）。
+    assert_eq!(
+        client
+            .get(format!("{url}/api/v1/admin/shelf/reading?cursor="))
+            .bearer_auth(&admin.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND,
+    );
     store.revoke_device(&reader.device_id).unwrap();
     assert_eq!(
         put_favorite(&client, &url, &reader.token, "test", true, 2)

@@ -44,8 +44,8 @@ export function ShelfV2Settings() {
         onChange={(event) => setEnabled(event.currentTarget.checked)}
         label="ライブラリの作品の一覧を新しい棚から出す"
         description={switched
-          ? "作品の画面と読む画面も新しい棚で開きます。作品の編集・複数選択・コレクションの表紙とEPUBは、まだ使えません。検索語での検索は、検索の準備が済んでから使えます。"
-          : "作品の画面と読む画面は読むだけで開けます。お気に入りなどの変更・編集・複数選択は、まだ使えません。検索語での検索は、検索の準備が済んでから使えます。"}
+          ? "作品の画面と読む画面も新しい棚で開きます。検索語での検索は、検索の準備が済んでから使えます。"
+          : "作品の画面と読む画面は読むだけで開けます。お気に入りなどの変更・編集・複数選択は、正本に切り替えるまで使えません。検索語での検索は、検索の準備が済んでから使えます。"}
       />
       {data.state === "failed" && <Text size="sm" c="red" mt="sm">{data.message}</Text>}
       {unresolved > 0 && <Text size="sm" c="dimmed" mt="sm">移行の未解決の記録が{formatNumber(unresolved)}件あります。</Text>}

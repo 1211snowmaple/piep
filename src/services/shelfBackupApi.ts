@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ReimportOutcome } from "@/services/dbApi";
 
 /** 棚の写しの中身の要約。 */
 export interface ShelfBackupInspection {
@@ -75,6 +76,14 @@ export function libraryV2ExportEntityArchive(kind: "person" | "series", provider
 /** 作者・シリーズのアーカイブの作品を、今の棚へ足す。今の棚にある作品・記録はそのまま。 */
 export function libraryV2ImportArchive(path: string): Promise<ShelfArchiveImport> {
   return invoke<ShelfArchiveImport>("library_v2_import_archive", { path });
+}
+
+/**
+ * 旧棚の保存フォルダーを調べ、棚にまだ一度も入っていない作品を版ごと棚へ戻す。
+ * 棚にある作品・棚から外した作品には触れない。
+ */
+export function libraryV2ReimportFolders(): Promise<ReimportOutcome> {
+  return invoke<ReimportOutcome>("library_v2_reimport_folders");
 }
 
 /** 予約した復元と、前回の入れ替えの結果。 */

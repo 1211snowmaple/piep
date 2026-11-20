@@ -34,6 +34,8 @@ const AUTO_SEND_RETRY: Duration = Duration::from_secs(15 * 60);
 const FAVORITES_POLL: Duration = Duration::from_secs(60);
 /// 一度に受け取る携帯のお気に入りの数。
 const FAVORITES_PAGE: usize = 500;
+/// サーバーの棚の読書位置を一度に読む数（サーバーの上限）。
+const SHELF_READING_PAGE: usize = 500;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
@@ -68,6 +70,24 @@ pub struct DesktopServerSettings {
     pub last_send: LastSend,
     /// 単独サーバーから、携帯のお気に入りをどこまで取り込んだか。
     pub favorites_cursor: i64,
+    /// 単独サーバーの新しい棚から、携帯の読書位置をどこまで取り込んだか（サーバーの印）。
+    pub shelf_reading_cursor: String,
+}
+
+/// サーバーの棚の読書位置の一ページ。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShelfReadingPage {
+    library_id: crate::library::LibraryId,
+    items: Vec<ShelfReadingItem>,
+    cursor: String,
+    more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShelfReadingItem {
+    work: crate::library::LibraryId,
+    position: crate::library::ReadingPosition,
 }
 
 struct ActiveEmbedded {
@@ -599,6 +619,7 @@ impl DesktopServer {
             settings.last_send = LastSend::default();
             // 別のサーバーの記録の番号は、このサーバーでは意味を持たない。
             settings.favorites_cursor = 0;
+            settings.shelf_reading_cursor.clear();
         })
     }
 
@@ -611,6 +632,7 @@ impl DesktopServer {
             settings.auto_send = false;
             settings.last_send = LastSend::default();
             settings.favorites_cursor = 0;
+            settings.shelf_reading_cursor.clear();
         })
     }
 
@@ -659,15 +681,25 @@ impl DesktopServer {
             let full = items.len() >= FAVORITES_PAGE;
             let gate = state.library_gate.clone().write_owned().await;
             let library = Arc::clone(state);
+            // 正本に切り替えた棚にも当てる。旧棚は写しを送るのに使うので、今までどおり書く。
+            let shelf = state.library_v2.writable().ok();
             applied += tokio::task::spawn_blocking(move || {
                 let _gate = gate;
                 let mut applied = 0;
                 for item in &items {
-                    if library
+                    let mut changed = library
                         .db
                         .set_favorite_by_source(&item.source, &item.source_id, item.favorite)?
-                        .is_some()
-                    {
+                        .is_some();
+                    if let Some(shelf) = &shelf {
+                        changed |= crate::commands::library_v2::follow_remote_favorite(
+                            shelf,
+                            &item.source,
+                            &item.source_id,
+                            item.favorite,
+                        )?;
+                    }
+                    if changed {
                         applied += 1;
                     }
                 }
@@ -688,8 +720,79 @@ impl DesktopServer {
                 break;
             }
         }
-        if applied > 0 {
+        // 携帯が新しい棚に書いた読書位置も、同じ機会に取り込む。取り込めなくてもお気に入りは止めない。
+        let read = match self.pull_shelf_reading_locked(state).await {
+            Ok(read) => read,
+            Err(error) => {
+                log::warn!("携帯の読書位置を取り込めません: {error}");
+                0
+            }
+        };
+        if applied > 0 || read > 0 {
+            state.library_v2.forget_derived();
             self.notify_favorites();
+        }
+        Ok(applied)
+    }
+
+    /// 単独サーバーの新しい棚から、携帯が書いた読書位置を正本に切り替えた棚へ取り込む。
+    ///
+    /// サーバーの棚は配る写しなので、写しを入れ替える前に取り込んでおけば携帯の位置は消えない。
+    /// 一覧は初めに全部、そのあとは変わった分だけ。どちらの位置が新しいかは書いた時刻で決め、
+    /// 同じ位置を何度読んでも二度は書かない。印が別の写しのものならサーバーが初めから返す。
+    async fn pull_shelf_reading_locked(&self, state: &Arc<AppState>) -> Result<usize, String> {
+        let Ok(library) = state.library_v2.writable() else {
+            return Ok(0);
+        };
+        let Some(remote) = self.settings().remote else {
+            return Ok(0);
+        };
+        let Some(token) = credential::load()? else {
+            return Ok(0);
+        };
+        // 印はサーバーが作る（数字・英字・`-`・`.` だけ）。それ以外なら初めから読み直す。
+        let mut cursor = self.settings().shelf_reading_cursor;
+        if !cursor
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+        {
+            cursor.clear();
+        }
+        let mut applied = 0;
+        loop {
+            let path = format!("shelf/reading?cursor={cursor}&limit={SHELF_READING_PAGE}");
+            // 新しい棚を配っていないサーバーには口が無い。携帯も新しい棚へ書いていない。
+            let Some(page) = admin_get_if_present(&remote, &token, &path).await? else {
+                break;
+            };
+            let page: ShelfReadingPage = serde_json::from_value(page)
+                .map_err(|_| "サーバーの棚の読書位置を読み取れません".to_string())?;
+            if page.library_id != library.id {
+                return Err("サーバーの棚は、この棚の写しではありません".into());
+            }
+            let shelf = Arc::clone(&library);
+            let items = page.items;
+            applied += tokio::task::spawn_blocking(move || {
+                let mut applied = 0;
+                for item in &items {
+                    if crate::commands::library_v2::adopt_remote_reading(
+                        &shelf,
+                        item.work,
+                        &item.position,
+                    )? {
+                        applied += 1;
+                    }
+                }
+                Ok::<_, String>(applied)
+            })
+            .await
+            .map_err(|error| format!("読書位置を書けません: {error}"))??;
+            let next = page.cursor;
+            self.change_settings(|settings| settings.shelf_reading_cursor = next.clone())?;
+            if !page.more || next == cursor {
+                break;
+            }
+            cursor = next;
         }
         Ok(applied)
     }

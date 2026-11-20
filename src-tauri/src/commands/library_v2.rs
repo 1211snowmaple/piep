@@ -391,12 +391,100 @@ pub async fn library_v2_set_user_state(
 }
 
 /// このアプリが棚へ書く読書位置の端末。棚ごとに決まる（携帯は端末ごとの識別を別に持つ）。
-fn desktop_device(library: &Library) -> LibraryId {
+pub(crate) fn desktop_device(library: &Library) -> LibraryId {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(format!("piep-desktop-device\0{}", library.id).as_bytes());
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     uuid::Builder::from_custom_bytes(bytes).into_uuid()
+}
+
+/// 単独サーバーの棚で携帯が書いた読書位置を、この棚へ写す。サーバーの位置のほうが新しいときだけ
+/// 書き、書いた端末は携帯のまま残す（読む画面がほかの端末の位置として案内する）。この棚が書いた
+/// 位置・この棚に載っていない作品・本文に無い位置は写さない。写したら真。
+pub(crate) fn adopt_remote_reading(
+    library: &Library,
+    work: LibraryId,
+    remote: &crate::library::ReadingPosition,
+) -> Result<bool, String> {
+    let Some(device) = remote.device else {
+        return Ok(false);
+    };
+    if remote.generation == 0 || device == desktop_device(library) {
+        return Ok(false);
+    }
+    // 棚から外した作品・知らない作品には位置を置かない。
+    if library
+        .library_item_generation(work)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let local = library
+        .reading_position(work, library.id)
+        .map_err(|e| e.to_string())?;
+    if local.location == remote.location && local.finished == remote.finished {
+        return Ok(false);
+    }
+    // どちらが後に読んだかは書いた時刻で決める（二つの棚に共通の更新世代は無い）。
+    if remote.updated_at.unwrap_or(0) <= local.updated_at.unwrap_or(0) {
+        return Ok(false);
+    }
+    match library.set_reading_position(crate::library::ReadingUpdate {
+        request: LibraryId::now_v7(),
+        work,
+        user: library.id,
+        device,
+        expected: local.generation,
+        location: remote.location.clone(),
+        finished: remote.finished,
+    }) {
+        Ok(_) => Ok(true),
+        // 本文に無い位置（この棚では別の版）や、いま書かれた位置との食い違い。写さない。
+        Err(
+            error @ (crate::library::Error::Integrity(_)
+            | crate::library::Error::ResourceUnavailable
+            | crate::library::Error::Sql(rusqlite::Error::QueryReturnedNoRows)),
+        ) => {
+            log::warn!("サーバーの棚の読書位置を写せません（{work}）: {error}");
+            Ok(false)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// 携帯で付け外ししたお気に入りを、この棚の持ち主にも当てる。棚に載っていない作品と、
+/// 値が同じときは書かない。書いたら真。
+pub(crate) fn follow_remote_favorite(
+    library: &Library,
+    provider: &str,
+    key: &str,
+    favorite: bool,
+) -> Result<bool, String> {
+    let Some(view) = library
+        .reader_work_by_key(library.id, provider, key)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(false);
+    };
+    let work = view.entity_id.get();
+    let current = library
+        .user_state(work, library.id)
+        .map_err(|e| e.to_string())?;
+    if current.favorite == favorite {
+        return Ok(false);
+    }
+    library
+        .set_favorite(
+            LibraryId::now_v7(),
+            work,
+            library.id,
+            current.generation,
+            favorite,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// 棚の読書位置を、読む画面の形（ページは 1 から、ページの中の割合は 0〜1）で。

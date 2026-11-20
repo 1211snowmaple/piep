@@ -1482,6 +1482,30 @@ mod tests {
             details["libraryV2"],
             serde_json::json!({"libraryId":id,"syncEpoch":epoch,"works":"1"})
         );
+        // 携帯の読書位置は管理の口からだけ読める（デスクトップ版が自分の棚へ取り込む）。
+        let reading = |token: &str| {
+            client
+                .get(format!(
+                    "{base}/api/v1/admin/shelf/reading?cursor=&limit=10"
+                ))
+                .bearer_auth(token)
+        };
+        assert_eq!(
+            reading(&granted.token).send().await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let positions: serde_json::Value = reading(&administrator.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(positions["libraryId"], serde_json::json!(id));
+        assert_eq!(positions["items"], serde_json::json!([]));
+        assert_eq!(positions["cursor"], format!("{}.s.0", epoch.get()));
         assert_eq!(
             get(&administrator.token).send().await.unwrap().status(),
             StatusCode::UNAUTHORIZED

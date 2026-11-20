@@ -77,9 +77,6 @@ export function shelfListable(status: LibraryV2Status | undefined): boolean {
 /** 画面の押せない操作に添える理由。 */
 export const SHELF_READ_ONLY = "新しい棚では変えられません";
 
-/** 切り替えた棚でも、まだ新しい棚につないでいない操作の理由。 */
-export const SHELF_NOT_YET = "新しい棚ではまだ使えません";
-
 /** 棚を正本に切り替えたか。切り替えた棚だけ、画面から書き込める。 */
 export function shelfWritable(status: LibraryV2Status | undefined): boolean {
   return status?.state === "ready" && status.switched === true;

@@ -260,6 +260,60 @@ fn staged_from(dir: &Path, data: &Value, source: &str) -> Result<Vec<StagedAsset
         .collect())
 }
 
+/// 保存フォルダーの一つの版（応答の JSON と `data_assets/`）を、取り寄せずに棚へ保存する。
+/// 旧棚の保存フォルダーの再取り込みに使う。画像・添付はフォルダーにあるものだけを使う。
+pub(crate) async fn save_folder_to_shelf(
+    library: Arc<Library>,
+    data: Value,
+    source: String,
+    key: String,
+    assets: PathBuf,
+) -> Result<LibraryId, String> {
+    let work_lock = work_save_mutex(&source, &key);
+    let _work_guard = work_lock.lock().await;
+    if !fetched_has_material_content(&data, &source) {
+        return Err("本文も挿絵もありません".into());
+    }
+    blocking(move || {
+        let request = LibraryId::now_v7();
+        library
+            .begin_acquisition(request, &source, EntityKind::Work, &key, "reimport")
+            .map_err(|e| e.to_string())?;
+        let saved = (|| {
+            let input = serde_json::to_vec_pretty(&data).map_err(|e| e.to_string())?;
+            library
+                .record_acquisition_payload(
+                    request,
+                    "work-save-input",
+                    &crate::library::CaptureSource::Bytes(input),
+                )
+                .map_err(|e| e.to_string())?;
+            let assets = staged_from(&assets, &data, &source)?;
+            let observation = (source == "fanbox").then(|| repairs::observation(&data, &assets));
+            let save = WorkSave {
+                request,
+                provider: &source,
+                key: &key,
+                route: "reimport",
+                data: &data,
+                assets,
+            };
+            library
+                .save_readable_work(save, observation)
+                .map_err(|e| e.to_string())
+        })();
+        match saved {
+            Ok(saved) => Ok(saved.entity_id),
+            Err(error) => {
+                // 棚へ渡す前に止まった取得を閉じる（渡した後なら棚が閉じていて、これは何もしない）。
+                let _ = library.cancel_acquisition(request);
+                Err(error)
+            }
+        }
+    })
+    .await
+}
+
 /// 取り寄せた応答を切り替えた棚へ保存する。
 pub(super) async fn save_to_shelf(
     shelf: Arc<LibraryV2>,

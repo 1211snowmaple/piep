@@ -7,12 +7,15 @@
 //! 一覧は、初めは利用者の位置を作品の順に全部、そのあとは棚の変更の記録（outbox）の番号で
 //! 変わった分だけを返す。全部を返し始める前に記録の番号を控えるので、途中で変わった位置も
 //! 次の差分で届く。番号は棚の写しごとなので、続きの印には同期の世代を入れ、違えば断る。
+//!
+//! 単独サーバーの棚は配る写しなので、携帯が書いた位置はデスクトップ版が管理の口から同じ一覧で
+//! 読み、自分の棚へ取り込む（`owner_reading`）。
 
 use super::{internal, invalid, not_found, read_permit, ApiError, Context, Principal};
 use crate::library::protocol::Id;
 use crate::library::{
-    server_device, LibraryId, ReadingAnchor, ReadingLocation, ReadingPosition, ReadingUpdate,
-    PAGE_RATIO_SCALE,
+    server_device, Library, LibraryId, ReadingAnchor, ReadingLocation, ReadingPosition,
+    ReadingUpdate, PAGE_RATIO_SCALE,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -115,6 +118,106 @@ pub(super) struct ReadingQuery {
     limit: Option<i64>,
 }
 
+/// 一覧の一ページ：位置（作品と位置）、次の印、続きがあるか。
+type ReadingRows = (Vec<(LibraryId, ReadingPosition)>, String, bool);
+
+/// 利用者の読書位置の一ページ。初めは全部を作品の順に、そのあとは変わった分だけ。
+fn reading_page(
+    library: &Library,
+    subject: LibraryId,
+    epoch: Id,
+    cursor: Cursor,
+    limit: usize,
+) -> crate::library::Result<ReadingRows> {
+    match cursor {
+        Cursor::Full { mark, after } => {
+            // 返し始める前に番号を控える。この後に変わった位置は差分で届く。
+            let mark = match mark {
+                Some(mark) => mark,
+                None => library.reading_sequence()?,
+            };
+            let mut rows = library.reading_positions_after(subject, after, limit + 1)?;
+            let more = rows.len() > limit;
+            rows.truncate(limit);
+            let cursor = match rows.last() {
+                Some((work, _)) if more => format!("{}.f.{mark}.{work}", epoch.get()),
+                _ => format!("{}.s.{mark}", epoch.get()),
+            };
+            Ok((rows, cursor, more))
+        }
+        Cursor::Since(since) => {
+            let mut changes = library.reading_changes(since, limit + 1)?;
+            let more = changes.len() > limit;
+            changes.truncate(limit);
+            let next = changes.last().map_or(since, |(_, sequence)| *sequence);
+            let mut rows = Vec::new();
+            for (work, _) in changes {
+                let position = library.reading_position(work, subject)?;
+                // ほかの利用者の位置だけが変わった作品は返さない。
+                if position.generation > 0 {
+                    rows.push((work, position));
+                }
+            }
+            Ok((rows, format!("{}.s.{next}", epoch.get()), more))
+        }
+    }
+}
+
+/// 管理の口で返す一件。位置は棚の形のまま（書いた端末と時刻つき）。
+#[derive(serde::Serialize)]
+struct OwnerReading<'a> {
+    work: LibraryId,
+    position: &'a ReadingPosition,
+}
+
+impl Context {
+    /// 棚の持ち主（デスクトップと同じ利用者）の読書位置を、デスクトップ版が自分の棚へ取り込む
+    /// ために読む。管理の口からだけ呼ぶ。印が別の写しのもの・崩れたものなら初めから返す
+    /// （デスクトップ版は返った印を控え直すだけでよい）。
+    pub(crate) async fn owner_reading(
+        self: Arc<Self>,
+        cursor: Option<String>,
+        limit: Option<i64>,
+    ) -> Response {
+        let epoch = self.sync_epoch;
+        let cursor = parse_cursor(cursor.as_deref().unwrap_or(""), epoch).unwrap_or(Cursor::Full {
+            mark: None,
+            after: None,
+        });
+        let limit = usize::try_from(limit.unwrap_or(PAGE).clamp(1, MAX_PAGE)).unwrap_or(1);
+        let ctx = self;
+        let result = tokio::task::spawn_blocking(move || {
+            let subject = ctx.library.id;
+            let (rows, cursor, more) = reading_page(&ctx.library, subject, epoch, cursor, limit)
+                .map_err(|error| {
+                    log::error!("新しい棚の読書位置を読めません: {error}");
+                    internal()
+                })?;
+            let items: Vec<OwnerReading<'_>> = rows
+                .iter()
+                .map(|(work, position)| OwnerReading {
+                    work: *work,
+                    position,
+                })
+                .collect();
+            serde_json::to_vec(&serde_json::json!({
+                "libraryId": ctx.library_id,
+                "items": items,
+                "cursor": cursor,
+                "more": more,
+            }))
+            .map_err(|_| internal())
+        })
+        .await
+        .map_err(|_| internal())
+        .and_then(|result| result);
+        match result {
+            Ok(bytes) => super::representation(bytes, "application/json", false),
+            Err(error) => error.into_response(),
+        }
+    }
+}
+
 /// 認証した利用者の読書位置。
 pub(super) async fn list(
     State(ctx): State<Arc<Context>>,
@@ -135,55 +238,18 @@ pub(super) async fn list(
     let device = server_device(&principal.device);
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let library = &ctx.library;
-        let fail = |error: crate::library::Error| {
-            log::error!("新しい棚の読書位置を読めません: {error}");
-            internal()
-        };
-        let page = match cursor {
-            Cursor::Full { mark, after } => {
-                // 返し始める前に番号を控える。この後に変わった位置は差分で届く。
-                let mark = match mark {
-                    Some(mark) => mark,
-                    None => library.reading_sequence().map_err(fail)?,
-                };
-                let mut rows = library
-                    .reading_positions_after(subject, after, limit + 1)
-                    .map_err(fail)?;
-                let more = rows.len() > limit;
-                rows.truncate(limit);
-                let cursor = match rows.last() {
-                    Some((work, _)) if more => format!("{}.f.{mark}.{work}", epoch.get()),
-                    _ => format!("{}.s.{mark}", epoch.get()),
-                };
-                MobileShelfReadingPage {
-                    items: rows
-                        .iter()
-                        .map(|(work, position)| reading_item(*work, position, device))
-                        .collect(),
-                    cursor,
-                    more,
-                }
-            }
-            Cursor::Since(since) => {
-                let mut changes = library.reading_changes(since, limit + 1).map_err(fail)?;
-                let more = changes.len() > limit;
-                changes.truncate(limit);
-                let next = changes.last().map_or(since, |(_, sequence)| *sequence);
-                let mut items = Vec::new();
-                for (work, _) in changes {
-                    let position = library.reading_position(work, subject).map_err(fail)?;
-                    // ほかの利用者の位置だけが変わった作品は返さない。
-                    if position.generation > 0 {
-                        items.push(reading_item(work, &position, device));
-                    }
-                }
-                MobileShelfReadingPage {
-                    items,
-                    cursor: format!("{}.s.{next}", epoch.get()),
-                    more,
-                }
-            }
+        let (rows, cursor, more) = reading_page(&ctx.library, subject, epoch, cursor, limit)
+            .map_err(|error| {
+                log::error!("新しい棚の読書位置を読めません: {error}");
+                internal()
+            })?;
+        let page = MobileShelfReadingPage {
+            items: rows
+                .iter()
+                .map(|(work, position)| reading_item(*work, position, device))
+                .collect(),
+            cursor,
+            more,
         };
         serde_json::to_vec(&page).map_err(|_| internal())
     })

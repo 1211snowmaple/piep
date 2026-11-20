@@ -146,9 +146,9 @@ const MULTIPART_WORKS_PER_PART: usize = 2_000;
 const MULTIPART_ENTITIES_PER_PART: i64 = 5_000;
 const MAX_MULTIPART_PARTS: usize = 2_048;
 const MAX_MULTIPART_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_REIMPORT_VERSIONS_PER_WORK: usize = 10_000;
+pub(crate) const MAX_REIMPORT_VERSIONS_PER_WORK: usize = 10_000;
 
-fn archive_metadata_is_link(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn archive_metadata_is_link(metadata: &std::fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }
@@ -163,7 +163,7 @@ fn archive_metadata_is_link(metadata: &std::fs::Metadata) -> bool {
     false
 }
 
-fn canonical_reimport_directory(path: &Path, root: &Path) -> Result<PathBuf, String> {
+pub(crate) fn canonical_reimport_directory(path: &Path, root: &Path) -> Result<PathBuf, String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("Reimport directory metadata failed: {error}"))?;
     if archive_metadata_is_link(&metadata) || !metadata.file_type().is_dir() {
@@ -178,7 +178,7 @@ fn canonical_reimport_directory(path: &Path, root: &Path) -> Result<PathBuf, Str
     Ok(canonical)
 }
 
-fn canonical_reimport_json(path: &Path, version_root: &Path) -> Result<PathBuf, String> {
+pub(crate) fn canonical_reimport_json(path: &Path, version_root: &Path) -> Result<PathBuf, String> {
     let metadata = std::fs::symlink_metadata(path)
         .map_err(|error| format!("Reimport JSON metadata failed: {error}"))?;
     if archive_metadata_is_link(&metadata) || !metadata.file_type().is_file() {

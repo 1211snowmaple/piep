@@ -71,7 +71,7 @@ npm --prefix docs-tools run docs:build
 だから数の置き場を一つにする。文の中では次のように書く。
 
 ```markdown
-コマンドは <!--stat:commands.total-->274<!--/stat--> 個ある
+コマンドは <!--stat:commands.total-->275<!--/stat--> 個ある
 ```
 
 HTML コメントは GitHub でも VitePress でも描画されないので、読む人には数字しか
@@ -208,9 +208,9 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 
 | | |
 |---|---:|
-| コマンド | <!--stat:commands.total-->274<!--/stat--> |
-| `///` があるもの | <!--stat:commands.documented-->274<!--/stat--> |
-| 節の前書き（`//!`）があるモジュール | <!--stat:modules.documented-->34<!--/stat--> / <!--stat:modules.total-->40<!--/stat--> |
+| コマンド | <!--stat:commands.total-->275<!--/stat--> |
+| `///` があるもの | <!--stat:commands.documented-->275<!--/stat--> |
+| 節の前書き（`//!`）があるモジュール | <!--stat:modules.documented-->35<!--/stat--> / <!--stat:modules.total-->42<!--/stat--> |
 
 **全部埋まっている。** ラチェット検査（[品質](09-quality.md#境界のドリフト検査)）は
 この数字を守るので、`///` の無いコマンドを足すと CI が落ちる。数を戻すのではなく、
