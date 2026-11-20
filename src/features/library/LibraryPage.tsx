@@ -2166,7 +2166,7 @@ export default function LibraryPage() {
                         {entitiesToUnwatch.length ? `${formatNumber(entitiesToUnwatch.length)}件の更新監視を止める` : "更新監視を止める"}
                       </Menu.Item>
                       <Menu.Divider />
-                      <Menu.Item leftSection={<Icons.archive size={IconSize.menu} />} disabled={shelfMode} title={shelfMode ? "新しい棚ではまだ書き出せません" : undefined} onClick={() => entitySelectionMutation.mutate("archive")}>アーカイブを書き出す</Menu.Item>
+                      <Menu.Item leftSection={<Icons.archive size={IconSize.menu} />} disabled={shelfMode} title={shelfMode ? "新しい棚ではまだ書き出せません" : undefined} aria-label={shelfMode ? "アーカイブを書き出す（新しい棚ではまだ書き出せません）" : undefined} onClick={() => entitySelectionMutation.mutate("archive")}>アーカイブを書き出す</Menu.Item>
                     </Menu.Dropdown>
                   </Menu>
                 </>

@@ -288,7 +288,11 @@ pub fn open_in_background(state: Arc<LibraryV2>, app_data: &Path) {
     let path = library_dir(app_data);
     let spawned = std::thread::Builder::new()
         .name("piep-library-v2".into())
-        .spawn(move || state.open(&path));
+        .spawn(move || {
+            // 予約した復元は、棚を開く前に入れ替える。
+            super::backup_shelf::apply_pending_restore(&path);
+            state.open(&path)
+        });
     if let Err(error) = spawned {
         log::error!("新しい棚を開くスレッドを作れません: {error}");
     }
