@@ -114,6 +114,19 @@ export function useShelfMode(runtime: boolean): { shelfMode: boolean; deciding: 
   };
 }
 
+/**
+ * 棚を正本に切り替えたら、一覧を新しい棚から出す好みを入れたままにする。切り替えたあとの旧棚は
+ * 空で、旧棚の画面に戻す意味が無い。アプリの頭で一度だけ使う。
+ */
+export function usePinShelfAfterSwitch(runtime: boolean) {
+  const [preferred, setPreferred] = useShelfV2Preference();
+  const status = useLibraryV2Status(runtime && !preferred);
+  const switched = runtime && !preferred && shelfWritable(status.data);
+  useEffect(() => {
+    if (switched) setPreferred(true);
+  }, [switched, setPreferred]);
+}
+
 /** 読みかけの棚を旧棚の番号で渡すか（端末の記録を棚の ID へ書き直す前だけ）。 */
 function legacyReadingWorks(params: SearchV2Params): number[] | null {
   return readingKeysAdopted() ? null : params.idsInclude ?? null;
