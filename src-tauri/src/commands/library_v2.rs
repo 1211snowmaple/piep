@@ -1049,7 +1049,7 @@ pub async fn library_v2_original(
     .map_err(|e| e.to_string())?
 }
 
-fn entity_kind(kind: &str) -> Result<crate::library::EntityKind, String> {
+pub(crate) fn entity_kind(kind: &str) -> Result<crate::library::EntityKind, String> {
     match kind {
         "person" => Ok(crate::library::EntityKind::Person),
         "series" => Ok(crate::library::EntityKind::Series),

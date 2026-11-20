@@ -542,6 +542,8 @@ pub fn run() -> tauri::Result<()> {
             commands::original_images::upgrade_pixiv_images_to_original,
             commands::original_images::library_v2_original_image_status,
             commands::backup_shelf::library_v2_backup,
+            commands::backup_shelf::library_v2_export_entity_archive,
+            commands::backup_shelf::library_v2_import_archive,
             commands::backup_shelf::library_v2_inspect_backup,
             commands::backup_shelf::library_v2_schedule_restore,
             commands::backup_shelf::library_v2_restore_state,

@@ -1,11 +1,12 @@
 import { MantineProvider } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { ShelfBackupCard } from "./ShelfBackupCard";
 
-const api = vi.hoisted(() => ({ backup: vi.fn(), inspect: vi.fn(), schedule: vi.fn(), state: vi.fn(), cancel: vi.fn() }));
+const api = vi.hoisted(() => ({ backup: vi.fn(), inspect: vi.fn(), schedule: vi.fn(), state: vi.fn(), cancel: vi.fn(), importArchive: vi.fn() }));
 const dialog = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("@/services/shelfBackupApi", () => ({
   libraryV2Backup: api.backup,
@@ -13,6 +14,7 @@ vi.mock("@/services/shelfBackupApi", () => ({
   libraryV2ScheduleRestore: api.schedule,
   libraryV2RestoreState: api.state,
   libraryV2CancelRestore: api.cancel,
+  libraryV2ImportArchive: api.importArchive,
 }));
 vi.mock("@/services/dialogApi", () => ({ openSingleDialog: dialog.open }));
 
@@ -21,7 +23,7 @@ beforeEach(() => {
   api.state.mockResolvedValue({ pending: null, last: null });
 });
 
-const renderCard = () => render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><AppRouter><ShelfBackupCard runtime busy={false} /></AppRouter></QueryClientProvider></MantineProvider>);
+const renderCard = (writable = true) => render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><AppRouter><ShelfBackupCard runtime busy={false} writable={writable} /></AppRouter></QueryClientProvider></MantineProvider>);
 
 it("makes a backup as a new folder inside the chosen one", async () => {
   dialog.open.mockResolvedValue("C:\\backups");
@@ -55,4 +57,36 @@ it("tells where the previous shelf was kept after a restore", async () => {
   api.state.mockResolvedValue({ pending: null, last: { backup: "D:/old-shelf", previous: "C:/data/shelf.before-restore-1", error: null, finishedAt: 1_700_000_000 } });
   renderCard();
   expect(await screen.findByText("C:/data/shelf.before-restore-1")).toBeInTheDocument();
+});
+
+it("takes in an author archive instead of swapping the shelf, and tells what it added", async () => {
+  dialog.open.mockResolvedValue("D:/archives/作者");
+  api.inspect.mockResolvedValue({ path: "D:/archives/作者", works: 12, files: 40, bytes: 2048, sameLibrary: true, switched: false, partial: true });
+  api.importArchive.mockResolvedValue({ added: 2, restored: 9, already: 1, conflicts: 0 });
+  const show = vi.spyOn(notifications, "show");
+  renderCard();
+  fireEvent.click(await screen.findByRole("button", { name: "バックアップから復元" }));
+  expect(await screen.findByText("アーカイブの取り込み")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "次の起動で入れ替える" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "この棚に取り込む" }));
+  await waitFor(() => expect(api.importArchive).toHaveBeenCalledWith("D:/archives/作者"));
+  expect(api.schedule).not.toHaveBeenCalled();
+  await waitFor(() => expect(show).toHaveBeenCalledWith(expect.objectContaining({ title: "アーカイブを取り込みました", message: "2作品を足しました。9作品を棚に戻しました。1作品はすでに棚にあります。" })));
+});
+
+it("does not take in an archive made from another shelf or into a shelf not yet switched", async () => {
+  dialog.open.mockResolvedValue("D:/archives/作者");
+  api.inspect.mockResolvedValue({ path: "D:/archives/作者", works: 12, files: 40, bytes: 2048, sameLibrary: false, switched: false, partial: true });
+  const { unmount } = renderCard();
+  fireEvent.click(await screen.findByRole("button", { name: "バックアップから復元" }));
+  expect(await screen.findByText(/別の棚から作ったアーカイブなので、取り込めません/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "この棚に取り込む" })).toBeDisabled();
+  unmount();
+  api.inspect.mockResolvedValue({ path: "D:/archives/作者", works: 12, files: 40, bytes: 2048, sameLibrary: true, switched: false, partial: true });
+  renderCard(false);
+  fireEvent.click(await screen.findByRole("button", { name: "バックアップから復元" }));
+  const locked = await screen.findByRole("button", { name: "この棚に取り込む（新しい棚では変えられません）" });
+  expect(locked).toHaveAttribute("aria-disabled", "true");
+  fireEvent.click(locked);
+  expect(api.importArchive).not.toHaveBeenCalled();
 });

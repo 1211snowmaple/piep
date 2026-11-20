@@ -327,20 +327,26 @@ impl Library {
     }
 
     pub fn open(root: &Path) -> Result<Self> {
-        Self::open_inner(root, None)
+        Self::open_inner(root, None, "library.json")
     }
 
     /// 設定で指定した棚かを、DB の更新を始める前に照合する。
     pub fn open_matching(root: &Path, expected: LibraryId) -> Result<Self> {
-        Self::open_inner(root, Some(expected))
+        Self::open_inner(root, Some(expected), "library.json")
     }
 
-    fn open_inner(root: &Path, expected: Option<LibraryId>) -> Result<Self> {
+    /// 棚の部分写し（作者・シリーズのアーカイブ）を開く。形式の記録の名前が棚と違うので、
+    /// 部分写しは棚として開けず（復元の候補にもならず）、棚も部分写しとしては開けない。
+    pub fn open_part(root: &Path) -> Result<Self> {
+        Self::open_inner(root, None, super::partial::PART_MARKER)
+    }
+
+    fn open_inner(root: &Path, expected: Option<LibraryId>, marker_name: &str) -> Result<Self> {
         regular_directory(root)?;
         let lock = Self::lock(root)?;
-        super::store::regular_file(&root.join("library.json"))?;
+        super::store::regular_file(&root.join(marker_name))?;
         let mut input = Vec::new();
-        File::open(root.join("library.json"))?
+        File::open(root.join(marker_name))?
             .take(65537)
             .read_to_end(&mut input)?;
         if input.len() > 65536 {
@@ -500,7 +506,7 @@ impl Library {
         Ok(self.objects.put_path_stored(path)?.into())
     }
 
-    pub(crate) fn register_file(tx: &Transaction<'_>, prepared: &PreparedFile) -> Result<()> {
+    pub(crate) fn register_file(tx: &Connection, prepared: &PreparedFile) -> Result<()> {
         let file = &prepared.file;
         let existing: Option<(i64, bool)> = tx
             .query_row(

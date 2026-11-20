@@ -348,6 +348,26 @@ impl Library {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// 作者・シリーズの作品（いまの版に名前の載った棚の作品）。並びは作品 ID の順。
+    pub fn entity_works(&self, kind: EntityKind, entity: LibraryId) -> Result<Vec<LibraryId>> {
+        let relation = match kind {
+            EntityKind::Series => "SELECT snapshot_id FROM snapshot_series WHERE series_id=?1",
+            _ => "SELECT snapshot_id FROM snapshot_people WHERE person_id=?1",
+        };
+        let conn = self.reader()?;
+        let mut statement = conn.prepare_cached(&format!(
+            "SELECT DISTINCT p.work_id FROM work_current_projection p
+             WHERE p.snapshot_id IN ({relation}) ORDER BY p.work_id"
+        ))?;
+        let rows =
+            statement.query_map([entity.as_bytes().as_slice()], |r| r.get::<_, Vec<u8>>(0))?;
+        rows.map(|id| {
+            LibraryId::from_slice(&id?)
+                .map_err(|_| crate::library::Error::Integrity("作品 ID が不正です".into()))
+        })
+        .collect()
+    }
+
     /// 作者の作品が属するシリーズ。旧棚と同じく、名前か説明に語を含むものに絞り、鍵で並べ、
     /// 同じ値は作品の多い順・名前の順に並べる。
     pub fn person_series(

@@ -7,9 +7,12 @@
 //! 復元は、開いている棚を入れ替えることになるので、その場では行わない。検査を通った写しを予約し、次に
 //! 起動したとき、棚を開く前に入れ替える。今の棚は消さずに隣へ退け、写しは手元に残す（写しから
 //! もう一つ写しを作って置く）。入れ替えに失敗したら、退けた棚を元に戻す。
+//!
+//! 作者・シリーズのアーカイブは、その作品だけを写した棚の部分写し（`Library::copy_works`）。
+//! 棚としては開けず、入れ替えには使えない。取り込みは今の棚に無い行だけを足す（`Library::merge_part`）。
 
 use crate::commands::library_v2::{library_dir, LibraryV2};
-use crate::library::{Library, LibraryId};
+use crate::library::{Library, LibraryId, PartTransfer};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,6 +47,8 @@ pub struct ShelfBackupInspection {
     pub same_library: bool,
     /// 正本に切り替えた棚の写しか。
     pub switched: bool,
+    /// 作者・シリーズのアーカイブ（棚の部分写し）か。入れ替えには使えず、取り込みに使う。
+    pub partial: bool,
 }
 
 /// 復元の予約。棚の隣に置く。
@@ -101,10 +106,16 @@ pub(crate) fn inspect(
     path: &Path,
     current: Option<LibraryId>,
 ) -> Result<ShelfBackupInspection, String> {
-    if !path.join("library.json").is_file() {
+    let partial = Library::is_part(path);
+    if !partial && !path.join("library.json").is_file() {
         return Err("棚のバックアップではありません（library.json がありません）".into());
     }
-    let library = Library::open(path).map_err(|e| format!("バックアップを開けません: {e}"))?;
+    let library = if partial {
+        Library::open_part(path)
+    } else {
+        Library::open(path)
+    }
+    .map_err(|e| format!("バックアップを開けません: {e}"))?;
     library
         .verify()
         .map_err(|e| format!("バックアップの検査を通りません: {e}"))?;
@@ -117,7 +128,7 @@ pub(crate) fn inspect(
     let works = count("SELECT count(*) FROM library_items")?;
     let files = count("SELECT count(*) FROM content_files")?;
     let bytes = count("SELECT coalesce(sum(original_size),0) FROM content_files")?;
-    let switched = matches!(library.switched_at(), Ok(Some(_)));
+    let switched = !partial && matches!(library.switched_at(), Ok(Some(_)));
     Ok(ShelfBackupInspection {
         path: path.to_string_lossy().into_owned(),
         works,
@@ -125,6 +136,7 @@ pub(crate) fn inspect(
         bytes,
         same_library: current == Some(library.id),
         switched,
+        partial,
     })
 }
 
@@ -147,6 +159,118 @@ pub async fn library_v2_backup(
     .await
     .map_err(|e| format!("バックアップが途中で止まりました: {e}"))??;
     Ok(shown)
+}
+
+/// 作者・シリーズのアーカイブを書き出した結果。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ShelfArchiveExport {
+    pub path: String,
+    pub works: u64,
+}
+
+/// `parent` の中の、まだ無い名前のフォルダー。同じ名前があれば「名前 (2)」のように番号を足す。
+pub(crate) fn unused_folder(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    let name: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || r#"\/:*?"<>|"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let name = name.trim().trim_end_matches('.').trim();
+    let name = if name.is_empty() {
+        "piep-archive"
+    } else {
+        name
+    };
+    for n in 1..1000 {
+        let candidate = if n == 1 {
+            parent.join(name)
+        } else {
+            parent.join(format!("{name} ({n})"))
+        };
+        if !candidate.try_exists().map_err(|e| e.to_string())? {
+            return Ok(candidate);
+        }
+    }
+    Err("書き出し先の名前を決められません".into())
+}
+
+/// 作者・シリーズの作品を、棚の部分写しとして `parent` の中の新しいフォルダーへ書き出す。
+/// 棚は読むだけなので、切り替える前の（読むだけの）棚からも書き出せる。
+#[tauri::command]
+pub async fn library_v2_export_entity_archive(
+    app: tauri::AppHandle,
+    kind: String,
+    provider: String,
+    key: String,
+    parent: String,
+    name: String,
+) -> Result<ShelfArchiveExport, String> {
+    let shelf = app.state::<Arc<LibraryV2>>().inner().clone();
+    let library = shelf.library()?;
+    let kind = crate::commands::library_v2::entity_kind(&kind)?;
+    let _guard = claim()?;
+    tokio::task::spawn_blocking(move || {
+        let entity = library
+            .entity_by_key(kind, &provider, &key)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "棚にない作者・シリーズです".to_string())?;
+        let works = library
+            .entity_works(kind, entity)
+            .map_err(|e| e.to_string())?;
+        if works.is_empty() {
+            return Err("書き出す作品がありません".into());
+        }
+        let destination = unused_folder(Path::new(&parent), &name)?;
+        let outcome = library
+            .copy_works(&works, &destination)
+            .map_err(|e| format!("アーカイブを書き出せません: {e}"))?;
+        Ok(ShelfArchiveExport {
+            path: destination.to_string_lossy().into_owned(),
+            works: outcome.added,
+        })
+    })
+    .await
+    .map_err(|e| format!("書き出しが途中で止まりました: {e}"))?
+}
+
+/// 作者・シリーズのアーカイブの作品を、今の棚へ足す。今の棚にある作品・記録はそのまま。
+#[tauri::command]
+pub async fn library_v2_import_archive(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<PartTransfer, String> {
+    let shelf = app.state::<Arc<LibraryV2>>().inner().clone();
+    let library = shelf.writable()?;
+    let _guard = claim()?;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let path = PathBuf::from(path);
+        if !Library::is_part(&path) {
+            return Err("作者・シリーズのアーカイブではありません".to_string());
+        }
+        let part = Library::open_part(&path).map_err(|e| format!("アーカイブを開けません: {e}"))?;
+        part.verify()
+            .map_err(|e| format!("アーカイブの検査を通りません: {e}"))?;
+        let outcome = library
+            .merge_part(&part)
+            .map_err(|e| format!("アーカイブを取り込めません: {e}"))?;
+        if outcome.added + outcome.restored > 0 {
+            if let Err(error) = library.sync_search_index(&mut |_, _| {}) {
+                log::error!("取り込んだ作品を検索の索引へ載せられません: {error}");
+            }
+            super::library_health::schedule_semantic_sync(Arc::clone(&library));
+        }
+        Ok(outcome)
+    })
+    .await
+    .map_err(|e| format!("取り込みが途中で止まりました: {e}"))??;
+    shelf.forget_derived();
+    Ok(outcome)
 }
 
 /// 棚の写しを検査して、中身を数える。
@@ -186,6 +310,12 @@ pub async fn library_v2_schedule_restore(
     let inspection = tokio::task::spawn_blocking(move || inspect(&backup, current))
         .await
         .map_err(|e| format!("検査が途中で止まりました: {e}"))??;
+    if inspection.partial {
+        return Err(
+            "作者・シリーズのアーカイブは、棚の入れ替えには使えません。取り込みを使ってください"
+                .into(),
+        );
+    }
     write_json(
         &request_path(&live),
         &RestoreRequest {

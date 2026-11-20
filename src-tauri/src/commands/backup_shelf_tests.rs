@@ -118,3 +118,78 @@ fn a_broken_backup_leaves_the_shelf_in_place() {
     assert!(!request_path(&live).exists());
     assert_eq!(titles(&live), vec!["今の本".to_string()]);
 }
+
+#[test]
+fn an_author_archive_is_inspected_as_a_part_and_never_swapped_in_for_the_shelf() {
+    let temp = temp();
+    let live = temp.0.join("shelf");
+    let archive = temp.0.join("archive");
+    let id = {
+        let library = Library::create(&live).unwrap();
+        for (key, author) in [("1", "a"), ("2", "a"), ("3", "b")] {
+            library
+                .capture(Capture {
+                    acquired_at: None,
+                    request_id: LibraryId::now_v7(),
+                    provider: "local".into(),
+                    external_key: key.into(),
+                    kind: EntityKind::Work,
+                    route: "test".into(),
+                    raw: b"{}".to_vec().into(),
+                    metadata: BTreeMap::from([
+                        ("title".into(), serde_json::json!(format!("本 {key}"))),
+                        ("author_key".into(), serde_json::json!(author)),
+                    ]),
+                    field_states: BTreeMap::new(),
+                    body: Some("本文".into()),
+                    media: vec![],
+                    attachments: vec![],
+                })
+                .unwrap();
+        }
+        let author = library
+            .entity_by_key(EntityKind::Person, "local", "a")
+            .unwrap()
+            .unwrap();
+        let works = library.entity_works(EntityKind::Person, author).unwrap();
+        assert_eq!(works.len(), 2);
+        library.copy_works(&works, &archive).unwrap();
+        library.id
+    };
+    let inspection = inspect(&archive, Some(id)).unwrap();
+    assert!(inspection.partial);
+    assert_eq!(inspection.works, 2);
+    assert!(inspection.same_library);
+    // 予約が書かれても、部分写しで棚を入れ替えない。
+    write_json(
+        &request_path(&live),
+        &RestoreRequest {
+            backup: archive.clone(),
+            requested_at: 1,
+        },
+    )
+    .unwrap();
+    apply_pending_restore(&live);
+    let outcome: RestoreOutcome =
+        serde_json::from_slice(&std::fs::read(outcome_path(&live)).unwrap()).unwrap();
+    assert!(outcome.error.is_some());
+    assert_eq!(titles(&live).len(), 3);
+}
+
+#[test]
+fn an_archive_folder_gets_a_safe_unused_name() {
+    let temp = temp();
+    assert_eq!(
+        unused_folder(&temp.0, "作者: a/b").unwrap(),
+        temp.0.join("作者_ a_b")
+    );
+    std::fs::create_dir(temp.0.join("作者")).unwrap();
+    assert_eq!(
+        unused_folder(&temp.0, "作者").unwrap(),
+        temp.0.join("作者 (2)")
+    );
+    assert_eq!(
+        unused_folder(&temp.0, " .. ").unwrap(),
+        temp.0.join("piep-archive")
+    );
+}

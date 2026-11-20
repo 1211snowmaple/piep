@@ -55,6 +55,7 @@ import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { parseViewMode, useViewMode } from "@/lib/viewMode";
 import { entityKey, VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
 import { exportEntityZip } from "@/services/archiveApi";
+import { libraryV2ExportEntityArchive } from "@/services/shelfBackupApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import type { EntityWatchState } from "@/components/EntityCard";
 import { SearchAssistModal } from "@/features/assist/SearchAssistModal";
@@ -1517,7 +1518,9 @@ export default function LibraryPage() {
         let written = 0;
         for (const entity of selectedEntities) {
           const name = entity.displayName.replace(/[/:*?"<>|]/g, "_").slice(0, 80) || entity.sourceKey;
-          await exportEntityZip(entityKind, entity.source, entity.sourceKey, `${directory}/${name}.zip`);
+          // 新しい棚では、作品だけを写した棚の部分写し（フォルダー一つ）。設定の復元から取り込める。
+          if (shelfMode) await libraryV2ExportEntityArchive(entityKind, entity.source, entity.sourceKey, directory, name);
+          else await exportEntityZip(entityKind, entity.source, entity.sourceKey, `${directory}/${name}.zip`);
           written += 1;
         }
         return written;
@@ -2166,7 +2169,7 @@ export default function LibraryPage() {
                         {entitiesToUnwatch.length ? `${formatNumber(entitiesToUnwatch.length)}件の更新監視を止める` : "更新監視を止める"}
                       </Menu.Item>
                       <Menu.Divider />
-                      <Menu.Item leftSection={<Icons.archive size={IconSize.menu} />} disabled={shelfMode} title={shelfMode ? "新しい棚ではまだ書き出せません" : undefined} aria-label={shelfMode ? "アーカイブを書き出す（新しい棚ではまだ書き出せません）" : undefined} onClick={() => entitySelectionMutation.mutate("archive")}>アーカイブを書き出す</Menu.Item>
+                      <Menu.Item leftSection={<Icons.archive size={IconSize.menu} />} onClick={() => entitySelectionMutation.mutate("archive")}>アーカイブを書き出す</Menu.Item>
                     </Menu.Dropdown>
                   </Menu>
                 </>

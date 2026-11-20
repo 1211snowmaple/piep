@@ -1,4 +1,5 @@
 import { MantineProvider } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -24,6 +25,16 @@ const api = vi.hoisted(() => ({
   libraryV2Decorations: vi.fn(),
 }));
 const refresh = vi.hoisted(() => vi.fn());
+const archive = vi.hoisted(() => ({ exportShelf: vi.fn(), exportLegacy: vi.fn(), choose: vi.fn() }));
+vi.mock("@/services/shelfBackupApi", () => ({ libraryV2ExportEntityArchive: archive.exportShelf }));
+vi.mock("@/services/archiveApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/archiveApi")>()),
+  exportEntityZip: archive.exportLegacy,
+}));
+vi.mock("@/services/dialogApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/dialogApi")>()),
+  openSingleDialog: archive.choose,
+}));
 const watching = vi.hoisted(() => ({ get: vi.fn(), upsert: vi.fn(), check: vi.fn() }));
 vi.mock("@/features/updates/startSingleCheck", () => ({ runSingleCheck: watching.check }));
 vi.mock("@/store", () => ({ store: { get: vi.fn().mockResolvedValue("test-connection") } }));
@@ -198,11 +209,22 @@ describe("author and series pages on the new shelf", () => {
     for (const call of Object.values(legacy)) expect(call).not.toHaveBeenCalled();
   });
 
+  it("writes the author's archive from the shelf, even before switching", async () => {
+    const show = vi.spyOn(notifications, "show");
+    archive.choose.mockResolvedValue("D:/archives");
+    archive.exportShelf.mockResolvedValue({ path: "D:/archives/作者一", works: 3 });
+    renderEntity("person", "#/people/pixiv/77");
+    await screen.findByRole("heading", { name: "作者一" });
+    fireEvent.click(screen.getByRole("button", { name: "アーカイブ" }));
+    await waitFor(() => expect(archive.exportShelf).toHaveBeenCalledWith("person", "pixiv", "77", "D:/archives", "作者一"));
+    await waitFor(() => expect(show).toHaveBeenCalledWith(expect.objectContaining({ title: "3作品を書き出しました", message: "D:/archives/作者一" })));
+    expect(archive.exportLegacy).not.toHaveBeenCalled();
+  });
+
   it("keeps the controls that write to the old shelf in place but unpressable", async () => {
     renderEntity("person", "#/people/pixiv/77");
     await screen.findByRole("heading", { name: "作者一" });
     expect(screen.getByRole("button", { name: "情報を更新（新しい棚では変えられません）" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "アーカイブ（新しい棚では変えられません）" })).toBeDisabled();
     expect(screen.getByRole("switch", { name: "新作と改稿の監視（新しい棚では変えられません）" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "いま新作・改稿を確認（新しい棚では変えられません）" })).toBeDisabled();
     expect(watching.get).not.toHaveBeenCalled();
