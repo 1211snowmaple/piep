@@ -108,9 +108,8 @@ impl WireChunk {
     pub fn parse(&self) -> Result<FileChunk, ShipError> {
         let id = Fingerprint::parse(&self.id)
             .map_err(|_| ShipError::Invalid("実体の識別子が正しくありません"))?;
-        if id.to_string() != self.id
-            || self.length == 0
-            || self.length > piep_storage::MAX_CHUNK_ORIGINAL_BYTES
+        // 空のファイルは長さ 0 の実体を一つ持つ（保存の決まり）ので、0 は断らない。
+        if id.to_string() != self.id || self.length > piep_storage::MAX_CHUNK_ORIGINAL_BYTES
         {
             return Err(ShipError::Invalid("実体の識別子が正しくありません"));
         }
