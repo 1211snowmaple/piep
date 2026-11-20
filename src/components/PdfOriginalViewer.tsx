@@ -3,12 +3,22 @@ import { Alert, Button, Group, Loader, Modal, Stack, Text } from "@mantine/core"
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { renderPdfAttachmentPage, type PdfPageImage } from "@/services/dbApi";
+import { libraryV2RenderPdfPage } from "@/services/libraryV2Api";
 import { errorMessage } from "@/lib/format";
 
 export interface PdfOriginalTarget {
-  downloadId: number;
+  /** 旧棚は作品の番号、新しい棚（試験中）は作品の ID（UUID）。 */
+  workId: number | string;
+  /** 旧棚は添付の保存先のパス、新しい棚はファイルの識別子。 */
   localPath: string;
   fileName: string;
+}
+
+/** 紙面を描く。どちらの棚も、その作品の PDF の添付でなければ断る。 */
+function renderTargetPage(target: PdfOriginalTarget, page: number, width: number): Promise<PdfPageImage> {
+  return typeof target.workId === "string"
+    ? libraryV2RenderPdfPage(target.workId, target.localPath, page, width)
+    : renderPdfAttachmentPage(target.workId, target.localPath, page, width);
 }
 
 /**
@@ -26,7 +36,7 @@ function steppedWidth(available: number): number {
 const PAGE_CACHE_MS = 5 * 60 * 1000;
 
 function pageKey(target: PdfOriginalTarget | null, page: number, width: number) {
-  return ["pdf-page", target?.downloadId ?? 0, target?.localPath ?? "", page, width] as const;
+  return ["pdf-page", target?.workId ?? 0, target?.localPath ?? "", page, width] as const;
 }
 
 /**
@@ -37,7 +47,7 @@ function pageKey(target: PdfOriginalTarget | null, page: number, width: number) 
  * **原本と引き比べられなければ、取り込みが正しいかを利用者が確かめられない。**
  */
 export function PdfOriginalViewer({ target, onClose }: { target: PdfOriginalTarget | null; onClose: () => void }) {
-  const identity = target ? JSON.stringify([target.downloadId, target.localPath]) : null;
+  const identity = target ? JSON.stringify([target.workId, target.localPath]) : null;
   const [position, setPosition] = useState({ identity, page: 0 });
   // 添付が変わった最初の描画から0ページ目を使う。effect で戻すと、それより
   // 先に前のページ番号で描画・先読みを依頼してしまう。
@@ -68,10 +78,10 @@ export function PdfOriginalViewer({ target, onClose }: { target: PdfOriginalTarg
 
   const pageQuery = useQuery({
     queryKey: pageKey(target, page, width),
-    queryFn: () => renderPdfAttachmentPage(target!.downloadId, target!.localPath, page, width),
+    queryFn: () => renderTargetPage(target!, page, width),
     enabled: Boolean(target),
     // 送るたびに真っ白へ落とすと、紙面の位置を見失う。前のページを出したまま差し替える。
-    placeholderData: (previous, query) => target && query?.queryKey[1] === target.downloadId && query.queryKey[2] === target.localPath ? previous : undefined,
+    placeholderData: (previous, query) => target && query?.queryKey[1] === target.workId && query.queryKey[2] === target.localPath ? previous : undefined,
     staleTime: PAGE_CACHE_MS,
   });
 
@@ -85,7 +95,7 @@ export function PdfOriginalViewer({ target, onClose }: { target: PdfOriginalTarg
     if (!target || !canGoOn) return;
     void queryClient.prefetchQuery({
       queryKey: pageKey(target, page + 1, width),
-      queryFn: () => renderPdfAttachmentPage(target.downloadId, target.localPath, page + 1, width),
+      queryFn: () => renderTargetPage(target, page + 1, width),
       staleTime: PAGE_CACHE_MS,
     });
   }, [target, canGoOn, page, width, queryClient]);

@@ -75,7 +75,11 @@ export default {
         // 未実装の設計。実装したら消し、残るものは方針書へ移す。
         text: "これから（未実装）",
         collapsed: true,
-        items: [{ text: "まとまりの発見", link: "/plan/collection-discovery" }],
+        items: [
+          { text: "まとまりの発見", link: "/plan/collection-discovery" },
+          { text: "ライブラリ全体の可逆圧縮", link: "/plan/library-lossless-storage" },
+          { text: "ライブラリのデータモデル再設計", link: "/plan/library-data-model" },
+        ],
       },
     ],
     socialLinks: [{ icon: "github", link: "https://github.com/1211snowmaple/piep" }],

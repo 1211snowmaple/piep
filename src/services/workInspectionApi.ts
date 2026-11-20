@@ -11,6 +11,8 @@ export interface RevisionAsset {
   contentHash: string | null;
 }
 export interface RevisionMetadata {
+  /** 本文の指定と資産の対応が未準備なら false。 */
+  assetsKnown?: boolean;
   title: string | null;
   caption: string | null;
   author?: string | null;

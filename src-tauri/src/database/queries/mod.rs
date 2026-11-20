@@ -22,23 +22,34 @@ use super::models::*;
 use super::schema;
 // 本文を組み立てるエスケープは、取り込み側と同じものを使う。同じ規則を二か所に
 // 書いていたので、片方だけ直すとリーダーとエディタで表示が食い違う余地があった。
-use super::parser::escape_html as escape_editor_html;
-use super::parser::expand_pixiv_inline_notation;
 use super::search::{
     generate_ngrams_limited, make_match_highlights, match_fields_and_score, normalize_search_text,
     normalized_levenshtein, parse_search_query, query_ngrams, ParsedSearchQuery, SearchDocument,
 };
-use super::search_normalization::index_text;
 
+pub(crate) use piep_reader_render::blocks::{
+    block_source_ref, blocks_to_fanbox_blocks, blocks_to_html, blocks_to_pixiv_text,
+    blocks_to_plain_text, BLOCK_GAP_KEY, BLOCK_MISSING_KEY, BLOCK_SOURCE_REF_KEY,
+    EDITOR_IMAGE_ASSET_TYPE, MAX_BLOCK_GAP,
+};
+pub(crate) use piep_reader_render::pages::{paginate_reader_html, plain_text_from_reader_html};
+#[cfg(test)]
+use piep_reader_render::{
+    blocks::{block_gap, block_image_reference},
+    pages::READER_PAGE_TARGET_BYTES,
+};
 mod acquisition_audit;
 mod original_images;
 pub use original_images::{ReducedImageReplacement, ReducedPixivImage};
 mod assist_inputs;
 /// 作品コレクションは `Database` の非公開内部へ触れるため、子モジュールに置く。
 mod reader;
+pub(crate) use piep_reader_render::pages::{reader_outline, search_reader_pages};
 mod work_inspection;
 pub(crate) use work_inspection::revision_metadata;
+pub(crate) use work_inspection::RevisionAsset;
 pub use work_inspection::{RevisionMetadata, RevisionSnapshot, WorkAcquisitionDetails};
+pub(crate) mod queue_transfer;
 mod update_watch;
 mod watch_groups;
 pub(crate) use acquisition_audit::{
@@ -54,8 +65,16 @@ mod collection_additions;
 mod collection_sweep;
 mod collections;
 mod server_support;
+mod suggestion_source;
 mod tag_recommendations;
 mod work_link_evidence;
+pub(crate) use collection_additions::collection_additions;
+pub(crate) use collection_sweep::{sweep_identity, sweep_plan, PreparedSweep};
+pub(crate) use collections::{
+    accepted_suggestion_name_source, name_proposals_in, naming_works_in, sample_bundle_like_ids_in,
+    seed_suggestion_plan,
+};
+pub(crate) use suggestion_source::{Corpus, SuggestionSource};
 pub use tag_recommendations::RelatedTagCandidate;
 
 #[derive(Debug, Clone)]
@@ -880,7 +899,7 @@ fn collect_diagnostic_file_stats(
     )
 }
 
-fn recursive_file_size(root: &Path) -> u64 {
+pub(crate) fn recursive_file_size(root: &Path) -> u64 {
     let mut no_known_assets = |_path: &Path| Ok(false);
     collect_diagnostic_file_stats(
         root,
@@ -1107,17 +1126,17 @@ fn current_process_memory_bytes() -> Option<u64> {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct ProcessResourceSnapshot {
-    working_set_bytes: Option<u64>,
-    private_bytes: Option<u64>,
-    process_count: u32,
-    webview_process_count: u32,
-    gpu_dedicated_bytes: Option<u64>,
-    gpu_shared_bytes: Option<u64>,
+pub(crate) struct ProcessResourceSnapshot {
+    pub(crate) working_set_bytes: Option<u64>,
+    pub(crate) private_bytes: Option<u64>,
+    pub(crate) process_count: u32,
+    pub(crate) webview_process_count: u32,
+    pub(crate) gpu_dedicated_bytes: Option<u64>,
+    pub(crate) gpu_shared_bytes: Option<u64>,
 }
 
 #[cfg(windows)]
-fn process_resource_snapshot() -> ProcessResourceSnapshot {
+pub(crate) fn process_resource_snapshot() -> ProcessResourceSnapshot {
     use std::collections::HashSet;
 
     #[repr(C)]
@@ -1332,7 +1351,7 @@ fn gpu_memory_for_processes(
 }
 
 #[cfg(not(windows))]
-fn process_resource_snapshot() -> ProcessResourceSnapshot {
+pub(crate) fn process_resource_snapshot() -> ProcessResourceSnapshot {
     ProcessResourceSnapshot {
         working_set_bytes: current_process_memory_bytes(),
         process_count: 1,
@@ -1449,15 +1468,6 @@ struct CachedQueryResult<T> {
     bytes: usize,
     expires_at: Instant,
     last_used: u64,
-}
-
-#[derive(Clone)]
-struct NormalizedSuggestionCandidate {
-    item: SearchSuggestion,
-    normalized_label: String,
-    compact_label: String,
-    reading_kana: String,
-    reading_romaji: String,
 }
 
 struct BoundedQueryCache<T> {
@@ -1698,7 +1708,7 @@ pub struct Database {
     facet_cache: Mutex<BoundedQueryCache<Vec<FacetCount>>>,
     entity_facet_cache: Mutex<BoundedQueryCache<Vec<EntityFacet>>>,
     suggest_cache: Mutex<BoundedQueryCache<SearchSuggestResult>>,
-    normalized_suggest_cache: Mutex<BoundedQueryCache<Vec<NormalizedSuggestionCandidate>>>,
+    normalized_suggest_cache: Mutex<BoundedQueryCache<Vec<crate::search_suggest::Candidate>>>,
     filter_facets_cache: Mutex<BoundedQueryCache<FilterFacets>>,
     search_snapshot_cache: Mutex<SearchSnapshotCache>,
 }
@@ -2034,6 +2044,19 @@ impl Database {
         self.read_pool
             .get()
             .map_err(|e| format!("DB read pool checkout failed: {}", e))
+    }
+
+    /// 全文索引に入れる文書を、索引を作り直すときと同じ手順で作る。新しい棚の検索の文書と
+    /// 突き合わせるためだけに使う（`piep-library compare-search-documents`）。
+    pub fn search_index_document_for_comparison(
+        &self,
+        download_id: i64,
+    ) -> Result<Option<super::tantivy_index::TantivyIndexDocument>, String> {
+        let conn = self.read_conn()?;
+        Ok(
+            search_index_document_locked(&conn, &self.storage_dir, download_id)?
+                .map(|document| document.tantivy),
+        )
     }
 
     pub fn library_generation(&self) -> Result<i64, String> {
@@ -2730,48 +2753,7 @@ impl Database {
                 }
             }
 
-            let query_grams = query_ngrams(&normalized_query);
-            let mut scored = facets
-                .into_iter()
-                .filter_map(|facet| {
-                    let normalized_name = normalize_search_text(&facet.name);
-                    let mut score = if normalized_name == normalized_query {
-                        1000.0
-                    } else if normalized_name.starts_with(&normalized_query) {
-                        800.0
-                    } else if normalized_name.contains(&normalized_query) {
-                        650.0
-                    } else {
-                        let name_grams = generate_ngrams_limited(&normalized_name, 512);
-                        let overlap = query_grams
-                            .iter()
-                            .filter(|gram| name_grams.contains(*gram))
-                            .count();
-                        let ratio = if query_grams.is_empty() {
-                            0.0
-                        } else {
-                            overlap as f64 / query_grams.len() as f64
-                        };
-                        let fuzzy = normalized_levenshtein(&normalized_name, &normalized_query);
-                        (ratio * 430.0).max(if fuzzy >= 0.72 { fuzzy * 360.0 } else { 0.0 })
-                    };
-
-                    if score <= 0.0 {
-                        return None;
-                    }
-                    score += (facet.count as f64 + 1.0).ln() * 12.0;
-                    Some((score, facet))
-                })
-                .collect::<Vec<(f64, FacetCount)>>();
-
-            scored.sort_by(|a, b| {
-                b.0.partial_cmp(&a.0)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| b.1.count.cmp(&a.1.count))
-                    .then_with(|| a.1.name.cmp(&b.1.name))
-            });
-            scored.truncate(limit);
-            scored.into_iter().map(|(_, facet)| facet).collect()
+            rank_facets(facets, &normalized_query, limit)
         };
         if let Ok(mut cache) = self.facet_cache.lock() {
             cache.insert(
@@ -2804,7 +2786,7 @@ impl Database {
         // Suggestions are deliberately prefix based. Four `%term%` grouped
         // scans on every keystroke become the dominant cost in a six-figure
         // library; infix/full-body matching remains available on Enter.
-        let like = format!("{}%", text.replace('%', "\\%").replace('_', "\\_"));
+        let like = crate::search_suggest::like_prefix(text);
         let mut items = Vec::new();
 
         collect_suggestions(
@@ -2863,71 +2845,33 @@ impl Database {
             &mut items,
         )?;
 
-        let normalized_text = normalize_search_text(text);
-        for item in &mut items {
-            item.exact_match = normalize_search_text(&item.label) == normalized_text;
-        }
-        sort_suggestions(&mut items);
-        let direct_items = items.clone();
-        let mut additions = Vec::new();
-        let normalized_query = normalize_search_text(text);
-        // The prefix lookup remains the fast path. Only build/read the bounded
-        // normalization pool when it can fill a slot, and keep all direct
-        // candidates ahead of additions so the new matching never removes an
-        // option users saw before. The pool is cached for this library
+        // The prefix lookup remains the fast path. The normalization pool is
+        // only read when it can fill a slot, and is cached for this library
         // generation, avoiding a full label scan on every debounced keystroke.
-        if items.len() < limit as usize && normalized_query.chars().count() >= 2 {
+        let items = crate::search_suggest::assemble(text, limit, items, || {
             let cached = self
                 .normalized_suggest_cache
                 .lock()
                 .ok()
                 .and_then(|mut cache| cache.get("popular-labels-v1", generation));
-            let candidates = if let Some(cached) = cached {
-                cached
-            } else {
-                let loaded = load_normalized_suggestion_candidates(&conn)?;
-                if let Ok(mut cache) = self.normalized_suggest_cache.lock() {
-                    let bytes = loaded
-                        .iter()
-                        .map(|candidate| {
-                            candidate.item.label.len()
-                                + candidate.normalized_label.len()
-                                + candidate.reading_kana.len()
-                                + candidate.reading_romaji.len()
-                                + 128
-                        })
-                        .sum();
-                    cache.insert(
-                        "popular-labels-v1".to_string(),
-                        generation,
-                        loaded.clone(),
-                        bytes,
-                    );
-                }
-                loaded
-            };
-            let mut normalized_items = Vec::new();
-            collect_normalized_suggestion_fallbacks(
-                &candidates,
-                text,
-                limit,
-                &direct_items,
-                &mut normalized_items,
-            );
-            for item in &mut normalized_items {
-                item.exact_match = normalize_search_text(&item.label) == normalized_text;
+            if let Some(cached) = cached {
+                return Ok(cached);
             }
-            sort_suggestions(&mut normalized_items);
-            additions.extend(normalized_items);
-        }
-        items.extend(additions);
-        items.dedup_by(|left, right| {
-            left.kind == right.kind
-                && left.source == right.source
-                && left.source_key == right.source_key
-                && left.value == right.value
-        });
-        items.truncate(limit as usize);
+            let loaded = load_normalized_suggestion_candidates(&conn)?;
+            if let Ok(mut cache) = self.normalized_suggest_cache.lock() {
+                let bytes = loaded
+                    .iter()
+                    .map(crate::search_suggest::Candidate::bytes)
+                    .sum();
+                cache.insert(
+                    "popular-labels-v1".to_string(),
+                    generation,
+                    loaded.clone(),
+                    bytes,
+                );
+            }
+            Ok::<_, String>(loaded)
+        })?;
         let result = SearchSuggestResult { items };
         if let Ok(mut cache) = self.suggest_cache.lock() {
             cache.insert(
@@ -5749,6 +5693,7 @@ impl Database {
                         .unwrap_or("new")
                         .to_string();
                     Ok(UpdateJobCandidate {
+                        work_id: None,
                         metadata: UpdateWorkMetadata::from_row(row, 9, &payload)?,
                         id,
                         download_id: row.get(8)?,
@@ -6094,6 +6039,7 @@ impl Database {
         let rows = stmt
             .query_map(params![job_id], |row| {
                 Ok(UpdateJobItemState {
+                    work_id: None,
                     metadata: UpdateWorkMetadata::from_row(
                         row,
                         8,
@@ -6153,6 +6099,7 @@ impl Database {
                     params![item_id, job_id],
                     |row| {
                         Ok(UpdateJobItemState {
+                            work_id: None,
                             metadata: Default::default(),
                             source: row.get(0)?,
                             source_id: row.get(1)?,
@@ -6407,23 +6354,87 @@ impl Database {
         work: &DownloadEntry,
         reason: &str,
     ) -> Result<bool, String> {
+        self.insert_update_job_unavailable_item(
+            job_id,
+            &UpdateJobItemInput {
+                item_type: "work".into(),
+                source: Some(work.source.clone()),
+                source_id: Some(work.source_id.clone()),
+                target_type: Some("work".into()),
+                title: work.title.clone(),
+                payload_json: serde_json::to_string(work).map_err(|e| e.to_string())?,
+                status: "held".into(),
+            },
+            &serde_json::json!({"id": work.source_id, "title": work.title,
+            "user": {"id": work.author_id, "name": work.author_name},
+            "creatorId": work.author_id, "isRestricted": false,
+            "localVersion": work.current_version, "localSavedAt": work.downloaded_at}),
+            reason,
+        )
+    }
+
+    /// 旧棚の作品番号や保存パスを持たない作品も、同じ保留と件数の規則で記録する。
+    pub fn insert_update_job_unavailable_item(
+        &self,
+        job_id: &str,
+        item: &UpdateJobItemInput,
+        original: &serde_json::Value,
+        reason: &str,
+    ) -> Result<bool, String> {
+        self.insert_unavailable_item(job_id, item, original, reason, None)
+    }
+
+    /// 候補の正本が棚にある場合、既存キューへは実行項目だけを書く。
+    pub(crate) fn insert_unavailable_queue_item(
+        &self,
+        job_id: &str,
+        item: &UpdateJobItemInput,
+        reason: &str,
+        known: bool,
+    ) -> Result<bool, String> {
+        self.insert_unavailable_item(job_id, item, &serde_json::Value::Null, reason, Some(known))
+    }
+
+    fn insert_unavailable_item(
+        &self,
+        job_id: &str,
+        item: &UpdateJobItemInput,
+        original: &serde_json::Value,
+        reason: &str,
+        native_known: Option<bool>,
+    ) -> Result<bool, String> {
+        let source = item
+            .source
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or("取得元がありません")?;
+        let source_id = item
+            .source_id
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or("作品 ID がありません")?;
         let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
         let tx = conn
             .transaction()
             .map_err(|error| format!("Failed to begin unavailable work insert: {error}"))?;
         // 前の回から見つからないままなら、確認はしても新しい保留としては数えない。
-        let known: bool = tx
+        let known: bool = if let Some(known) = native_known {
+            known
+        } else {
+            tx
             .query_row(
                 "SELECT status IN ('held','dismissed')
                         AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.holdKind') END='unavailable'
                  FROM update_candidates WHERE source=?1 AND source_id=?2",
-                params![work.source, work.source_id],
+                params![source, source_id],
                 |row| row.get(0),
             )
             .optional()
             .map_err(|error| format!("Failed to read unavailable work state: {error}"))?
-            .unwrap_or(false);
-        let mut payload = serde_json::to_value(work).map_err(|error| error.to_string())?;
+            .unwrap_or(false)
+        };
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&item.payload_json).map_err(|error| error.to_string())?;
         if known {
             payload["knownHold"] = serde_json::json!(true);
         }
@@ -6440,34 +6451,26 @@ impl Database {
                     WHERE job_id = ?1 AND item_type = 'work'
                       AND source = ?2 AND source_id = ?3
                  )",
-                params![
-                    job_id,
-                    work.source,
-                    work.source_id,
-                    work.title,
-                    payload_json,
-                    reason
-                ],
+                params![job_id, source, source_id, item.title, payload_json, reason],
             )
             .map_err(|error| format!("Failed to record unavailable work: {error}"))?;
         if changed > 0 {
-            let candidate_payload = serde_json::json!({
-                "source": work.source, "sourceId": work.source_id, "title": work.title,
-                "kind": "revision", "holdKind": "unavailable", "holdReason": reason,
-                "originalData": {"id": work.source_id, "title": work.title,
-                    "user": {"id": work.author_id, "name": work.author_name},
-                    "creatorId": work.author_id, "isRestricted": false,
-                    "localVersion": work.current_version, "localSavedAt": work.downloaded_at}
-            });
-            tx.execute(
+            if native_known.is_none() {
+                let candidate_payload = serde_json::json!({
+                    "source": source, "sourceId": source_id, "title": item.title,
+                    "kind": "revision", "holdKind": "unavailable", "holdReason": reason,
+                    "originalData": original,
+                });
+                tx.execute(
                 "INSERT INTO update_candidates(source,source_id,kind,title,payload_json,target_type,status)
                  VALUES(?1,?2,'revision',?3,?4,'work','held')
                  ON CONFLICT(source,source_id) DO UPDATE SET kind='revision',title=excluded.title,
                     payload_json=excluded.payload_json,target_type='work',
                     status=CASE WHEN update_candidates.status='dismissed' THEN 'dismissed' ELSE 'held' END,
                     updated_at=CURRENT_TIMESTAMP",
-                params![work.source,work.source_id,work.title,candidate_payload.to_string()],
+                params![source,source_id,item.title,candidate_payload.to_string()],
             ).map_err(|error| format!("Failed to retain unavailable work state: {error}"))?;
+            }
             let contribution = update_job_item_counter_contribution("work", "held");
             tx.execute(
                 "UPDATE update_jobs
@@ -9926,7 +9929,7 @@ struct SuggestionWork {
     content_type: String,
 }
 
-const COLLECTION_SUGGEST_RULE_VERSION: &str = "collection-suggest-v3";
+pub(crate) const COLLECTION_SUGGEST_RULE_VERSION: &str = "collection-suggest-v3";
 const LINK_TRAVERSAL_MAX_DEPTH: usize = 8;
 const LINK_TRAVERSAL_MAX_WORKS: usize = 240;
 const LINK_INCOMING_SEARCH_LIMIT: usize = 40;
@@ -10101,7 +10104,7 @@ fn load_link_edges_touching(
 /// work URL, and all budgets are bounded so a suggestion cannot reparse the
 /// entire library while holding up normal saves.
 fn discover_linked_collection_component(
-    db: &Database,
+    src: &dyn SuggestionSource,
     seeds: &[SuggestionWork],
     already_refreshed: &mut HashSet<i64>,
 ) -> Result<HashMap<i64, LinkTraversalEvidence>, String> {
@@ -10123,7 +10126,7 @@ fn discover_linked_collection_component(
     // 種は利用者が明示的に選んだものなので、この制限から外す。
     let seed_ids = seeds.iter().map(|seed| seed.id).collect::<HashSet<_>>();
     let hubs = {
-        let conn = db.read_conn()?;
+        let conn = src.corpus()?;
         load_link_hub_ids(&conn)?
     };
 
@@ -10134,12 +10137,14 @@ fn discover_linked_collection_component(
 
         // Outgoing links from every newly discovered work are authoritative
         // enough to parse first and usually reveal the next hop immediately.
-        for download_id in &frontier {
+        // 新しい棚は保存のたびにリンクを取るので、取り直さない。
+        let backfill = src.link_backfill();
+        for download_id in frontier.iter().filter(|_| backfill.is_some()) {
             if refresh_budget == 0 || !already_refreshed.insert(*download_id) {
                 continue;
             }
             refresh_budget -= 1;
-            if let Err(error) = db.refresh_work_links(*download_id) {
+            if let Err(error) = backfill.unwrap().refresh_work_links(*download_id) {
                 log::debug!("Collection link refresh skipped for {download_id}: {error}");
             }
         }
@@ -10147,9 +10152,9 @@ fn discover_linked_collection_component(
         // Backfill incoming one-way links for older data. Search hits are not
         // accepted as members by themselves; after refresh they still need an
         // actual normalized work-link edge to enter the component below.
-        if refresh_budget > 0 {
+        if let Some(db) = backfill.filter(|_| refresh_budget > 0) {
             let frontier_works = {
-                let conn = db.read_conn()?;
+                let conn = src.corpus()?;
                 load_suggestion_works(&conn, &frontier)?
             };
             for work in frontier_works {
@@ -10189,7 +10194,7 @@ fn discover_linked_collection_component(
 
         let frontier_set = frontier.iter().copied().collect::<HashSet<_>>();
         let edges = {
-            let conn = db.read_conn()?;
+            let conn = src.corpus()?;
             load_link_edges_touching(&conn, &frontier)?
         };
         let mut next = Vec::new();
@@ -11225,16 +11230,16 @@ fn save_pair_feedback(
 }
 
 #[derive(Debug, Clone)]
-struct ExtractedWorkLink {
-    to_source: String,
-    to_source_id: String,
-    relation_type: String,
-    anchor_text: Option<String>,
-    context_text: Option<String>,
-    confidence: f64,
+pub(crate) struct ExtractedWorkLink {
+    pub(crate) to_source: String,
+    pub(crate) to_source_id: String,
+    pub(crate) relation_type: String,
+    pub(crate) anchor_text: Option<String>,
+    pub(crate) context_text: Option<String>,
+    pub(crate) confidence: f64,
 }
 
-fn extract_work_link_evidence(
+pub(crate) fn extract_work_link_evidence(
     text: &str,
     from_source: &str,
     from_source_id: &str,
@@ -13078,22 +13083,9 @@ fn insert_bulk_match_entries(conn: &Connection, entries: &[DownloadEntry]) -> Re
     Ok(())
 }
 
-fn sort_suggestions(items: &mut [SearchSuggestion]) {
-    items.sort_by(|left, right| {
-        right
-            .exact_match
-            .cmp(&left.exact_match)
-            .then_with(|| {
-                suggestion_kind_priority(&left.kind).cmp(&suggestion_kind_priority(&right.kind))
-            })
-            .then_with(|| right.count.unwrap_or(0).cmp(&left.count.unwrap_or(0)))
-            .then_with(|| left.label.cmp(&right.label))
-    });
-}
-
 fn load_normalized_suggestion_candidates(
     conn: &Connection,
-) -> Result<Vec<NormalizedSuggestionCandidate>, String> {
+) -> Result<Vec<crate::search_suggest::Candidate>, String> {
     let candidates = [
         ("tag", "SELECT t.name, t.name, COUNT(dt.download_id), NULL, NULL FROM tags t JOIN download_tags dt ON dt.tag_id = t.id GROUP BY t.id, t.name ORDER BY COUNT(dt.download_id) DESC, t.name ASC LIMIT 400"),
         ("author", "SELECT d.author_name, d.author_name, COUNT(*), d.source, NULLIF(d.author_id, '') FROM downloads d WHERE d.author_name IS NOT NULL AND d.author_name != '' GROUP BY d.author_name, d.source, NULLIF(d.author_id, '') ORDER BY COUNT(*) DESC, d.author_name ASC LIMIT 400"),
@@ -13121,83 +13113,10 @@ fn load_normalized_suggestion_candidates(
             .map_err(|e| format!("Normalized suggestion query failed: {e}"))?;
         for row in rows {
             let item = row.map_err(|e| format!("Normalized suggestion row failed: {e}"))?;
-            let normalized_label = normalize_search_text(&item.label);
-            let compact_label = normalized_label
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            let indexed = if kind == "author" {
-                index_text(&item.label)
-            } else {
-                Default::default()
-            };
-            out.push(NormalizedSuggestionCandidate {
-                item,
-                normalized_label,
-                compact_label,
-                reading_kana: indexed
-                    .reading_kana
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect(),
-                reading_romaji: indexed
-                    .reading_romaji
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .collect(),
-            });
+            out.push(crate::search_suggest::Candidate::new(item));
         }
     }
     Ok(out)
-}
-
-fn collect_normalized_suggestion_fallbacks(
-    candidates: &[NormalizedSuggestionCandidate],
-    text: &str,
-    limit: i64,
-    existing: &[SearchSuggestion],
-    out: &mut Vec<SearchSuggestion>,
-) {
-    let query = normalize_search_text(text);
-    let compact_query = query
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>();
-    if compact_query.chars().count() < 2 {
-        return;
-    }
-    let allow_compact = !query.chars().any(char::is_whitespace);
-    for candidate in candidates {
-        if existing
-            .iter()
-            .filter(|item| item.kind == candidate.item.kind)
-            .count() as i64
-            >= limit
-        {
-            continue;
-        }
-        let surface_match = candidate.normalized_label.contains(&query)
-            || (allow_compact && candidate.compact_label.contains(&compact_query));
-        let reading_match = candidate.item.kind == "author"
-            && !surface_match
-            && (candidate.reading_kana.contains(&query)
-                || candidate.reading_romaji.contains(&query)
-                || (allow_compact
-                    && (candidate.reading_kana.contains(&compact_query)
-                        || candidate.reading_romaji.contains(&compact_query))));
-        if !surface_match && !reading_match {
-            continue;
-        }
-        if existing.iter().chain(out.iter()).any(|item| {
-            item.kind == candidate.item.kind
-                && item.source == candidate.item.source
-                && item.source_key == candidate.item.source_key
-                && item.value == candidate.item.value
-        }) {
-            continue;
-        }
-        out.push(candidate.item.clone());
-    }
 }
 
 fn collect_suggestions(
@@ -13228,16 +13147,6 @@ fn collect_suggestions(
         items.push(row.map_err(|e| format!("Suggest row read failed: {}", e))?);
     }
     Ok(())
-}
-
-fn suggestion_kind_priority(kind: &str) -> u8 {
-    match kind {
-        "author" => 0,
-        "series" => 1,
-        "title" => 2,
-        "tag" => 3,
-        _ => 4,
-    }
 }
 
 fn sort_key_select_expr(params: &SearchV2Params) -> String {
@@ -13963,7 +13872,7 @@ fn insert_work_blocks_locked(
     Ok(())
 }
 
-fn normalize_block_inputs(blocks: &[WorkBlockInput]) -> Vec<WorkBlockInput> {
+pub(crate) fn normalize_block_inputs(blocks: &[WorkBlockInput]) -> Vec<WorkBlockInput> {
     let mut normalized = Vec::new();
     for block in blocks {
         let block_type = match block.block_type.as_str() {
@@ -14046,50 +13955,6 @@ enum SourceLine {
     /// 落としていたころは、投稿者が分けて書いた段落が編集画面で 1 つの塊に
     /// 溶けていた。
     Boundary,
-}
-
-/// ブロックの前にあった空行の数を憶えておく鍵。
-///
-/// 段落の切れ目は取得元によって形が違う（pixiv は空行 1 つ、FANBOX は
-/// ブロックの境界そのもので空行なし）。**数として持っておけば**、書き戻す
-/// ときに元の見え方をそのまま再現できる。持たずに書き戻していたころは、
-/// 編集画面を開いて何も変えずに反映するだけで、本文全体が 1 行に潰れた。
-const BLOCK_GAP_KEY: &str = "gap";
-
-/// 画像ブロックが元の本文で名乗っていた参照。EPUB へ書き出すときに、
-/// 同じ絵をもう一度指すために使う。
-const BLOCK_SOURCE_REF_KEY: &str = "sourceRef";
-
-/// 取り込んだときに絵が見つからなかった画像ブロックの印。編集画面がそれと
-/// 名乗り、手元の画像で埋めるよう促すのに使う。
-const BLOCK_MISSING_KEY: &str = "missing";
-
-/// 空行の上限。壊れた値や悪意のある値で本文が縦に伸び続けないようにする。
-const MAX_BLOCK_GAP: usize = 64;
-
-fn block_attrs(block: &WorkBlock) -> Option<serde_json::Value> {
-    block
-        .attrs_json
-        .as_deref()
-        .and_then(|attrs| serde_json::from_str::<serde_json::Value>(attrs).ok())
-        .filter(serde_json::Value::is_object)
-}
-
-fn block_gap(block: &WorkBlock) -> Option<usize> {
-    block_attrs(block)
-        .and_then(|attrs| attrs.get(BLOCK_GAP_KEY).and_then(serde_json::Value::as_u64))
-        .map(|gap| (gap as usize).min(MAX_BLOCK_GAP))
-}
-
-fn block_source_ref(block: &WorkBlock) -> Option<String> {
-    block_attrs(block)
-        .and_then(|attrs| {
-            attrs
-                .get(BLOCK_SOURCE_REF_KEY)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .filter(|value| !value.trim().is_empty())
 }
 
 fn attrs_with(attrs: Option<String>, key: &str, value: serde_json::Value) -> Option<String> {
@@ -14225,7 +14090,7 @@ fn token_attribute(token: &str, name: &str) -> Option<String> {
         })
 }
 
-fn html_to_editor_blocks(html: &str, assets: &[AssetEntry]) -> Vec<WorkBlock> {
+pub(crate) fn html_to_editor_blocks(html: &str, assets: &[AssetEntry]) -> Vec<WorkBlock> {
     if html.trim().is_empty() {
         return plain_text_to_editor_blocks("");
     }
@@ -14450,19 +14315,6 @@ fn hash_blocks(blocks: &[WorkBlockInput]) -> String {
         .collect()
 }
 
-fn blocks_to_plain_text(blocks: &[WorkBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|block| match block.block_type.as_str() {
-            "image" | "separator" | "page_break" => None,
-            _ => block.text.as_deref(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-const READER_PAGE_TARGET_BYTES: usize = 128 * 1024;
-
 fn reader_version_path(
     download: &DownloadEntry,
     versions: &[DownloadVersion],
@@ -14579,9 +14431,6 @@ fn assets_for_version_path(assets: &[AssetEntry], json_path: &Path) -> Vec<Asset
         .collect()
 }
 
-/// 編集画面の「画像を追加」で取り込んだ絵の種別。
-pub(crate) const EDITOR_IMAGE_ASSET_TYPE: &str = "editor_image";
-
 /// 編集のブロックが指せる絵。元にした版の絵に、編集画面で足した絵を加える。
 ///
 /// 足した絵は版の置き場ではなく `editor-assets/` に入る。版の絵だけを渡して
@@ -14672,312 +14521,6 @@ fn reader_source_content(
         &download.source,
         &version_assets,
     ))
-}
-
-/// Converts source-level boundaries into reasonably sized transport pages.
-/// Boundaries always sit between complete source blocks, so a page can be
-/// sanitized independently without producing malformed markup.
-fn paginate_reader_html(html: &str, source: &str) -> (Vec<String>, Vec<usize>) {
-    if html.trim().is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-    let marker = if source.eq_ignore_ascii_case("pixiv") {
-        "<!-- newpage -->"
-    } else {
-        "<!-- content-block -->"
-    };
-    let blocks = html
-        .split(marker)
-        .map(str::trim)
-        .filter(|part| !part.is_empty());
-    let mut pages = Vec::new();
-    // pixiv の [newpage] が作る「原稿のページ」が、転送用の何ページ目から
-    // 始まるか。長い原稿ページは転送のために割られるので、この対応表が無いと
-    // `[jump:5]` が 5 ページ目ではない場所へ飛ぶ。
-    let mut source_page_starts = Vec::new();
-    let mut current = String::new();
-    for block in blocks {
-        // Pixiv's [newpage] is user-visible page semantics and must never be
-        // coalesced. A source page can nevertheless be several megabytes long;
-        // break that one transport response at generated line boundaries so a
-        // single IPC message does not have to carry the entire novel.
-        if source.eq_ignore_ascii_case("pixiv") {
-            source_page_starts.push(pages.len());
-            let mut chunk = String::new();
-            for line in block.split_inclusive("<br />\n") {
-                if !chunk.is_empty()
-                    && chunk.len().saturating_add(line.len()) > READER_PAGE_TARGET_BYTES
-                {
-                    pages.push(std::mem::take(&mut chunk));
-                }
-                chunk.push_str(line);
-            }
-            if !chunk.trim().is_empty() {
-                pages.push(chunk);
-            }
-            continue;
-        }
-        if !current.is_empty()
-            && current.len().saturating_add(block.len()) > READER_PAGE_TARGET_BYTES
-        {
-            pages.push(std::mem::take(&mut current));
-        }
-        if !current.is_empty() {
-            current.push('\n');
-        }
-        current.push_str(block);
-    }
-    if !current.trim().is_empty() {
-        pages.push(current);
-    }
-    if pages.is_empty() {
-        pages.push(html.to_string());
-    }
-    // 割られなかった原稿ページは、転送用のページとそのまま 1 対 1。
-    if source_page_starts.is_empty() {
-        source_page_starts = (0..pages.len()).collect();
-    }
-    (pages, source_page_starts)
-}
-
-fn plain_text_from_reader_html(html: &str) -> String {
-    static TAGS: std::sync::LazyLock<Regex> =
-        std::sync::LazyLock::new(|| Regex::new(r"(?s)<[^>]*>").expect("valid HTML tag regex"));
-    let separated = html
-        .replace("<br />", "\n")
-        .replace("<br>", "\n")
-        .replace("</p>", "\n")
-        .replace("</h2>", "\n")
-        .replace("</blockquote>", "\n");
-    TAGS.replace_all(&separated, "")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#x27;", "'")
-        .trim()
-        .to_string()
-}
-
-/// 編集したブロックを、読書画面が受け取る HTML へ戻す。
-///
-/// 取り込んだ本文と**同じ組み方**で書く。行の終わりごとに `<br />` を置き、
-/// 空行のぶんだけ足す。ただ連結していたころは行の区切りがどこにも残らず、
-/// 「編集画面を開いて何も変えずに反映する」だけで作品全体がひと続きの塊に
-/// なっていた。
-///
-/// ここが吐く HTML は取り込み直されない（版があるときブロックは DB から
-/// 読む）ので、`html_to_editor_blocks` が知らない `<figure>` を使ってよい。
-fn blocks_to_html(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
-    let mut html = String::new();
-    for (index, block) in blocks.iter().enumerate() {
-        let gap = block_gap(block).unwrap_or(if index == 0 { 0 } else { 1 });
-        if index == 0 {
-            for _ in 0..gap {
-                html.push_str("<br />\n");
-            }
-        } else {
-            // 直前の行を閉じる 1 つと、空行の数だけの `<br />`。
-            for _ in 0..=gap {
-                html.push_str("<br />\n");
-            }
-            // FANBOX の読書画面はこの印でページを切り出す。
-            html.push_str("<!-- content-block -->\n");
-        }
-        html.push_str(&block_to_html(block, assets));
-    }
-    html
-}
-
-/// このブロックが指す絵を、取得元の本文が使っていた名前で呼ぶ。
-///
-/// 取り込んだときに控えた参照を第一に使い、編集画面から足した絵は
-/// ファイル名から引く。EPUB のビルダーはどちらの形でも実ファイルへ辿れる。
-fn block_image_reference(block: &WorkBlock, assets: &[AssetEntry]) -> Option<String> {
-    let asset = block
-        .asset_id
-        .and_then(|id| assets.iter().find(|asset| asset.id == id));
-    // 編集で足した画像を選んだブロックは、その画像を指す。元の参照は
-    // 選び直す前の絵（取得できなかった絵を含む）を名乗っているので、
-    // 優先すると EPUB に古い絵が出るか、何も出なかった。
-    let added = asset.is_some_and(|asset| asset.asset_type == EDITOR_IMAGE_ASSET_TYPE);
-    if !added {
-        if let Some(reference) = block_source_ref(block) {
-            return Some(reference);
-        }
-    }
-    let asset = asset?;
-    Path::new(&asset.filename)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(str::to_string)
-}
-
-fn block_link_label(block: &WorkBlock) -> Option<String> {
-    block_attrs(block)
-        .and_then(|attrs| {
-            attrs
-                .get("label")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .filter(|label| !label.trim().is_empty())
-}
-
-/// 反映済みの編集を、pixiv の本文記法へ組み直す。
-///
-/// 平文へ均していたころは、`blocks_to_plain_text` が画像・区切り・改ページを
-/// 落とし、見出しをただの行にしていた。編集した作品の EPUB には挿絵が 1 枚も
-/// 入らず、章も改ページも消えていた。
-pub(crate) fn blocks_to_pixiv_text(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
-        let gap = block_gap(block).unwrap_or(if index == 0 { 0 } else { 1 });
-        for _ in 0..gap {
-            lines.push(String::new());
-        }
-        let text = block.text.as_deref().unwrap_or("");
-        match block.block_type.as_str() {
-            "heading" => lines.push(format!("[chapter:{}]", text.trim())),
-            "page_break" => lines.push("[newpage]".to_string()),
-            "separator" => lines.push(super::parser::EDITOR_SEPARATOR_NOTATION.to_string()),
-            "image" => {
-                if let Some(reference) = block_image_reference(block, assets) {
-                    // 取り込んだ挿絵は、元の記法（`[pixivimage:…]`）ごと控えてある。
-                    // それをさらに包んでいたので、`[uploadedimage:[pixivimage:…]]`
-                    // という誰も読めない参照になり、**編集した作品の EPUB からは
-                    // 挿絵が 1 枚残らず消えていた**。
-                    lines.push(if reference.starts_with('[') {
-                        reference
-                    } else {
-                        format!("[uploadedimage:{reference}]")
-                    });
-                }
-            }
-            "link" => {
-                let url = text.trim();
-                if !url.is_empty() {
-                    let label = block_link_label(block).unwrap_or_else(|| url.to_string());
-                    lines.push(format!("[[jumpuri:{label}>{url}]]"));
-                }
-            }
-            _ => lines.extend(text.split('\n').map(str::to_string)),
-        }
-    }
-    lines.join("\n")
-}
-
-/// 反映済みの編集を、FANBOX の本文ブロックへ組み直す。
-pub(crate) fn blocks_to_fanbox_blocks(
-    blocks: &[WorkBlock],
-    assets: &[AssetEntry],
-) -> Vec<serde_json::Value> {
-    let blank = || serde_json::json!({ "type": "p", "text": "" });
-    let mut out = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
-        let gap = block_gap(block).unwrap_or(if index == 0 { 0 } else { 1 });
-        for _ in 0..gap {
-            out.push(blank());
-        }
-        let text = block.text.as_deref().unwrap_or("");
-        match block.block_type.as_str() {
-            "heading" => out.push(serde_json::json!({ "type": "header", "text": text.trim() })),
-            "image" => {
-                if let Some(reference) = block_image_reference(block, assets) {
-                    out.push(serde_json::json!({ "type": "image", "imageId": reference }));
-                }
-            }
-            "separator" | "page_break" => out.push(blank()),
-            "link" => {
-                let url = text.trim();
-                if !url.is_empty() {
-                    let label = block_link_label(block).unwrap_or_else(|| url.to_string());
-                    // FANBOX のリンクは本文の範囲で表す。長さは UTF-16 の単位。
-                    out.push(serde_json::json!({
-                        "type": "p",
-                        "text": label,
-                        "links": [{ "url": url, "offset": 0, "length": label.encode_utf16().count() }],
-                    }));
-                }
-            }
-            _ => out.push(serde_json::json!({ "type": "p", "text": text })),
-        }
-    }
-    out
-}
-
-fn block_to_html(block: &WorkBlock, assets: &[AssetEntry]) -> String {
-    match block.block_type.as_str() {
-        "heading" => format!(
-            "<h2>{}</h2>",
-            expand_pixiv_inline_notation(&escape_editor_html(block.text.as_deref().unwrap_or("")))
-        ),
-        "image" => {
-            let asset = block
-                .asset_id
-                .and_then(|id| assets.iter().find(|asset| asset.id == id));
-            let Some(asset) = asset else {
-                // 取り込んだときから絵が無かったものは、どの絵だったかを残す。
-                return match block_source_ref(block) {
-                    Some(reference) => format!(
-                        r#"<div class="missing-image-placeholder" role="note" data-image-reference="{}" data-image-missing="true">取得できなかった画像 {}</div>"#,
-                        escape_editor_html(&reference),
-                        escape_editor_html(&reference)
-                    ),
-                    None => "<div class=\"missing-image-placeholder\">画像が見つかりません</div>"
-                        .to_string(),
-                };
-            };
-            let caption = block
-                .text
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
-            let image = format!(
-                r#"<img class="novel-image" data-local-path="{}" alt="{}" />"#,
-                escape_editor_html(&asset.local_path),
-                escape_editor_html(caption.unwrap_or(&asset.filename))
-            );
-            // 書いた説明が読書画面にも EPUB にも出ないまま捨てられていた。
-            match caption {
-                Some(caption) => format!(
-                    r#"<figure class="novel-figure">{}<figcaption>{}</figcaption></figure>"#,
-                    image,
-                    escape_editor_html(caption)
-                ),
-                None => image,
-            }
-        }
-        "separator" => "<hr />".to_string(),
-        "page_break" => "<!-- newpage -->".to_string(),
-        "quote" => format!(
-            "<blockquote>{}</blockquote>",
-            expand_pixiv_inline_notation(&escape_editor_html(block.text.as_deref().unwrap_or("")))
-                .replace('\n', "<br />\n")
-        ),
-        "link" => {
-            let url = block.text.as_deref().unwrap_or("");
-            let label = block_attrs(block)
-                .and_then(|attrs| {
-                    attrs
-                        .get("label")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                })
-                .filter(|label| !label.trim().is_empty())
-                .unwrap_or_else(|| url.to_string());
-            format!(
-                r#"<a href="{}" target="_blank" rel="noopener noreferrer" class="novel-link-card"><span class="link-card-icon">🔗</span><span class="link-card-info"><span class="link-card-title">{}</span><span class="link-card-host">{}</span></span></a>"#,
-                escape_editor_html(url),
-                escape_editor_html(&label),
-                escape_editor_html(url)
-            )
-        }
-        // 地の文。書いた記法をそのまま開く ―― 取り込みと同じ関数を通すので、
-        // 編集画面で足したルビも読書画面でルビになる。
-        _ => expand_pixiv_inline_notation(&escape_editor_html(block.text.as_deref().unwrap_or("")))
-            .replace('\n', "<br />\n"),
-    }
 }
 
 fn active_edit_plain_text_locked(
@@ -15422,6 +14965,7 @@ fn search_index_document_locked(
             author_name: doc.author_name,
             author_id: author_id.clone(),
             tags: doc.tags,
+            tag_list: Vec::new(),
             series_title: doc.series_title,
             excerpt: doc.excerpt,
             body: doc.body,
@@ -15730,6 +15274,7 @@ fn work_block_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkBlock> {
 
 fn update_target_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateTarget> {
     Ok(UpdateTarget {
+        watch_generation: None,
         id: row.get(0)?,
         target_type: row.get(1)?,
         source: row.get(2)?,
@@ -16269,3 +15814,56 @@ mod search_integration_tests;
 #[cfg(test)]
 #[path = "editor_roundtrip_tests.rs"]
 mod editor_roundtrip_tests;
+
+/// 絞り込みの選択肢を、問いに近い順に並べて `limit` 件に切る（旧棚と新しい棚で共通）。
+///
+/// `normalized_query` は `normalize_search_text` を通したもの。一致・前方一致・部分一致のあとに、
+/// 文字の重なりと編集距離で読みの揺れを拾い、使われている数を少し足す。
+pub(crate) fn rank_facets(
+    facets: Vec<FacetCount>,
+    normalized_query: &str,
+    limit: usize,
+) -> Vec<FacetCount> {
+    let query_grams = query_ngrams(normalized_query);
+    let mut scored = facets
+        .into_iter()
+        .filter_map(|facet| {
+            let normalized_name = normalize_search_text(&facet.name);
+            let mut score = if normalized_name == normalized_query {
+                1000.0
+            } else if normalized_name.starts_with(normalized_query) {
+                800.0
+            } else if normalized_name.contains(normalized_query) {
+                650.0
+            } else {
+                let name_grams = generate_ngrams_limited(&normalized_name, 512);
+                let overlap = query_grams
+                    .iter()
+                    .filter(|gram| name_grams.contains(*gram))
+                    .count();
+                let ratio = if query_grams.is_empty() {
+                    0.0
+                } else {
+                    overlap as f64 / query_grams.len() as f64
+                };
+                let fuzzy = normalized_levenshtein(&normalized_name, normalized_query);
+                (ratio * 430.0).max(if fuzzy >= 0.72 { fuzzy * 360.0 } else { 0.0 })
+            };
+
+            if score <= 0.0 {
+                return None;
+            }
+            score += (facet.count as f64 + 1.0).ln() * 12.0;
+            Some((score, facet))
+        })
+        .collect::<Vec<(f64, FacetCount)>>();
+
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| b.1.count.cmp(&a.1.count))
+            .then_with(|| a.1.name.cmp(&b.1.name))
+    });
+    scored.truncate(limit);
+    scored.into_iter().map(|(_, facet)| facet).collect()
+}

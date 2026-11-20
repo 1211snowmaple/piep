@@ -6,7 +6,13 @@ import { WorkCover } from "@/components/WorkCover";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { suggestCollectionAdditions } from "@/services/collectionApi";
+import { shelfFileUrl } from "@/services/libraryV2Api";
 import type { CollectionAdditionCandidate, WorkCollection } from "@/types/collections";
+
+/** 候補の作品を指す鍵。新しい棚は作品の UUID、旧棚は作品の番号。 */
+function candidateKey(candidate: CollectionAdditionCandidate): string {
+  return candidate.work ?? String(candidate.downloadId);
+}
 
 /**
  * すでにある束へ、あとから入れるとよさそうな作品を探す。
@@ -26,9 +32,9 @@ export function CollectionAdditionsModal({ opened, onClose, collection, busy, on
   onClose: () => void;
   collection: WorkCollection;
   busy: boolean;
-  onAdd: (downloadIds: number[]) => void;
+  onAdd: (candidates: CollectionAdditionCandidate[]) => void;
 }) {
-  const [dropped, setDropped] = useState<ReadonlySet<number>>(new Set());
+  const [dropped, setDropped] = useState<ReadonlySet<string>>(new Set());
 
   const search = useMutation({
     mutationFn: () => suggestCollectionAdditions(collection.id),
@@ -48,13 +54,11 @@ export function CollectionAdditionsModal({ opened, onClose, collection, busy, on
 
   const result = search.data;
   const candidates = result?.candidates ?? [];
-  const chosen = candidates
-    .filter((candidate) => !dropped.has(candidate.downloadId))
-    .map((candidate) => candidate.downloadId);
+  const chosen = candidates.filter((candidate) => !dropped.has(candidateKey(candidate)));
 
-  const toggle = (downloadId: number) => setDropped((current) => {
+  const toggle = (key: string) => setDropped((current) => {
     const next = new Set(current);
-    if (next.has(downloadId)) next.delete(downloadId); else next.add(downloadId);
+    if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
 
@@ -103,10 +107,10 @@ export function CollectionAdditionsModal({ opened, onClose, collection, busy, on
             <Stack gap="xs">
               {candidates.map((candidate) => (
                 <AdditionRow
-                  key={candidate.downloadId}
+                  key={candidateKey(candidate)}
                   candidate={candidate}
-                  dropped={dropped.has(candidate.downloadId)}
-                  onToggle={() => toggle(candidate.downloadId)}
+                  dropped={dropped.has(candidateKey(candidate))}
+                  onToggle={() => toggle(candidateKey(candidate))}
                 />
               ))}
             </Stack>
@@ -181,7 +185,7 @@ function AdditionRow({ candidate, dropped, onToggle }: {
           {dropped ? <Icons.cancel size={IconSize.inline} /> : <Icons.confirm size={IconSize.inline} />}
         </span>
         <span className="suggestion-member__cover">
-          <WorkCover work={candidate} variant="compact" />
+          <WorkCover work={candidate.work ? { ...candidate, coverUrl: shelfFileUrl(candidate.coverPath) } : candidate} variant="compact" />
         </span>
         <span className="suggestion-member__body">
           {/* 題名は折らずに最後まで出す。1行で切っていたが、この束へ足す候補は

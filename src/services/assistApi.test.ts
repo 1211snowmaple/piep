@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
 import { getSetting } from "@/services/settingsApi";
 import {
   DEFAULT_ASSIST_SETTINGS,
+  acceptRelatedTags,
+  loadNote,
+  proposeSplits,
+  recapPrevious,
   assistReady,
   assistFeatureReady,
   assistTarget,
@@ -15,6 +20,7 @@ import {
 } from "@/services/assistApi";
 
 vi.mock("@/services/settingsApi", () => ({ getSetting: vi.fn(), setSetting: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 function settings(overrides: Partial<AssistSettings>): AssistSettings {
   return { ...structuredClone(DEFAULT_ASSIST_SETTINGS), ...overrides };
@@ -158,5 +164,27 @@ describe("assist settings safety", () => {
     configured.featureProfiles.work_tagging.model = "unverified-llm-override";
     expect(validateAssistSettings(configured)).toMatch(/タグの補完.*試して/);
     expect(assistFeatureReady(configured, "work_tagging")).toBe(false);
+  });
+});
+
+describe("どちらの棚へ頼むか", () => {
+  const engine = toEngine(settings({}), "reader_recap");
+  it("作品の番号は旧棚、棚の ID は新しい棚の同じ仕事へ送る", async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+    await acceptRelatedTags(7, ["雨"]);
+    expect(invoke).toHaveBeenLastCalledWith("assist_accept_related_tags", { downloadId: 7, tags: ["雨"] });
+    await acceptRelatedTags("w1", ["雨"]);
+    expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_accept_related_tags", { work: "w1", tags: ["雨"] });
+  });
+  it("覚え書き・前回のあらすじ・分け方も新しい棚を選べる", async () => {
+    vi.mocked(invoke).mockResolvedValue({ value: null, provenance: null });
+    await loadNote("work", "w2:w1", "recap", null, true);
+    expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_load_note", { subjectType: "work", subjectKey: "w2:w1", noteKind: "recap", engine: null });
+    await recapPrevious(engine, "w1", "w2");
+    expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_recap_previous", { engine, previous: "w1", current: "w2" });
+    await recapPrevious(engine, 1, 2);
+    expect(invoke).toHaveBeenLastCalledWith("assist_recap_previous", { engine, previousDownloadId: 1, currentDownloadId: 2 });
+    await proposeSplits(engine, "c1", true);
+    expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_propose_splits", { engine, collection: "c1" });
   });
 });

@@ -50,6 +50,8 @@ import { errorMessage, formatBytes, formatDate, formatFreshness, formatNumber } 
 import { runSingleCheck } from "@/features/updates/startSingleCheck";
 import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { exportEntityZip } from "@/services/archiveApi";
+import { libraryV2ExportEntityArchive } from "@/services/shelfBackupApi";
+import { openSingleDialog } from "@/services/dialogApi";
 import { AuthorAssist } from "@/features/assist/AuthorAssist";
 import { CollectionCard } from "@/features/collections/CollectionCard";
 import { sortCollections } from "@/features/collections/CollectionsPanel";
@@ -68,6 +70,20 @@ import {
   upsertUpdateTarget,
 } from "@/services/dbApi";
 import { ENTITY_SERIES_PAGE_SIZE, listEntitySeriesPage, listEntityTags } from "@/services/shelfApi";
+import { libraryV2Entity, libraryV2EntityOriginal, libraryV2EntityTags, libraryV2PersonSeries, shelfFileUrl } from "@/services/libraryV2Api";
+import {
+  searchShelf,
+  shelfEntityCollections,
+  shelfEntityVersions,
+  shelfListable,
+  shelfWritable,
+  invalidateShelf,
+  shelfPersonEntry,
+  shelfSeriesEntry,
+  shelfSeriesFacet,
+  useLibraryV2Status,
+  useShelfV2Preference,
+} from "@/features/library/shelfV2";
 import { saveDialog } from "@/services/dialogApi";
 import { openExternalUrl } from "@/services/openerApi";
 import { store } from "@/store";
@@ -87,7 +103,7 @@ import {
   type SortOption,
 } from "@/features/library/sortOptions";
 import type { CollectionSortBy } from "@/types/collections";
-import type { EntityFacet, EntitySortBy, EntityVersion, FacetCount, LibrarySortBy, LibrarySortOrder, PersonEntry, SeriesEntry, UpdateTarget } from "@/types/library";
+import type { EntityFacet, EntitySortBy, EntityVersion, FacetCount, LibrarySortBy, LibrarySortOrder, ListedWork, PersonEntry, SeriesEntry, UpdateTarget } from "@/types/library";
 
 /**
  * Every option says both what it sorts by and which way round.
@@ -105,6 +121,8 @@ const ENTITY_WORK_SORT_VALUES = sortKeys([
 /** Chips for the tags this author actually uses, with the rest behind a popover. */
 const VISIBLE_TAG_CHIPS = 10;
 
+const READ_ONLY = "新しい棚では変えられません";
+
 export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const { source = "", sourceKey = "" } = useRouteParams(kind === "person" ? "/people/:source/:sourceKey" : "/series/:source/:sourceKey");
   // Route params are decoded by the router. Decoding a second time crashes on
@@ -114,6 +132,15 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const returnTo = useReturnTo();
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
+  // 新しい棚（試験中・読むだけ）から出すか。ライブラリの一覧と同じ好みと条件で決める。棚の
+  // 状態を最初に聞き終えるまでは、どちらの棚にも問い合わせない（旧棚を引いてから差し替えない）。
+  const [shelfV2Preferred] = useShelfV2Preference();
+  const shelfV2Status = useLibraryV2Status(runtime && shelfV2Preferred);
+  const shelfMode = runtime && shelfV2Preferred && shelfListable(shelfV2Status.data);
+  const canRefreshProfile = !shelfMode || shelfWritable(shelfV2Status.data);
+  const shelfDeciding = runtime && shelfV2Preferred && !shelfV2Status.data;
+  const legacyMode = !shelfMode && !shelfDeciding;
+  const canManageWatching = legacyMode || (shelfMode && shelfWritable(shelfV2Status.data));
   const { pathname, search, navigationId } = useAppRouter();
   const [urlParams, setUrlParams] = useAppSearchParams();
   const tab = parseEntityTab(urlParams.get("tab"), kind);
@@ -237,7 +264,8 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   // Relevance is walked with a score cursor and has no nth page, so numbers are
   // only offered once an ordering has been chosen.
   const searchingByRelevance = Boolean(workQuery) && sortBy === "relevance";
-  const numberedPages = pagingMode === "pages" && !searchingByRelevance;
+  // 新しい棚の一覧は続きの位置で読み進めるだけで、ページ番号は持たない（ライブラリの一覧と同じ）。
+  const numberedPages = pagingMode === "pages" && !searchingByRelevance && !shelfMode;
   const {
     page: pageParam,
     maxPage: maxDirectPage,
@@ -265,8 +293,23 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const toggleTag = (tag: string) => patchUrl({
     tags: activeTags.includes(tag) ? activeTags.filter((item) => item !== tag) : [...activeTags, tag],
   });
-  const entity = useQuery({
+  const shelfHead = useQuery({
+    queryKey: ["library-v2-entity", kind, source, key],
+    queryFn: async () => {
+      const head = await libraryV2Entity(kind, source, key);
+      if (!head) throw new Error(kind === "person" ? "新しい棚にこの作者はいません" : "新しい棚にこのシリーズはありません");
+      return head;
+    },
+    enabled: shelfMode,
+  });
+  const shelfId = shelfMode ? shelfHead.data?.id ?? null : null;
+  const shelfEntity = useMemo(
+    () => shelfHead.data ? (kind === "person" ? shelfPersonEntry(shelfHead.data) : shelfSeriesEntry(shelfHead.data)) : undefined,
+    [kind, shelfHead.data],
+  );
+  const legacyEntity = useQuery({
     queryKey: ["entity", kind, source, key],
+    enabled: legacyMode,
     queryFn: async (): Promise<PersonEntry | SeriesEntry> => {
       if (runtime) return kind === "person" ? getPerson<PersonEntry>(source, key) : getSeries<SeriesEntry>(source, key);
       const facet = (kind === "person" ? demoFacets.authorEntities : demoFacets.series).find((item) => item.source === source && item.sourceKey === key) ?? (kind === "person" ? demoFacets.authorEntities[0] : demoFacets.series[0]);
@@ -283,12 +326,26 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       return kind === "person" ? { ...common, displayName: facet.displayName, iconPath: null, linksJson: demoLinks } : { ...common, title: facet.displayName, isConcluded: false, publishedContentCount: facet.count + 2 };
     },
   });
+  const entity = shelfMode
+    ? { data: shelfEntity, isLoading: shelfHead.isLoading, error: shelfHead.error, refetch: shelfHead.refetch }
+    : legacyEntity;
+  // 新しい棚の画像はファイルの識別子。旧棚のパスとは URL への直し方が違う。
+  const assetUrl = (path: string | null | undefined) => shelfMode ? shelfFileUrl(path) : getAssetUrl(path);
   // Prolific authors have more works than any single request should return, so
   // this pages through them instead of silently stopping at a fixed slab.
   const works = useInfiniteQuery({
     ...boundedInfiniteListOptions,
-    queryKey: ["entity-works", kind, source, key, workQuery, activeTags, sortBy, sortOrder, pageSize, numberedPages ? pageParam : 0],
-    queryFn: ({ pageParam: cursor }) => runtime
+    queryKey: ["entity-works", kind, source, key, workQuery, activeTags, sortBy, sortOrder, pageSize, numberedPages ? pageParam : 0, shelfId ?? "legacy"],
+    queryFn: ({ pageParam: cursor }): Promise<{ items: ListedWork[]; nextCursor: string | null; totalEstimate: number | null }> => shelfId
+      ? searchShelf({
+        text: workQuery || null,
+        tagsInclude: activeTags.length ? activeTags : null,
+        limit: pageSize,
+        cursor,
+        sortBy,
+        sortOrder,
+      }, kind === "person" ? { person: shelfId } : { series: shelfId })
+      : runtime
       ? searchDownloadsV2({
         ...(kind === "person" ? { personSource: source, personKey: key } : { seriesSource: source, seriesKey: key }),
         text: workQuery || null,
@@ -311,7 +368,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     // which is what dropped the reader at the top of the profile on every page
     // change. Holding the previous page keeps the geometry still.
     placeholderData: keepPreviousData,
-    enabled: tab === "works",
+    enabled: tab === "works" && (legacyMode || Boolean(shelfId)),
   });
   // Series search has its own URL key: `q` already belongs to the works tab.
   // Keeping the two separate means following a filtered-series link does not
@@ -426,8 +483,19 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   // the same explicit in-memory safety stop used by other infinite listings.
   const authorSeries = useInfiniteQuery({
     ...boundedInfiniteListOptions,
-    queryKey: ["entity-series", source, key, serverSeriesQuery, seriesSortBy, seriesSortOrder],
-    queryFn: ({ pageParam: cursor }) => runtime
+    queryKey: ["entity-series", source, key, serverSeriesQuery, seriesSortBy, seriesSortOrder, shelfId ?? "legacy"],
+    queryFn: async ({ pageParam: cursor }): Promise<{ items: EntityFacet[]; nextCursor: string | null; total: number }> => {
+      if (shelfId) {
+        const page = await libraryV2PersonSeries(shelfId, {
+          query: serverSeriesQuery || null,
+          sort: seriesSortBy,
+          order: seriesSortOrder,
+          offset: cursor ? Number(cursor) : 0,
+          limit: ENTITY_SERIES_PAGE_SIZE,
+        });
+        return { items: page.items.map(shelfSeriesFacet), nextCursor: page.next === null ? null : String(page.next), total: page.total };
+      }
+      return runtime
       ? listEntitySeriesPage(source, key, {
         query: serverSeriesQuery || null,
         sortBy: seriesSortBy,
@@ -435,7 +503,8 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
         limit: ENTITY_SERIES_PAGE_SIZE,
         cursor,
       })
-      : Promise.resolve({ items: [] as EntityFacet[], nextCursor: null, total: 0 }),
+      : Promise.resolve({ items: [] as EntityFacet[], nextCursor: null, total: 0 });
+    },
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage, allPages) => {
       const cursor = lastPage.nextCursor;
@@ -449,17 +518,20 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     // 出しているので、開いてから取りに行くと数字が遅れて現れる。1ページ分
     // （60件）は開いたときに要るものでもあるので、先に取っておけば
     // タブの中身も待たされない。
-    enabled: kind === "person",
+    enabled: kind === "person" && (legacyMode || Boolean(shelfId)),
     staleTime: 5 * 60_000,
   });
   // この作者・このシリーズの作品を 1 件でも含むコレクション。詳細から、
   // それが関わっているまとまりへ直接辿れるようにする。**作者にしか無いと、
   // 同じ画面で作りが割れる。**
   const entityCollections = useQuery({
-    queryKey: ["collections-for-entity", kind, source, key],
-    queryFn: () => runtime
-      ? (kind === "person" ? listCollectionsForPerson(source, key) : listCollectionsForSeries(source, key))
-      : Promise.resolve([] as WorkCollectionSummary[]),
+    queryKey: ["collections-for-entity", kind, source, key, shelfId ?? "legacy"],
+    queryFn: () => shelfId
+      ? shelfEntityCollections(kind, shelfId)
+      : runtime
+        ? (kind === "person" ? listCollectionsForPerson(source, key) : listCollectionsForSeries(source, key))
+        : Promise.resolve([] as WorkCollectionSummary[]),
+    enabled: legacyMode || Boolean(shelfId),
     staleTime: 60_000,
   });
   const [storedCollectionSort, setStoredCollectionSort] = useLocalStorage<unknown>({
@@ -494,26 +566,37 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     setUrlParams(next, { replace: true });
   };
   const entityTags = useQuery({
-    queryKey: ["entity-tags", kind, source, key],
-    queryFn: () => runtime ? listEntityTags(kind, source, key) : Promise.resolve([] as FacetCount[]),
+    queryKey: ["entity-tags", kind, source, key, shelfId ?? "legacy"],
+    queryFn: async (): Promise<FacetCount[]> => shelfId
+      ? libraryV2EntityTags(kind, shelfId)
+      : runtime ? listEntityTags(kind, source, key) : [],
+    enabled: legacyMode || Boolean(shelfId),
     staleTime: 5 * 60_000,
   });
   const versions = useQuery({
-    queryKey: ["entity-versions", kind, source, key],
-    queryFn: () => runtime ? listEntityVersions<EntityVersion[]>(kind, source, key) : Promise.resolve<EntityVersion[]>([{ id: 1, entityType: kind, source, sourceKey: key, version: 2, contentHash: null, jsonPath: "preview.json", assetCount: 1, fileSizeBytes: 24000, createdAt: new Date().toISOString(), changeSummary: "プロフィール更新" }]),
-    enabled: tab === "history",
+    queryKey: ["entity-versions", kind, source, key, shelfId ?? "legacy"],
+    queryFn: () => shelfMode && shelfHead.data ? Promise.resolve(shelfEntityVersions(shelfHead.data)) : runtime ? listEntityVersions<EntityVersion[]>(kind, source, key) : Promise.resolve<EntityVersion[]>([{ id: 1, entityType: kind, source, sourceKey: key, version: 2, contentHash: null, jsonPath: "preview.json", assetCount: 1, fileSizeBytes: 24000, createdAt: new Date().toISOString(), changeSummary: "プロフィール更新" }]),
+    enabled: tab === "history" && (legacyMode || Boolean(shelfId)),
   });
   const profileJson = useQuery({
-    queryKey: ["entity-json", kind, source, key],
-    queryFn: () => runtime ? getLatestEntityProfileJson<Record<string, unknown>>(kind, source, key) : Promise.resolve(entity.data ?? {}),
+    queryKey: ["entity-json", kind, source, key, shelfId ?? "legacy"],
+    queryFn: async () => {
+      if (shelfMode) {
+        const head = shelfHead.data;
+        const raw = head?.snapshot ? await libraryV2EntityOriginal(head.id, head.snapshot) : null;
+        return raw ? JSON.parse(raw) as Record<string, unknown> : null;
+      }
+      return runtime ? getLatestEntityProfileJson<Record<string, unknown>>(kind, source, key) : entity.data ?? {};
+    },
     enabled: Boolean(entity.data),
   });
   const target = useQuery({
     // Same namespace as the shelf and the update centre. A singular key looked
     // tidier but shares no prefix with ["update-targets"], so turning watching
     // on here left those screens showing the old state, and vice versa.
-    queryKey: ["update-targets", kind, source, key],
+    queryKey: ["update-targets", kind, source, key, shelfMode ? shelfId : "legacy"],
     queryFn: () => runtime ? getUpdateTarget<UpdateTarget>(kind === "person" ? "author" : "series", source, key) : Promise.resolve(null),
+    enabled: legacyMode || (canManageWatching && Boolean(shelfId)),
   });
   const displayName = useMemo(() => entity.data ? (kind === "person" ? (entity.data as PersonEntry).displayName : (entity.data as SeriesEntry).title) : "", [entity.data, kind]);
   const refreshMutation = useMutation({
@@ -521,19 +604,28 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       if (!runtime) return {};
       return refreshEntityProfile({ entityType: kind, source, sourceKey: key, force: true, refreshToken: await store.get<string>("pixiv_refresh_token"), cookie: await store.get<string>("fanbox_session_id"), userAgent: await store.get<string>("fanbox_user_agent") || "Mozilla/5.0" });
     },
-    onSuccess: () => { notifications.show({ color: "green", message: "プロフィールを更新しました" }); queryClient.invalidateQueries({ queryKey: ["entity", kind, source, key] }); queryClient.invalidateQueries({ queryKey: ["entity-versions", kind, source, key] }); queryClient.invalidateQueries({ queryKey: ["entity-json", kind, source, key] }); },
+    onSuccess: () => { notifications.show({ color: "green", message: "プロフィールを更新しました" }); invalidateShelf(queryClient); },
     onError: (error) => notifications.show({ color: "red", title: "更新できません", message: errorMessage(error) }),
   });
   const targetMutation = useMutation({
     mutationFn: async (enabled: boolean) => {
+      if (!canManageWatching) throw new Error(READ_ONLY);
       if (!runtime) return;
       await upsertUpdateTarget({ targetType: kind === "person" ? "author" : "series", source, sourceKey: key, displayName, enabled, metadataJson: null });
     },
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["update-targets"] }); notifications.show({ color: "green", message: "更新監視を変更しました" }); },
+    onSuccess: () => { invalidateShelf(queryClient); notifications.show({ color: "green", message: "更新監視を変更しました" }); },
     onError: (error) => notifications.show({ color: "red", title: "更新監視を変更できません", message: errorMessage(error) }),
   });
+  const [checkingSource, setCheckingSource] = useState(false);
+  const checkSource = async () => {
+    if (!canManageWatching || checkingSource) return;
+    setCheckingSource(true);
+    try {
+      await runSingleCheck({ kind: kind === "person" ? "author" : "series", source, sourceKey: key, label: displayName }, () => navigate("/updates"));
+    } finally { setCheckingSource(false); }
+  };
   const workItems = useMemo(() => {
-    const seen = new Set<number>();
+    const seen = new Set<number | string>();
     return works.data?.pages.flatMap((page) => page.items.filter((work) => {
       if (seen.has(work.id)) return false;
       seen.add(work.id);
@@ -604,7 +696,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     };
   }, [entity.data, kind]);
 
-  if (entity.isLoading) return <div className="page"><LoadingState /></div>;
+  if (entity.isLoading || shelfDeciding) return <div className="page"><LoadingState /></div>;
   if (entity.error || !entity.data) return <div className="page"><ErrorState error={entity.error ?? "情報がありません"} retry={() => entity.refetch()} /></div>;
   const entry = entity.data;
   // シリーズで知りたいのは日付ではなく「何話取りこぼしているか」である。
@@ -614,7 +706,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const localCount = entry.workCount ?? 0;
   const missingCount = publishedCount === null ? 0 : Math.max(0, publishedCount - localCount);
   const profileData = (profileJson.data ?? {}) as Record<string, any>;
-  const profileStats = profileData.stats as Record<string, number> | undefined;
+  const profileStats = profileData.stats as Record<string, unknown> | undefined;
   const coverPath = entry.coverPath;
   const avatarPath = kind === "person" ? (entry as PersonEntry).iconPath : coverPath;
   // 保存元が画像を持ちうるのに置かれていない場合は、保存元と同じく一枚の絵で
@@ -637,6 +729,17 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   };
   const exportZip = async () => {
     if (!runtime) return notifications.show({ color: "piep", message: "書き出しはデスクトップアプリで利用できます" });
+    if (shelfMode) {
+      // 新しい棚では、作品だけを写した棚の部分写し（フォルダー一つ）。設定の復元から取り込める。
+      try {
+        const directory = await openSingleDialog({ directory: true, title: "アーカイブの書き出し先" });
+        if (!directory) return;
+        const written = await libraryV2ExportEntityArchive(kind, source, key, directory, displayName.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) || key);
+        notifications.show({ color: "green", title: `${formatNumber(written.works)}作品を書き出しました`, message: written.path });
+      }
+      catch (error) { notifications.show({ color: "red", title: "書き出しに失敗しました", message: errorMessage(error) }); }
+      return;
+    }
     try {
       const path = await saveDialog({ title: "アーカイブを書き出す", defaultPath: `${displayName.replace(/[\\/:*?"<>|]/g, "_")}.zip`, filters: [{ name: "ZIP archive", extensions: ["zip"] }] });
       if (!path) return;
@@ -649,7 +752,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
     { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSourceExternally },
     { key: "archive", label: "アーカイブ", icon: Icons.archive, onClick: exportZip },
-    { key: "refresh", label: "情報を更新", icon: Icons.watch, primary: true, loading: refreshMutation.isPending, onClick: () => refreshMutation.mutate() },
+    { key: "refresh", label: "情報を更新", icon: Icons.watch, primary: true, loading: refreshMutation.isPending, onClick: () => refreshMutation.mutate(), disabled: !canRefreshProfile, hint: !canRefreshProfile ? `情報を更新（${READ_ONLY}）` : undefined },
   ];
 
   return (
@@ -659,7 +762,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
           behind this one, and pushing a clean copy throws them away. */}
       <Breadcrumbs mb="md"><Anchor component="button" type="button" size="sm" onClick={() => returnTo(`/library?tab=${kind === "person" ? "people" : "series"}`)}>{kind === "person" ? "作者・クリエイター" : "シリーズ"}</Anchor><Text size="sm" c="dimmed">{displayName}</Text></Breadcrumbs>
       <Card ref={entityHeroRef} className="entity-hero" data-kind={kind} padding={0}>
-        {kind === "person" && coverPath && <Box className="entity-hero__banner"><Image src={getAssetUrl(coverPath)} alt={`${displayName}のヘッダー画像`} /></Box>}
+        {kind === "person" && coverPath && <Box className="entity-hero__banner"><Image src={assetUrl(coverPath)} alt={`${displayName}のヘッダー画像`} /></Box>}
         <Box className="entity-hero__body">
           <Box className="entity-hero__primary">
             {/* 操作は人物情報とは別の段として扱う。作者名のまとまりをアイコンの
@@ -667,8 +770,8 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
             {kind === "person" && <Box className="entity-hero__actions"><ActionBar label={`${displayName}の操作`} items={entityActions} /></Box>}
             <Group align={kind === "person" ? "center" : "flex-start"} wrap="nowrap" miw={0} className="entity-hero__identity">
               {kind === "person"
-                ? <Avatar className="entity-hero__avatar" src={getAssetUrl(avatarPath)} size={112} radius="xl" color="piep">{noImage ? <NoImageMark /> : <Icons.person size={IconSize.avatar} />}</Avatar>
-                : <Box ref={seriesCoverRef} className="entity-hero__series-cover">{avatarPath ? <Image src={getAssetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Icons.series size={IconSize.avatar} />}</Box>}
+                ? <Avatar className="entity-hero__avatar" src={assetUrl(avatarPath)} size={112} radius="xl" color="piep">{noImage ? <NoImageMark /> : <Icons.person size={IconSize.avatar} />}</Avatar>
+                : <Box ref={seriesCoverRef} className="entity-hero__series-cover">{avatarPath ? <Image src={assetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Icons.series size={IconSize.avatar} />}</Box>}
               <Stack gap={7} mb={5} miw={0} align="flex-start" className="entity-hero__identity-copy">
                 {/* 作品と同じく、印と操作を同じ段に置く。操作だけの段を立てると左が空く。 */}
                 <div className="entity-hero__toprow">
@@ -678,7 +781,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                 <Title order={1} className="entity-hero__title">{displayName}</Title>{/* かつてここには「更新 …」と出ていたが、指していたのは取得元での更新では
                     なく piep の行が書き換わった日だった。読む側には区別がつかない。
                     取得元の話をしないなら、手元の言葉で言う。確認していなければ何も出さない。 */}
-                <Group gap="xs">{seriesEntry ? <><Badge variant="light" color="gray">{missingCount > 0 ? `手元 ${formatNumber(localCount)}話 / 取得元 ${formatNumber(publishedCount ?? 0)}話` : `${formatNumber(localCount)}話`}</Badge>{missingCount > 0 && <Badge variant="light" color="yellow">{formatNumber(missingCount)}話 未取得</Badge>}{seriesEntry.isConcluded && <Badge variant="light" color="gray">完結</Badge>}</> : <Badge variant="light" color="gray">{formatNumber(localCount)}作品</Badge>}{entry.lastCheckedAt && <Text size="xs" c="dimmed">{formatFreshness(entry.lastCheckedAt)}に確認</Text>}</Group>
+                <Group gap="xs">{seriesEntry ? <><Badge variant="light" color="gray">{missingCount > 0 ? `手元 ${formatNumber(localCount)}話 / 取得元 ${formatNumber(publishedCount ?? 0)}話` : `${formatNumber(localCount)}話`}</Badge>{missingCount > 0 && <Badge variant="light" color="yellow">{formatNumber(missingCount)}話 未取得</Badge>}{seriesEntry.isConcluded && <Badge variant="light" color="gray">完結</Badge>}</> : <Badge variant="light" color="gray">{formatNumber(localCount)}作品</Badge>}{shelfMode && <Tooltip label={shelfWritable(shelfV2Status.data) ? "切り替えた新しい棚から読んでいます。" : "新しい棚（試験中）から読んでいます。読むだけで、ここからは何も書き換えません。"}><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}{entry.lastCheckedAt && <Text size="xs" c="dimmed">{formatFreshness(entry.lastCheckedAt)}に確認</Text>}</Group>
               </Stack>
             </Group>
           </Box>
@@ -710,7 +813,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
             <Tabs.Panel value="works" pt="lg">
               <Stack gap="sm">
                 {/* 作風のメモ。作者のときだけ、設定してあるときだけ出る。 */}
-                {kind === "person" && <AuthorAssist source={source} personKey={key} />}
+                {kind === "person" && <AuthorAssist source={source} personKey={key} shelf={shelfMode} />}
                 <Group gap="sm" wrap="nowrap" align="center">
                   <TextInput
                     flex={1}
@@ -809,7 +912,9 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                         onGoTo: setPage,
                         maxDirectPage,
                         limitNotice: pageLimitNotice,
-                        unavailableReason: searchingByRelevance
+                        unavailableReason: shelfMode
+                          ? "新しい棚の一覧はページ番号で移動できません。"
+                          : searchingByRelevance
                           ? "関連度順はページ番号で移動できません。並び順を選ぶとページ番号が使えます。"
                           : null,
                       }}
@@ -866,7 +971,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                             <Text size="sm">ライブラリが更新され、続きの位置が分からなくなったようです。表示中のシリーズはそのまま残しています。</Text>
                             <Group gap="xs">
                               <Button size="xs" variant="default" onClick={() => authorSeries.fetchNextPage()}>もう一度試す</Button>
-                              <Button size="xs" variant="default" onClick={() => queryClient.resetQueries({ queryKey: ["entity-series", source, key, serverSeriesQuery, seriesSortBy, seriesSortOrder], exact: true })}>先頭から読み直す</Button>
+                              <Button size="xs" variant="default" onClick={() => queryClient.resetQueries({ queryKey: ["entity-series", source, key, serverSeriesQuery, seriesSortBy, seriesSortOrder, shelfId ?? "legacy"], exact: true })}>先頭から読み直す</Button>
                             </Group>
                           </Stack>
                         </Alert>
@@ -927,14 +1032,15 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                     ))}</SimpleGrid>}
               </Stack>
             </Tabs.Panel>
-            <Tabs.Panel value="history" pt="lg"><Paper p="lg" withBorder>{versions.isLoading ? <LoadingState /> : <Timeline active={versions.data?.length ?? 0}>{versions.data?.map((version) => <Timeline.Item key={version.id} bullet={<Icons.versionHistory size={IconSize.inline} />} title={`バージョン ${version.version}`}><Text size="sm" c="dimmed">{version.changeSummary || "プロフィールを保存"}</Text><Text size="xs" c="dimmed" mt={4}>{formatDate(version.createdAt, true)} · {formatBytes(version.fileSizeBytes)}</Text></Timeline.Item>)}</Timeline>}</Paper></Tabs.Panel>
+            <Tabs.Panel value="history" pt="lg"><Paper p="lg" withBorder>{versions.isLoading ? <LoadingState /> : <Timeline active={versions.data?.length ?? 0}>{versions.data?.map((version) => <Timeline.Item key={version.id} bullet={<Icons.versionHistory size={IconSize.inline} />} title={`バージョン ${version.version}`}><Text size="sm" c="dimmed">{version.changeSummary || "プロフィールを保存"}</Text><Text size="xs" c="dimmed" mt={4}>{shelfMode ? formatDate(version.createdAt, true) : `${formatDate(version.createdAt, true)} · ${formatBytes(version.fileSizeBytes)}`}</Text></Timeline.Item>)}</Timeline>}</Paper></Tabs.Panel>
             <Tabs.Panel value="json" pt="lg">{tab !== "json" ? null : profileJson.isLoading ? <LoadingState /> : profileJson.error ? <ErrorState error={profileJson.error} retry={() => profileJson.refetch()} /> : <BoundedJsonView value={profileJson.data ?? {}} />}</Tabs.Panel>
           </Tabs>
         </Grid.Col>
         <Grid.Col span={{ base: 12, lg: 3 }}>
           <Stack gap="lg">
-            <Card p="lg"><Stack gap="md"><Group justify="space-between"><Box><Text fw={700}>新作・改稿を監視</Text><Text size="xs" c="dimmed" mt={4}>{kind === "person" ? "新しい作品を検出" : "シリーズの続編を検出"}</Text></Box><Switch checked={targetMutation.isPending ? targetMutation.variables : target.data?.enabled ?? false} disabled={targetMutation.isPending || target.isLoading} onChange={(event) => targetMutation.mutate(event.currentTarget.checked)} aria-label="新作と改稿の監視" /></Group>{/* 監視に入れなくても、その場で一度だけ見に行ける。 */}<Button variant="light" leftSection={<Icons.updates size={IconSize.menu} />} onClick={() => runSingleCheck({ kind: kind === "person" ? "author" : "series", source, sourceKey: key, label: displayName }, () => navigate("/updates"))}>{kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}</Button></Stack></Card>
-            <Card p="lg"><Text fw={700} mb="md">プロフィール情報</Text><Stack gap="sm">{profileData.account && <Meta label="アカウント" value={`@${profileData.account}`} />}{profileStats && <><Meta label="小説" value={`${formatNumber(profileStats.totalNovels ?? 0)}作品`} /><Meta label="小説シリーズ" value={`${formatNumber(profileStats.totalNovelSeries ?? 0)}件`} /></>}{typeof profileData.sampleNovelCount === "number" && <Meta label="取得済み構成作品" value={`${formatNumber(profileData.sampleNovelCount)}件`} />}<Meta label="現在のバージョン" value={`v${entry.currentVersion}`} /><Meta label="最終取得" value={formatDate(entry.lastFetchedAt, true)} /><Meta label="最終確認" value={formatDate(entry.lastCheckedAt, true)} /></Stack></Card>
+            <Card p="lg"><Stack gap="md"><Group justify="space-between"><Box><Text fw={700}>新作・改稿を監視</Text><Text size="xs" c="dimmed" mt={4}>{kind === "person" ? "新しい作品を検出" : "シリーズの続編を検出"}</Text></Box><Switch checked={targetMutation.isPending ? targetMutation.variables : target.data?.enabled ?? false} disabled={!canManageWatching || targetMutation.isPending || target.isLoading} onChange={(event) => targetMutation.mutate(event.currentTarget.checked)} aria-label={!canManageWatching ? `新作と改稿の監視（${READ_ONLY}）` : "新作と改稿の監視"} /></Group>{/* 監視に入れなくても、その場で一度だけ見に行ける。 */}<Button variant="light" disabled={!canManageWatching} loading={checkingSource} aria-label={!canManageWatching ? `${kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}（${READ_ONLY}）` : undefined} leftSection={<Icons.updates size={IconSize.menu} />} onClick={() => { void checkSource(); }}>{kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}</Button></Stack></Card>
+            <Card p="lg"><Text fw={700} mb="md">プロフィール情報</Text><Stack gap="sm">{profileData.account && <Meta label="アカウント" value={`@${profileData.account}`} />}{profileStats && <><Meta label="小説" value={typeof profileStats.totalNovels === "number" ? `${formatNumber(profileStats.totalNovels)}作品` : "未確認"} /><Meta label="小説シリーズ" value={typeof profileStats.totalNovelSeries === "number" ? `${formatNumber(profileStats.totalNovelSeries)}件` : "未確認"} /></>}{typeof profileData.sampleNovelCount === "number" && <Meta label="取得済み構成作品" value={`${formatNumber(profileData.sampleNovelCount)}件`} />}<Meta label="現在のバージョン" value={entry.currentVersion > 0 ? `v${entry.currentVersion}` : "なし"} /><Meta label="最終取得" value={formatDate(entry.lastFetchedAt, true)} /><Meta label="最終確認" value={formatDate(entry.lastCheckedAt, true)} /></Stack></Card>
+            {shelfMode && !shelfWritable(shelfV2Status.data) && <Note title="新しい棚（試験中）">旧棚から移行した時点の写しを、読むだけで開いています。更新監視・情報の更新は、設定で新しい棚を切ると使えます。コレクションの中身は旧棚で開きます。</Note>}
             {!runtime && <Note>プレビューではデモプロフィールを表示しています。</Note>}
           </Stack>
         </Grid.Col>

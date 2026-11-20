@@ -12,7 +12,7 @@ use rusqlite::{Connection, Transaction};
 use std::path::Path;
 
 const DB_FILE: &str = "piep.sqlite3";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 5;
 
 /// 版 1: 読書位置の同期。0.5.1 では `reading-sync.sqlite3` に置いていた。
 pub(super) const SYNC_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sync_meta (
@@ -47,6 +47,17 @@ const OFFLINE_SCHEMA: &str = "CREATE TABLE offline_catalog (
     source TEXT NOT NULL,
     source_id TEXT NOT NULL);
     CREATE VIRTUAL TABLE offline_text USING fts5(text, work_id UNINDEXED, page UNINDEXED, tokenize='trigram');";
+
+/// 版 4: 保存した作品を置き場の名前（`work-{番号}` か `shelf-{UUID}`）で引く。新しい棚の作品は
+/// 番号を持たないため。索引は保存版から作り直せる控えなので、古い表は捨てて作り直す。
+const OFFLINE_KEY_SCHEMA: &str = "DROP TABLE IF EXISTS offline_catalog;
+    DROP TABLE IF EXISTS offline_text;
+    CREATE TABLE offline_catalog (
+    work_key TEXT PRIMARY KEY,
+    generation TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL);
+    CREATE VIRTUAL TABLE offline_text USING fts5(text, work_key UNINDEXED, page UNINDEXED, tokenize='trigram');";
 
 pub struct DeviceDb {
     path: PathBuf,
@@ -174,6 +185,15 @@ impl DeviceDb {
             }
             if version < 3 {
                 tx.execute_batch(OFFLINE_SCHEMA).map_err(records_error)?;
+            }
+            if version < 4 {
+                tx.execute_batch(OFFLINE_KEY_SCHEMA)
+                    .map_err(records_error)?;
+            }
+            // 版 5: 新しい棚の読書位置の同期（作品は棚の UUID で見分ける）。
+            if version < 5 {
+                tx.execute_batch(super::shelf_reading::SHELF_READING_SCHEMA)
+                    .map_err(records_error)?;
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(records_error)?;

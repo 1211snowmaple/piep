@@ -5,6 +5,7 @@
 //! WebView へ返し、取得したものは端末に残す。次からはサーバーへ行かずに出せる。
 
 use super::image_validation::validate_display_image;
+use super::offline::OfflineKey;
 use super::{
     ASSET_TIMEOUT, MAX_ASSET_BYTES, PcClientState, SavedConnection, authenticated_get_with_saved,
     bounded_response_bytes,
@@ -30,10 +31,26 @@ const ENTITY_REFRESH_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, PartialEq, Eq)]
 enum Route {
-    Remote { endpoint: String, refreshes: bool },
-    SavedCover { work_id: i64 },
-    SavedEntity { work_id: i64, kind: String },
-    SavedCollection { work_id: i64, collection_id: String },
+    Remote {
+        endpoint: String,
+        refreshes: bool,
+    },
+    SavedCover {
+        work_id: OfflineKey,
+    },
+    SavedEntity {
+        work_id: OfflineKey,
+        kind: String,
+    },
+    SavedCollection {
+        work_id: OfflineKey,
+        collection_id: String,
+    },
+    /// 新しい棚の本文の画像。開いた文書の鍵と、その文書の中の画像の番号。
+    Native {
+        key: String,
+        asset: usize,
+    },
 }
 
 /// 取り直しを新しい要求から順に回す。速くスクロールすると、画面から消えた行の要求が
@@ -315,8 +332,74 @@ fn parse_route(path: &str) -> Option<Route> {
             endpoint: format!("/api/v1/collections/{id}/cover/{slot}"),
             refreshes: false,
         }),
+        // 新しい棚の作品の表紙。版の UUID は端末の覚えの鍵で、版が変わると取り直す。
+        ["shelf", library, work, snapshot, rest @ ..] if rest.is_empty() || rest == ["large"] => {
+            let library = uuid::Uuid::parse_str(library).ok()?;
+            let work = uuid::Uuid::parse_str(work).ok()?;
+            uuid::Uuid::parse_str(snapshot).ok()?;
+            let size = if rest.is_empty() { "" } else { "?size=large" };
+            Some(Route::Remote {
+                endpoint: format!("/api/v2/libraries/{library}/works/{work}/cover{size}"),
+                refreshes: false,
+            })
+        }
+        // 新しい棚の作者のアイコン・ヘッダーとシリーズの表紙。版を持たないので、古くなったら取り直す。
+        [
+            "shelf-entity",
+            library,
+            kind @ ("people" | "series"),
+            source @ ("pixiv" | "fanbox"),
+            key,
+            rest @ ..,
+        ] if rest.is_empty() || (*kind == "people" && rest == ["banner"]) => {
+            let library = uuid::Uuid::parse_str(library).ok()?;
+            let key = percent_decode(key)?;
+            if key.is_empty() || key.chars().count() > 200 {
+                return None;
+            }
+            let mut query = url::form_urlencoded::Serializer::new(String::new());
+            query.append_pair("provider", source);
+            query.append_pair("key", &key);
+            if !rest.is_empty() {
+                query.append_pair("variant", "banner");
+            }
+            Some(Route::Remote {
+                endpoint: format!(
+                    "/api/v2/libraries/{library}/{kind}/cover?{}",
+                    query.finish()
+                ),
+                refreshes: true,
+            })
+        }
+        // 新しい棚のコレクションの表紙。コレクションの世代は端末の覚えの鍵で、変わると取り直す。
+        [
+            "shelf-collection",
+            library,
+            collection,
+            slot @ ("single" | "file" | "tile-0" | "tile-1" | "tile-2" | "tile-3"),
+            revision,
+        ] => {
+            let library = uuid::Uuid::parse_str(library).ok()?;
+            let collection = uuid::Uuid::parse_str(collection).ok()?;
+            revision.parse::<u64>().ok()?;
+            Some(Route::Remote {
+                endpoint: format!(
+                    "/api/v2/libraries/{library}/collections/{collection}/cover/{slot}"
+                ),
+                refreshes: false,
+            })
+        }
+        ["native", entity, kind @ ("snapshot" | "edit"), view, asset] => {
+            let entity = uuid::Uuid::parse_str(entity).ok()?;
+            let view = uuid::Uuid::parse_str(view).ok()?;
+            let asset: usize = asset.parse().ok().filter(|asset| *asset < 1_000_000)?;
+            Some(Route::Native {
+                key: format!("{entity}/{kind}/{view}"),
+                asset,
+            })
+        }
         ["saved", id, _generation] => Some(Route::SavedCover {
-            work_id: positive(id)?,
+            work_id: OfflineKey::parse(id)?,
         }),
         [
             "saved-entity",
@@ -324,12 +407,12 @@ fn parse_route(path: &str) -> Option<Route> {
             kind @ ("people" | "series"),
             _generation,
         ] => Some(Route::SavedEntity {
-            work_id: positive(id)?,
+            work_id: OfflineKey::parse(id)?,
             kind: (*kind).to_string(),
         }),
         ["saved-collection", id, collection, _generation] if safe_collection_id(collection) => {
             Some(Route::SavedCollection {
-                work_id: positive(id)?,
+                work_id: OfflineKey::parse(id)?,
                 collection_id: (*collection).to_string(),
             })
         }
@@ -476,6 +559,62 @@ async fn serve_remote<R: Runtime>(
     }
 }
 
+pub(super) fn sniffed_mime(bytes: &[u8]) -> Option<&'static str> {
+    Some(match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Jpeg => "image/jpeg",
+        image::ImageFormat::Png => "image/png",
+        image::ImageFormat::WebP => "image/webp",
+        image::ImageFormat::Gif => "image/gif",
+        _ => return None,
+    })
+}
+
+/// 新しい棚の本文の画像。開いた文書の一式に載っているファイルだけを取りに行く。
+/// 中身のハッシュで決まるので、接続先とハッシュで残す（改稿で古い絵が出ることはない）。
+async fn serve_native<R: Runtime>(
+    app: &AppHandle<R>,
+    key: &str,
+    asset: usize,
+) -> Response<Vec<u8>> {
+    use super::native_reader::{NativeReaderState, fetch_image, image_target};
+    let Some(target) = image_target(&app.state::<NativeReaderState>(), key, asset) else {
+        return failure(StatusCode::NOT_FOUND);
+    };
+    if target.file.length > MAX_ASSET_BYTES as u64 {
+        return failure(StatusCode::BAD_GATEWAY);
+    }
+    let cache = app.state::<CoverCacheState>();
+    let state = app.state::<PcClientState>();
+    let Ok((generation, Some(saved))) = state.connection_snapshot() else {
+        return failure(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let file = cache_path(&cache.dir, &saved.url, &format!("native/{}", target.id()));
+    let Ok(cached) = state.with_connection(generation, || Ok(read_cached(&file))) else {
+        return failure(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    if let Some((mime, bytes)) = cached {
+        return respond(StatusCode::OK, Some(&mime), bytes);
+    }
+    let _permit = cache.limiter.acquire().await;
+    let Ok(bytes) = fetch_image(&state, &target).await else {
+        return failure(StatusCode::BAD_GATEWAY);
+    };
+    let Some(mime) = sniffed_mime(&bytes) else {
+        return failure(StatusCode::BAD_GATEWAY);
+    };
+    if validate_display_image(&bytes, mime).is_err() {
+        return failure(StatusCode::BAD_GATEWAY);
+    }
+    let stored = state.with_connection(generation, || {
+        cache.write(&file, mime, &bytes);
+        Ok(())
+    });
+    if stored.is_err() {
+        return failure(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    respond(StatusCode::OK, Some(mime), bytes)
+}
+
 async fn serve<R: Runtime>(app: &AppHandle<R>, path: &str) -> Response<Vec<u8>> {
     use super::offline::{OfflineState, saved_collection_cover, saved_cover, saved_entity_cover};
     let Some(route) = parse_route(path) else {
@@ -486,14 +625,15 @@ async fn serve<R: Runtime>(app: &AppHandle<R>, path: &str) -> Response<Vec<u8>> 
             endpoint,
             refreshes,
         } => return serve_remote(app, path, &endpoint, refreshes).await,
-        Route::SavedCover { work_id } => saved_cover(&app.state::<OfflineState>(), work_id).await,
+        Route::Native { key, asset } => return serve_native(app, &key, asset).await,
+        Route::SavedCover { work_id } => saved_cover(&app.state::<OfflineState>(), &work_id).await,
         Route::SavedEntity { work_id, kind } => {
-            saved_entity_cover(&app.state::<OfflineState>(), work_id, &kind).await
+            saved_entity_cover(&app.state::<OfflineState>(), &work_id, &kind).await
         }
         Route::SavedCollection {
             work_id,
             collection_id,
-        } => saved_collection_cover(&app.state::<OfflineState>(), work_id, &collection_id).await,
+        } => saved_collection_cover(&app.state::<OfflineState>(), &work_id, &collection_id).await,
     };
     match saved {
         Ok((mime, bytes)) => respond(StatusCode::OK, Some(&mime), bytes),
@@ -664,11 +804,84 @@ mod tests {
                 refreshes: false
             })
         );
+        let (library, work, snapshot) = (
+            "01a1eeaa-0000-7000-8000-000000000001",
+            "01a1eeaa-0000-7000-8000-000000000002",
+            "01a1eeaa-0000-7000-8000-000000000003",
+        );
+        assert_eq!(
+            parse_route(&format!("/shelf%2F{library}%2F{work}%2F{snapshot}")),
+            Some(Route::Remote {
+                endpoint: format!("/api/v2/libraries/{library}/works/{work}/cover"),
+                refreshes: false
+            })
+        );
+        assert_eq!(
+            parse_route(&format!("/shelf%2F{library}%2F{work}%2F{snapshot}%2Flarge")),
+            Some(Route::Remote {
+                endpoint: format!("/api/v2/libraries/{library}/works/{work}/cover?size=large"),
+                refreshes: false
+            })
+        );
+        assert_eq!(
+            parse_route(&format!(
+                "/shelf-entity%2F{library}%2Fpeople%2Fpixiv%2Fa%2520b%2Fbanner"
+            )),
+            Some(Route::Remote {
+                endpoint: format!(
+                    "/api/v2/libraries/{library}/people/cover?provider=pixiv&key=a+b&variant=banner"
+                ),
+                refreshes: true
+            })
+        );
+        assert_eq!(
+            parse_route(&format!("/shelf-entity%2F{library}%2Fseries%2Ffanbox%2F9")),
+            Some(Route::Remote {
+                endpoint: format!("/api/v2/libraries/{library}/series/cover?provider=fanbox&key=9"),
+                refreshes: true
+            })
+        );
+        assert_eq!(
+            parse_route(&format!(
+                "/shelf-collection%2F{library}%2F{work}%2Ftile-2%2F4"
+            )),
+            Some(Route::Remote {
+                endpoint: format!("/api/v2/libraries/{library}/collections/{work}/cover/tile-2"),
+                refreshes: false
+            })
+        );
+        for bad in [
+            format!("/shelf%2F{library}%2F{work}%2F{snapshot}%2Fhuge"),
+            format!("/shelf%2F{library}%2F..%2F{snapshot}"),
+            format!("/shelf%2F{library}%2F{work}"),
+            format!("/shelf-entity%2F{library}%2Fseries%2Fpixiv%2F9%2Fbanner"),
+            format!("/shelf-entity%2F{library}%2Fpeople%2Fother%2F9"),
+            "/shelf-entity%2Fnot-a-uuid%2Fpeople%2Fpixiv%2F9".to_string(),
+            format!("/shelf-collection%2F{library}%2F{work}%2Ftile-4%2F4"),
+            format!("/shelf-collection%2F{library}%2Flegacy-id%2Ffile%2F4"),
+            format!("/shelf-collection%2F{library}%2F{work}%2Ffile%2F-1"),
+        ] {
+            assert_eq!(parse_route(&bad), None, "{bad}");
+        }
         assert_eq!(parse_route("/asset%2F12%2F5%2F99999%2F3%2Fabc"), None);
         assert_eq!(parse_route("/asset%2F12%2F-5%2F1080%2F3%2Fabc"), None);
         assert_eq!(
             parse_route("/saved%2F7%2F99"),
-            Some(Route::SavedCover { work_id: 7 })
+            Some(Route::SavedCover {
+                work_id: OfflineKey::Legacy(7)
+            })
+        );
+        let shelf = uuid::Uuid::now_v7();
+        assert_eq!(
+            parse_route(&format!("/saved-entity%2F{shelf}%2Fpeople%2F1")),
+            Some(Route::SavedEntity {
+                work_id: OfflineKey::Shelf(shelf),
+                kind: "people".into()
+            })
+        );
+        assert_eq!(
+            parse_route(&format!("/saved%2F{}%2F1", shelf.simple())),
+            None
         );
         for bad in [
             "/work%2F0%2F1%2Fa",

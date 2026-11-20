@@ -95,7 +95,7 @@ function SavedGroupArtwork({ group, kind }: { group: SavedGroup; kind: "people" 
 
 interface TextSearch {
   query: string;
-  hits: Map<number, OfflineTextHit>;
+  hits: Map<number | string, OfflineTextHit>;
   failed: boolean;
 }
 
@@ -103,7 +103,7 @@ interface TextSearch {
 const textQueryLimit = 100;
 
 async function findInText(query: string): Promise<TextSearch> {
-  const empty = { query, hits: new Map<number, OfflineTextHit>(), failed: false };
+  const empty = { query, hits: new Map<number | string, OfflineTextHit>(), failed: false };
   if (!query.trim() || query.length > textQueryLimit || !isTauri()) return empty;
   try {
     const hits = await searchOfflineText(query);
@@ -137,7 +137,7 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
   const [problem, setProblem] = useState<string | null>(null);
   const [issuesProblem, setIssuesProblem] = useState<string | null>(null);
   const [loadRevision, setLoadRevision] = useState(0);
-  const [deletingIssueId, setDeletingIssueId] = useState<number | null>(null);
+  const [deletingIssueId, setDeletingIssueId] = useState<number | string | null>(null);
   const [searchInputs, setSearchInputs] = useState<Record<OfflineTab, string>>(emptySearches);
   const [queries, setQueries] = useState<Record<OfflineTab, string>>(emptySearches);
   const [groupSearchInput, setGroupSearchInput] = useState("");
@@ -165,7 +165,7 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
     return () => { alive = false; };
   }, [savedRevision, loadRevision]);
 
-  const removeUnreadableWork = async (workId: number) => {
+  const removeUnreadableWork = async (workId: number | string) => {
     setDeletingIssueId(workId);
     setIssuesProblem(null);
     try {
@@ -237,7 +237,7 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
       <h2 id="offline-issues-title">読み込めない保存データ</h2>
       <p>本文を読み込めない保存データがあります。不要なものは端末から削除できます。</p>
       {issuesProblem && <p className="offline-issues-error" role="alert">{issuesProblem}</p>}
-      {issues.map((issue) => <div className="offline-issue-row" key={issue.workId}><span>作品番号 {issue.workId} の保存データを読み込めません</span><button className="secondary-button" type="button" disabled={deletingIssueId === issue.workId} onClick={() => void removeUnreadableWork(issue.workId)}>{deletingIssueId === issue.workId ? "削除中…" : "このデータを削除"}</button></div>)}
+      {issues.map((issue) => <div className="offline-issue-row" key={issue.workId}><span>{typeof issue.workId === "number" ? `作品番号 ${issue.workId} の保存データを読み込めません` : "保存した作品のうち一つの保存データを読み込めません"}</span><button className="secondary-button" type="button" disabled={deletingIssueId === issue.workId} onClick={() => void removeUnreadableWork(issue.workId)}>{deletingIssueId === issue.workId ? "削除中…" : "このデータを削除"}</button></div>)}
       {issuesProblem && <button className="secondary-button offline-retry" type="button" onClick={() => setLoadRevision((revision) => revision + 1)} disabled={loading}>{loading ? "確認中…" : "一覧を再確認"}</button>}
     </section>}
     <nav className="library-tabs" aria-label="端末内のライブラリの種類">{(["works", "people", "series", "collections"] as const).map((id) => <button key={id} type="button" className={tab === id ? "active" : ""} aria-current={tab === id ? "page" : undefined} onClick={() => navigation.push({ page: { name: "offline", tab: id, groupId: null } })}>{tabLabel[id]}</button>)}</nav>

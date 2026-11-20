@@ -23,6 +23,13 @@ export function LibraryPage() {
   return (
     <div className="adm-section">
       <PageHead title="ライブラリ" lead="このサーバーではライブラリを変更しません。変更はデスクトップ版から送ります。" />
+      {data?.libraryV2 && <Card title="配信中の新しい棚">
+        <Facts items={[
+          ["作品", `${data.libraryV2.works} 作品`],
+          ["棚の UUID", data.libraryV2.libraryId],
+          ["同期の世代", data.libraryV2.syncEpoch],
+        ]} />
+      </Card>}
       <Card title="受け取った内容">
         {!data ? <Skeleton height={80} /> : (
           <Facts items={[

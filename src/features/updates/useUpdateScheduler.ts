@@ -3,7 +3,10 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import { isTauriRuntime, listUpdateTargets, listWatchGroups, searchDownloadsV2 } from "@/services/dbApi";
 import { listUpdateJobsCommand, startUpdateJobCommand, type StartUpdateJobRequest } from "@/services/updateJobApi";
 import { isUpdateJobActive, isUpdateJobTerminal, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
-import { isRunDue, loadSchedule, readLastRun, writeLastRun } from "@/features/updates/updateSchedule";
+import { isRunDue, loadSchedule, saveSchedule, readLastRun, writeLastRun } from "@/features/updates/updateSchedule";
+import { libraryV2Search, libraryV2Status } from "@/services/libraryV2Api";
+import { watchGroupMatches } from "@/lib/watchIdentity";
+import type { WatchId } from "@/types/library";
 
 /** How often the app re-checks whether a scheduled run has come due. */
 const TICK_MS = 5 * 60_000;
@@ -64,6 +67,8 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
         const settings = await loadSchedule();
         const lastRun = await readLastRun();
         if (!isRunDue(settings, lastRun, Date.now(), startup)) return;
+        const shelf = await libraryV2Status();
+        if (shelf.state !== "ready" && shelf.state !== "absent") return;
 
         // すでに走っているジョブがあれば、そのまま任せる。待つのは worker が
         // 付いているものだけ - 一時停止や再接続待ちのまま放置された1件を
@@ -77,9 +82,9 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
           // 消えていたら走らせない - すべてへ広げると、絞った意味が無くなる。
           const [groups, targets] = await Promise.all([
             listWatchGroups(),
-            listUpdateTargets<{ id: number }>(null, true),
+            listUpdateTargets<{ id: WatchId }>(null, true),
           ]);
-          const group = groups.find((item) => item.id === settings.groupId);
+          const group = groups.find((item) => watchGroupMatches(item, settings.groupId));
           if (!group) {
             console.error("自動確認の範囲にした監視グループが見つかりません", settings.groupId);
             return;
@@ -87,13 +92,16 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
           const members = new Set(group.targetIds);
           const targetIds = targets.filter((target) => members.has(target.id)).map((target) => target.id);
           if (!targetIds.length) return;
+          if (group.id !== settings.groupId) await saveSchedule({ ...settings, groupId: group.id });
           request = { scope: "targets", mode: settings.mode, targetIds, watchSaved: settings.watchSaved, newWorksOnly: settings.newWorksOnly };
         } else {
-          // 監視対象も監視作品も無いなら、確認する意味がない。作品の監視は
-          // downloads 側の旗なので、update_targets を見るだけでは数え落とす。
+          // 監視対象も監視作品も無いなら、確認する意味がない。作品ごとの監視は
+          // 作者・シリーズの登録と別なので、正本の棚で両方を確かめる。
           const [targets, watchedWorks] = await Promise.all([
-            listUpdateTargets<{ id: number }>(null, true),
-            searchDownloadsV2({ watchFilter: "watched", limit: 1, projection: "bulk" }),
+            listUpdateTargets<{ id: WatchId }>(null, true),
+            shelf.state === "ready" && shelf.switched
+              ? libraryV2Search({ text: "", versions: "current", mode: "words" }, { sort: "saved", descending: true, limit: 1, after: null, filter: { watching: true }, count: false }).then((result) => ({ items: result.cards }))
+              : searchDownloadsV2({ watchFilter: "watched", limit: 1, projection: "bulk" }),
           ]);
           if (!targets.length && (settings.newWorksOnly || !watchedWorks.items.length)) return;
           request = { scope: "all", mode: settings.mode, watchSaved: settings.watchSaved, newWorksOnly: settings.newWorksOnly };

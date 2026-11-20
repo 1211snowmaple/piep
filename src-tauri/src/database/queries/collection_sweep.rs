@@ -180,322 +180,368 @@ impl Database {
     /// 保存データを走査し、同じ規則・顔ぶれには同じ候補IDを割り当てる。
     /// 採否の記録と、作品から作った候補は維持する。
     pub fn sweep_collection_candidates(&self) -> Result<CollectionSweepResult, String> {
-        // 別版は代表だけを残し、同じ内容を重複表示しない。
-        // 「【モモ編】…」が別の作品として同じ束に二度並ぶ。
-        let (works, aliases) = keep_edition_representatives(self.load_sweep_works()?);
-        if works.len() < MIN_BUNDLE {
-            return Ok(CollectionSweepResult {
-                bundles: Vec::new(),
-                saved_search_suggestions: Vec::new(),
-                semantic_used: false,
-                note: Some("棚に作品が足りないので、まとまりを探せません。".to_string()),
-            });
-        }
-        let by_id = works
-            .iter()
-            .map(|work| (work.id, work.clone()))
-            .collect::<HashMap<_, _>>();
-
-        let mut bundles = Vec::new();
-        bundles.extend(self.sweep_link_components(&by_id, &aliases)?);
-        bundles.extend(sweep_title_families(&works));
-        bundles.extend(self.sweep_series_runs(&by_id)?);
-        let mut sequences = deduplicate_sequences(bundles);
-        let context = discovery::contextualize(self, &mut sequences, &by_id, &aliases)?;
-
-        sequences = deduplicate_sequences(sequences);
-        let mut themes = self.sweep_themes(&by_id)?;
-
-        // すでに利用者が作ったコレクションを、走査の「新しい発見」として
-        // もう一度出してはいけない。選抜したあとで落とすと、その重複が
-        // 枠を一つ使い、まだ見ていない束を押し出すため、系統ごとの選抜より前に
-        // 除く。順序付きコレクションでも、ここで知りたいのは顔ぶれの一致である。
-        let (existing, rejected_pairs) = {
-            let conn = self.read_conn()?;
-            (
-                load_existing_collection_member_sets(&conn)?,
-                load_rejected_pairs(&conn)?,
-            )
-        };
-        let allowed = |bundle: &SweepBundle| {
-            let members = bundle
-                .ids
-                .iter()
-                .filter_map(|id| by_id.get(id))
-                .collect::<Vec<_>>();
-            !bundle_is_rejected(&rejected_pairs, &members).unwrap_or(true)
-        };
-        sequences.retain(allowed);
-        themes.bundles.retain(allowed);
-        sequences.retain(|bundle| !bundle_matches_existing_collection(bundle, &by_id, &existing));
-        themes
-            .bundles
-            .retain(|bundle| !bundle_matches_existing_collection(bundle, &by_id, &existing));
-
-        // 続き物を先に置く。読む順のある束は、見つかったときの価値が大きい。
-        // 上限は系統ごとにかける — 数の多いほうが少ないほうを押し出さないため。
-        // シリーズ未登録の作品を含む発見から確認できるよう、優先枠を先に取る。
-        let (unregistered, within_series): (Vec<_>, Vec<_>) =
-            sequences.into_iter().partition(|bundle| {
-                bundle.ids.iter().any(|id| {
-                    context
-                        .details
-                        .get(&(bundle.ids.clone(), *id))
-                        .is_some_and(|items| items.iter().any(|e| e.kind == "unregistered"))
-                })
-            });
-        let within_series = select_track(within_series);
-        let unregistered = select_track(unregistered);
-        let reserved = within_series.len().min(MAX_SWEEP_PER_TRACK / 4);
-        let mut all = unregistered
-            .into_iter()
-            .take(MAX_SWEEP_PER_TRACK - reserved)
-            .collect::<Vec<_>>();
-        let remaining = MAX_SWEEP_PER_TRACK.saturating_sub(all.len());
-        all.extend(within_series.into_iter().take(remaining));
-        all.extend(select_track(themes.bundles));
-
-        let bundles = self.replace_swept_suggestions(&all, &by_id, &context)?;
+        let plan = sweep_plan(self)?;
+        let bundles = self.replace_swept_suggestions(plan.prepared)?;
         Ok(CollectionSweepResult {
             bundles,
-            saved_search_suggestions: themes.saved_searches,
-            semantic_used: themes.note.is_none(),
-            note: themes.note,
+            saved_search_suggestions: plan.saved_search_suggestions,
+            semantic_used: plan.semantic_used,
+            note: plan.note,
         })
     }
+}
 
-    /// 走査の対象になる作品。告知・活動報告はここで落とす。
-    fn load_sweep_works(&self) -> Result<Vec<SweepWork>, String> {
-        let conn = self.read_conn()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, source, source_id, title, author_name, COALESCE(author_id, ''),
+/// 走査で見つけ、保存する前の候補。保存の仕方（旧棚・新しい棚）だけが違う。
+pub(crate) struct PreparedSweep {
+    pub track: &'static str,
+    pub strength: f64,
+    pub ids_json: String,
+    pub names: Vec<CollectionNameCandidate>,
+    /// `download_id` は出どころの作品の番号（新しい棚では作業用の表の番号）。
+    pub members: Vec<CollectionSuggestionMember>,
+    pub evidence: String,
+}
+
+pub(crate) struct SweepPlan {
+    pub prepared: Vec<PreparedSweep>,
+    pub saved_search_suggestions: Vec<SavedSearchSuggestion>,
+    pub semantic_used: bool,
+    pub note: Option<String>,
+}
+
+/// 走査の候補の同一性。同じ規則・系統・顔ぶれなら、走査し直しても同じ候補になる。
+pub(crate) fn sweep_identity(
+    rule_version: &str,
+    track: &str,
+    members: &[CollectionSuggestionMember],
+) -> Result<[u8; 32], String> {
+    use sha2::{Digest, Sha256};
+    let mut stable_keys = members
+        .iter()
+        .map(|m| (&m.source, &m.source_id))
+        .collect::<Vec<_>>();
+    stable_keys.sort();
+    let identity =
+        serde_json::to_vec(&(rule_version, track, stable_keys)).map_err(|e| e.to_string())?;
+    Ok(Sha256::digest(identity).into())
+}
+
+/// 棚全体を走査して、束の候補を作る。保存はしない。
+pub(crate) fn sweep_plan(src: &dyn SuggestionSource) -> Result<SweepPlan, String> {
+    // 別版は代表だけを残し、同じ内容を重複表示しない。
+    // 「【モモ編】…」が別の作品として同じ束に二度並ぶ。
+    let (works, aliases) = keep_edition_representatives(load_sweep_works(src)?);
+    if works.len() < MIN_BUNDLE {
+        return Ok(SweepPlan {
+            prepared: Vec::new(),
+            saved_search_suggestions: Vec::new(),
+            semantic_used: false,
+            note: Some("棚に作品が足りないので、まとまりを探せません。".to_string()),
+        });
+    }
+    let by_id = works
+        .iter()
+        .map(|work| (work.id, work.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let mut bundles = Vec::new();
+    bundles.extend(sweep_link_components(src, &by_id, &aliases)?);
+    bundles.extend(sweep_title_families(&works));
+    bundles.extend(sweep_series_runs(src, &by_id)?);
+    let mut sequences = deduplicate_sequences(bundles);
+    let context = discovery::contextualize(src, &mut sequences, &by_id, &aliases)?;
+
+    sequences = deduplicate_sequences(sequences);
+    let mut themes = sweep_themes(src, &by_id)?;
+
+    // すでに利用者が作ったコレクションを、走査の「新しい発見」として
+    // もう一度出してはいけない。選抜したあとで落とすと、その重複が
+    // 枠を一つ使い、まだ見ていない束を押し出すため、系統ごとの選抜より前に
+    // 除く。順序付きコレクションでも、ここで知りたいのは顔ぶれの一致である。
+    let (existing, rejected_pairs) = {
+        let conn = src.corpus()?;
+        (
+            load_existing_collection_member_sets(&conn)?,
+            load_rejected_pairs(&conn)?,
+        )
+    };
+    let allowed = |bundle: &SweepBundle| {
+        let members = bundle
+            .ids
+            .iter()
+            .filter_map(|id| by_id.get(id))
+            .collect::<Vec<_>>();
+        !bundle_is_rejected(&rejected_pairs, &members).unwrap_or(true)
+    };
+    sequences.retain(allowed);
+    themes.bundles.retain(allowed);
+    sequences.retain(|bundle| !bundle_matches_existing_collection(bundle, &by_id, &existing));
+    themes
+        .bundles
+        .retain(|bundle| !bundle_matches_existing_collection(bundle, &by_id, &existing));
+
+    // 続き物を先に置く。読む順のある束は、見つかったときの価値が大きい。
+    // 上限は系統ごとにかける — 数の多いほうが少ないほうを押し出さないため。
+    // シリーズ未登録の作品を含む発見から確認できるよう、優先枠を先に取る。
+    let (unregistered, within_series): (Vec<_>, Vec<_>) =
+        sequences.into_iter().partition(|bundle| {
+            bundle.ids.iter().any(|id| {
+                context
+                    .details
+                    .get(&(bundle.ids.clone(), *id))
+                    .is_some_and(|items| items.iter().any(|e| e.kind == "unregistered"))
+            })
+        });
+    let within_series = select_track(within_series);
+    let unregistered = select_track(unregistered);
+    let reserved = within_series.len().min(MAX_SWEEP_PER_TRACK / 4);
+    let mut all = unregistered
+        .into_iter()
+        .take(MAX_SWEEP_PER_TRACK - reserved)
+        .collect::<Vec<_>>();
+    let remaining = MAX_SWEEP_PER_TRACK.saturating_sub(all.len());
+    all.extend(within_series.into_iter().take(remaining));
+    all.extend(select_track(themes.bundles));
+
+    let prepared = prepare_swept_suggestions(src, &all, &by_id, &context)?;
+    Ok(SweepPlan {
+        prepared,
+        saved_search_suggestions: themes.saved_searches,
+        semantic_used: themes.note.is_none(),
+        note: themes.note,
+    })
+}
+
+/// 走査の対象になる作品。告知・活動報告はここで落とす。
+fn load_sweep_works(src: &dyn SuggestionSource) -> Result<Vec<SweepWork>, String> {
+    let conn = src.corpus()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, source, source_id, title, author_name, COALESCE(author_id, ''),
                         cover_path, text_length, content_type,
                         COALESCE(source_created_at, downloaded_at, '')
                  FROM downloads",
-            )
-            .map_err(|e| format!("Failed to prepare sweep works: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    SweepWork {
-                        id: row.get(0)?,
-                        source: row.get(1)?,
-                        source_id: row.get(2)?,
-                        title: row.get(3)?,
-                        author_name: row.get(4)?,
-                        author_id: row.get(5)?,
-                        cover_path: row.get(6)?,
-                        text_length: row.get(7)?,
-                        published_at: row.get(9)?,
-                    },
-                    row.get::<_, String>(8)?,
-                ))
-            })
-            .map_err(|e| format!("Failed to query sweep works: {e}"))?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (work, content_type) =
-                row.map_err(|e| format!("Failed to read sweep works: {e}"))?;
-            if collection_rules::is_administrative_post(
-                &work.title,
-                &content_type,
-                work.text_length,
-            ) {
-                continue;
-            }
-            out.push(work);
+        )
+        .map_err(|e| format!("Failed to prepare sweep works: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                SweepWork {
+                    id: row.get(0)?,
+                    source: row.get(1)?,
+                    source_id: row.get(2)?,
+                    title: row.get(3)?,
+                    author_name: row.get(4)?,
+                    author_id: row.get(5)?,
+                    cover_path: row.get(6)?,
+                    text_length: row.get(7)?,
+                    published_at: row.get(9)?,
+                },
+                row.get::<_, String>(8)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to query sweep works: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (work, content_type) = row.map_err(|e| format!("Failed to read sweep works: {e}"))?;
+        if collection_rules::is_administrative_post(&work.title, &content_type, work.text_length) {
+            continue;
         }
-        Ok(out)
+        out.push(work);
     }
+    Ok(out)
+}
 
-    /// 本文リンクでつながっている塊。ハブは橋にしない。
-    fn sweep_link_components(
-        &self,
-        by_id: &HashMap<i64, SweepWork>,
-        aliases: &HashMap<i64, i64>,
-    ) -> Result<Vec<SweepBundle>, String> {
-        let conn = self.read_conn()?;
-        let hubs = load_link_hub_ids(&conn)?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT from_download_id, to_download_id, confidence, context_text
+/// 本文リンクでつながっている塊。ハブは橋にしない。
+fn sweep_link_components(
+    src: &dyn SuggestionSource,
+    by_id: &HashMap<i64, SweepWork>,
+    aliases: &HashMap<i64, i64>,
+) -> Result<Vec<SweepBundle>, String> {
+    let conn = src.corpus()?;
+    let hubs = load_link_hub_ids(&conn)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT from_download_id, to_download_id, confidence, context_text
                  FROM work_links
                  WHERE status != 'rejected'
                    AND from_download_id IS NOT NULL
                    AND to_download_id IS NOT NULL
                    AND confidence >= 0.6
                    AND relation_type IN ('continues_from', 'continues_to')",
-            )
-            .map_err(|e| format!("Failed to prepare sweep links: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })
-            .map_err(|e| format!("Failed to query sweep links: {e}"))?;
+        )
+        .map_err(|e| format!("Failed to prepare sweep links: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to query sweep links: {e}"))?;
 
-        let mut adjacency: HashMap<i64, HashSet<i64>> = HashMap::new();
-        // 辺の確信度は捨てない。「本文リンクでつながっている」の一言で束ねて
-        // いたが、0.61 でつながった塊と 0.98 でつながった塊は別物である。
-        // 鍵は小さいほうの id を先に置いて、向きの違いで二重に数えない。
-        let mut edge_confidence: HashMap<(i64, i64), f64> = HashMap::new();
-        for row in rows {
-            let (from, to, confidence, quote) =
-                row.map_err(|e| format!("Failed to read sweep links: {e}"))?;
-            if discovery::ambiguous_link_context(quote.as_deref().unwrap_or_default()) {
-                continue;
-            }
-            let from = aliases.get(&from).copied().unwrap_or(from);
-            let to = aliases.get(&to).copied().unwrap_or(to);
-            if from == to {
-                continue;
-            }
-            // 告知として落とした作品はここに居ない。ハブは端点にはなれるが、
-            // 渡って先へ行く橋にはしない。
-            if !by_id.contains_key(&from) || !by_id.contains_key(&to) {
-                continue;
-            }
-            if discovery::same_episode(&by_id[&from], &by_id[&to]) {
-                continue;
-            }
-            if hubs.contains(&from) || hubs.contains(&to) {
-                continue;
-            }
-            adjacency.entry(from).or_default().insert(to);
-            adjacency.entry(to).or_default().insert(from);
-            let key = if from <= to { (from, to) } else { (to, from) };
-            // 同じ二作に両向きの行があるなら、強いほうを採る。
-            edge_confidence
-                .entry(key)
-                .and_modify(|value| *value = value.max(confidence))
-                .or_insert(confidence);
+    let mut adjacency: HashMap<i64, HashSet<i64>> = HashMap::new();
+    // 辺の確信度は捨てない。「本文リンクでつながっている」の一言で束ねて
+    // いたが、0.61 でつながった塊と 0.98 でつながった塊は別物である。
+    // 鍵は小さいほうの id を先に置いて、向きの違いで二重に数えない。
+    let mut edge_confidence: HashMap<(i64, i64), f64> = HashMap::new();
+    for row in rows {
+        let (from, to, confidence, quote) =
+            row.map_err(|e| format!("Failed to read sweep links: {e}"))?;
+        if discovery::ambiguous_link_context(quote.as_deref().unwrap_or_default()) {
+            continue;
         }
-
-        Ok(connected_components(&adjacency)
-            .into_iter()
-            .filter(|component| (MIN_BUNDLE..=MAX_BUNDLE).contains(&component.len()))
-            .map(|ids| SweepBundle {
-                kind: BundleKind::Link,
-                member_evidence: vec![CollectionSuggestionEvidence {
-                    kind: "content_link".to_string(),
-                    label: "本文・キャプションのリンク".to_string(),
-                    contribution: 0.8,
-                }],
-                strength: link_component_strength(&ids, &edge_confidence),
-                ids,
-                track: "sequence",
-            })
-            .collect())
+        let from = aliases.get(&from).copied().unwrap_or(from);
+        let to = aliases.get(&to).copied().unwrap_or(to);
+        if from == to {
+            continue;
+        }
+        // 告知として落とした作品はここに居ない。ハブは端点にはなれるが、
+        // 渡って先へ行く橋にはしない。
+        if !by_id.contains_key(&from) || !by_id.contains_key(&to) {
+            continue;
+        }
+        if discovery::same_episode(&by_id[&from], &by_id[&to]) {
+            continue;
+        }
+        if hubs.contains(&from) || hubs.contains(&to) {
+            continue;
+        }
+        adjacency.entry(from).or_default().insert(to);
+        adjacency.entry(to).or_default().insert(from);
+        let key = if from <= to { (from, to) } else { (to, from) };
+        // 同じ二作に両向きの行があるなら、強いほうを採る。
+        edge_confidence
+            .entry(key)
+            .and_modify(|value| *value = value.max(confidence))
+            .or_insert(confidence);
     }
 
-    /// 公式シリーズの、話数が連続している区間。
-    fn sweep_series_runs(
-        &self,
-        by_id: &HashMap<i64, SweepWork>,
-    ) -> Result<Vec<SweepBundle>, String> {
-        let conn = self.read_conn()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT series_source, series_key, title, download_id, content_order
+    Ok(connected_components(&adjacency)
+        .into_iter()
+        .filter(|component| (MIN_BUNDLE..=MAX_BUNDLE).contains(&component.len()))
+        .map(|ids| SweepBundle {
+            kind: BundleKind::Link,
+            member_evidence: vec![CollectionSuggestionEvidence {
+                kind: "content_link".to_string(),
+                label: "本文・キャプションのリンク".to_string(),
+                contribution: 0.8,
+            }],
+            strength: link_component_strength(&ids, &edge_confidence),
+            ids,
+            track: "sequence",
+        })
+        .collect())
+}
+
+/// 公式シリーズの、話数が連続している区間。
+fn sweep_series_runs(
+    src: &dyn SuggestionSource,
+    by_id: &HashMap<i64, SweepWork>,
+) -> Result<Vec<SweepBundle>, String> {
+    let conn = src.corpus()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT series_source, series_key, title, download_id, content_order
                  FROM download_series
                  WHERE content_order IS NOT NULL
                  ORDER BY series_source, series_key, content_order",
-            )
-            .map_err(|e| format!("Failed to prepare series runs: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    format!("{}:{}", row.get::<_, String>(0)?, row.get::<_, String>(1)?),
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(|e| format!("Failed to query series runs: {e}"))?;
+        )
+        .map_err(|e| format!("Failed to prepare series runs: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                format!("{}:{}", row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to query series runs: {e}"))?;
 
-        let mut out = Vec::new();
-        let mut current_key = String::new();
-        let mut current_title = String::new();
-        let mut run: Vec<(i64, i64)> = Vec::new();
-        let flush = |title: &str, run: &mut Vec<(i64, i64)>, out: &mut Vec<SweepBundle>| {
-            // 3作以上そろって初めて「連載」と呼ぶ。2作なら題名族が拾う。
-            if run.len() >= 3
-                && run.len() <= MAX_BUNDLE
-                && !collection_rules::is_administrative_series_label(title)
-            {
-                out.push(SweepBundle {
-                    kind: BundleKind::SeriesRun(title.to_string()),
-                    member_evidence: vec![CollectionSuggestionEvidence {
-                        kind: "series_run".to_string(),
-                        label: format!("公式シリーズ「{title}」の連番"),
-                        contribution: 0.52,
-                    }],
-                    // 取得元が「これは同じシリーズの何話目である」と言っている
-                    // うえ、話数が途切れずに並んでいる。棚の中でいちばん確かな
-                    // 根拠なので、推測を重ねずここは高く置く。
-                    strength: 0.95,
-                    ids: run.iter().map(|(id, _)| *id).collect(),
-                    track: "sequence",
-                });
-            }
-            run.clear();
-        };
-        for row in rows {
-            let (key, title, download_id, order) =
-                row.map_err(|e| format!("Failed to read series runs: {e}"))?;
-            if !by_id.contains_key(&download_id) {
-                continue;
-            }
-            let broken =
-                key != current_key || run.last().is_some_and(|(_, previous)| order - previous > 1);
-            if broken {
-                flush(&current_title, &mut run, &mut out);
-                current_key = key;
-                current_title = title;
-            }
-            run.push((download_id, order));
+    let mut out = Vec::new();
+    let mut current_key = String::new();
+    let mut current_title = String::new();
+    let mut run: Vec<(i64, i64)> = Vec::new();
+    let flush = |title: &str, run: &mut Vec<(i64, i64)>, out: &mut Vec<SweepBundle>| {
+        // 3作以上そろって初めて「連載」と呼ぶ。2作なら題名族が拾う。
+        if run.len() >= 3
+            && run.len() <= MAX_BUNDLE
+            && !collection_rules::is_administrative_series_label(title)
+        {
+            out.push(SweepBundle {
+                kind: BundleKind::SeriesRun(title.to_string()),
+                member_evidence: vec![CollectionSuggestionEvidence {
+                    kind: "series_run".to_string(),
+                    label: format!("公式シリーズ「{title}」の連番"),
+                    contribution: 0.52,
+                }],
+                // 取得元が「これは同じシリーズの何話目である」と言っている
+                // うえ、話数が途切れずに並んでいる。棚の中でいちばん確かな
+                // 根拠なので、推測を重ねずここは高く置く。
+                strength: 0.95,
+                ids: run.iter().map(|(id, _)| *id).collect(),
+                track: "sequence",
+            });
         }
-        flush(&current_title, &mut run, &mut out);
-        Ok(out)
+        run.clear();
+    };
+    for row in rows {
+        let (key, title, download_id, order) =
+            row.map_err(|e| format!("Failed to read series runs: {e}"))?;
+        if !by_id.contains_key(&download_id) {
+            continue;
+        }
+        let broken =
+            key != current_key || run.last().is_some_and(|(_, previous)| order - previous > 1);
+        if broken {
+            flush(&current_title, &mut run, &mut out);
+            current_key = key;
+            current_title = title;
+        }
+        run.push((download_id, order));
     }
+    flush(&current_title, &mut run, &mut out);
+    Ok(out)
+}
 
-    /// 共有タグを起点にした、味の束。
-    ///
-    /// タグだけでは足りない — 同じタグの作品は棚に何百とある。逆に本文の
-    /// 近さだけでも足りない — 近いだけの作品は言葉で説明できない。
-    /// **タグで起点を決め、本文の近さで削る**と、説明のつく束だけが残る。
-    fn sweep_themes(&self, by_id: &HashMap<i64, SweepWork>) -> Result<ThemeSweep, String> {
-        let conn = self.read_conn()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT t.name, dt.download_id
+/// 共有タグを起点にした、味の束。
+///
+/// タグだけでは足りない — 同じタグの作品は棚に何百とある。逆に本文の
+/// 近さだけでも足りない — 近いだけの作品は言葉で説明できない。
+/// **タグで起点を決め、本文の近さで削る**と、説明のつく束だけが残る。
+fn sweep_themes(
+    src: &dyn SuggestionSource,
+    by_id: &HashMap<i64, SweepWork>,
+) -> Result<ThemeSweep, String> {
+    let conn = src.corpus()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.name, dt.download_id
                  FROM download_tags dt
                  JOIN tags t ON t.id = dt.tag_id
                  ORDER BY t.name, dt.download_id",
-            )
-            .map_err(|e| format!("Failed to prepare theme tags: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .map_err(|e| format!("Failed to query theme tags: {e}"))?;
-        let mut by_tag: HashMap<String, Vec<i64>> = HashMap::new();
-        for row in rows {
-            let (name, download_id) = row.map_err(|e| format!("Failed to read theme tags: {e}"))?;
-            if !collection_rules::is_informative_tag(&name) || !by_id.contains_key(&download_id) {
-                continue;
-            }
-            by_tag.entry(name).or_default().push(download_id);
+        )
+        .map_err(|e| format!("Failed to prepare theme tags: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| format!("Failed to query theme tags: {e}"))?;
+    let mut by_tag: HashMap<String, Vec<i64>> = HashMap::new();
+    for row in rows {
+        let (name, download_id) = row.map_err(|e| format!("Failed to read theme tags: {e}"))?;
+        if !collection_rules::is_informative_tag(&name) || !by_id.contains_key(&download_id) {
+            continue;
         }
+        by_tag.entry(name).or_default().push(download_id);
+    }
 
-        // 大きすぎるタグの見きわめに、本文ベクトルは要らない。何作に付いて
-        // いるかだけで決まる。意味索引が無くても、ここまでは言える。
-        let mut oversized = by_tag
+    // 大きすぎるタグの見きわめに、本文ベクトルは要らない。何作に付いて
+    // いるかだけで決まる。意味索引が無くても、ここまでは言える。
+    let mut oversized = by_tag
             .iter()
             .filter(|(_, ids)| ids.len() > THEME_TAG_MAX)
             .map(|(tag, ids)| SavedSearchSuggestion {
@@ -507,202 +553,215 @@ impl Database {
                 ),
             })
             .collect::<Vec<_>>();
-        oversized.sort_by(|left, right| {
-            right
-                .work_count
-                .cmp(&left.work_count)
-                .then_with(|| left.tag.cmp(&right.tag))
-        });
-        oversized.truncate(MAX_SAVED_SEARCH_SUGGESTIONS);
+    oversized.sort_by(|left, right| {
+        right
+            .work_count
+            .cmp(&left.work_count)
+            .then_with(|| left.tag.cmp(&right.tag))
+    });
+    oversized.truncate(MAX_SAVED_SEARCH_SUGGESTIONS);
 
-        let wanted = by_id.keys().copied().collect::<HashSet<_>>();
-        let centroids = match crate::database::semantic_index::work_centroids(
-            &self.storage_dir,
-            &wanted,
-        ) {
-            Ok(values) => values,
-            Err(error) => {
-                // 意味索引が無くても走査そのものは成り立つ。続き物だけ出す。
-                // ただし**黙って**続き物だけにはしない。索引が壊れている
-                // ことと、題材の束が本当に無いことは別の話である。
-                log::warn!("Theme sweep skipped, semantic index unavailable: {error}");
-                return Ok(ThemeSweep::skipped(
-                        oversized,
-                        "意味索引が読めないので、題材の束は探せませんでした。続き物だけを出しています。",
-                    ));
-            }
-        };
-        if centroids.len() < THEME_TAG_MIN {
+    let wanted = by_id.keys().copied().collect::<HashSet<_>>();
+    let centroids = match src.centroids(&wanted) {
+        Ok(values) => values,
+        Err(error) => {
+            // 意味索引が無くても走査そのものは成り立つ。続き物だけ出す。
+            // ただし**黙って**続き物だけにはしない。索引が壊れている
+            // ことと、題材の束が本当に無いことは別の話である。
+            log::warn!("Theme sweep skipped, semantic index unavailable: {error}");
             return Ok(ThemeSweep::skipped(
+                oversized,
+                "意味索引が読めないので、題材の束は探せませんでした。続き物だけを出しています。",
+            ));
+        }
+    };
+    if centroids.len() < THEME_TAG_MIN {
+        return Ok(ThemeSweep::skipped(
                 oversized,
                 "本文ベクトルがまだ足りないので、題材の束は探せませんでした。続き物だけを出しています。",
             ));
-        }
-        // 本文ベクトルの無い作品は、近さを測れないので束の材料から外す。
-        for ids in by_tag.values_mut() {
-            ids.retain(|id| centroids.contains_key(id));
-        }
-
-        // 起点の順序を決めておく。同じ棚を二度走査したら同じ束が出るべきである。
-        let mut tags = by_tag.into_iter().collect::<Vec<_>>();
-        tags.sort_by(|left, right| {
-            left.1
-                .len()
-                .cmp(&right.1.len())
-                .then_with(|| left.0.cmp(&right.0))
-        });
-
-        // 棚のふつうの近さを先に測る。ここを測らずに絶対値でしきい値を置くと、
-        // 同じ題材ばかりの棚では何も弾けない。
-        let baseline = shelf_baseline(&centroids);
-
-        let mut out = Vec::new();
-        for (tag, mut ids) in tags {
-            if !(THEME_TAG_MIN..=THEME_TAG_MAX).contains(&ids.len()) {
-                continue;
-            }
-            ids.sort_unstable();
-            let Some((kept, z)) = tighten_to_baseline(&ids, &centroids, &baseline) else {
-                continue;
-            };
-            out.push(SweepBundle {
-                kind: BundleKind::Theme { tag },
-                member_evidence: vec![
-                    CollectionSuggestionEvidence {
-                        kind: "shared_tags".to_string(),
-                        label: "共有タグ".to_string(),
-                        contribution: 0.5,
-                    },
-                    CollectionSuggestionEvidence {
-                        kind: "semantic_similarity".to_string(),
-                        label: "本文の内容が近い".to_string(),
-                        contribution: 0.3,
-                    },
-                ],
-                strength: theme_strength(z),
-                ids: kept,
-                track: "theme",
-            });
-        }
-        // 大きい束から先にまとめる。小さいものを先に置くと、あとから来た
-        // 大きい束が次々に吸い寄せられて、際限なく育つ。
-        out.sort_by(|left, right| {
-            right
-                .ids
-                .len()
-                .cmp(&left.ids.len())
-                .then_with(|| left.ids.first().cmp(&right.ids.first()))
-        });
-
-        // まとめたあとに、もう一度締める。
-        //
-        // `merge_overlapping` の上限は MAX_BUNDLE(40) で、テーマの上限
-        // THEME_MAX_MEMBERS(24) ではない。だから重なりの大きい二つのテーマ束を
-        // まとめると、**24作までと決めたはずの束が40作になって出てくる**。
-        // しかも近さを測り直さないので、根拠の一行は「本文も近い40作です」と
-        // 言う — その40作でそれを確かめたことは一度も無いのに。
-        //
-        // 締め直せば、大きさも隔たりも最後の顔ぶれで測った値になる。ここで
-        // 落ちる束は、まとめる前は通っていても、まとまった姿では束と呼べない
-        // ものである。
-        let mut themes = Vec::new();
-        for mut bundle in merge_overlapping(out) {
-            let Some((kept, z)) = tighten_to_baseline(&bundle.ids, &centroids, &baseline) else {
-                continue;
-            };
-            bundle.ids = kept;
-            bundle.strength = theme_strength(z);
-            themes.push(bundle);
-        }
-        Ok(ThemeSweep {
-            bundles: themes,
-            saved_searches: oversized,
-            note: None,
-        })
+    }
+    // 本文ベクトルの無い作品は、近さを測れないので束の材料から外す。
+    for ids in by_tag.values_mut() {
+        ids.retain(|id| centroids.contains_key(id));
     }
 
-    /// 走査で作った候補を入れ替える。種から作った候補には触らない。
+    // 起点の順序を決めておく。同じ棚を二度走査したら同じ束が出るべきである。
+    let mut tags = by_tag.into_iter().collect::<Vec<_>>();
+    tags.sort_by(|left, right| {
+        left.1
+            .len()
+            .cmp(&right.1.len())
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    // 棚のふつうの近さを先に測る。ここを測らずに絶対値でしきい値を置くと、
+    // 同じ題材ばかりの棚では何も弾けない。
+    let baseline = shelf_baseline(&centroids);
+
+    let mut out = Vec::new();
+    for (tag, mut ids) in tags {
+        if !(THEME_TAG_MIN..=THEME_TAG_MAX).contains(&ids.len()) {
+            continue;
+        }
+        ids.sort_unstable();
+        let Some((kept, z)) = tighten_to_baseline(&ids, &centroids, &baseline) else {
+            continue;
+        };
+        out.push(SweepBundle {
+            kind: BundleKind::Theme { tag },
+            member_evidence: vec![
+                CollectionSuggestionEvidence {
+                    kind: "shared_tags".to_string(),
+                    label: "共有タグ".to_string(),
+                    contribution: 0.5,
+                },
+                CollectionSuggestionEvidence {
+                    kind: "semantic_similarity".to_string(),
+                    label: "本文の内容が近い".to_string(),
+                    contribution: 0.3,
+                },
+            ],
+            strength: theme_strength(z),
+            ids: kept,
+            track: "theme",
+        });
+    }
+    // 大きい束から先にまとめる。小さいものを先に置くと、あとから来た
+    // 大きい束が次々に吸い寄せられて、際限なく育つ。
+    out.sort_by(|left, right| {
+        right
+            .ids
+            .len()
+            .cmp(&left.ids.len())
+            .then_with(|| left.ids.first().cmp(&right.ids.first()))
+    });
+
+    // まとめたあとに、もう一度締める。
+    //
+    // `merge_overlapping` の上限は MAX_BUNDLE(40) で、テーマの上限
+    // THEME_MAX_MEMBERS(24) ではない。だから重なりの大きい二つのテーマ束を
+    // まとめると、**24作までと決めたはずの束が40作になって出てくる**。
+    // しかも近さを測り直さないので、根拠の一行は「本文も近い40作です」と
+    // 言う — その40作でそれを確かめたことは一度も無いのに。
+    //
+    // 締め直せば、大きさも隔たりも最後の顔ぶれで測った値になる。ここで
+    // 落ちる束は、まとめる前は通っていても、まとまった姿では束と呼べない
+    // ものである。
+    let mut themes = Vec::new();
+    for mut bundle in merge_overlapping(out) {
+        let Some((kept, z)) = tighten_to_baseline(&bundle.ids, &centroids, &baseline) else {
+            continue;
+        };
+        bundle.ids = kept;
+        bundle.strength = theme_strength(z);
+        themes.push(bundle);
+    }
+    Ok(ThemeSweep {
+        bundles: themes,
+        saved_searches: oversized,
+        note: None,
+    })
+}
+
+/// 走査で作った候補を入れ替える。種から作った候補には触らない。
+fn prepare_swept_suggestions(
+    src: &dyn SuggestionSource,
+    bundles: &[SweepBundle],
+    by_id: &HashMap<i64, SweepWork>,
+    context: &discovery::DiscoveryContext,
+) -> Result<Vec<PreparedSweep>, String> {
+    let mut prepared = Vec::new();
+    {
+        let conn = src.corpus()?;
+        let rejected_pairs = load_rejected_pairs(&conn)?;
+        for bundle in bundles {
+            let members = bundle
+                .ids
+                .iter()
+                .filter_map(|id| by_id.get(id))
+                .collect::<Vec<_>>();
+            if members.len() < MIN_BUNDLE {
+                continue;
+            }
+            if bundle_is_rejected(&rejected_pairs, &members)? {
+                continue;
+            }
+            let members = if bundle.track == "sequence" {
+                members
+            } else {
+                fold_composite_volumes(members)
+            };
+            if members.len() < MIN_BUNDLE {
+                continue;
+            }
+            let ordered = if bundle.track == "sequence" {
+                discovery::ordered(&members, &context.edges)
+            } else {
+                order_bundle_members(&members, bundle.track)
+            };
+            let ids_json = serde_json::to_string(&bundle.ids)
+                .map_err(|e| format!("Failed to encode sweep seeds: {e}"))?;
+            // 根拠の文は、まとめ終わったあとの顔ぶれで数え直す。
+            // 数えるのは表示名。同じ作者に別の ID が付いていることがあり、
+            // 内部の鍵で数えると画面の「作者2人」が実感と合わない。
+            let author_count = ordered
+                .iter()
+                .map(|work| work.author_name.as_str())
+                .collect::<HashSet<_>>()
+                .len();
+            let evidence = bundle.evidence_sentence(author_count);
+            let names = sweep_name_options(&conn, &ordered, &ids_json, bundle.anchor_tag())?;
+            let suggestion_members = ordered
+                .iter()
+                .enumerate()
+                .map(|(position, work)| CollectionSuggestionMember {
+                    source: work.source.clone(),
+                    source_id: work.source_id.clone(),
+                    download_id: Some(work.id),
+                    work: None,
+                    title: work.title.clone(),
+                    author_name: work.author_name.clone(),
+                    cover_path: work.cover_path.clone(),
+                    text_length: work.text_length,
+                    proposed_position: position as i64,
+                    score: 1.0,
+                    selected: true,
+                    evidence: bundle
+                        .member_evidence
+                        .iter()
+                        .cloned()
+                        .chain(
+                            (bundle.track == "sequence")
+                                .then(|| context.details.get(&(bundle.ids.clone(), work.id)))
+                                .flatten()
+                                .into_iter()
+                                .flatten()
+                                .cloned(),
+                        )
+                        .collect(),
+                })
+                .collect::<Vec<_>>();
+            prepared.push(PreparedSweep {
+                track: bundle.track,
+                strength: bundle.strength,
+                ids_json,
+                names,
+                members: suggestion_members,
+                evidence,
+            });
+        }
+    }
+    Ok(prepared)
+}
+
+impl Database {
     fn replace_swept_suggestions(
         &self,
-        bundles: &[SweepBundle],
-        by_id: &HashMap<i64, SweepWork>,
-        context: &discovery::DiscoveryContext,
+        prepared: Vec<PreparedSweep>,
     ) -> Result<Vec<CollectionSuggestion>, String> {
         let now = chrono::Utc::now().to_rfc3339();
         let rule_version = COLLECTION_SUGGEST_RULE_VERSION.to_string();
-        let mut prepared = Vec::new();
-        {
-            let conn = self.read_conn()?;
-            let rejected_pairs = load_rejected_pairs(&conn)?;
-            for bundle in bundles {
-                let members = bundle
-                    .ids
-                    .iter()
-                    .filter_map(|id| by_id.get(id))
-                    .collect::<Vec<_>>();
-                if members.len() < MIN_BUNDLE {
-                    continue;
-                }
-                if bundle_is_rejected(&rejected_pairs, &members)? {
-                    continue;
-                }
-                let members = if bundle.track == "sequence" {
-                    members
-                } else {
-                    fold_composite_volumes(members)
-                };
-                if members.len() < MIN_BUNDLE {
-                    continue;
-                }
-                let ordered = if bundle.track == "sequence" {
-                    discovery::ordered(&members, &context.edges)
-                } else {
-                    order_bundle_members(&members, bundle.track)
-                };
-                let ids_json = serde_json::to_string(&bundle.ids)
-                    .map_err(|e| format!("Failed to encode sweep seeds: {e}"))?;
-                // 根拠の文は、まとめ終わったあとの顔ぶれで数え直す。
-                // 数えるのは表示名。同じ作者に別の ID が付いていることがあり、
-                // 内部の鍵で数えると画面の「作者2人」が実感と合わない。
-                let author_count = ordered
-                    .iter()
-                    .map(|work| work.author_name.as_str())
-                    .collect::<HashSet<_>>()
-                    .len();
-                let evidence = bundle.evidence_sentence(author_count);
-                let names = sweep_name_options(&conn, &ordered, &ids_json, bundle.anchor_tag())?;
-                let suggestion_members = ordered
-                    .iter()
-                    .enumerate()
-                    .map(|(position, work)| CollectionSuggestionMember {
-                        source: work.source.clone(),
-                        source_id: work.source_id.clone(),
-                        download_id: Some(work.id),
-                        title: work.title.clone(),
-                        author_name: work.author_name.clone(),
-                        cover_path: work.cover_path.clone(),
-                        text_length: work.text_length,
-                        proposed_position: position as i64,
-                        score: 1.0,
-                        selected: true,
-                        evidence: bundle
-                            .member_evidence
-                            .iter()
-                            .cloned()
-                            .chain(
-                                (bundle.track == "sequence")
-                                    .then(|| context.details.get(&(bundle.ids.clone(), work.id)))
-                                    .flatten()
-                                    .into_iter()
-                                    .flatten()
-                                    .cloned(),
-                            )
-                            .collect(),
-                    })
-                    .collect::<Vec<_>>();
-                prepared.push((bundle, ids_json, names, suggestion_members, evidence));
-            }
-        }
 
         let mut saved = Vec::new();
         let mut saved_ids = HashSet::new();
@@ -726,16 +785,16 @@ impl Database {
             [],
         )
         .map_err(|e| format!("Failed to clear swept suggestions: {e}"))?;
-        for (bundle, ids_json, mut names, members, evidence) in prepared {
-            use sha2::{Digest, Sha256};
-            let mut stable_keys = members
-                .iter()
-                .map(|m| (&m.source, &m.source_id))
-                .collect::<Vec<_>>();
-            stable_keys.sort();
-            let identity = serde_json::to_vec(&(&rule_version, bundle.track, stable_keys))
-                .map_err(|e| e.to_string())?;
-            let digest = Sha256::digest(identity);
+        for PreparedSweep {
+            track,
+            strength,
+            ids_json,
+            mut names,
+            members,
+            evidence,
+        } in prepared
+        {
+            let digest = sweep_identity(&rule_version, track, &members)?;
             let id = format!(
                 "sweep-{}",
                 digest
@@ -774,7 +833,7 @@ impl Database {
                 .map_err(|e| format!("Failed to encode sweep members: {e}"))?;
             let names_json = serde_json::to_string(&names)
                 .map_err(|e| format!("Failed to encode sweep names: {e}"))?;
-            let kind = if bundle.track == "sequence" {
+            let kind = if track == "sequence" {
                 "ordered"
             } else {
                 "unordered"
@@ -792,11 +851,11 @@ impl Database {
                     proposed_name,
                     kind,
                     members_json,
-                    bundle.strength,
+                    strength,
                     rule_version,
                     now,
                     names_json,
-                    bundle.track,
+                    track,
                     evidence,
                 ],
             )
@@ -806,10 +865,10 @@ impl Database {
                 proposed_name,
                 name_options: names,
                 collection_kind: kind.to_string(),
-                track: bundle.track.to_string(),
+                track: track.to_string(),
                 origin: "sweep".to_string(),
                 evidence_summary: evidence,
-                score: bundle.strength,
+                score: strength,
                 rule_version: rule_version.clone(),
                 state: "pending".to_string(),
                 members,

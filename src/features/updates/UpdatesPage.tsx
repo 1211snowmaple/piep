@@ -35,6 +35,7 @@ import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
 import { updateJobStatusMeta, invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { DeferredCandidatesPanel } from "./DeferredCandidatesPanel";
+import { StoredJobHistoryPanel } from "./StoredJobHistoryPanel";
 import { UpdateWorkLinks } from "./UpdateWorkLinks";
 import { UpdateStatusBadge } from "./UpdateStatusBadge";
 import { heldAcquisitionKind, heldReason, summarizeUpdateJobItems, updateJobSubject } from "./updateJobOutcome";
@@ -43,12 +44,15 @@ import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { createWatchGroup, deleteUpdateTarget, deleteWatchGroup, isTauriRuntime, listUpdateTargets, listWatchGroups, renameWatchGroup, searchDownloadsV2, setUpdateTargetEnabled, setWatchGroupMembers, upsertUpdateTarget } from "@/services/dbApi";
 import { readingWorkIds } from "@/features/library/readingShelf";
-import { clearFinishedUpdateJobsCommand, countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, listUpdateJobHeldItemStatesCommand, listUpdateJobItemStatesCommand, restoreDismissedUpdateCandidatesCommand, type UpdateJobItemState } from "@/services/updateJobApi";
+import { clearFinishedUpdateJobsCommand, countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, listUpdateJobHeldItemStatesCommand, listUpdateJobItemStatesCommand, restoreDismissedUpdateCandidatesCommand, type UpdateJobItemState, type UpdateJobScope } from "@/services/updateJobApi";
+import { libraryV2Status } from "@/services/libraryV2Api";
+import { shelfWritable } from "@/features/library/shelfV2";
 import { loadSchedule, saveSchedule, type UpdateScheduleSettings } from "@/features/updates/updateSchedule";
 import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
 import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
 import { TargetsPanel, type GroupAction, type TargetAction } from "./WatchTargetsPanel";
-import type { UpdateTarget, WatchGroup } from "@/types/library";
+import type { UpdateTarget, WatchGroup, WatchId } from "@/types/library";
+import { watchGroupMatches } from "@/lib/watchIdentity";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 export { TargetHealthBadge } from "./WatchTargetsPanel";
@@ -100,6 +104,8 @@ const CANDIDATE_DISPLAY_PAGE_SIZE = 60;
  */
 export async function shelfWorkIds(scope: string): Promise<number[] | null> {
   if (scope !== "favorite" && scope !== "reading") return null;
+  // 切り替えた棚では、棚が自分の範囲で作品を選ぶ。旧棚の番号は集めない。
+  if (shelfWritable(await libraryV2Status().catch(() => undefined))) return null;
   const params = scope === "favorite"
     ? { favorite: true, limit: SHELF_SCOPE_LIMIT, projection: "bulk" as const }
     : { idsInclude: readingWorkIds().slice(0, SHELF_SCOPE_LIMIT), limit: SHELF_SCOPE_LIMIT, projection: "bulk" as const };
@@ -221,7 +227,7 @@ export default function UpdatesPage() {
 
   const startMutation = useMutation({
     // `targetIds` は監視対象の一覧やグループから来た確認。その作者・シリーズだけを見る。
-    mutationFn: async (values: { scope: string; mode: string; depth: string; targetIds?: number[] }) => {
+    mutationFn: async (values: { scope: string; mode: string; depth: string; targetIds?: WatchId[] }) => {
       if (!runtime) { await new Promise((resolve) => setTimeout(resolve, 400)); setPreviewSnapshot({ ...demoSnapshot, jobId: `preview-${Date.now()}`, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }); return; }
       const group = values.scope.startsWith("group:") ? groupList.find((item) => `group:${item.id}` === values.scope) : null;
       if (values.scope.startsWith("group:") && !group) throw new Error("選んだ監視グループが見つかりません");
@@ -231,14 +237,15 @@ export default function UpdatesPage() {
       // 監視のオン・オフに関わらず、いま棚にあるものを見に行ける。
       const shelfIds = targetIds ? null : await shelfWorkIds(values.scope);
       if (shelfIds && !shelfIds.length) throw new Error("この棚には作品がありません");
+      const shelfScope = values.scope === "favorite" || values.scope === "reading";
       const schedule = await loadSchedule();
       await updateJobs.start({
-        scope: (targetIds ? "targets" : shelfIds ? "work" : values.scope) as "all" | "work" | "author" | "series" | "targets",
+        scope: (targetIds ? "targets" : shelfIds ? "work" : values.scope) as UpdateJobScope,
         mode: values.mode as "check_only" | "auto_save",
         workIds: shelfIds ?? (workId && !targetIds ? [workId] : null),
         targetIds,
         watchSaved: schedule.watchSaved,
-        newWorksOnly: values.depth === "new" && values.scope !== "work" && !shelfIds && !workId,
+        newWorksOnly: values.depth === "new" && values.scope !== "work" && !shelfScope && !workId,
       });
       await updateJobs.loadJobs();
     },
@@ -310,7 +317,7 @@ export default function UpdatesPage() {
   const clearFinishedJobsMutation = useMutation({
     mutationFn: async () => {
       if (!runtime) return 0;
-      const removed = await clearFinishedUpdateJobsCommand();
+      const removed = await clearFinishedUpdateJobsCommand(false);
       await updateJobs.loadJobs();
       return removed;
     },
@@ -363,7 +370,7 @@ export default function UpdatesPage() {
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["update-targets"] }),
   });
   const groupMutation = useMutation({
-    mutationFn: async (input: GroupAction): Promise<number | null> => {
+    mutationFn: async (input: GroupAction): Promise<WatchId | null> => {
       if (!runtime) return null;
       if (input.action === "create") {
         const id = await createWatchGroup(input.name);
@@ -376,7 +383,7 @@ export default function UpdatesPage() {
         // 自動確認の範囲だったなら、すべてへ戻す。消えたグループを指したままだと、
         // 自動確認が黙って止まる。
         const current = await loadSchedule();
-        if (current.groupId === input.group.id) {
+        if (watchGroupMatches(input.group, current.groupId)) {
           await saveSchedule({ ...current, groupId: null });
           setScheduleRevision((value) => value + 1);
         }
@@ -389,7 +396,7 @@ export default function UpdatesPage() {
       queryClient.invalidateQueries({ queryKey: ["watch-groups"] });
       queryClient.invalidateQueries({ queryKey: ["update-targets"] });
       if (input.action === "members") {
-        const changed = result ?? 0;
+        const changed = Number(result ?? 0);
         const skipped = input.targetIds.length - changed;
         notifications.show({
           color: "gray",
@@ -406,7 +413,7 @@ export default function UpdatesPage() {
       notifications.show({ color: "red", title: "監視グループを変更できません", message: errorMessage(error) });
     },
   });
-  const checkTargets = (targetIds: number[], label: string) => startMutation.mutate(
+  const checkTargets = (targetIds: WatchId[], label: string) => startMutation.mutate(
     { scope: "targets", mode: form.values.mode, depth: form.values.depth, targetIds },
     { onSuccess: () => notifications.show({ color: "piep", title: "確認を開始しました", message: `${label}の${formatNumber(targetIds.length)}件を確認します` }) },
   );
@@ -665,7 +672,7 @@ export default function UpdatesPage() {
         </Tabs.Panel>
 
         <Tabs.Panel value="history" pt="lg">
-          <JobHistoryPanel
+          <StoredJobHistoryPanel runtime={runtime} hasCurrent={jobs.length > 0} onShelfReady={updateJobs.loadJobs} current={<JobHistoryPanel
             jobs={jobs}
             activeJobId={activeSnapshot?.jobId ?? null}
             finishedCount={finishedJobCount}
@@ -679,7 +686,7 @@ export default function UpdatesPage() {
             }}
             onClear={(jobId) => clearJobMutation.mutate(jobId)}
             onClearFinished={confirmClearFinishedJobs}
-          />
+          />} />
         </Tabs.Panel>
 
         <Tabs.Panel value="schedule" pt="lg">
@@ -740,7 +747,7 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
               <UpdateWorkMetadata metadata={item.metadata} />
             </Stack>
             <UpdateStatusBadge title={item.title || item.sourceId || "作品"} {...acquisitionStatusMeta(heldAcquisitionKind(reason))} detail={item.error || "確認を保留しました。保存済みの内容は保持されています。"} />
-            {item.source && item.sourceId && <UpdateWorkLinks source={item.source} sourceId={item.sourceId} downloadId={item.downloadId} title={item.title || item.sourceId} onOpenWork={onOpenWork} />}
+            {item.source && item.sourceId && <UpdateWorkLinks source={item.source} sourceId={item.sourceId} downloadId={item.downloadId} workId={item.workId} title={item.title || item.sourceId} onOpenWork={onOpenWork} />}
           </Group>
         </Paper>;
       })}
@@ -956,7 +963,7 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
                 <UpdateWorkMetadata metadata={candidate.metadata} fallback={[candidate.targetLabel, candidate.subtitle].filter(Boolean).join(" · ")} />
               </Stack>
               <UpdateStatusBadge title={candidate.title} {...candidateStatusMeta(candidate)} detail={candidate.error} />
-              <UpdateWorkLinks source={candidate.source} sourceId={candidate.sourceId} downloadId={candidate.downloadId} title={candidate.title} onOpenWork={onOpenWork} />
+              <UpdateWorkLinks source={candidate.source} sourceId={candidate.sourceId} downloadId={candidate.downloadId} workId={candidate.workId} title={candidate.title} onOpenWork={onOpenWork} />
               {isSavableCandidate(candidate) && (
                 <Tooltip label="候補から外す（保留・非表示の一覧から戻せます）">
                   <ActionIcon variant="subtle" color="gray" aria-label={`${candidate.title}を候補から外す`} onClick={() => onDismiss(candidate)}>
@@ -1009,7 +1016,7 @@ function describeSchedule(schedule: UpdateScheduleSettings | undefined, groups: 
   if (!when.length) return "オフ";
   if (schedule.groupId === null) return `${when.join(" · ")}・${mode}`;
   if (!groups) return "…";
-  const group = groups.find((item) => item.id === schedule.groupId);
+  const group = groups.find((item) => watchGroupMatches(item, schedule.groupId));
   return group ? `${when.join(" · ")}・「${group.name}」を${mode}` : "グループが見つからず停止中";
 }
 

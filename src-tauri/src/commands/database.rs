@@ -21,11 +21,10 @@ use crate::database::{
     EntityFacetScope, EntityProfileRepairStatus, EntitySeriesPage, EntityVersion, FacetCount,
     FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
     PersonEntry, ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit,
-    SavedSearch, SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus,
-    SearchSuggestParams, SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry,
-    UpdateCredentials, UpdateTarget, UpdateTargetInput, WorkBlockInput, WorkCollection,
-    WorkCollectionInput, WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision,
-    WorkKey,
+    SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams, SearchSuggestResult,
+    SearchV2Params, SearchV2Result, SeriesEntry, UpdateCredentials, UpdateTarget,
+    UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
+    WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision, WorkKey,
 };
 use crate::AppState;
 use sha2::{Digest, Sha256};
@@ -43,6 +42,11 @@ use tokio::time::{sleep, Duration};
 
 static ENTITY_REFRESH_LOCK: LazyLock<AsyncMutex<Option<Instant>>> =
     LazyLock::new(|| AsyncMutex::new(None));
+#[path = "database_profile_shelf.rs"]
+mod profile_shelf;
+#[path = "database_saved_search_shelf.rs"]
+mod saved_search_shelf;
+use saved_search_shelf::{SavedSearchView, SavedSearchViewInput};
 static ENTITY_PROFILE_REPAIR_RUNNING: AtomicBool = AtomicBool::new(false);
 static ENTITY_PROFILE_REPAIR_CANCEL: AtomicBool = AtomicBool::new(false);
 static SEARCH_REBUILD_JOBS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
@@ -77,7 +81,7 @@ where
     .map_err(|e| format!("Database task failed: {e}"))?
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshEntityProfileParams {
     pub entity_type: String,
@@ -214,6 +218,18 @@ pub async fn search_rebuild_index(
         batch_size: None,
         include_semantic: None,
     });
+    let shelf = app.state::<Arc<AppState>>().library_v2.switched();
+    if let Some(library) = shelf {
+        if let Some(enabled) = options.include_semantic {
+            let target = Arc::clone(&library);
+            tokio::task::spawn_blocking(move || {
+                super::library_health::apply_semantic_enabled(&target, enabled)
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+        }
+        return spawn_shelf_index_job(app, library, "manual");
+    }
     let semantic_enabled = match options.include_semantic {
         Some(enabled) => {
             run_db_blocking(app.clone(), move |state| {
@@ -242,6 +258,12 @@ pub async fn search_set_semantic_enabled(
     enabled: bool,
 ) -> Result<SearchIndexStatus, String> {
     run_db_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            super::library_health::apply_semantic_enabled(&library, enabled)?;
+            return library
+                .search_index_status(enabled)
+                .map_err(|e| e.to_string());
+        }
         state.db.set_semantic_index_enabled(enabled)
     })
     .await
@@ -259,6 +281,23 @@ pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
         // Long enough for the first screen to settle; the work then competes
         // with nothing the user is waiting on.
         sleep(Duration::from_millis(1_200)).await;
+
+        // 新しい棚の意味検索の設定がまだなければ、旧棚の設定を一度だけ写す。
+        if !super::library_health::has_settings() {
+            match run_db_blocking(app.clone(), |state| state.db.semantic_index_enabled()).await {
+                Ok(enabled) => {
+                    if let Err(error) = super::library_health::store_semantic_enabled(enabled) {
+                        log::warn!("意味検索の設定を写せません: {error}");
+                    }
+                }
+                Err(error) => log::warn!("旧棚の意味検索の設定を読めません: {error}"),
+            }
+        }
+        // 正本に切り替えた棚は、開いたときと保存のたびに自分で追いつく。旧棚の索引は整えない。
+        if let Some(library) = app.state::<Arc<AppState>>().library_v2.switched() {
+            super::library_health::schedule_semantic_sync(library);
+            return;
+        }
 
         // 記録より先に実物を見る。索引が消えているのに「索引済み」の記録だけが
         // 残っていると、待っている件数は 0 と出て、この仕事は何もせずに帰る。
@@ -340,7 +379,7 @@ pub fn start_automatic_saved_asset_audit(app: tauri::AppHandle) {
         let mut marked = 0;
         let mut after_id = 0;
         loop {
-            match state.db.has_active_update_job() {
+            match state.jobs().has_active_update_job() {
                 Ok(true) => {
                     sleep(Duration::from_secs(2)).await;
                     continue;
@@ -416,7 +455,7 @@ pub fn start_automatic_cover_repair(app: tauri::AppHandle) {
         let state = app.state::<Arc<AppState>>().inner().clone();
         for (id, source_id, json_path, old_cover) in rows {
             loop {
-                match state.db.has_active_update_job() {
+                match state.jobs().has_active_update_job() {
                     Ok(false) => break,
                     Ok(true) => sleep(Duration::from_secs(2)).await,
                     Err(error) => {
@@ -441,7 +480,6 @@ pub fn start_automatic_cover_repair(app: tauri::AppHandle) {
                 let parent = Path::new(&json_path).parent().ok_or("保存先がありません")?;
                 let mut cover_data = serde_json::json!({ "cover_url": url });
                 crate::downloader::asset_downloader::download_and_link_assets(
-                    &app,
                     &mut cover_data,
                     &parent.join("data.json"),
                     false,
@@ -501,6 +539,116 @@ pub fn start_automatic_cover_repair(app: tauri::AppHandle) {
         }
         log::info!("代替表紙の修復を終了しました: {repaired_total}件");
     });
+}
+
+/// 正本に切り替えた棚の索引を追いつかせる（全文、続けて意味検索を入れていれば意味の索引）。
+/// 進み具合は旧棚の作り直しと同じ知らせで流し、走っている作り直しがあればそれに合流する。
+fn spawn_shelf_index_job(
+    app: tauri::AppHandle,
+    library: Arc<crate::library::Library>,
+    origin: &'static str,
+) -> Result<String, String> {
+    let job_id = format!(
+        "search-index-{}-{}",
+        chrono::Utc::now().timestamp_millis(),
+        SEARCH_REBUILD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut jobs = SEARCH_REBUILD_JOBS.lock().map_err(|e| e.to_string())?;
+        if let Some((existing, _)) = jobs.iter().next() {
+            return Ok(existing.clone());
+        }
+        jobs.insert(job_id.clone(), cancel.clone());
+    }
+    let job = job_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let started = Instant::now();
+        let progress_app = app.clone();
+        let progress_job = job.clone();
+        let task_library = Arc::clone(&library);
+        let outcome = tokio::task::spawn_blocking(move || {
+            let library = task_library;
+            let mut last = Instant::now() - Duration::from_secs(1);
+            let mut emit = |phase: &str, done: usize, total: usize| {
+                if done < total && last.elapsed() < Duration::from_millis(100) {
+                    return;
+                }
+                last = Instant::now();
+                let elapsed = started.elapsed().as_secs_f64();
+                let rate = (elapsed > 0.5).then(|| done as f64 / elapsed);
+                let _ = progress_app.emit(
+                    "search-index-progress",
+                    SearchRebuildProgress {
+                        job_id: progress_job.clone(),
+                        origin: origin.to_string(),
+                        status: "running".to_string(),
+                        total_downloads: 0,
+                        indexed_downloads: 0,
+                        pending_downloads: total.saturating_sub(done) as i64,
+                        is_complete: false,
+                        phase: phase.to_string(),
+                        processed: done as i64,
+                        processed_total: total as i64,
+                        failed: 0,
+                        embedding_provider: String::new(),
+                        gpu_enabled: false,
+                        throughput_per_sec: rate,
+                        eta_seconds: rate
+                            .filter(|r| *r > 0.0)
+                            .map(|r| total.saturating_sub(done) as f64 / r),
+                        error: None,
+                    },
+                );
+            };
+            let lexical = library
+                .sync_search_index(&mut |done, total| emit("indexing", done, total))
+                .map_err(|e| e.to_string())?;
+            let mut processed = lexical.indexed + lexical.history.indexed;
+            if super::library_health::semantic_enabled() && !cancel.load(Ordering::Relaxed) {
+                let _turn = super::library_health::SEMANTIC_TURN
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                let semantic = library
+                    .sync_semantic_index(
+                        None,
+                        &|| cancel.load(Ordering::Relaxed),
+                        &mut |done, total| emit("semantic", done, total),
+                    )
+                    .map_err(|e| e.to_string())?;
+                processed += semantic.indexed;
+            }
+            Ok::<_, String>((processed as i64, cancel.load(Ordering::Relaxed)))
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|result| result);
+        let status = library
+            .search_index_status(super::library_health::semantic_enabled())
+            .map_err(|e| e.to_string());
+        match (outcome, status) {
+            (Ok((processed, canceled)), Ok(status)) => emit_search_index_progress(
+                &app,
+                &job,
+                origin,
+                if canceled { "canceled" } else { "completed" },
+                status,
+                processed,
+                0,
+                started.elapsed().as_secs_f64(),
+            ),
+            (Err(error), _) | (_, Err(error)) => {
+                let _ = app.emit(
+                    "search-index-progress",
+                    serde_json::json!({ "jobId": job, "origin": origin, "status": "failed", "phase": "failed", "error": error }),
+                );
+            }
+        }
+        if let Ok(mut jobs) = SEARCH_REBUILD_JOBS.lock() {
+            jobs.remove(&job);
+        }
+    });
+    Ok(job_id)
 }
 
 fn spawn_rebuild_job(
@@ -948,25 +1096,55 @@ pub async fn db_list_entity_tags(
     .await
 }
 
-/// 保存した検索の一覧を返す。
+/// 保存した検索の一覧を返す。ID は文字列（切り替えた棚では検索の UUID）。
 #[tauri::command]
-pub async fn db_list_saved_searches(app: tauri::AppHandle) -> Result<Vec<SavedSearch>, String> {
-    run_db_blocking(app, move |state| state.db.list_saved_searches()).await
+pub async fn db_list_saved_searches(app: tauri::AppHandle) -> Result<Vec<SavedSearchView>, String> {
+    run_db_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return saved_search_shelf::list(&library);
+        }
+        Ok(state
+            .db
+            .list_saved_searches()?
+            .into_iter()
+            .map(saved_search_shelf::legacy_view)
+            .collect())
+    })
+    .await
 }
 
 /// 検索を保存する。同じ名前があれば上書きし、保存後の姿を返す。
 #[tauri::command]
 pub async fn db_upsert_saved_search(
     app: tauri::AppHandle,
-    input: SavedSearchInput,
-) -> Result<SavedSearch, String> {
-    run_library_write_blocking(app, move |state| state.db.upsert_saved_search(&input)).await
+    input: SavedSearchViewInput,
+) -> Result<SavedSearchView, String> {
+    run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return saved_search_shelf::upsert(&library, input);
+        }
+        let input = saved_search_shelf::legacy_input(input)?;
+        state
+            .db
+            .upsert_saved_search(&input)
+            .map(saved_search_shelf::legacy_view)
+    })
+    .await
 }
 
 /// 保存した検索を消す。`false` は「その ID が無かった」を意味する。
 #[tauri::command]
-pub async fn db_delete_saved_search(app: tauri::AppHandle, id: i64) -> Result<bool, String> {
-    run_library_write_blocking(app, move |state| state.db.delete_saved_search(id)).await
+pub async fn db_delete_saved_search(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+    run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return saved_search_shelf::delete(&library, &id);
+        }
+        match id.parse::<i64>() {
+            Ok(id) => state.db.delete_saved_search(id),
+            Err(_) => Ok(false),
+        }
+    })
+    .await
 }
 
 /// コレクションの一覧を、要約だけで返す。
@@ -1163,6 +1341,10 @@ pub async fn db_propose_collection_names(
     collection_id: String,
 ) -> Result<Vec<CollectionNameCandidate>, String> {
     run_db_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            let target = super::library_v2::collection_target(&library, &collection_id)?;
+            return library.collection_name_proposals_on_shelf(target);
+        }
         state.db.collection_name_proposals(&collection_id)
     })
     .await
@@ -1179,10 +1361,15 @@ pub async fn db_name_collection_with_model(
     engine: crate::assist::AssistEngine,
 ) -> Result<crate::assist::GeneratedAssist<crate::assist::NamedBundle>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let works =
-        tokio::task::spawn_blocking(move || state.db.collection_naming_works_for(&collection_id))
-            .await
-            .map_err(|e| format!("Database task failed: {e}"))??;
+    let works = tokio::task::spawn_blocking(move || {
+        if let Some(library) = state.library_v2.switched() {
+            let target = super::library_v2::collection_target(&library, &collection_id)?;
+            return library.collection_naming_works_on_shelf(target);
+        }
+        state.db.collection_naming_works_for(&collection_id)
+    })
+    .await
+    .map_err(|e| format!("Database task failed: {e}"))??;
     let provenance = crate::assist::generation_provenance(
         &engine,
         crate::assist::FEATURE_COLLECTION_NAMING,
@@ -1204,9 +1391,19 @@ pub async fn db_try_naming_engine(
     collection_id: Option<String>,
 ) -> Result<crate::assist::TrialResult, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let works = tokio::task::spawn_blocking(move || match collection_id {
-        Some(id) => state.db.collection_naming_works_for(&id),
-        None => state.db.sample_naming_works(),
+    let works = tokio::task::spawn_blocking(move || {
+        if let Some(library) = state.library_v2.switched() {
+            return match collection_id {
+                Some(id) => library.collection_naming_works_on_shelf(
+                    super::library_v2::collection_target(&library, &id)?,
+                ),
+                None => library.sample_naming_works_on_shelf(),
+            };
+        }
+        match collection_id {
+            Some(id) => state.db.collection_naming_works_for(&id),
+            None => state.db.sample_naming_works(),
+        }
     })
     .await
     .map_err(|e| format!("Database task failed: {e}"))??;
@@ -1229,6 +1426,25 @@ pub async fn db_name_collection_suggestion(
     // 材料を読むところと、外へ送るところを分ける。送っているあいだ
     // ライブラリの錠を握ったままにしない。
     let state = app.state::<Arc<AppState>>().inner().clone();
+    if let Some(library) = state.library_v2.switched() {
+        let works = {
+            let library = library.clone();
+            let suggestion_id = suggestion_id.clone();
+            tokio::task::spawn_blocking(move || library.suggestion_naming_works(&suggestion_id))
+                .await
+                .map_err(|e| format!("Database task failed: {e}"))??
+        };
+        let provenance = crate::assist::generation_provenance(
+            &engine,
+            crate::assist::FEATURE_COLLECTION_NAMING,
+            &works,
+        )?;
+        let named = crate::assist::name_bundle(&engine, &works).await?;
+        return run_library_write_blocking(app, move |_| {
+            library.attach_llm_name_to_suggestion(&suggestion_id, &named, &provenance)
+        })
+        .await;
+    }
     let ids = {
         let suggestion_id = suggestion_id.clone();
         let state = state.clone();
@@ -1276,7 +1492,13 @@ pub async fn db_name_collection_suggestion(
 /// 走査で出た候補を、まとめて閉じる。`track` を渡すとその系統だけ。
 #[tauri::command]
 pub async fn db_dismiss_swept_suggestions(app: tauri::AppHandle) -> Result<usize, String> {
-    run_library_write_blocking(app, move |state| state.db.dismiss_swept_suggestions()).await
+    run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library.dismiss_swept_collection_suggestions();
+        }
+        state.db.dismiss_swept_suggestions()
+    })
+    .await
 }
 
 /// 棚全体を走査して、束の候補を作り直す。
@@ -1287,7 +1509,13 @@ pub async fn db_dismiss_swept_suggestions(app: tauri::AppHandle) -> Result<usize
 pub async fn db_sweep_collection_candidates(
     app: tauri::AppHandle,
 ) -> Result<CollectionSweepResult, String> {
-    run_library_write_blocking(app, move |state| state.db.sweep_collection_candidates()).await
+    run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library.sweep_collection_suggestions();
+        }
+        state.db.sweep_collection_candidates()
+    })
+    .await
 }
 
 /// すでにある束へ、あとから入れるとよさそうな作品を探す。
@@ -1299,6 +1527,10 @@ pub async fn db_suggest_collection_additions(
     collection_id: String,
 ) -> Result<CollectionAdditionResult, String> {
     run_db_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            let target = super::library_v2::collection_target(&library, &collection_id)?;
+            return library.collection_additions_on_shelf(target);
+        }
         state.db.suggest_collection_additions(&collection_id)
     })
     .await
@@ -1402,6 +1634,23 @@ pub async fn db_generate_collection_suggestion(
     request: CollectionSuggestionRequest,
 ) -> Result<CollectionSuggestion, String> {
     run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            let seeds = request
+                .seed_works
+                .iter()
+                .map(|work| {
+                    work.parse::<crate::library::LibraryId>()
+                        .map_err(|_| "基準の作品の ID が不正です".to_string())
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            if seeds.is_empty() {
+                return Err("At least one seed work is required".to_string());
+            }
+            if seeds.len() > 20 {
+                return Err("A suggestion can use at most 20 seed works".to_string());
+            }
+            return library.seed_collection_suggestion(&seeds, request.limit);
+        }
         state.db.generate_collection_suggestion(&request)
     })
     .await
@@ -1416,6 +1665,9 @@ pub async fn db_list_collection_suggestions(
     state_filter: Option<String>,
 ) -> Result<Vec<CollectionSuggestion>, String> {
     run_db_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library.collection_suggestion_views(state_filter.as_deref());
+        }
         state
             .db
             .list_collection_suggestions(state_filter.as_deref())
@@ -1433,12 +1685,24 @@ pub async fn db_dismiss_collection_suggestion(
     suggestion_id: String,
 ) -> Result<bool, String> {
     run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library.dismiss_collection_suggestion_view(&suggestion_id);
+        }
         state.db.dismiss_collection_suggestion(&suggestion_id)
     })
     .await
 }
 
-/// 候補を採り、コレクションを作って返す。
+/// 採って作ったコレクション。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptedCollection {
+    /// 旧棚ではコレクションの ID、切り替えた棚ではコレクションの UUID。
+    pub id: String,
+    pub name: String,
+}
+
+/// 候補を採り、コレクションを作る。作ったコレクションの ID と名前を返す。
 ///
 /// **候補の段階で並べ替えはできない。** 順序を直すのは採ったあと、
 /// `db_reorder_work_collection_members` で行う。
@@ -1446,9 +1710,26 @@ pub async fn db_dismiss_collection_suggestion(
 pub async fn db_accept_collection_suggestion(
     app: tauri::AppHandle,
     input: AcceptCollectionSuggestionInput,
-) -> Result<WorkCollection, String> {
+) -> Result<AcceptedCollection, String> {
     run_library_write_blocking(app, move |state| {
-        state.db.accept_collection_suggestion(&input)
+        let name = input.name.clone();
+        if let Some(library) = state.library_v2.switched() {
+            let id = library.accept_collection_suggestion_view(&input)?;
+            let name = library
+                .collection_detail(id)
+                .map(|detail| detail.summary.name)
+                .or_else(|_| name.ok_or(()))
+                .unwrap_or_default();
+            return Ok(AcceptedCollection {
+                id: id.to_string(),
+                name,
+            });
+        }
+        let collection = state.db.accept_collection_suggestion(&input)?;
+        Ok(AcceptedCollection {
+            id: collection.summary.id,
+            name: collection.summary.name,
+        })
     })
     .await
 }
@@ -1464,6 +1745,10 @@ pub async fn db_reject_collection_suggestion(
     member_keys: Option<Vec<WorkKey>>,
 ) -> Result<bool, String> {
     run_library_write_blocking(app, move |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library
+                .reject_collection_suggestion_view(&suggestion_id, member_keys.as_deref());
+        }
         state
             .db
             .reject_collection_suggestion(&suggestion_id, member_keys.as_deref())
@@ -1501,8 +1786,15 @@ pub async fn db_get_filter_facets(
 pub async fn db_get_search_index_status(
     app: tauri::AppHandle,
 ) -> Result<SearchIndexStatus, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_search_index_status()
+    run_db_blocking(app, |state| {
+        if let Some(library) = state.library_v2.switched() {
+            return library
+                .search_index_status(super::library_health::semantic_enabled())
+                .map_err(|e| e.to_string());
+        }
+        state.db.get_search_index_status()
+    })
+    .await
 }
 
 /// 作者やシリーズを、名前で探して返す。
@@ -1679,7 +1971,41 @@ pub async fn db_set_flags_for_ids(
 pub async fn db_upsert_update_target(
     app: tauri::AppHandle,
     target: UpdateTargetInput,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
 ) -> Result<UpdateTarget, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let options = target
+                .metadata_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .unwrap_or_else(|| serde_json::json!({}));
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::Upsert {
+                    target_type: target.target_type.clone(),
+                    provider: target.source.clone(),
+                    key: target.source_key.clone(),
+                    name: target.display_name,
+                    enabled: target.enabled,
+                    options,
+                },
+            )?;
+            super::watching::find(
+                &library,
+                &target.target_type,
+                &target.source,
+                &target.source_key,
+            )?
+            .ok_or("監視対象が見つかりません".into())
+        })
+        .await;
+    }
     run_library_write_blocking(app, move |state| state.db.upsert_update_target(&target)).await
 }
 
@@ -1691,6 +2017,12 @@ pub async fn db_get_update_target(
     source: String,
     source_key: String,
 ) -> Result<Option<UpdateTarget>, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            super::watching::find(&library, &target_type, &source, &source_key)
+        })
+        .await;
+    }
     run_db_blocking(app, move |state| {
         state
             .db
@@ -1709,6 +2041,16 @@ pub async fn db_list_update_targets(
     target_type: Option<String>,
     enabled_only: Option<bool>,
 ) -> Result<Vec<UpdateTarget>, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            super::watching::targets(
+                &library,
+                target_type.as_deref(),
+                enabled_only.unwrap_or(false),
+            )
+        })
+        .await;
+    }
     let state = app.state::<Arc<AppState>>();
     state
         .db
@@ -1719,13 +2061,42 @@ pub async fn db_list_update_targets(
 ///
 /// **設定は消えない。** 消したいときは `db_delete_update_target`。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // 既存の IPC 引数に要求 ID・世代・棚の対象 ID を添える。
 pub async fn db_set_update_target_enabled(
     app: tauri::AppHandle,
     target_type: String,
     source: String,
     source_key: String,
     enabled: bool,
+    target_id: Option<crate::database::WatchId>,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
 ) -> Result<(), String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let key = target_id
+                .or(
+                    super::watching::find(&library, &target_type, &source, &source_key)?
+                        .map(|v| v.id),
+                )
+                .ok_or("監視対象が見つかりません")?;
+            let id = match key {
+                crate::database::WatchId::Shelf(id) => id,
+                key => super::watching::target_id(&library, key)?,
+            };
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::Enable {
+                    target: id,
+                    enabled,
+                },
+            )
+            .map(|_| ())
+        })
+        .await;
+    }
     run_library_write_blocking(app, move |state| {
         state
             .db
@@ -1743,7 +2114,32 @@ pub async fn db_delete_update_target(
     target_type: String,
     source: String,
     source_key: String,
+    target_id: Option<crate::database::WatchId>,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
 ) -> Result<(), String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let key = target_id
+                .or(
+                    super::watching::find(&library, &target_type, &source, &source_key)?
+                        .map(|v| v.id),
+                )
+                .ok_or("監視対象が見つかりません")?;
+            let id = match key {
+                crate::database::WatchId::Shelf(id) => id,
+                key => super::watching::target_id(&library, key)?,
+            };
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::RemoveTarget { target: id },
+            )
+            .map(|_| ())
+        })
+        .await;
+    }
     run_library_write_blocking(app, move |state| {
         state
             .db
@@ -1757,22 +2153,64 @@ pub async fn db_delete_update_target(
 pub async fn db_list_watch_groups(
     app: tauri::AppHandle,
 ) -> Result<Vec<crate::database::WatchGroup>, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || super::watching::groups(&library)).await;
+    }
     app.state::<Arc<AppState>>().db.list_watch_groups()
 }
 
 /// 監視グループを一番下に作り、その ID を返す。同じ名前があれば `Err`。
 #[tauri::command]
-pub async fn db_create_watch_group(app: tauri::AppHandle, name: String) -> Result<i64, String> {
-    run_library_write_blocking(app, move |state| state.db.create_watch_group(&name)).await
+pub async fn db_create_watch_group(
+    app: tauri::AppHandle,
+    name: String,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
+) -> Result<crate::database::WatchId, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::CreateGroup { name },
+            )
+            .map(|v| crate::database::WatchId::Shelf(v.id))
+        })
+        .await;
+    }
+    run_library_write_blocking(app, move |state| {
+        state.db.create_watch_group(&name).map(Into::into)
+    })
+    .await
 }
 
 /// 監視グループの名前を変える。
 #[tauri::command]
 pub async fn db_rename_watch_group(
     app: tauri::AppHandle,
-    group_id: i64,
+    group_id: crate::database::WatchId,
     name: String,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
 ) -> Result<(), String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let id = match group_id {
+                crate::database::WatchId::Shelf(id) => id,
+                key => super::watching::group_id(&library, key)?,
+            };
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::RenameGroup { group: id, name },
+            )
+            .map(|_| ())
+        })
+        .await;
+    }
+    let group_id = group_id.legacy()?;
     run_library_write_blocking(app, move |state| {
         state.db.rename_watch_group(group_id, &name)
     })
@@ -1781,7 +2219,29 @@ pub async fn db_rename_watch_group(
 
 /// 監視グループを消す。**中の監視対象は消えない。**
 #[tauri::command]
-pub async fn db_delete_watch_group(app: tauri::AppHandle, group_id: i64) -> Result<(), String> {
+pub async fn db_delete_watch_group(
+    app: tauri::AppHandle,
+    group_id: crate::database::WatchId,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
+) -> Result<(), String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let id = match group_id {
+                crate::database::WatchId::Shelf(id) => id,
+                key => super::watching::group_id(&library, key)?,
+            };
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::RemoveGroup { group: id },
+            )
+            .map(|_| ())
+        })
+        .await;
+    }
+    let group_id = group_id.legacy()?;
     run_library_write_blocking(app, move |state| state.db.delete_watch_group(group_id)).await
 }
 
@@ -1789,10 +2249,44 @@ pub async fn db_delete_watch_group(app: tauri::AppHandle, group_id: i64) -> Resu
 #[tauri::command]
 pub async fn db_set_watch_group_members(
     app: tauri::AppHandle,
-    group_id: i64,
-    target_ids: Vec<i64>,
+    group_id: crate::database::WatchId,
+    target_ids: Vec<crate::database::WatchId>,
     add: bool,
+    request_id: Option<crate::library::LibraryId>,
+    expected_generation: Option<i64>,
 ) -> Result<usize, String> {
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let group = match group_id {
+                crate::database::WatchId::Shelf(id) => id,
+                key => super::watching::group_id(&library, key)?,
+            };
+            let targets = target_ids
+                .into_iter()
+                .map(|v| match v {
+                    crate::database::WatchId::Shelf(id) => Ok(id),
+                    key => super::watching::target_id(&library, key),
+                })
+                .collect::<Result<_, _>>()?;
+            super::watching::edit(
+                &library,
+                request_id,
+                expected_generation,
+                crate::library::WatchEdit::Members {
+                    group,
+                    targets,
+                    add,
+                },
+            )
+            .map(|v| v.changed)
+        })
+        .await;
+    }
+    let group_id = group_id.legacy()?;
+    let target_ids = target_ids
+        .into_iter()
+        .map(crate::database::WatchId::legacy)
+        .collect::<Result<Vec<_>, _>>()?;
     run_library_write_blocking(app, move |state| {
         state.db.set_watch_group_members(group_id, &target_ids, add)
     })
@@ -2288,16 +2782,6 @@ pub async fn refresh_entity_profile(
     app: tauri::AppHandle,
     params: RefreshEntityProfileParams,
 ) -> Result<serde_json::Value, String> {
-    let RefreshEntityProfileParams {
-        entity_type,
-        source,
-        source_key,
-        force,
-        refresh_token,
-        cookie,
-        user_agent,
-    } = params;
-
     let mut last_refresh = ENTITY_REFRESH_LOCK.lock().await;
     if let Some(last) = *last_refresh {
         let elapsed = last.elapsed();
@@ -2308,6 +2792,18 @@ pub async fn refresh_entity_profile(
     *last_refresh = Some(Instant::now());
 
     let state = app.state::<Arc<AppState>>().inner().clone();
+    if let Some(library) = state.library_v2.switched() {
+        return profile_shelf::refresh(state, library, params).await;
+    }
+    let RefreshEntityProfileParams {
+        entity_type,
+        source,
+        source_key,
+        force,
+        refresh_token,
+        cookie,
+        user_agent,
+    } = params;
     let force = force.unwrap_or(false);
     let app_data = state
         .db
@@ -2744,7 +3240,11 @@ pub async fn db_scan_fanbox_asset_gaps(app: tauri::AppHandle) -> Result<FanboxRe
 pub async fn db_get_entity_profile_repair_status(
     app: tauri::AppHandle,
 ) -> Result<EntityProfileRepairView, String> {
-    let status = run_db_blocking(app, |state| state.db.entity_profile_repair_status()).await?;
+    let status = run_db_blocking(app, |state| match state.library_v2.switched() {
+        Some(library) => library.profile_repair_status().map_err(|e| e.to_string()),
+        None => state.db.entity_profile_repair_status(),
+    })
+    .await?;
     Ok(EntityProfileRepairView {
         status,
         running: ENTITY_PROFILE_REPAIR_RUNNING.load(Ordering::Acquire),
@@ -2770,8 +3270,11 @@ pub async fn repair_incomplete_entity_profiles(
     let _run_guard = EntityProfileRepairRunGuard;
     ENTITY_PROFILE_REPAIR_CANCEL.store(false, Ordering::Release);
 
-    let targets =
-        run_db_blocking(app.clone(), |state| state.db.incomplete_entity_profiles()).await?;
+    let targets = run_db_blocking(app.clone(), |state| match state.library_v2.switched() {
+        Some(library) => library.incomplete_profiles().map_err(|e| e.to_string()),
+        None => state.db.incomplete_entity_profiles(),
+    })
+    .await?;
     let total = targets.len();
     let mut repaired = 0usize;
     let mut failed = 0usize;
@@ -2868,9 +3371,12 @@ pub async fn repair_incomplete_entity_profiles(
     }
 
     let canceled = ENTITY_PROFILE_REPAIR_CANCEL.load(Ordering::Acquire);
-    let remaining = run_db_blocking(app.clone(), |state| state.db.entity_profile_repair_status())
-        .await?
-        .total_count;
+    let remaining = run_db_blocking(app.clone(), |state| match state.library_v2.switched() {
+        Some(library) => library.profile_repair_status().map_err(|e| e.to_string()),
+        None => state.db.entity_profile_repair_status(),
+    })
+    .await?
+    .total_count;
     emit_profile_repair_progress(
         &app,
         EntityProfileRepairProgress {

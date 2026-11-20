@@ -17,11 +17,21 @@ import { demoSuggestions, getDemoReader } from "@/mocks/demoData";
 import { nameCollectionSuggestion } from "@/services/assistApi";
 import { acceptCollectionSuggestion, listCollectionSuggestions, rejectCollectionSuggestion, suggestionNameOverride } from "@/services/collectionApi";
 import { getReaderContentPage, isTauriRuntime } from "@/services/dbApi";
+import { libraryV2Content, shelfFileUrl } from "@/services/libraryV2Api";
+import { invalidateShelf, useShelfMode } from "@/features/library/shelfV2";
 import type { CollectionSuggestion, CollectionSuggestionMember, SavedSearchSuggestion, WorkKey } from "@/types/collections";
 import "./discovery.css";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 const EMPTY: CollectionSuggestion[] = [];
+
+/** 本文の HTML を、段落の区切りを残した平文にする（候補の確認の窓は平文で見せる）。 */
+export function htmlText(html: string): string {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("br").forEach((node) => node.replaceWith("\n"));
+  doc.querySelectorAll("p, div, h1, h2, h3, h4, h5, h6, li, blockquote").forEach((node) => node.append("\n"));
+  return (doc.body.textContent ?? "").replace(/\n{3,}/g, "\n\n").trim();
+}
 type Track = "sequence" | "theme";
 
 /** 一度に見せる候補の数。
@@ -104,6 +114,7 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
   const { engine } = useAssist("collection_naming");
+  const { shelfMode } = useShelfMode(runtime);
   const [track, setTrack] = useState<Track>("sequence");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -150,7 +161,8 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange
   };
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["collection-suggestions"] });
-    queryClient.invalidateQueries({ queryKey: ["work-collections"] });
+    if (shelfMode) void invalidateShelf(queryClient);
+    else queryClient.invalidateQueries({ queryKey: ["work-collections"] });
   };
   const finish = (id: string) => {
     setResolved((current) => new Set([...current, id]));
@@ -300,11 +312,11 @@ function SuggestionReview({ suggestion, draft, busy, accepting, runtime, deferre
             const evidence = [...new Set(member.evidence.filter((item) => !["series_subset", "edition_overlap", "order_conflict", "sequence_gap", "body_unconfirmed", "cross_source", "title_similarity", "content_link", "unregistered"].includes(item.kind)).map((item) => item.label).filter(Boolean))];
             return <li key={key} className="discovery-member" data-excluded={!included || undefined}>
               <div className="discovery-member__selection"><Checkbox checked={included} disabled={busy} aria-label={`${member.title}を含める`} onChange={() => onDraft((current) => ({ ...current, excluded: included ? [...current.excluded, key] : current.excluded.filter((value) => value !== key) }))} />{ordered && <span className="discovery-member__position" aria-label={`${index + 1}番目`}>{index + 1}</span>}</div>
-              <div className="discovery-member__cover"><WorkCover work={member} variant="compact" /></div>
+              <div className="discovery-member__cover"><WorkCover work={member.work ? { ...member, coverUrl: shelfFileUrl(member.coverPath) } : member} variant="compact" /></div>
               <div className="discovery-member__body"><Text size="sm" fw={650} className="discovery-member__title">{member.title}</Text><div className="discovery-member__meta"><span>{getProvider(member.source).label}</span><span>{member.authorName}</span><span>{member.textLength > 0 ? `${formatNumber(member.textLength)}字` : "本文未取得"}</span></div>
                 {evidence.length > 0 && <ul className="discovery-member__evidence">{evidence.slice(0, 2).map((label) => <li key={label}>{label}</li>)}</ul>}
                 {evidence.length > 2 && <details className="discovery-member__more"><summary>ほかの根拠 {evidence.length - 2}件</summary><ul>{evidence.slice(2).map((label) => <li key={label}>{label}</li>)}</ul></details>}
-                <Button variant="subtle" color="gray" size="compact-xs" className="discovery-member__preview" leftSection={<Icons.read size={IconSize.inline} />} disabled={busy || member.downloadId === null} onClick={() => setPreview(member)}>本文を確認</Button>
+                <Button variant="subtle" color="gray" size="compact-xs" className="discovery-member__preview" leftSection={<Icons.read size={IconSize.inline} />} disabled={busy || (member.downloadId === null && !member.work)} onClick={() => setPreview(member)}>本文を確認</Button>
               </div>
               {ordered && <div className="discovery-member__order"><Tooltip label="一つ前へ"><ActionIcon variant="subtle" color="gray" aria-label={`${member.title}を一つ前へ`} disabled={busy || index === 0} onClick={() => move(index, -1)}><Icons.up size={IconSize.menu} /></ActionIcon></Tooltip><Tooltip label="一つ後へ"><ActionIcon variant="subtle" color="gray" aria-label={`${member.title}を一つ後へ`} disabled={busy || index === members.length - 1} onClick={() => move(index, 1)}><Icons.down size={IconSize.menu} /></ActionIcon></Tooltip></div>}
             </li>;
@@ -327,13 +339,18 @@ function ReaderPreview({ member, runtime, onBack }: { member: CollectionSuggesti
   const [knownPageCount, setKnownPageCount] = useState(1);
   const contentRef = useRef<HTMLDivElement>(null);
   const content = useQuery({
-    queryKey: ["collection-preview", member.downloadId, page],
-    queryFn: () => {
+    queryKey: ["collection-preview", member.work ?? member.downloadId, page],
+    queryFn: async () => {
+      // 新しい棚の候補は作品の UUID で読む。読む画面と同じ HTML を平文にして見せる。
+      if (runtime && member.work) {
+        const shelfPage = await libraryV2Content(member.work, null, page);
+        return { ...shelfPage, plainText: htmlText(shelfPage.html) };
+      }
       if (runtime) return getReaderContentPage(member.downloadId!, null, page, true);
       const demo = getDemoReader(member.downloadId!);
       return Promise.resolve({ page: 0, pageCount: 1, plainText: demo.plainText, html: demo.html, totalPlainTextChars: demo.plainText.length, sourcePageStarts: [0] });
     },
-    enabled: member.downloadId !== null,
+    enabled: member.downloadId !== null || Boolean(member.work),
     staleTime: 60_000,
   });
   useEffect(() => { if (content.data) setKnownPageCount(content.data.pageCount); }, [content.data]);

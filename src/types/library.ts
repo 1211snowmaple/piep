@@ -41,6 +41,24 @@ export interface DownloadEntry {
   historicalMatchCount?: number;
 }
 
+/**
+ * 新しい棚の作品を、一覧のカードが読む形にしたもの（試験中・読むだけ）。
+ *
+ * `id` は新しい棚の作品の ID（UUID の文字列）で、旧棚の番号ではない。旧棚の番号で
+ * 動く操作（お気に入り・更新監視・EPUB・削除・選択）には渡さない。表紙は
+ * `coverUrl` に URL で持つ（旧棚のパスではない）。
+ */
+export interface ShelfEntry extends Omit<DownloadEntry, "id"> {
+  id: string;
+  shelf: "v2";
+  coverUrl: string | null;
+  /** 旧棚から移した作品の、旧棚での番号。端末の読書位置・しおりはこの番号で引く。 */
+  legacyId: number | null;
+}
+
+/** 一覧に並ぶ作品。旧棚か新しい棚か。 */
+export type ListedWork = DownloadEntry | ShelfEntry;
+
 export interface ScoreReason {
   field: string;
   matchType: string;
@@ -292,6 +310,8 @@ export interface FacetCount {
 }
 
 export interface EntityFacet {
+  /** 新しい棚（試験中）から引いたもの。画像の欄はパスでなくファイルの識別子。 */
+  shelf?: "v2";
   source: string;
   sourceKey: string;
   displayName: string;
@@ -401,8 +421,13 @@ export interface EntityVersion {
   changeSummary: string | null;
 }
 
+export type WatchId = number | string;
+/** 旧棚の番号か、新しい棚の作品 UUID。 */
+export type WorkId = number | string;
+
 export interface UpdateTarget {
-  id: number;
+  id: WatchId;
+  watchGeneration?: number;
   targetType: "work" | "author" | "series" | string;
   source: string;
   sourceKey: string;
@@ -426,13 +451,15 @@ export interface UpdateTarget {
 
 /** 利用者が作った監視グループ。監視対象を束ねて、その束だけを確認する。 */
 export interface WatchGroup {
-  id: number;
+  id: WatchId;
+  legacyId?: number;
+  watchGeneration?: number;
   name: string;
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
   /** 中の監視対象（UpdateTarget.id）。 */
-  targetIds: number[];
+  targetIds: WatchId[];
 }
 
 export interface DashboardTrendPoint {
@@ -458,7 +485,8 @@ export interface DashboardSummary {
   pendingIndexCount: number;
   topTags: FacetCount[];
   topAuthors: FacetCount[];
-  recentDownloads: DownloadEntry[];
+  /** 新しい棚の集計では棚の作品（`ShelfEntry`）が入る。 */
+  recentDownloads: ListedWork[];
   sourceBreakdown: SourceBreakdown[];
   monthlyDownloads: DashboardTrendPoint[];
 }
@@ -502,7 +530,8 @@ export interface LibraryShelfCounts {
 }
 
 export interface SavedSearchRecord {
-  id: number;
+  /** 切り替えた棚では検索の UUID、旧棚では番号の文字列。中身を解釈しない。 */
+  id: string;
   name: string;
   query: string | null;
   paramsJson: string;
@@ -512,7 +541,7 @@ export interface SavedSearchRecord {
 
 export interface SavedSearchInput {
   /** Omitted for a new entry; reusing a name replaces that entry. */
-  id?: number | null;
+  id?: string | null;
   name: string;
   query?: string | null;
   paramsJson: string;

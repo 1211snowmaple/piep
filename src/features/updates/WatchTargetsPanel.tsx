@@ -29,23 +29,23 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { getAssetUrl } from "@/services/dbApi";
-import type { UpdateTarget, WatchGroup } from "@/types/library";
+import type { UpdateTarget, WatchGroup, WatchId } from "@/types/library";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 export type TargetValues = { targetType: string; source: string; sourceKey: string; displayName: string };
 /** `groupId` があれば、追加した対象をそのグループにも入れる。 */
-export type TargetAction = { action: "add" | "toggle" | "delete"; target?: UpdateTarget; enabled?: boolean; values?: TargetValues; groupId?: number };
+export type TargetAction = { action: "add" | "toggle" | "delete"; target?: UpdateTarget; enabled?: boolean; values?: TargetValues; groupId?: WatchId };
 export type GroupAction =
-  | { action: "create"; name: string; addTargetIds?: number[] }
+  | { action: "create"; name: string; addTargetIds?: WatchId[] }
   | { action: "rename"; group: WatchGroup; name: string }
   | { action: "delete"; group: WatchGroup }
-  | { action: "members"; group: WatchGroup; targetIds: number[]; add: boolean };
+  | { action: "members"; group: WatchGroup; targetIds: WatchId[]; add: boolean };
 
 /**
  * 左の束。既定の四つは監視対象そのものの性質で決まり、その下に利用者が
  * 作ったグループが並ぶ。どれを選んでも右の一覧の作法は同じ。
  */
-export type WatchView = "all" | "author" | "series" | "paused" | `group:${number}`;
+export type WatchView = "all" | "author" | "series" | "paused" | `group:${WatchId}`;
 
 const PAGE_SIZE = 60;
 /** 行に並べるグループ名の数。それより多ければ「+N」に畳む。 */
@@ -63,7 +63,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
   /** まとめて止める・再開する。 */
   onSetEnabled: (targets: UpdateTarget[], enabled: boolean) => void;
   /** 一覧の対象だけを確認する。`label` は知らせに出す呼び名。 */
-  onCheck: (targetIds: number[], label: string) => void;
+  onCheck: (targetIds: WatchId[], label: string) => void;
   checkDisabled: boolean;
 }) {
   const [view, setView] = useState<WatchView>("all");
@@ -72,7 +72,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
   const [searchText, setSearchText] = useState("");
   const [activeVisibleCount, setActiveVisibleCount] = useState(PAGE_SIZE);
   const [pausedVisibleCount, setPausedVisibleCount] = useState(PAGE_SIZE);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [selected, setSelected] = useState<Set<WatchId>>(new Set());
   if (loading) return <LoadingState />;
   if (error) return <ErrorState error={error} retry={retry} />;
 
@@ -104,7 +104,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
   const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
 
   const viewTitle = viewGroup?.name ?? ({ all: "すべての監視対象", author: "作者", series: "シリーズ", paused: "停止中" } as Record<string, string>)[currentView];
-  const toggleSelected = (id: number, checked: boolean) => setSelected((current) => {
+  const toggleSelected = (id: WatchId, checked: boolean) => setSelected((current) => {
     const next = new Set(current);
     if (checked) next.add(id);
     else next.delete(id);
@@ -124,13 +124,13 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
       children: <GroupNameForm current={current} onSubmit={async (name) => { await submit(name); modals.close(id); }} />,
     });
   };
-  const createGroup = (addTargetIds?: number[]) => askGroupName(
+  const createGroup = (addTargetIds?: WatchId[]) => askGroupName(
     addTargetIds?.length ? `新しいグループに${formatNumber(addTargetIds.length)}件を入れる` : "監視グループを作る",
     "",
     async (name) => {
       const created = await groupMutation.mutateAsync({ action: "create", name, addTargetIds });
       if (addTargetIds?.length) setSelected(new Set());
-      else if (typeof created === "number") changeView(`group:${created}`);
+      else if (typeof created === "number" || typeof created === "string") changeView(`group:${created}`);
     },
   );
   const confirmDeleteGroup = (group: WatchGroup) => modals.openConfirmModal({

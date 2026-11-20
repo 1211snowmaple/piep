@@ -1,5 +1,10 @@
 //! 単独サーバー（`piep-server`）の本体。設定、置き場、待ち受け、コマンド。
 
+#[path = "standalone_native.rs"]
+mod native;
+#[path = "standalone_shipment.rs"]
+pub mod shipment;
+
 use super::admin_assets::ADMIN_ASSETS;
 use super::admin_store::TicketKind;
 use super::http::admin_web::command_ticket;
@@ -50,8 +55,44 @@ pub struct ServerConfig {
     #[serde(default)]
     pub public_url: String,
     pub tls: Option<TlsSetting>,
+    pub library_v2: Option<ReaderShelfConfig>,
     #[serde(default)]
     pub update: UpdateConfig,
+}
+
+/// サーバーの置き場にある新しい棚と、そこを読める端末を明示する。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReaderShelfConfig {
+    pub library_id: crate::library::protocol::Id,
+    pub sync_epoch: crate::library::protocol::Id,
+    pub generation: Option<crate::library::protocol::Id>,
+    #[serde(default)]
+    pub readers: std::collections::BTreeMap<String, crate::library::protocol::Id>,
+}
+
+impl ReaderShelfConfig {
+    fn open(
+        &self,
+        paths: &ServerPaths,
+        store: Arc<ServerStore>,
+    ) -> Result<Arc<super::v2::Context>, String> {
+        let root = match self.generation {
+            Some(generation) => native::generation_path(paths, generation)?,
+            None => paths.native_library(),
+        };
+        let library = Arc::new(
+            crate::library::Library::open_matching(&root, self.library_id.get())
+                .map_err(|error| format!("新しい棚を開けません: {error}"))?,
+        );
+        let authority = Arc::new(super::v2::DeviceAuthority::new(store));
+        for (device, subject) in &self.readers {
+            authority.grant(device.clone(), self.library_id, *subject)?;
+        }
+        let context = super::v2::Context::new(library, authority, self.sync_epoch)
+            .map_err(|error| error.to_string())?;
+        Ok(Arc::new(context))
+    }
 }
 
 /// 自己更新。`install` で置いたときだけ動く。
@@ -135,6 +176,9 @@ impl ServerPaths {
     }
     pub fn library(&self) -> PathBuf {
         self.root.join("library")
+    }
+    pub fn native_library(&self) -> PathBuf {
+        self.root.join("library-v2")
     }
     pub fn storage(&self) -> PathBuf {
         self.library().join("downloads")
@@ -307,6 +351,7 @@ pub(crate) async fn next_connection(
         admin_listen,
         public_url,
         tls,
+        library_v2: current.library_v2.clone(),
         update: current.update.clone(),
     };
     next.validate()?;
@@ -812,12 +857,7 @@ pub fn command_admin_web(data: &Path, enable: bool) -> Result<(), String> {
 /// `EXIT_RESTART` なら、管理画面から頼まれたので立ち上げ直す。
 pub async fn command_run(data: &Path) -> Result<i32, String> {
     let paths = ServerPaths::new(data)?;
-    fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
-    // 同じ置き場を 2 つのプロセスで動かさない。
-    let lock =
-        File::create(paths.lock()).map_err(|error| format!("置き場を確保できません: {error}"))?;
-    lock.try_lock()
-        .map_err(|_| "この置き場ではすでに piep-server が動いています".to_string())?;
+    let lock = lock_server(&paths)?;
     match run_locked(paths.clone(), lock).await {
         Err(error) if restore_trial(&paths, &error) => Err(format!(
             "{error}。管理画面で変えた接続の設定では立ち上がれないので、前の設定へ戻しました"
@@ -826,7 +866,30 @@ pub async fn command_run(data: &Path) -> Result<i32, String> {
     }
 }
 
+/// 待ち受けの起動と配信する棚の選択を、同じ置き場で直列化する。
+fn lock_server(paths: &ServerPaths) -> Result<File, String> {
+    fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(paths.lock())
+        .map_err(|error| format!("置き場を確保できません: {error}"))?;
+    lock.try_lock().map_err(|_| {
+        "この置き場は piep-server が使用中です。停止してからやり直してください".to_string()
+    })?;
+    Ok(lock)
+}
+
 async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
+    // 送られた棚を組み終えていれば、設定を読む前に配る棚をそれへ切り替える。
+    {
+        let paths = paths.clone();
+        tokio::task::spawn_blocking(move || shipment::apply_pending(&paths))
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     let config = load_config(&paths)?;
     let material = tls_material(&paths, &config).await?;
     let fingerprint = material
@@ -834,10 +897,29 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
         .and_then(|material| material.fingerprint.clone());
     let tls_config = material.map(|material| material.config);
     let parts = assemble(&paths, config.public_url(), fingerprint)?;
+    let mut served = None;
+    if let Some(settings) = &config.library_v2 {
+        let shelf = settings.open(&paths, Arc::clone(&parts.context.store))?;
+        served = Some(Arc::clone(shelf.library()));
+        parts.context.set_reader_shelf(shelf)?;
+    }
+    let shipments = Arc::new(shipment::ShelfShipments::new(paths.clone(), served));
+    parts
+        .context
+        .set_shipments(paths.clone(), Arc::clone(&shipments));
     parts.receiver.start_index_catch_up();
     note_started(&paths, &parts.context.store);
     let handle = axum_server::Handle::new();
     let restart = Arc::new(AtomicBool::new(false));
+    // 送られた棚を組み終えたら立ち上げ直して配る（見張り役がいるときだけ。いなければ手で）。
+    if update::is_managed(&paths) {
+        let stop_handle = handle.clone();
+        let requested = Arc::clone(&restart);
+        shipments.set_restart(Arc::new(move || {
+            requested.store(true, Ordering::SeqCst);
+            stop_handle.graceful_shutdown(Some(Duration::from_secs(5)));
+        }));
+    }
     // 外へ公開している口にログイン画面を置かない。
     let local = local_admin(&config);
     let web_here =
@@ -999,6 +1081,10 @@ const USAGE: &str = "piep-server <command>
   admin-web --data <dir> --enable|--disable
                                          管理画面を戻す、または止める
   status --data <dir>                    状態を出す
+  stage-library --data <dir> --shelf <dir>
+                                         検証済みの新しい棚の写しを用意し、世代の UUID を出す
+  activate-library --data <dir> --generation <UUID>
+                                         停止中のサーバーで配信する写しを選ぶ
   --version                              版を出す
 
 --url はデスクトップ版からこのサーバーへ届く URL。127.0.0.1 だけで待ち受けていて、
@@ -1016,6 +1102,8 @@ struct Arguments {
     replace: bool,
     enable: bool,
     disable: bool,
+    shelf: Option<PathBuf>,
+    generation: Option<crate::library::protocol::Id>,
 }
 
 fn parse_arguments(args: &[String]) -> Result<Arguments, String> {
@@ -1040,6 +1128,18 @@ fn parse_arguments(args: &[String]) -> Result<Arguments, String> {
             "--replace" => parsed.replace = true,
             "--enable" => parsed.enable = true,
             "--disable" => parsed.disable = true,
+            "--shelf" if parsed.command == "stage-library" && parsed.shelf.is_none() => {
+                parsed.shelf = Some(PathBuf::from(iter.next().ok_or_else(|| USAGE.to_string())?));
+            }
+            "--generation"
+                if parsed.command == "activate-library" && parsed.generation.is_none() =>
+            {
+                let value = iter.next().ok_or_else(|| USAGE.to_string())?;
+                parsed.generation = Some(
+                    serde_json::from_value(serde_json::Value::String(value.clone()))
+                        .map_err(|error| format!("棚の世代が不正です: {error}"))?,
+                );
+            }
             _ => return Err(USAGE.to_string()),
         }
     }
@@ -1136,6 +1236,27 @@ pub async fn main_from_args(args: Vec<String>) -> i32 {
                 print_pairing(&payload);
                 Ok(0)
             }
+            "stage-library" => {
+                let paths = ServerPaths::new(required_data(&parsed)?)?;
+                let shelf = parsed.shelf.ok_or_else(|| USAGE.to_string())?;
+                let generation = tokio::task::spawn_blocking(move || native::stage(&paths, &shelf))
+                    .await
+                    .map_err(|error| error.to_string())??;
+                println!("{}", generation.get());
+                Ok(0)
+            }
+            "activate-library" => {
+                let paths = ServerPaths::new(required_data(&parsed)?)?;
+                let generation = parsed.generation.ok_or_else(|| USAGE.to_string())?;
+                tokio::task::spawn_blocking(move || native::activate(&paths, generation))
+                    .await
+                    .map_err(|error| error.to_string())??;
+                println!(
+                    "配信する棚に {} を指定しました。サーバーを起動してください。",
+                    generation.get()
+                );
+                Ok(0)
+            }
             "admin-pair" => {
                 let payload =
                     command_admin_pair(required_data(&parsed)?, parsed.url.clone(), parsed.replace)
@@ -1217,6 +1338,208 @@ mod tests {
 
     fn config(text: &str) -> ServerConfig {
         toml::from_str(text).expect("config")
+    }
+
+    #[tokio::test]
+    async fn configured_shelf_mounts_with_explicit_device_grants_and_a_persistent_epoch() {
+        use crate::library::protocol::{Id, LibraryIdentity, ReaderBundle};
+        use reqwest::{header, StatusCode};
+
+        struct Temp(PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp =
+            Temp(std::env::temp_dir().join(format!("piep-server-v2-{}", uuid::Uuid::now_v7())));
+        let paths = ServerPaths::new(&temp.0).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        let library = crate::library::Library::create(&paths.native_library()).unwrap();
+        let id = Id::new(library.id).unwrap();
+        let body = "配信で確かめる本文。".repeat(100);
+        let saved = library
+            .save_readable_work(
+                crate::library::WorkSave {
+                    request: uuid::Uuid::now_v7(),
+                    provider: "pixiv",
+                    key: "1",
+                    route: "test",
+                    data: &serde_json::json!({"detail":{"title":"配信中の作品"},"text":body}),
+                    assets: vec![],
+                },
+                None,
+            )
+            .unwrap();
+        drop(library);
+        let epoch = Id::new(uuid::Uuid::now_v7()).unwrap();
+        let subject = Id::new(uuid::Uuid::now_v7()).unwrap();
+        let parts = assemble(&paths, None, None).unwrap();
+        let store = Arc::clone(&parts.context.store);
+        let pair = |name| {
+            let ticket = store
+                .issue_pairing(Role::Reader, Duration::from_secs(60))
+                .unwrap();
+            store.consume_pairing(&ticket, name).unwrap()
+        };
+        let granted = pair("登録した端末");
+        let other = pair("許可のない端末");
+        let text = format!(
+            "[library_v2]\nlibrary_id = \"{}\"\nsync_epoch = \"{}\"\n[library_v2.readers]\n\"{}\" = \"{}\"\n",
+            id.get(), epoch.get(), granted.device_id, subject.get(),
+        );
+        let changed_connection = connection_text(&text, &config("")).unwrap();
+        let settings = config(&changed_connection).library_v2.unwrap();
+        assert_eq!(settings.readers.get(&granted.device_id), Some(&subject));
+        let mut wrong = settings.clone();
+        wrong.library_id = subject;
+        assert!(wrong.open(&paths, Arc::clone(&store)).is_err());
+        // 開き直しても設定した epoch と許可を使う。
+        drop(settings.open(&paths, Arc::clone(&store)).unwrap());
+        parts
+            .context
+            .set_reader_shelf(settings.open(&paths, Arc::clone(&store)).unwrap())
+            .unwrap();
+        let router = combined_router(Arc::clone(&parts.context));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let serving = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .no_gzip()
+            .build()
+            .unwrap();
+        let get = |token: &str| {
+            client
+                .get(format!("{base}/api/v2/identity"))
+                .bearer_auth(token)
+        };
+        let denied = get(&other.token).send().await.unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(denied.headers()[header::CACHE_CONTROL], "no-store");
+        let identity: LibraryIdentity = get(&granted.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(identity.library_id, id);
+        assert_eq!(identity.subject_id, subject);
+        assert_eq!(identity.sync_epoch, epoch);
+        let view = format!(
+            "{base}/api/v2/libraries/{}/entities/{}/views/snapshot/{}",
+            id.get(),
+            saved.entity_id,
+            saved.snapshot_id,
+        );
+        let resource = |url: String| {
+            client
+                .get(url)
+                .bearer_auth(&granted.token)
+                .header(header::ACCEPT_ENCODING, "gzip")
+        };
+        let response = resource(format!("{view}/bundle"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-cache, no-transform"
+        );
+        assert_eq!(response.headers()[header::VARY], "Authorization");
+        assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
+        let bundle = ReaderBundle::parse(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(bundle.files.len(), 1);
+        let file = bundle.files[0].file.to_native();
+        let response = resource(format!("{view}/resources/body/files/{}/chunks/0", file.id))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, max-age=31536000, immutable, no-transform"
+        );
+        assert_eq!(response.headers()[header::VARY], "Authorization");
+        assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
+        assert_eq!(file.chunks.len(), 1);
+        let restored =
+            piep_storage::decode_chunk(&response.bytes().await.unwrap(), &file.chunks[0]).unwrap();
+        assert_eq!(crate::library::Fingerprint::of(&restored), file.id);
+        let legacy = resource(format!("{base}/api/v1/about"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(legacy.headers()[header::CACHE_CONTROL], "private, no-store");
+        let admin_ticket = store
+            .issue_pairing(Role::Admin, Duration::from_secs(60))
+            .unwrap();
+        let administrator = store.consume_pairing(&admin_ticket, "管理端末").unwrap();
+        let status = |token: &str| {
+            client
+                .get(format!("{base}/api/v1/admin/status"))
+                .bearer_auth(token)
+        };
+        assert_eq!(
+            status(&granted.token).send().await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let details: serde_json::Value = status(&administrator.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            details["libraryV2"],
+            serde_json::json!({"libraryId":id,"syncEpoch":epoch,"works":"1"})
+        );
+        // 携帯の読書位置は管理の口からだけ読める（デスクトップ版が自分の棚へ取り込む）。
+        let reading = |token: &str| {
+            client
+                .get(format!(
+                    "{base}/api/v1/admin/shelf/reading?cursor=&limit=10"
+                ))
+                .bearer_auth(token)
+        };
+        assert_eq!(
+            reading(&granted.token).send().await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        let positions: serde_json::Value = reading(&administrator.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(positions["libraryId"], serde_json::json!(id));
+        assert_eq!(positions["items"], serde_json::json!([]));
+        assert_eq!(positions["cursor"], format!("{}.s.0", epoch.get()));
+        assert_eq!(
+            get(&administrator.token).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(store.revoke_device(&granted.device_id).unwrap());
+        assert_eq!(
+            get(&granted.token).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        serving.abort();
+        let _ = serving.await;
     }
 
     #[test]
@@ -1370,6 +1693,7 @@ auto = false
                 cert: PathBuf::from("C:/certs/cert.pem"),
                 key: PathBuf::from("C:/certs/key.pem"),
             }),
+            library_v2: None,
             update: UpdateConfig::default(),
         };
         let written = connection_text(&text, &next).expect("written");
@@ -1390,6 +1714,7 @@ auto = false
             admin_listen: None,
             public_url: String::new(),
             tls: None,
+            library_v2: None,
             update: UpdateConfig::default(),
         };
         let written = connection_text(&written, &back).expect("written again");

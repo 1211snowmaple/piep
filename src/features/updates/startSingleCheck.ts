@@ -3,6 +3,7 @@ import { errorMessage } from "@/lib/format";
 import { isTauriRuntime } from "@/services/dbApi";
 import { startUpdateJobCommand } from "@/services/updateJobApi";
 import { loadSchedule } from "@/features/updates/updateSchedule";
+import type { WorkId } from "@/types/library";
 
 /**
  * Checks one work, author or series right now. An author check also checks
@@ -15,7 +16,7 @@ import { loadSchedule } from "@/features/updates/updateSchedule";
  */
 export async function startSingleCheck(
   target:
-    | { kind: "work"; workId: number; label: string }
+    | { kind: "work"; workId: WorkId; label: string }
     | { kind: "author" | "series"; source: string; sourceKey: string; label: string },
 ): Promise<void> {
   if (!isTauriRuntime()) {

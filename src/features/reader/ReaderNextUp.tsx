@@ -2,8 +2,9 @@ import { Badge, Box, Text, UnstyledButton } from "@mantine/core";
 import { WorkCover } from "@/components/WorkCover";
 import { Icons, IconSize } from "@/lib/icons";
 import { formatNumber } from "@/lib/format";
-import { readReadingPosition } from "@/features/library/readingShelf";
-import type { DownloadEntry } from "@/types/library";
+import { summaryText } from "@/lib/content";
+import { readingKeyOf, readReadingPosition } from "@/features/library/readingShelf";
+import type { DownloadEntry, ShelfEntry } from "@/types/library";
 
 /**
  * 黙読の速さの目安（字/分）。日本語の小説でよく言われる 400〜600字/分の
@@ -38,13 +39,15 @@ export function NeighborTile({ role, ordered, label, title, work, emphasized, on
   ordered: boolean;
   label: string;
   title: string;
-  /** 詳しい情報。まだ届いていなければ題だけで描く。 */
-  work?: DownloadEntry;
+  /** 詳しい情報（旧棚の作品か新しい棚の作品）。まだ届いていなければ題だけで描く。 */
+  work?: DownloadEntry | ShelfEntry;
   /** 読む順のある並びの「次」。いちばん押されるので目立たせる。 */
   emphasized: boolean;
   onOpen: () => void;
 }) {
-  const reading = work ? readReadingPosition(work.id, null) !== null : false;
+  const reading = work ? readReadingPosition(readingKeyOf(work), null) !== null : false;
+  // 取得元の説明は HTML のことがある。一覧のカードと同じく地の文にして見せる。
+  const excerpt = work?.excerpt ? summaryText(work.excerpt) : "";
   return (
     <UnstyledButton className="reader-neighbor" data-role={role} data-emphasized={emphasized || undefined} onClick={onOpen} aria-label={`${label}：${title}`}>
       <Box className="reader-neighbor__cover">
@@ -62,7 +65,7 @@ export function NeighborTile({ role, ordered, label, title, work, emphasized, on
             {[work.authorName || work.personName, `${formatNumber(work.textLength)}字`, formatReadingTime(work.textLength)].filter(Boolean).join(" · ")}
           </Text>
         )}
-        {work?.excerpt && <Text size="xs" c="dimmed" className="reader-neighbor__excerpt line-clamp-2">{work.excerpt}</Text>}
+        {excerpt && <Text size="xs" c="dimmed" className="reader-neighbor__excerpt line-clamp-2">{excerpt}</Text>}
         {reading && <Badge size="xs" variant="light" color="piep" className="reader-neighbor__badge">読みかけ・続きから</Badge>}
       </Box>
     </UnstyledButton>

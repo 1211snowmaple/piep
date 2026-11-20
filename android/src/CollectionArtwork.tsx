@@ -15,7 +15,7 @@ function Sigil({ seed, hue }: { seed: string; hue: number }) {
 function Tile({ collection, index, offlineWorks }: { collection: PcCollection; index: number; offlineWorks?: OfflineWork[] }) {
   const tile = collection.coverTiles![index];
   const saved = offlineWorks?.find((item) => item.work.source === tile.source && item.work.sourceId === tile.sourceId && item.work.hasCover);
-  const src = saved ? savedCoverUrl(saved.work.id, saved.savedAtMs) : collectionCoverUrl(collection.id, `tile-${index}`, collection.coverRevision ?? 0);
+  const src = saved ? savedCoverUrl(saved.work.id, saved.savedAtMs) : collectionCoverUrl(collection, `tile-${index}`, collection.coverRevision ?? 0);
   return <span className="collection-art-tile" style={{ "--slot-index": index } as CSSProperties}>
     <span className="collection-art-tile-fallback" style={{ "--work-cover-hue": authorHue(tile.authorName || tile.source) } as CSSProperties}>
       <Sigil seed={`${tile.source}:${tile.sourceId}`} hue={authorHue(tile.authorName || tile.source)} />
@@ -28,19 +28,22 @@ export function CollectionArtwork({ collection, offlineWorks }: { collection: Pc
   const [mainFailed, setMainFailed] = useState(false);
   const tiles = collection.coverTiles?.slice(0, 4) ?? [];
   const requested = collection.coverMode ?? (collection.coverWorkId ? "single" : "sigil");
+  // 棚のコレクションは表紙に選んだ作品の番号を持たない。表紙は棚から `single` で引く。
+  const shelfSingle = Boolean(collection.shelfLibrary && !offlineWorks);
   const revision = collection.coverRevision ?? 0;
   const savedMain = offlineWorks?.find((item) => item.work.id === collection.coverWorkId && item.work.hasCover);
   const savedFile = offlineWorks?.find((item) => item.collectionCoverIds?.includes(collection.id)
     && item.collections?.some((entry) => entry.id === collection.id && entry.coverRevision === collection.coverRevision));
   const hasMain = (requested === "file" && collection.hasFileCover && (!offlineWorks || savedFile))
-    || (requested === "single" && collection.hasSingleCover && collection.coverWorkId && (!offlineWorks || savedMain));
+    || (requested === "single" && collection.hasSingleCover && (shelfSingle || (collection.coverWorkId && (!offlineWorks || savedMain))));
   const main = hasMain && !mainFailed;
   // 画像のない枠にも作品ごとの印が残る。コレクションで選んだ並べ方は、枠があるかぎり保つ。
   const mode = main ? requested : requested === "sigil" || tiles.length === 0 ? "sigil" : requested === "spine" && tiles.length >= 2 ? "spine" : "mosaic";
   const mainSrc = !main ? null
     : requested === "file"
-      ? savedFile ? savedCollectionCoverUrl(savedFile.work.id, collection.id, savedFile.savedAtMs) : collectionCoverUrl(collection.id, "file", revision)
-      : savedMain ? savedCoverUrl(savedMain.work.id, savedMain.savedAtMs) : workCoverUrlById(collection.coverWorkId!, revision);
+      ? savedFile ? savedCollectionCoverUrl(savedFile.work.id, collection.id, savedFile.savedAtMs) : collectionCoverUrl(collection, "file", revision)
+      : shelfSingle ? collectionCoverUrl(collection, "single", revision)
+        : savedMain ? savedCoverUrl(savedMain.work.id, savedMain.savedAtMs) : workCoverUrlById(collection.coverWorkId!, revision);
 
   useEffect(() => { setMainFailed(false); }, [collection.id, revision, requested]);
 

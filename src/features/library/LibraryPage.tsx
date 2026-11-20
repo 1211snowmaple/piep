@@ -6,7 +6,7 @@ import { SearchMethodMenu } from "@/components/SearchMethodMenu";
 import { FilterChoiceGroup, FilterMultiChoiceGroup } from "@/components/FilterChoiceGroup";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { acquisitionFilters, acquisitionFilterName, parseAcquisitionFilter } from "@/lib/acquisition";
-import type { LibraryAcquisitionFilter } from "@/types/library";
+import type { LibraryAcquisitionFilter, ShelfEntry } from "@/types/library";
 import {
   ActionIcon,
   Alert,
@@ -49,11 +49,13 @@ import { errorMessage, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { listenForScrollIntent, scrollViewportToTop } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
+import { invalidateShelf, isShelfEntry, searchShelf, searchShelfEntities, shelfListable, ShelfUnsupportedError, useLibraryV2Status, useShelfV2Preference, useShelfWritable, type ShelfEntityFacet, type ShelfSearchResult } from "@/features/library/shelfV2";
 import { LibraryShelfMenu } from "./LibraryShelfMenu";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { parseViewMode, useViewMode } from "@/lib/viewMode";
 import { entityKey, VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
 import { exportEntityZip } from "@/services/archiveApi";
+import { libraryV2ExportEntityArchive } from "@/services/shelfBackupApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import type { EntityWatchState } from "@/components/EntityCard";
 import { SearchAssistModal } from "@/features/assist/SearchAssistModal";
@@ -79,8 +81,10 @@ import {
   upsertUpdateTarget,
 } from "@/services/dbApi";
 import { searchSuggest } from "@/services/searchApi";
+import { libraryV2ClearReadingPositions, libraryV2RemoveWork, libraryV2SearchSuggest, libraryV2SetUserState, SHELF_WORK_ID } from "@/services/libraryV2Api";
+import { libraryV2FilterFacets, libraryV2SearchFilterFacets } from "@/services/shelfHealthApi";
 import { deleteSavedSearch, listSavedSearches, upsertSavedSearch } from "@/services/shelfApi";
-import { forgetReadingPositions, readingWorkIds } from "@/features/library/readingShelf";
+import { forgetReadingPositions, readingKeyOf, readingKeysAdopted, readingWorkIds } from "@/features/library/readingShelf";
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import { useSavedSearchMigration } from "@/features/library/savedSearchMigration";
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
@@ -98,7 +102,7 @@ import {
   WORK_SORT_OPTIONS,
 } from "@/features/library/sortOptions";
 import type { CollectionSortBy } from "@/types/collections";
-import type { EntityFacet, EntityFacetScope, EntitySortBy, FacetCount, LibraryAssetFilter, LibraryCoverFilter, LibraryDateField, LibraryEditFilter, LibraryRevisionFilter, LibrarySeriesFilter, LibrarySortBy, LibrarySortOrder, LibraryVersionScope, LibraryWatchFilter, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result, UpdateTarget } from "@/types/library";
+import type { EntityFacet, EntityFacetScope, EntitySortBy, FacetCount, LibraryAssetFilter, LibraryCoverFilter, LibraryDateField, LibraryEditFilter, LibraryRevisionFilter, LibrarySeriesFilter, LibrarySortBy, LibrarySortOrder, LibraryVersionScope, LibraryWatchFilter, ListedWork, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result, UpdateTarget } from "@/types/library";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 type LibraryTab = "works" | "people" | "series" | "collections";
@@ -540,7 +544,7 @@ function openSaveSearchModal(defaultName: string, onConfirm: (name: string) => v
 
 const MANAGE_SEARCH_MODAL = "manage-saved-searches";
 
-function openManageSavedSearches(saved: SavedSearchRecord[], onDelete: (id: number) => void) {
+function openManageSavedSearches(saved: SavedSearchRecord[], onDelete: (id: string) => void) {
   modals.open({
     modalId: MANAGE_SEARCH_MODAL,
     title: "保存した検索を整理",
@@ -569,6 +573,15 @@ function openManageSavedSearches(saved: SavedSearchRecord[], onDelete: (id: numb
       </Stack>
     ),
   });
+}
+
+function uniqueShelfWorks(pages: ShelfSearchResult[] | undefined) {
+  const seen = new Set<string>();
+  return pages?.flatMap((page) => page.items.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  })) ?? [];
 }
 
 function uniqueWorks(pages: SearchV2Result[] | undefined) {
@@ -715,7 +728,7 @@ export default function LibraryPage() {
     entitySortOrder?: LibrarySortOrder;
     collectionSortBy?: CollectionSortBy | null;
     collectionSortOrder?: LibrarySortOrder;
-    saved?: number | null;
+    saved?: string | null;
     searchMode?: "smart" | "exact" | "semantic" | null;
     versionScope?: LibraryVersionScope;
     membershipShelf?: SavedMembershipShelf;
@@ -893,6 +906,13 @@ export default function LibraryPage() {
   // Works ranked by relevance have only a score cursor. Entity tabs and
   // explicitly sorted works can use a bounded direct page; everything else
   // drops a stale page parameter rather than silently ignoring it.
+  // 一覧を新しい棚から出す（試験中・読むだけ）。好みが入っていて、棚が一覧を出せる状態の
+  // ときだけ。ページ番号は旧棚と同じく何件目からかで開く。
+  const [shelfV2Preferred] = useShelfV2Preference();
+  const shelfV2Status = useLibraryV2Status(runtime && shelfV2Preferred);
+  const shelfMode = runtime && shelfV2Preferred && shelfListable(shelfV2Status.data);
+  // 棚の状態を聞いているあいだは、旧棚にも新しい棚にも選択肢を聞かない。
+  const shelfDeciding = runtime && shelfV2Preferred && shelfV2Status.isLoading;
   const numberedPageEnabled = pagingMode === "pages" && (tab !== "works" || sortBy !== "relevance");
   const {
     page: pageParam,
@@ -1004,6 +1024,15 @@ export default function LibraryPage() {
     staleTime: 15_000,
   });
   const [selected, setSelected] = useState<number[]>([]);
+  // 新しい棚の作品は UUID で、一覧から外れても操作できるよう作品ごと憶える。
+  const [shelfSelected, setShelfSelected] = useState<ShelfEntry[]>([]);
+  const shelfSelectedIds = useMemo(() => new Set(shelfSelected.map((work) => work.id)), [shelfSelected]);
+  const toggleShelfSelected = useCallback((work: ShelfEntry, next: boolean) => setShelfSelected((current) => next
+    ? (current.some((item) => item.id === work.id) ? current : [...current, work])
+    : current.filter((item) => item.id !== work.id)), []);
+  // 複数選択の操作（お気に入り・監視・外す・コレクション）を書けるのは、正本に切り替えた棚だけ。
+  const shelfWritableNow = useShelfWritable(runtime);
+  const selectionLocked = shelfMode && !shelfWritableNow;
   // 作者・シリーズは行 ID を持たないので `source:sourceKey` で数える。
   const [selectedEntities, setSelectedEntities] = useState<EntityFacet[]>([]);
   // 「表示中をすべて選択」が読む、いま画面に出ている一覧。
@@ -1027,7 +1056,7 @@ export default function LibraryPage() {
   // the moment the reader turned the page.
   const filterKey = useMemo(() => JSON.stringify(filters), [filters]);
   const entityScopeKey = useMemo(() => JSON.stringify(entityScopeParam), [entityScopeParam]);
-  useEffect(() => { setSelected([]); setSelectedEntities([]); }, [searchText, filterKey, sortBy, sortOrder, tab, entitySortBy, entitySortOrder, collectionSortBy, collectionSortOrder, entityScopeKey]);
+  useEffect(() => { setSelected([]); setShelfSelected([]); setSelectedEntities([]); }, [searchText, filterKey, sortBy, sortOrder, tab, entitySortBy, entitySortOrder, collectionSortBy, collectionSortOrder, entityScopeKey]);
 
   // The "読みかけ" shelf is a membership list rather than a filter: reading
   // positions are kept per device, so the library is told which works to show.
@@ -1047,7 +1076,7 @@ export default function LibraryPage() {
   // 「改稿あり」は確認待ちだけではなく、手元の版数が実際に増えた作品も含む。
   // 補完だけの保存コピーは取得元の改稿に数えず、DB側で同じ定義を使う。
   const pendingRevisionIds = useMemo(
-    () => new Set((pendingRevisions.data ?? []).map((entry) => entry.downloadId)),
+    () => new Set((pendingRevisions.data ?? []).map((entry) => entry.work)),
     [pendingRevisions.data],
   );
 
@@ -1117,19 +1146,40 @@ export default function LibraryPage() {
     // the page that is already on screen keeps the geometry - and the reader's
     // place in it - still while the next one is fetched.
     placeholderData: keepPreviousData,
-    enabled: tab === "works",
+    enabled: tab === "works" && !shelfMode,
   });
+  // 新しい棚の一覧。旧棚の一覧と同じ条件から引き、別の鍵で持つ（旧棚の一覧の書き換え
+  // ―お気に入りの先回りなど― が触らないように）。
+  const shelfWorks = useInfiniteQuery({
+    ...boundedInfiniteListOptions,
+    queryKey: ["library-v2", params],
+    queryFn: ({ pageParam }) => searchShelf({ ...params, cursor: pageParam }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage, allPages) => {
+      const cursor = lastPage.items.length ? lastPage.nextCursor : null;
+      return cursor && !allPages.slice(0, -1).some((page) => page.nextCursor === cursor) ? cursor : undefined;
+    },
+    placeholderData: keepPreviousData,
+    enabled: tab === "works" && shelfMode,
+    // 使えない条件は何度引いても使えない。
+    retry: (failures, error) => !(error instanceof ShelfUnsupportedError) && failures < 2,
+  });
+  const listing = shelfMode ? shelfWorks : works;
   const facets = useQuery({
-    queryKey: ["library-facets"],
-    queryFn: () => runtime ? getFilterFacets() : Promise.resolve(demoFacets),
-    enabled: filterOpened,
+    queryKey: ["library-facets", shelfMode],
+    queryFn: () => !runtime ? Promise.resolve(demoFacets) : shelfMode ? libraryV2FilterFacets() : getFilterFacets(),
+    enabled: filterOpened && !shelfDeciding,
   });
   const loadedItems = useMemo(() => uniqueWorks(works.data?.pages), [works.data?.pages]);
+  const shelfItems = useMemo(() => uniqueShelfWorks(shelfWorks.data?.pages), [shelfWorks.data?.pages]);
+  // 画面に並べる作品。選択・削除・お気に入りの先回りは旧棚の一覧（loadedItems）だけを相手にする。
+  const listedItems: ListedWork[] = shelfMode ? shelfItems : loadedItems;
+  const listingPages = shelfMode ? shelfWorks.data?.pages : works.data?.pages;
   const worksAtCacheLimit = !numberedPages
-    && (works.data?.pages.length ?? 0) >= INFINITE_LIST_MAX_PAGES
-    && Boolean(works.hasNextPage);
-  const totalCount = works.data?.pages[0]?.totalEstimate ?? null;
-  const searchMeta = works.data?.pages[0]?.searchMeta;
+    && (listingPages?.length ?? 0) >= INFINITE_LIST_MAX_PAGES
+    && Boolean(listing.hasNextPage);
+  const totalCount = listingPages?.[0]?.totalEstimate ?? null;
+  const searchMeta = listingPages?.[0]?.searchMeta;
   const workFilterCount = filters.sources.length + Number(Boolean(filters.contentType)) + Number(filters.favorite || filters.excludeFavorite) + Number(filters.readingOnly) + Number(Boolean(filters.watch)) + filters.authorsInclude.length + filters.authorsExclude.length + filters.tagsInclude.length + filters.tagsExclude.length + Number(filters.minChars !== "") + Number(filters.maxChars !== "") + Number(filters.minAssets !== "") + Number(filters.maxAssets !== "") + Number(filters.minSizeMb !== "") + Number(filters.maxSizeMb !== "") + Number(Boolean(filters.assetFilter)) + Number(Boolean(filters.seriesFilter)) + Number(Boolean(filters.seriesKey)) + Number(Boolean(filters.revisionFilter)) + Number(Boolean(filters.acquisitionFilter)) + Number(Boolean(filters.editFilter)) + Number(Boolean(filters.coverFilter)) + Number(Boolean(filters.dateFrom)) + Number(Boolean(filters.dateTo));
   // 束ね自身の条件も「適用中」に数える。数えないと、絞られている理由が
   // どこにも出ない一覧ができる。
@@ -1151,8 +1201,11 @@ export default function LibraryPage() {
     () => loadedItems.filter((work) => selectedSet.has(work.id)),
     [loadedItems, selectedSet],
   );
-  const selectionCount = tab === "works" ? selected.length : selectedEntities.length;
-  const allLoadedSelected = loadedIds.length > 0 && loadedIds.every((id) => selectedSet.has(id));
+  const workSelectionCount = shelfMode ? shelfSelected.length : selected.length;
+  const selectionCount = tab === "works" ? workSelectionCount : selectedEntities.length;
+  const allLoadedSelected = shelfMode
+    ? shelfItems.length > 0 && shelfItems.every((work) => shelfSelectedIds.has(String(work.id)))
+    : loadedIds.length > 0 && loadedIds.every((id) => selectedSet.has(id));
   const flagMutationsInFlight = useRef(0);
 
   const flagMutation = useMutation({
@@ -1185,6 +1238,19 @@ export default function LibraryPage() {
       if (flagMutationsInFlight.current === 0) queryClient.invalidateQueries({ queryKey: ["library"] });
     },
   });
+  // 新しい棚では消さずに棚から外す（版・編集・コレクションの記録は残り、もう一度保存すると戻る）。
+  const shelfRemoveMutation = useMutation({
+    mutationFn: async (works: ShelfEntry[]) => {
+      for (const work of works) await libraryV2RemoveWork(work.id);
+      return works.length;
+    },
+    onSuccess: (count) => {
+      notifications.show({ color: "green", message: `${formatNumber(count)}件を棚から外しました` });
+      setShelfSelected([]); setSelectionMode(false);
+    },
+    onError: (error) => notifications.show({ color: "red", title: "外せません", message: errorMessage(error) }),
+    onSettled: () => { void invalidateShelf(queryClient); },
+  });
   const deleteMutation = useMutation({
     mutationFn: (ids: number[]) => deleteThenCleanup(
       () => runtime ? deleteDownloads(ids) : Promise.resolve({ matchedCount: ids.length, changedCount: ids.length }),
@@ -1202,7 +1268,13 @@ export default function LibraryPage() {
     // One bulk command instead of one call per selected work: a large
     // selection previously fired thousands of concurrent invokes.
     mutationFn: async ({ action }: { action: "favorite" | "watch" | "unwatch" }) => {
-      if (!runtime) return selected.length;
+      if (!runtime) return workSelectionCount;
+      if (shelfMode) {
+        // 棚の利用者の状態は作品ごとの書き込み。順に書き、途中で失敗したらそこで止める。
+        const change = action === "favorite" ? { favorite: true } : { watching: action === "watch" };
+        for (const work of shelfSelected) await libraryV2SetUserState(work.id, change);
+        return shelfSelected.length;
+      }
       const flags = action === "favorite" ? { favorite: true } : { watch: action === "watch" };
       const result = await setFlagsForIds(selected, flags);
       return result.matchedCount;
@@ -1214,12 +1286,17 @@ export default function LibraryPage() {
           ? `${formatNumber(count)}件の更新監視を止めました`
           : `${formatNumber(count)}件を${input.action === "favorite" ? "お気に入り" : "更新監視"}に追加しました`,
       });
+      if (shelfMode) void invalidateShelf(queryClient);
       queryClient.resetQueries({ queryKey: ["library", params], exact: true });
       queryClient.invalidateQueries({ queryKey: ["library"], refetchType: "none" });
       queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
-    onError: (error) => notifications.show({ color: "red", title: "一括操作に失敗しました", message: errorMessage(error) }),
+    onError: (error) => {
+      // 途中まで書けたぶんは画面に出す。
+      if (shelfMode) void invalidateShelf(queryClient);
+      notifications.show({ color: "red", title: "一括操作に失敗しました", message: errorMessage(error) });
+    },
   });
 
   const suggestedName = () => query.trim()
@@ -1254,7 +1331,7 @@ export default function LibraryPage() {
     onError: (error) => notifications.show({ color: "red", title: "検索を保存できません", message: errorMessage(error) }),
   });
   const deleteSavedMutation = useMutation({
-    mutationFn: (id: number) => deleteSavedSearch(id),
+    mutationFn: (id: string) => deleteSavedSearch(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["saved-searches"] });
       notifications.show({ color: "gray", message: "保存した検索を削除しました" });
@@ -1297,10 +1374,10 @@ export default function LibraryPage() {
   // A saved search reached by URL - from the sidebar, a deep link or the back
   // button - is expanded into the visible conditions once, so what is on screen
   // always matches what the controls say.
-  const savedIdParam = Number.parseInt(urlParams.get("saved") ?? "", 10);
-  const appliedSavedRef = useRef<number | null>(null);
+  const savedIdParam = urlParams.get("saved") || null;
+  const appliedSavedRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!Number.isSafeInteger(savedIdParam)) {
+    if (!savedIdParam) {
       appliedSavedRef.current = null;
       return;
     }
@@ -1323,7 +1400,15 @@ export default function LibraryPage() {
   const mutateFlag = flagMutation.mutate;
   const toggleFavorite = useCallback((id: number, favorite: boolean) => mutateFlag({ id, kind: "favorite", value: favorite }), [mutateFlag]);
   const toggleWatch = useCallback((id: number, watch: boolean) => mutateFlag({ id, kind: "watch", value: watch }), [mutateFlag]);
-  const toggleVisibleWorkSelection = () => setSelected((current) => {
+  const toggleVisibleWorkSelection = () => shelfMode ? setShelfSelected((current) => {
+    if (allLoadedSelected) {
+      const loaded = new Set(shelfItems.map((work) => String(work.id)));
+      return current.filter((work) => !loaded.has(work.id));
+    }
+    const merged = new Map(current.map((work) => [work.id, work]));
+    for (const work of shelfItems) if (isShelfEntry(work) && !merged.has(work.id)) merged.set(work.id, work);
+    return [...merged.values()];
+  }) : setSelected((current) => {
     if (allLoadedSelected) {
       const loaded = new Set(loadedIds);
       return current.filter((id) => !loaded.has(id));
@@ -1339,8 +1424,41 @@ export default function LibraryPage() {
     visible.forEach((entity) => merged.set(entityKey(entity), entity));
     return [...merged.values()];
   });
-  const leaveSelection = () => { setSelectionMode(false); setSelected([]); setSelectedEntities([]); };
-  const confirmDelete = () => modals.openConfirmModal({
+  const leaveSelection = () => { setSelectionMode(false); setSelected([]); setShelfSelected([]); setSelectedEntities([]); };
+  const confirmShelfRemove = () => modals.openConfirmModal({
+    title: "選択した作品を棚から外しますか？",
+    children: (
+      <Stack gap="xs">
+        <Text size="sm">
+          次の{formatNumber(shelfSelected.length)}件を一覧から外します。保存した版・編集・コレクションの記録は残り、もう一度保存すると戻ります。
+        </Text>
+        <NamedWorkList works={shelfSelected} />
+      </Stack>
+    ),
+    confirmProps: DANGER_CONFIRM, labels: { confirm: "外す", cancel: "キャンセル" },
+    onConfirm: () => shelfRemoveMutation.mutate(shelfSelected),
+  });
+  // 読みかけから外す。端末の記録を消し、棚へ引き取ったあとは棚の読書位置も消す。
+  const forgetSelectedReading = async () => {
+    if (!shelfMode) {
+      selected.forEach((id) => forgetReadingPositions(id));
+    } else {
+      shelfSelected.forEach((work) => forgetReadingPositions(readingKeyOf(work)));
+      if (readingKeysAdopted()) {
+        try {
+          await libraryV2ClearReadingPositions(shelfSelected.map((work) => work.id));
+        } catch (error) {
+          notifications.show({ color: "red", title: "読みかけから外せません", message: errorMessage(error) });
+          return;
+        } finally {
+          void invalidateShelf(queryClient);
+        }
+      }
+    }
+    notifications.show({ color: "piep", message: `${formatNumber(workSelectionCount)}件を読みかけから外しました` });
+    setSelected([]); setShelfSelected([]); setSelectionMode(false);
+  };
+  const confirmDelete = () => shelfMode ? confirmShelfRemove() : modals.openConfirmModal({
     title: "選択した作品を削除しますか？",
     // 「元に戻せません」と書いてある窓で、対象を数でしか示していなかった。
     // 「すべて選択」で積み上げた選択は、画面を離れたぶんが見えていない。
@@ -1373,9 +1491,9 @@ export default function LibraryPage() {
     mutationFn: async (action: "epub" | "watch" | "unwatch" | "archive") => {
       if (!runtime) return 0;
       if (action === "epub") {
-        const ids: number[] = [];
+        const ids: Array<number | string> = [];
         for (const entity of selectedEntities) {
-          const result = await searchDownloadsV2({
+          const params: SearchV2Params = {
             ...(entityKind === "person"
               ? { personSource: entity.source, personKey: entity.sourceKey }
               : { seriesSource: entity.source, seriesKey: entity.sourceKey }),
@@ -1385,7 +1503,9 @@ export default function LibraryPage() {
             // 1話目が最後に来る本ができあがる。
             sortBy: entityKind === "series" ? "series_order" : "downloaded_at",
             sortOrder: "asc",
-          });
+          };
+          // 新しい棚では、作品の ID で積む（書き出しは棚から読む）。
+          const result = shelfMode ? await searchShelf(params) : await searchDownloadsV2(params);
           ids.push(...result.items.map((item) => item.id));
         }
         const unique = [...new Set(ids)];
@@ -1398,7 +1518,9 @@ export default function LibraryPage() {
         let written = 0;
         for (const entity of selectedEntities) {
           const name = entity.displayName.replace(/[/:*?"<>|]/g, "_").slice(0, 80) || entity.sourceKey;
-          await exportEntityZip(entityKind, entity.source, entity.sourceKey, `${directory}/${name}.zip`);
+          // 新しい棚では、作品だけを写した棚の部分写し（フォルダー一つ）。設定の復元から取り込める。
+          if (shelfMode) await libraryV2ExportEntityArchive(entityKind, entity.source, entity.sourceKey, directory, name);
+          else await exportEntityZip(entityKind, entity.source, entity.sourceKey, `${directory}/${name}.zip`);
           written += 1;
         }
         return written;
@@ -1419,6 +1541,7 @@ export default function LibraryPage() {
       return targets.length;
     },
     onSuccess: (count, action) => {
+      if (shelfMode) void invalidateShelf(queryClient);
       queryClient.invalidateQueries({ queryKey: ["update-targets"] });
       // 「監視中だけ」で絞り込んだ一覧は、絞り込み自体がこの印で決まっている。
       // 印だけ塗り替えると、名乗りと中身が食い違った行が残る。
@@ -1499,7 +1622,7 @@ export default function LibraryPage() {
     .filter((entity) => !searchText || `${entity.displayName} ${entity.description ?? ""}`.toLocaleLowerCase("ja-JP").includes(searchText.toLocaleLowerCase("ja-JP")))
     .filter((entity) => !entityFilters?.source || entity.source === entityFilters.source),
   [entityKind, searchText, entityFilters]);
-  const entities = useInfiniteQuery({
+  const legacyEntities = useInfiniteQuery({
     ...boundedInfiniteListOptions,
     // The mode belongs in the key, not just the offset it produces. Scrolling
     // and page one both start at offset zero, so the two modes shared one cache
@@ -1514,17 +1637,42 @@ export default function LibraryPage() {
       ? undefined
       : lastPageParam + lastPage.length,
     placeholderData: keepPreviousData,
-    enabled: tab === "people" || tab === "series",
+    enabled: (tab === "people" || tab === "series") && !shelfMode,
   });
+  // 新しい棚の一覧。作品の一覧と同じく別の鍵で持つ（旧棚の監視の切り替えが触らないように）。
+  // 集計は棚の側が条件ごとに覚えているので、ページをめくる・件数を聞くたびに集め直さない。
+  const shelfEntities = useInfiniteQuery({
+    ...boundedInfiniteListOptions,
+    queryKey: ["library-v2-entities", entityKind, searchText, pageSize, entityOffset, numberedPageEnabled, entityFilters, entitySortBy, entitySortOrder, entityScopeParam],
+    queryFn: ({ pageParam }): Promise<EntityFacet[]> => searchShelfEntities(entityKind, searchText || null, pageSize, pageParam, entityFilters, entitySortBy, entitySortOrder, entityScopeParam)
+      .then((page) => page.items),
+    initialPageParam: entityOffset,
+    getNextPageParam: (lastPage, _allPages, lastPageParam) => lastPage.length < pageSize
+      ? undefined
+      : lastPageParam + lastPage.length,
+    placeholderData: keepPreviousData,
+    enabled: (tab === "people" || tab === "series") && shelfMode,
+    retry: (failures, error) => !(error instanceof ShelfUnsupportedError) && failures < 2,
+  });
+  const entities = shelfMode ? shelfEntities : legacyEntities;
   // One pass over the same grouping, per set of conditions rather than per page
   // turned. Without it the pager cannot name a last page, and the count beside
   // the tabs had to hedge with "以上".
-  const entityTotal = useQuery({
+  const legacyEntityTotal = useQuery({
     queryKey: ["library-entity-count", entityKind, searchText, entityFilters, entityScopeParam],
     queryFn: () => runtime ? countEntityFacets(entityKind, searchText || null, entityFilters, entityScopeParam) : Promise.resolve(demoEntityMatches().length),
-    enabled: tab === "people" || tab === "series",
+    enabled: (tab === "people" || tab === "series") && !shelfMode,
     staleTime: 60_000,
   });
+  const shelfEntityTotal = useQuery({
+    queryKey: ["library-v2-entity-count", entityKind, searchText, entityFilters, entityScopeParam],
+    queryFn: () => searchShelfEntities(entityKind, searchText || null, 1, 0, entityFilters, entitySortBy, entitySortOrder, entityScopeParam)
+      .then((page) => page.total),
+    enabled: (tab === "people" || tab === "series") && shelfMode,
+    staleTime: 60_000,
+    retry: (failures, error) => !(error instanceof ShelfUnsupportedError) && failures < 2,
+  });
+  const entityTotal = shelfMode ? shelfEntityTotal : legacyEntityTotal;
   /**
    * 追いかけている相手の一覧。
    *
@@ -1535,7 +1683,8 @@ export default function LibraryPage() {
   const watchTargets = useQuery({
     queryKey: ["update-targets", "library"],
     queryFn: () => runtime ? listUpdateTargets<UpdateTarget>(null, false) : Promise.resolve([] as UpdateTarget[]),
-    enabled: tab === "people" || tab === "series",
+    // 新しい棚の行は、移した時点の監視の登録を自分で持っている。
+    enabled: (tab === "people" || tab === "series") && !shelfMode,
     staleTime: 30_000,
   });
   const watchStateByKey = useMemo(() => {
@@ -1566,6 +1715,7 @@ export default function LibraryPage() {
       });
     },
     onSuccess: (_result, input) => {
+      if (shelfMode) void invalidateShelf(queryClient);
       queryClient.invalidateQueries({ queryKey: ["update-targets"] });
       queryClient.invalidateQueries({ queryKey: ["library-entities"] });
       queryClient.invalidateQueries({ queryKey: ["library-entity-count"] });
@@ -1577,9 +1727,10 @@ export default function LibraryPage() {
     onError: (error) => notifications.show({ color: "red", title: "更新監視を変更できません", message: errorMessage(error) }),
   });
   const toggleEntityWatch = useCallback((entity: EntityFacet, next: boolean) => watchToggleMutation.mutate({ entity, next }), [watchToggleMutation]);
-  const entityWatchState = useCallback((entity: { source: string; sourceKey: string }) =>
-    watchStateByKey.get(`${entityKind}:${entity.source}:${entity.sourceKey}`) ?? null,
-  [entityKind, watchStateByKey]);
+  const entityWatchState = useCallback((entity: { source: string; sourceKey: string }) => shelfMode
+    ? (entity as Partial<ShelfEntityFacet>).watch ?? null
+    : watchStateByKey.get(`${entityKind}:${entity.source}:${entity.sourceKey}`) ?? null,
+  [entityKind, shelfMode, watchStateByKey]);
 
   // 押す前に分かっていることは、押す前に言う。
   const entitiesToWatch = useMemo(() => selectedEntities.filter((entity) => entityWatchState(entity) !== "watching"), [entityWatchState, selectedEntities]);
@@ -1611,7 +1762,7 @@ export default function LibraryPage() {
   // arrived. A layout effect so it lands in the same frame the new rows are
   // painted in, rather than a frame after them.
   const showingRequestedPage = tab === "works"
-    ? !works.isPlaceholderData && !works.isFetching
+    ? !listing.isPlaceholderData && !listing.isFetching
     : tab === "people" || tab === "series"
       ? !entities.isPlaceholderData && !entities.isFetching
       : true;
@@ -1656,7 +1807,7 @@ export default function LibraryPage() {
               pixels high against it. */}
           <Group wrap="nowrap" align="center" gap="sm" className="library-toolbar__row">
             <LibraryShelfMenu />
-            <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} versionScope={versionScope} method={tab === "works" ? resolvedSearchMode : undefined} onMethodChange={(mode) => writeUrl({ searchMode: mode })} /></Box><Group wrap="nowrap" align="center" gap="xs" className="library-toolbar__options">
+            <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} shelf={shelfMode} versionScope={versionScope} method={tab === "works" ? resolvedSearchMode : undefined} onMethodChange={(mode) => writeUrl({ searchMode: mode })} /></Box><Group wrap="nowrap" align="center" gap="xs" className="library-toolbar__options">
             <span className="library-toolbar__slot" data-inactive={tab === "collections" || undefined} inert={tab === "collections" || undefined} aria-hidden={tab === "collections" || undefined}>
               <Tooltip label="詳細フィルター">
                 <Indicator label={activeFilterCount} size={16} disabled={!activeFilterCount}>
@@ -1779,7 +1930,7 @@ export default function LibraryPage() {
             // コレクションの中身では既にそうしてある。 */}
             <PagingModeToggle scope={pagingScope} />
             <Text size="sm" c="dimmed" style={{ whiteSpace: "nowrap" }}>{tab === "works"
-              ? `${formatNumber(totalCount ?? loadedItems.length)}件${totalCount !== null && loadedItems.length < totalCount ? `（${formatNumber(loadedItems.length)}件を表示中）` : ""}`
+              ? `${formatNumber(totalCount ?? listedItems.length)}件${totalCount !== null && listedItems.length < totalCount ? `（${formatNumber(listedItems.length)}件を表示中）` : ""}`
               : entityTotal.data !== undefined
                 ? `${formatNumber(entityTotal.data)}件`
                 : `${formatNumber(entityItems.length)}件${entities.hasNextPage ? "以上" : ""}`}</Text>
@@ -1787,7 +1938,14 @@ export default function LibraryPage() {
               ? <SearchInterpretation meta={searchMeta} />
               : null}
           </Group>
-          {!selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
+          {/* 新しい棚の一覧は読むだけなので、選んでできること（削除・まとめて変更・監視・
+                書き出し）がない。作品・作者・シリーズのどのタブでも同じ。消すと右端が空いて
+                行が変わって見えるので、押せない形で残す。 */}
+          {!selectionMode && (
+            <Tooltip label="複数選択（新しい棚では変えられません）" disabled={!selectionLocked}>
+              <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} data-disabled={selectionLocked || undefined} aria-disabled={selectionLocked || undefined} aria-label={selectionLocked ? "複数選択（新しい棚では変えられません）" : undefined} onClick={() => { if (!selectionLocked) setSelectionMode(true); }}>複数選択</Button>
+            </Tooltip>
+          )}
         </Group>}
 
         {tab === "collections" ? <CollectionsPanel query={searchText} sortBy={collectionSortBy} sortOrder={collectionSortOrder} /> : <>
@@ -1826,20 +1984,20 @@ export default function LibraryPage() {
         )}
 
         {tab === "works" ? (
-          works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : loadedItems.length ? (
+          listing.isLoading ? <LoadingState label="ライブラリを検索しています" /> : listing.error ? <ErrorState error={listing.error} retry={() => listing.refetch()} /> : listedItems.length ? (
             <>
-              <VirtualizedWorkList items={loadedItems} view={view} selectionMode={selectionMode} selected={selectedSet} revisedIds={pendingRevisionIds} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
+              <VirtualizedWorkList items={listedItems} view={view} selectionMode={selectionMode} selected={selectedSet} shelfSelected={shelfSelectedIds} onSelectShelf={toggleShelfSelected} revisedIds={pendingRevisionIds} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
               <ListPager
                 scope={pagingScope}
-                hasNext={Boolean(works.hasNextPage) && !worksAtCacheLimit}
-                loading={works.isFetchingNextPage || works.isFetching}
-                loaded={loadedItems.length}
+                hasNext={Boolean(listing.hasNextPage) && !worksAtCacheLimit}
+                loading={listing.isFetchingNextPage || listing.isFetching}
+                loaded={listedItems.length}
                 total={totalCount}
-                onLoad={() => works.fetchNextPage()}
+                onLoad={() => listing.fetchNextPage()}
                 endMessage={worksAtCacheLimit
                   ? sortBy === "relevance"
-                    ? `メモリ使用量を抑えるため${formatNumber(loadedItems.length)}件で停止しました。検索条件を絞ると続きへ到達できます。`
-                    : `メモリ使用量を抑えるため${formatNumber(loadedItems.length)}件で停止しました。「ページ番号」に切り替えると続きへ移動できます。`
+                    ? `メモリ使用量を抑えるため${formatNumber(listedItems.length)}件で停止しました。検索条件を絞ると続きへ到達できます。`
+                    : `メモリ使用量を抑えるため${formatNumber(listedItems.length)}件で停止しました。「ページ番号」に切り替えると続きへ移動できます。`
                   : undefined}
                 pages={{
                   current: pageParam,
@@ -1863,7 +2021,8 @@ export default function LibraryPage() {
               selected={selectedEntityKeys}
               onSelect={toggleEntity}
               watchState={entityWatchState}
-              onToggleWatch={toggleEntityWatch}
+              onToggleWatch={selectionLocked ? undefined : toggleEntityWatch}
+              watchHint={selectionLocked ? "新しい棚では変えられません" : undefined}
             />
             <ListPager
               scope={pagingScope}
@@ -1903,6 +2062,7 @@ export default function LibraryPage() {
           versionScope={versionScope}
           tab={tab}
           runtime={runtime}
+          shelfMode={shelfMode}
           authors={facets.data?.authors ?? []}
           tags={facets.data?.tags ?? []}
           contentTypes={facets.data?.contentTypes.map((item) => ({ value: item.name, label: `${contentTypeName(item.name)} (${formatNumber(item.count)})` })) ?? []}
@@ -1913,10 +2073,11 @@ export default function LibraryPage() {
       {/* Raised while the selection bar is up so the two never stack. */}
       <ScrollToTop offsetBottom={selectionMode ? 104 : undefined} />
 
-      <AddToCollectionModal opened={collectOpened} onClose={collectModal.close} downloadIds={selected} />
+      <AddToCollectionModal opened={collectOpened} onClose={collectModal.close} downloadIds={selected} shelfWorks={shelfMode ? shelfSelected.map((work) => ({ source: work.source, sourceId: work.sourceId })) : null} />
       <SearchAssistModal
         opened={searchAssistOpened}
         onClose={searchAssist.close}
+        shelf={shelfMode}
         onApply={(intent) => {
           // Existing filters and AI suggestions are separate conditions. A
           // single tagMode cannot represent two OR groups, so refuse a merge
@@ -1971,7 +2132,7 @@ export default function LibraryPage() {
                 <Text size="xs" c="dimmed">選択中{tab !== "works" && selectionCount > 0 ? ` · 作品 ${formatNumber(selectedEntityWorkCount)}件` : ""}</Text>
               </div>
               <Button variant="subtle" size="compact-sm" onClick={tab === "works" ? toggleVisibleWorkSelection : toggleVisibleEntitySelection}>{allVisibleSelected ? "表示中を解除" : "表示中をすべて選択"}</Button>
-              {selectionCount > 0 && <Button variant="subtle" color="gray" size="compact-sm" onClick={() => { setSelected([]); setSelectedEntities([]); }}>すべて解除</Button>}
+              {selectionCount > 0 && <Button variant="subtle" color="gray" size="compact-sm" onClick={() => { setSelected([]); setShelfSelected([]); setSelectedEntities([]); }}>すべて解除</Button>}
             </Group>
             <Group gap="xs" wrap="nowrap" className="selection-bar__actions">
               {tab === "works" ? (
@@ -1979,11 +2140,11 @@ export default function LibraryPage() {
                   {/* 束ねる操作は、束の画面ではなく棚の側に置く。カードを
                       見ながら選び、そのまままとめられるのが要点で、
                       「入れたい作品の題名を思い出す」を要求しない。 */}
-                  <Button size="sm" variant="light" leftSection={<Icons.collection size={IconSize.menu} />} disabled={!selected.length} onClick={collectModal.open}>コレクション</Button>
-                  <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!selected.length} onClick={() => { addToEpubQueue(selected); notifications.show({ color: "green", message: `${selected.length}件をEPUBキューに追加しました` }); }}>EPUB</Button>
-                  <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!selected.length}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.favorite size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視をオンにする</Menu.Item>{/* 追加できて解除できないのは片手落ちだった。 */}<Menu.Item leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "unwatch" })}>更新監視を止める</Menu.Item>{/* 読みかけの棚から降ろす口が、作品を消すことしか無かった。
+                  <Button size="sm" variant="light" leftSection={<Icons.collection size={IconSize.menu} />} disabled={!workSelectionCount} onClick={collectModal.open}>コレクション</Button>
+                  <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!workSelectionCount} onClick={() => { addToEpubQueue(shelfMode ? shelfSelected.map((work) => work.id) : selected); notifications.show({ color: "green", message: `${workSelectionCount}件をEPUBキューに追加しました` }); }}>EPUB</Button>
+                  <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!workSelectionCount}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.favorite size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視をオンにする</Menu.Item>{/* 追加できて解除できないのは片手落ちだった。 */}<Menu.Item leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "unwatch" })}>更新監視を止める</Menu.Item>{/* 読みかけの棚から降ろす口が、作品を消すことしか無かった。
                       途中でやめた作品が、いつまでも棚に積まれ続けていた。 */}
-                  {shelfParam === "reading" && <Menu.Item leftSection={<Icons.read size={IconSize.menu} />} onClick={() => { selected.forEach((id) => forgetReadingPositions(id)); notifications.show({ color: "piep", message: `${selected.length}件を読みかけから外しました` }); setSelected([]); setSelectionMode(false); }}>読みかけから外す</Menu.Item>}<Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={confirmDelete}>削除</Menu.Item></Menu.Dropdown></Menu>
+                  {shelfParam === "reading" && <Menu.Item leftSection={<Icons.read size={IconSize.menu} />} onClick={() => { void forgetSelectedReading(); }}>読みかけから外す</Menu.Item>}<Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={confirmDelete}>{shelfMode ? "棚から外す" : "削除"}</Menu.Item></Menu.Dropdown></Menu>
                 </>
               ) : (
                 <>
@@ -2087,8 +2248,9 @@ export function searchSuggestionAction(item: SearchSuggestion): SearchSuggestion
   if (item.kind === "series" && source && sourceKey) {
     return { kind: "navigate", target: `/series/${encodeURIComponent(source)}/${encodeURIComponent(sourceKey)}` };
   }
-  if (item.kind === "title" && sourceKey && /^\d+$/.test(sourceKey)) {
-    return { kind: "navigate", target: `/works/${sourceKey}` };
+  // 題の候補の `sourceKey` は作品の ID（旧棚は番号、新しい棚は UUID）。
+  if (item.kind === "title" && sourceKey && (/^\d+$/.test(sourceKey) || SHELF_WORK_ID.test(sourceKey))) {
+    return { kind: "navigate", target: `/works/${sourceKey.toLowerCase()}` };
   }
   if (item.kind === "author") return { kind: "query", query: `author:${quotedFilterValue(item.label)}` };
   if (item.kind === "series") return { kind: "query", query: `series:${quotedFilterValue(item.label)}` };
@@ -2103,7 +2265,7 @@ const SUGGESTION_KIND_LABEL: Record<string, string> = {
   tag: "タグで絞る",
 };
 
-function LibrarySearch({ value, onChange, runtime, versionScope, method, onMethodChange }: { value: string; onChange: (value: string) => void; runtime: boolean; versionScope: LibraryVersionScope; method?: import("@/types/library").LibrarySearchMode; onMethodChange: (mode: import("@/types/library").LibrarySearchMode) => void }) {
+function LibrarySearch({ value, onChange, runtime, shelf, versionScope, method, onMethodChange }: { value: string; onChange: (value: string) => void; runtime: boolean; /** 新しい棚の一覧を出しているか。候補も棚から引く。 */ shelf: boolean; versionScope: LibraryVersionScope; method?: import("@/types/library").LibrarySearchMode; onMethodChange: (mode: import("@/types/library").LibrarySearchMode) => void }) {
   const navigate = useAppNavigate();
   const [composing, setComposing] = useState(false);
   const [debounced] = useDebouncedValue(value, 180);
@@ -2113,8 +2275,9 @@ function LibrarySearch({ value, onChange, runtime, versionScope, method, onMetho
   const suggestionQueryCurrent = suggestionText === value.trim();
   const combobox = useCombobox({ onDropdownClose: () => combobox.resetSelectedOption(), onDropdownOpen: () => combobox.resetSelectedOption() });
   const suggestions = useQuery({
-    queryKey: ["search-suggest", suggestionText],
+    queryKey: ["search-suggest", shelf, suggestionText],
     queryFn: async (): Promise<SearchSuggestion[]> => {
+      if (runtime && shelf) return (await libraryV2SearchSuggest(suggestionText, 8)).items;
       if (runtime) return (await searchSuggest({ text: suggestionText, limit: 8 })).items;
       const demoSuggestions: SearchSuggestion[] = [
         { kind: "tag", label: "創作", value: "創作", count: 2 },
@@ -2514,12 +2677,14 @@ function recentDatePreset(dateFrom: string, dateTo: string): RecentDatePreset | 
   return RECENT_DATE_PRESETS.find((preset) => recentDateFrom(preset.value) === dateFrom)?.value ?? null;
 }
 
-function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, contentTypes, onApply }: {
+function FilterForm({ value, scope, versionScope, tab, runtime, shelfMode, authors, tags, contentTypes, onApply }: {
   value: Filters;
   scope: EntityScopeFilters;
   versionScope: LibraryVersionScope;
   tab: LibraryTab;
   runtime: boolean;
+  /** 新しい棚を見ているか。選択肢を名前で探す先が変わる。 */
+  shelfMode: boolean;
   authors: FacetCount[];
   tags: FacetCount[];
   contentTypes: { value: string; label: string }[];
@@ -2558,15 +2723,15 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
   const invalidDateRange = Boolean(draft.dateFrom && draft.dateTo && draft.dateFrom > draft.dateTo);
   const normalizedSearch = debouncedFilterSearch.trim().toLocaleLowerCase("ja-JP");
   const remoteAuthors = useQuery({
-    queryKey: ["filter-facet-search", "authors", normalizedSearch],
-    queryFn: () => searchFilterFacets("authors", normalizedSearch, 12),
+    queryKey: ["filter-facet-search", "authors", normalizedSearch, shelfMode],
+    queryFn: () => shelfMode ? libraryV2SearchFilterFacets("authors", normalizedSearch, 12) : searchFilterFacets("authors", normalizedSearch, 12),
     enabled: runtime && Boolean(normalizedSearch),
     staleTime: 5 * 60_000,
     gcTime: 60_000,
   });
   const remoteTags = useQuery({
-    queryKey: ["filter-facet-search", "tags", normalizedSearch],
-    queryFn: () => searchFilterFacets("tags", normalizedSearch, 12),
+    queryKey: ["filter-facet-search", "tags", normalizedSearch, shelfMode],
+    queryFn: () => shelfMode ? libraryV2SearchFilterFacets("tags", normalizedSearch, 12) : searchFilterFacets("tags", normalizedSearch, 12),
     enabled: runtime && Boolean(normalizedSearch),
     staleTime: 5 * 60_000,
     gcTime: 60_000,
@@ -2961,7 +3126,7 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
 
           {activeSection === "content" && (
             <Stack gap="md">
-              <SeriesFilterSelect runtime={runtime} value={draft.seriesKey ? { key: draft.seriesKey, source: draft.seriesSource, label: draft.seriesLabel || draft.seriesKey } : null} onChange={(series) => setDraft({ ...draft, seriesKey: series?.key ?? null, seriesSource: series?.source ?? null, seriesLabel: series?.label ?? "" })} />
+              <SeriesFilterSelect runtime={runtime} shelfMode={shelfMode} value={draft.seriesKey ? { key: draft.seriesKey, source: draft.seriesSource, label: draft.seriesLabel || draft.seriesKey } : null} onChange={(series) => setDraft({ ...draft, seriesKey: series?.key ?? null, seriesSource: series?.source ?? null, seriesLabel: series?.label ?? "" })} />
               <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
                 <Select
                   size="sm"

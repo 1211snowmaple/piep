@@ -40,7 +40,7 @@ import UpdatesPage from "./UpdatesPage";
 it("opens the selected history run's result and its job-only holds", async () => {
   mocks.select.mockResolvedValue({ jobId: "job-history-review" });
   mocks.items.mockResolvedValue([
-    { source: "fanbox", sourceId: "repost", itemType: "work", title: "再掲作品", status: "held", error: "公開元で投稿が見つからないため確認を保留しました" },
+    { source: "fanbox", sourceId: "repost", itemType: "work", title: "再掲作品", status: "held", workId: "019ad000-0000-7000-8000-000000000001", error: "公開元で投稿が見つからないため確認を保留しました" },
   ]);
   window.location.hash = "#/updates";
   render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><AppRouter><UpdatesPage /></AppRouter></QueryClientProvider></MantineProvider>);
@@ -49,4 +49,6 @@ it("opens the selected history run's result and its job-only holds", async () =>
   await waitFor(() => expect(screen.getByRole("tab", { name: /結果/ })).toHaveAttribute("aria-selected", "true"));
   expect(mocks.select).toHaveBeenCalledWith("job-history-review");
   expect(await screen.findByText("再掲作品")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "再掲作品の保存した詳細を開く" }));
+  expect(window.location.hash).toContain("/works/019ad000-0000-7000-8000-000000000001");
 });

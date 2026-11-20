@@ -6,6 +6,8 @@ const listWatchGroups = vi.fn();
 const searchDownloadsV2 = vi.fn();
 const listUpdateJobsCommand = vi.fn();
 const startUpdateJobCommand = vi.fn();
+const libraryV2Status = vi.fn();
+const libraryV2Search = vi.fn();
 const storeValues = new Map<string, unknown>();
 
 vi.mock("@tauri-apps/plugin-notification", () => ({
@@ -22,6 +24,10 @@ vi.mock("@/services/dbApi", () => ({
 vi.mock("@/services/updateJobApi", () => ({
   listUpdateJobsCommand: () => listUpdateJobsCommand(),
   startUpdateJobCommand: (...args: unknown[]) => startUpdateJobCommand(...args),
+}));
+vi.mock("@/services/libraryV2Api", () => ({
+  libraryV2Status: () => libraryV2Status(),
+  libraryV2Search: (...args: unknown[]) => libraryV2Search(...args),
 }));
 vi.mock("@/store", () => ({
   store: {
@@ -54,9 +60,38 @@ beforeEach(() => {
   searchDownloadsV2.mockReset().mockResolvedValue({ items: [] });
   listUpdateJobsCommand.mockReset().mockResolvedValue([]);
   startUpdateJobCommand.mockReset().mockResolvedValue({ totals: 1 });
+  libraryV2Status.mockReset().mockResolvedValue({ state: "absent", path: "unused" });
+  libraryV2Search.mockReset().mockResolvedValue({ cards: [] });
 });
 
 describe("automatic update checks", () => {
+  it("checks the switched shelf when only a newly saved work is watched", async () => {
+    libraryV2Status.mockResolvedValue({ state: "ready", switched: true });
+    libraryV2Search.mockResolvedValue({ cards: [{ id: "019ad000-0000-7000-8000-000000000001" }] });
+    await runStartupTick();
+    expect(searchDownloadsV2).not.toHaveBeenCalled();
+    expect(startUpdateJobCommand).toHaveBeenCalledWith(expect.objectContaining({ scope: "all" }));
+  });
+
+  it("adopts the migrated group UUID and sends only its enabled targets", async () => {
+    const id = "019ad000-0000-7000-8000-000000000001";
+    const member = "019ad000-0000-7000-8000-000000000002";
+    libraryV2Status.mockResolvedValue({ state: "ready", switched: true });
+    storeValues.set("update_schedule", { onStartup: true, groupId: 7 });
+    listWatchGroups.mockResolvedValue([{ id, legacyId: 7, name: "毎日", targetIds: [member] }]);
+    listUpdateTargets.mockResolvedValue([{ id: member }]);
+    await runStartupTick();
+    expect(startUpdateJobCommand).toHaveBeenCalledWith(expect.objectContaining({ scope: "targets", targetIds: [member] }));
+    expect(storeValues.get("update_schedule")).toMatchObject({ groupId: id });
+  });
+
+  it("waits for the authoritative shelf to open before scheduling a job", async () => {
+    libraryV2Status.mockResolvedValue({ state: "indexing" });
+    listUpdateTargets.mockResolvedValue([{ id: 1 }]);
+    await runStartupTick();
+    expect(startUpdateJobCommand).not.toHaveBeenCalled();
+    expect(storeValues.has("update_schedule_last_run")).toBe(false);
+  });
   // 監視対象が空でも、作品の監視は downloads 側の旗として残っている。
   // update_targets だけを見ていた頃は、この人の自動確認が一度も走らなかった。
   it("runs when only individual works are watched", async () => {

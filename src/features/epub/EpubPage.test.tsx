@@ -34,6 +34,11 @@ vi.mock("@/services/eventBus", () => ({
   },
 }));
 vi.mock("@/services/openerApi", () => ({ openFilesystemPath: opener.openFilesystemPath }));
+const shelf = vi.hoisted(() => ({ byIds: vi.fn() }));
+vi.mock("@/features/library/shelfV2", async (original) => ({
+  ...(await original<typeof import("@/features/library/shelfV2")>()),
+  shelfEntriesByIds: shelf.byIds,
+}));
 
 function QueueProbe() {
   const { epubQueue, addToEpubQueue } = useWorkspace();
@@ -156,4 +161,18 @@ it.each(["success", "failed", "invalid", "canceled"])("keeps later additions and
   }));
 
   await waitFor(() => expect(screen.getByLabelText("書き出し待ち")).toHaveTextContent(outcome === "success" ? /^103$/ : /^108,103$/));
+});
+
+it("exports works of the new shelf by their id, in queue order, and keeps a failed one queued", async () => {
+  window.localStorage.setItem("piep.epub-queue.v2", JSON.stringify([101, "w-1", 108]));
+  shelf.byIds.mockResolvedValue([{ ...demoWorks[0], id: "w-1", shelf: "v2", title: "棚の一冊" }]);
+  api.exportEpubBatch.mockResolvedValue({ successCount: 2, failedCount: 1, failedIds: ["w-1"], invalidIds: [], outputFiles: ["C:/exports/101.epub", "C:/exports/108.epub"], invalidCount: 0, issues: [], canceled: false, skippedIds: [] } satisfies ExportBatchResult);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<MantineProvider><ModalsProvider><QueryClientProvider client={client}><AppRouter><WorkspaceProvider><EpubPage /><QueueProbe /></WorkspaceProvider></AppRouter></QueryClientProvider></ModalsProvider></MantineProvider>);
+
+  fireEvent.click(await screen.findByRole("button", { name: "3冊を書き出す" }));
+  await waitFor(() => expect(api.exportEpubBatch).toHaveBeenCalledWith(expect.objectContaining({ downloadIds: [101, "w-1", 108] })));
+  expect(shelf.byIds).toHaveBeenCalledWith(["w-1"]);
+  // 書けなかった棚の作品だけがキューに残る。
+  await waitFor(() => expect(screen.getByLabelText("書き出し待ち")).toHaveTextContent(/^w-1$/));
 });

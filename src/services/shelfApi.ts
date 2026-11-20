@@ -83,6 +83,6 @@ export async function upsertSavedSearch(input: SavedSearchInput): Promise<SavedS
   return invoke<SavedSearchRecord>("db_upsert_saved_search", { input });
 }
 
-export async function deleteSavedSearch(id: number): Promise<boolean> {
+export async function deleteSavedSearch(id: string): Promise<boolean> {
   return invoke<boolean>("db_delete_saved_search", { id });
 }

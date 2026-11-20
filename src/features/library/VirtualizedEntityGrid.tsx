@@ -13,6 +13,8 @@ interface VirtualizedEntityGridProps {
   /** 追いかけているかどうか。一覧を開くとき1回読んだ結果を渡す。 */
   watchState?: (entity: EntityFacet) => EntityWatchState;
   onToggleWatch?: (entity: EntityFacet, next: boolean) => void;
+  /** 監視を変えられない理由（新しい棚）。 */
+  watchHint?: string;
 }
 
 /** One entity's identity across a list. Facets have no row id of their own. */
@@ -43,7 +45,7 @@ export function entityGridColumnCount(width: number): number {
 const lastKnownWidth = new Map<string, number>();
 
 /** Keep only entity rows close to AppFrame's scroll viewport in the DOM. */
-export function VirtualizedEntityGrid({ items, kind, selectionMode = false, selected, onSelect, watchState, onToggleWatch }: VirtualizedEntityGridProps) {
+export function VirtualizedEntityGrid({ items, kind, selectionMode = false, selected, onSelect, watchState, onToggleWatch, watchHint }: VirtualizedEntityGridProps) {
   const gridRef = useRef<HTMLDivElement>(null);
   const [scrollElement, setScrollElement] = useState<HTMLElement | null>(() =>
     document.getElementById("main-content"),
@@ -112,6 +114,7 @@ export function VirtualizedEntityGrid({ items, kind, selectionMode = false, sele
       onSelect={onSelect}
       watch={watchState?.(entity) ?? null}
       onToggleWatch={onToggleWatch}
+      watchHint={watchHint}
     />
   );
 

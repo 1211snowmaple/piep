@@ -560,6 +560,53 @@ fn reader_transport_pages_keep_complete_source_blocks() {
         .all(|page| page.len() <= READER_PAGE_TARGET_BYTES));
 }
 
+/// 画像の置き場（旧棚の長いパスと新しい棚の短い識別子）が違っても、同じ本文は同じ行で切れる。
+/// 切れ目が動くと、「何ページ目の何行目」で憶えた読書位置としおりが別の行を指す。
+#[test]
+fn reader_transport_pages_do_not_depend_on_where_images_are_stored() {
+    let body = |place: &str| {
+        let image = format!(
+            "<img class=\"novel-image\" data-local-path=\"{place}\" alt=\"image_1\" /><br />\n"
+        );
+        let text = format!("{}<br />\n", "あ".repeat(READER_PAGE_TARGET_BYTES / 30));
+        // 本文だけで上限を越える長さ。置き場を数えると、長いパスのほうが早く切れる。
+        let mut html = String::new();
+        for _ in 0..12 {
+            html.push_str(&image);
+            html.push_str(&text);
+        }
+        html
+    };
+    let short = body(&"0".repeat(64));
+    let long = body(&format!(
+        "C:/Users/reader/Documents/piep/{}",
+        "x".repeat(4000)
+    ));
+    let lines = |pages: &[String]| {
+        pages
+            .iter()
+            .map(|page| page.matches("<br />").count())
+            .collect::<Vec<_>>()
+    };
+    for source in ["pixiv", "fanbox"] {
+        let separator = if source == "pixiv" {
+            ""
+        } else {
+            "<!-- content-block -->"
+        };
+        let as_blocks = |html: &str| {
+            html.split_inclusive("<br />\n")
+                .collect::<Vec<_>>()
+                .join(separator)
+        };
+        let (short_pages, short_starts) = paginate_reader_html(&as_blocks(&short), source);
+        let (long_pages, long_starts) = paginate_reader_html(&as_blocks(&long), source);
+        assert!(short_pages.len() >= 2, "{source}: 切れ目のある長さで試す");
+        assert_eq!(lines(&short_pages), lines(&long_pages), "{source}");
+        assert_eq!(short_starts, long_starts, "{source}");
+    }
+}
+
 #[test]
 fn diagnostic_percentiles_are_stable() {
     let mut samples = [9.0, 1.0, 7.0, 3.0, 5.0];
@@ -2566,6 +2613,7 @@ fn unnumbered_opening_leads_and_mentions_do_not_reorder_episodes() {
     // 第2話を種にしても、無印の初回が先頭に来る。
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![second],
             limit: Some(20),
         })
@@ -2616,6 +2664,7 @@ fn sharing_an_anthology_shelf_yields_no_bundle() {
             .unwrap();
     }
     let result = db.generate_collection_suggestion(&CollectionSuggestionRequest {
+        seed_works: Vec::new(),
         seed_download_ids: vec![seed],
         limit: Some(20),
     });
@@ -2635,6 +2684,7 @@ fn sharing_an_anthology_shelf_yields_no_bundle() {
     }
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![seed],
             limit: Some(20),
         })
@@ -2880,6 +2930,7 @@ fn sharing_a_series_shelf_is_not_evidence_of_a_bundle() {
 
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![seed],
             limit: Some(20),
         })
@@ -3483,6 +3534,7 @@ fn notices_neither_join_a_bundle_nor_bridge_one() {
 
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![seed],
             limit: Some(20),
         })
@@ -3524,6 +3576,7 @@ fn collection_suggestions_use_title_parts_and_learn_rejection() {
     );
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![first],
             limit: Some(20),
         })
@@ -3541,6 +3594,7 @@ fn collection_suggestions_use_title_parts_and_learn_rejection() {
         .unwrap());
 
     let after_rejection = db.generate_collection_suggestion(&CollectionSuggestionRequest {
+        seed_works: Vec::new(),
         seed_download_ids: vec![first],
         limit: Some(20),
     });
@@ -3561,6 +3615,7 @@ fn collection_suggestions_use_title_parts_and_learn_rejection() {
         .unwrap();
     let reconsidered = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![first],
             limit: Some(20),
         })
@@ -3604,6 +3659,7 @@ fn collection_suggestion_keeps_strong_same_author_candidate_after_1200_rows() {
 
     let suggestion = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![seed],
             limit: Some(20),
         })
@@ -3683,6 +3739,7 @@ fn collection_suggestions_walk_the_whole_link_component_from_either_end() {
         .unwrap();
     let from_first = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![first],
             limit: Some(20),
         })
@@ -3713,6 +3770,7 @@ fn collection_suggestions_walk_the_whole_link_component_from_either_end() {
         .unwrap();
     let from_last = db
         .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_works: Vec::new(),
             seed_download_ids: vec![fourth],
             limit: Some(20),
         })
@@ -7412,17 +7470,23 @@ fn watch_groups_bundle_targets_without_owning_them() {
         .contains("もうあります"));
     assert!(db.create_watch_group("   ").is_err());
     assert_eq!(
-        db.set_watch_group_members(daily, &[author, series], true)
-            .unwrap(),
+        db.set_watch_group_members(
+            daily,
+            &[author.legacy().unwrap(), series.legacy().unwrap()],
+            true
+        )
+        .unwrap(),
         2
     );
     // 入っているものを入れ直しても数えない。一つの対象は複数のグループに入れる。
     assert_eq!(
-        db.set_watch_group_members(daily, &[author], true).unwrap(),
+        db.set_watch_group_members(daily, &[author.legacy().unwrap()], true)
+            .unwrap(),
         0
     );
     assert_eq!(
-        db.set_watch_group_members(weekly, &[author], true).unwrap(),
+        db.set_watch_group_members(weekly, &[author.legacy().unwrap()], true)
+            .unwrap(),
         1
     );
     let groups = db.list_watch_groups().unwrap();
@@ -7446,7 +7510,8 @@ fn watch_groups_bundle_targets_without_owning_them() {
     db.rename_watch_group(weekly, "週末に見る").unwrap();
     assert!(db.rename_watch_group(weekly, "毎日見る").is_err());
     assert_eq!(
-        db.set_watch_group_members(daily, &[series], false).unwrap(),
+        db.set_watch_group_members(daily, &[series.legacy().unwrap()], false)
+            .unwrap(),
         1
     );
     // グループを消しても監視対象は残る。
@@ -8497,6 +8562,7 @@ fn lexical_snapshots_scale_with_fixed_memory_batches() {
                 author_name: format!("author {:03}", index % 400),
                 author_id: format!("author-{:03}", index % 400),
                 tags: format!("tag{}", index % 30),
+                tag_list: Vec::new(),
                 series_title: String::new(),
                 excerpt: "snapshotterm benchmark".to_string(),
                 body: "snapshotterm bounded disk ranking".to_string(),
@@ -10175,6 +10241,7 @@ fn restored_candidates_reject_untrusted_provider_fields() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
     let mut row = UpdateCandidateRow {
+        work_id: None,
         metadata: Default::default(),
         source: "pixiv".to_string(),
         source_id: "12345".to_string(),

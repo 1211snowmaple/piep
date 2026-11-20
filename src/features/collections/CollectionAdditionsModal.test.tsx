@@ -84,7 +84,7 @@ describe("CollectionAdditionsModal", () => {
   it("sends every candidate that was left in", async () => {
     const onAdd = renderModal();
     await userEvent.click(await screen.findByRole("button", { name: "3作品を追加" }));
-    expect(onAdd).toHaveBeenCalledWith([1, 2, 3]);
+    expect(onAdd.mock.calls[0][0].map((value: { downloadId: number }) => value.downloadId)).toEqual([1, 2, 3]);
   });
 
   /**
@@ -98,7 +98,7 @@ describe("CollectionAdditionsModal", () => {
     expect(await screen.findByRole("button", { name: "作品2を候補に戻す" })).toBeInTheDocument();
 
     await userEvent.click(await screen.findByRole("button", { name: "2作品を追加" }));
-    expect(onAdd).toHaveBeenCalledWith([1, 3]);
+    expect(onAdd.mock.calls[0][0].map((value: { downloadId: number }) => value.downloadId)).toEqual([1, 3]);
   });
 
   /**

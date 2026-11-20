@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient, useQueries } from "@tanstack/react-query";
 import { WorkCard, WorkCardSkeleton, type SavedState } from "./WorkCard";
 import { VirtualWorkList } from "./VirtualWorkList";
-import { getPcMetadata, sameWork, listOfflineWorks, pcErrorMessage, searchPcWorks, type PcSearchPage, type PcWork, type PcWorkScope, type PcWorkSearch } from "./pcApi";
+import { nativeShelfKey } from "./nativeReading";
+import { getPcMetadata, sameSavedVersion, sameWork, listOfflineWorks, pcErrorMessage, searchPcWorks, type PcSearchPage, type PcWork, type PcWorkScope, type PcWorkSearch } from "./pcApi";
 
 export const statusQueryKey = ["pc-status"] as const;
 const pageSize = 20;
@@ -49,8 +50,10 @@ export function useWorkList({ search, scope, pagingMode, page, enabled }: { sear
   // 関連度の順はカーソルでしか辿れない。
   const numbered = pagingMode === "pages" && !(search.text.trim() && search.sort === "standard");
   const scopeKey = scope ? { kind: scope.kind, source: scope.source, key: scope.key } : null;
+  // 新しい棚から引く接続では、棚と接続ごとに別の一覧として覚える（作品の指し方が違う）。
+  const shelf = nativeShelfKey();
   const infinite = useInfiniteQuery({
-    queryKey: ["works", search, scopeKey],
+    queryKey: ["works", search, scopeKey, shelf],
     queryFn: ({ pageParam }) => searchPcWorks(search, pageParam, scopeKey),
     initialPageParam: null as string | null,
     getNextPageParam: (last: PcSearchPage) => last.nextCursor,
@@ -59,7 +62,7 @@ export function useWorkList({ search, scope, pagingMode, page, enabled }: { sear
     refetchOnMount: refreshShortList,
   });
   const paged = useQuery({
-    queryKey: ["works-page", search, scopeKey, page],
+    queryKey: ["works-page", search, scopeKey, shelf, page],
     queryFn: () => searchPcWorks(search, null, scopeKey, (page - 1) * pageSize),
     enabled: enabled && numbered,
     placeholderData: keepPreviousData,
@@ -83,7 +86,7 @@ export function useWorkList({ search, scope, pagingMode, page, enabled }: { sear
     pageCount: Math.min(maxDirectPage, estimated),
     reachedDirectLimit: estimated > maxDirectPage,
     error,
-    listKey: JSON.stringify(["works", search, scopeKey, numbered ? page : 0]),
+    listKey: JSON.stringify(["works", search, scopeKey, shelf, numbered ? page : 0]),
   };
 }
 
@@ -147,15 +150,15 @@ async function oneAtATurn<T>(work: () => Promise<T>): Promise<T> {
  */
 export function useSavedStates(items: PcWork[], savedRevision: number, reachable: boolean) {
   const savedWorks = useSavedWorks(savedRevision);
-  const savedById = useMemo(() => new Map(savedWorks.map((item) => [item.work.id, item])), [savedWorks]);
+  const savedById = useMemo(() => new Map<number | string, (typeof savedWorks)[number]>(savedWorks.map((item) => [item.work.id, item])), [savedWorks]);
   const savedFor = (work: PcWork) => {
     const saved = savedById.get(work.id);
     return saved && sameWork(saved.work, work) ? saved : null;
   };
-  const sameVersion = (work: PcWork, saved: { savedVersion: number; savedContentHash: string | null }) => work.currentVersion === saved.savedVersion && work.contentHash === saved.savedContentHash;
+  // 新しい棚の作品は一覧の一件に編集の UUID まで載っているので、問い合わせずに比べられる。
   const toCheck = items.filter((work) => {
     const saved = savedFor(work);
-    return saved ? sameVersion(work, saved) : false;
+    return saved && !work.shelf ? sameSavedVersion(work, saved) : false;
   });
   const editHashes = useQueries({
     queries: toCheck.map((work) => ({
@@ -165,7 +168,7 @@ export function useSavedStates(items: PcWork[], savedRevision: number, reachable
       staleTime: 5 * 60_000,
     })),
     combine: (results) => {
-      const known = new Map<number, string | null>();
+      const known = new Map<number | string, string | null>();
       results.forEach((result, index) => { if (result.data !== undefined) known.set(toCheck[index].id, result.data); });
       return known;
     },
@@ -174,7 +177,7 @@ export function useSavedStates(items: PcWork[], savedRevision: number, reachable
     const saved = savedFor(work);
     if (!saved) return null;
     const known = editHashes.get(work.id);
-    return { changed: !sameVersion(work, saved) || (known !== undefined && known !== saved.savedEditHash) };
+    return { changed: !sameSavedVersion(work, saved) || (known !== undefined && known !== saved.savedEditHash) };
   };
 }
 

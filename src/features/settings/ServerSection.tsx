@@ -21,6 +21,7 @@ import {
   serverRemoteDevices,
   serverRemoteStatus,
   serverRevokeDevice,
+  serverSetRemoteShelfReader,
   serverSendNow,
   serverSendStop,
   serverSetAutoSend,
@@ -50,6 +51,7 @@ const SEND_PHASE: Record<string, string> = {
   upload: "送っています",
   database: "データを送っています",
   commit: "反映しています",
+  assemble: "サーバーで確かめています",
 };
 
 type Perform = (action: () => Promise<DesktopServerStatus | void>, name?: string) => Promise<void>;
@@ -291,6 +293,8 @@ function ConnectedRemote(props: CardProps) {
   const last = status.lastSend;
   const view = remoteView({ name, details: data, offline, registrationLost, sending: send.running, checkedAt: details.dataUpdatedAt });
   const phones = (data?.devices ?? []).filter((device) => device.role === "reader");
+  // 新しい棚を配っているサーバーだけ、携帯ごとに棚を読む許可を付け外しできる。
+  const shelfPhones = phones.filter((phone) => phone.readsShelf !== undefined);
   const next = offline ? null : nextAction(data, phones.length);
   const update = data?.update;
   const fresh = data ? hasNewVersion(data) : false;
@@ -303,6 +307,7 @@ function ConnectedRemote(props: CardProps) {
     data && isNewer(data.version, APP_VERSION) ? `サーバーの方が新しいバージョンです（${data.version}）。送れないときは、このアプリを更新してください。` : null,
     connectionError && !registrationLost && !connectionError.includes("接続できません") ? connectionError : null,
     lastError,
+    data?.shelfPending && !send.running ? "送ったライブラリは、サーバーを再起動すると読めるようになります。" : null,
     update?.lastError ? `更新できませんでした: ${update.lastError}` : null,
     data?.sync?.indexError ? `検索の索引を更新できません: ${data.sync.indexError}` : null,
     last.missingReferenced ? `ライブラリが参照しているファイルのうち ${formatNumber(last.missingReferenced)} 件がサーバーにありません。この PC からも失われているかもしれません。診断で確かめてください。` : null,
@@ -363,6 +368,24 @@ function ConnectedRemote(props: CardProps) {
             {update ? `・更新 ${update.auto ? update.window ? windowLabel(update.window) : "入" : "切"}` : ""}
           </Fact>
         </div>
+        {shelfPhones.length > 0 && (
+          <Stack gap={6} mt="md" role="group" aria-label="新しい棚を読む携帯">
+            <Text size="sm" fw={650}>新しい棚を読む携帯</Text>
+            {shelfPhones.map((phone) => (
+              <Switch
+                key={phone.id}
+                size="sm"
+                label={phone.name}
+                checked={phone.readsShelf === true}
+                disabled={pending || offline}
+                onChange={(event) => {
+                  const read = event.currentTarget.checked;
+                  void perform(async () => { await serverSetRemoteShelfReader(phone.id, read); await refetchDetails(); });
+                }}
+              />
+            ))}
+          </Stack>
+        )}
         {notes.length > 0 && (
           <Stack gap={4} mt="md">
             {notes.map((note) => <Text key={note} size="sm" style={{ overflowWrap: "anywhere" }}>{note}</Text>)}

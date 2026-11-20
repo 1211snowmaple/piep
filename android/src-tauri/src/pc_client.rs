@@ -18,18 +18,20 @@ use url::Url;
 use crate::secret_cipher::SecretCipher;
 // サーバーから受け取る型。サーバーと同じ定義（crates/piep-mobile-api）を使う。
 pub use piep_mobile_api::{
-    MobileCollection, MobileCollectionCoverTile, MobileCollectionDetail, MobileCollectionMember,
-    MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage, MobileFacet,
-    MobileMetadata, MobilePage, MobilePerson, MobileRevision, MobileSearchPage as SearchPage,
-    MobileSeriesMembership, MobileVersion, MobileWork,
+    MobileCollection, MobileCollectionDetail, MobileEntityDetail, MobileEntityPage,
+    MobileEntitySeriesPage, MobileMetadata, MobilePage, MobilePerson,
+    MobileSearchPage as SearchPage, MobileSeriesMembership, MobileWork,
 };
 
 pub mod cover_protocol;
 pub(crate) mod device_db;
 mod image_validation;
 pub(crate) mod local_reading;
+pub(crate) mod native_library;
+pub(crate) mod native_reader;
 pub(crate) mod offline;
 pub(crate) mod reading_sync;
+pub(crate) mod shelf_reading;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const ASSET_TIMEOUT: Duration = Duration::from_secs(60);
@@ -422,6 +424,8 @@ pub struct ConnectionStatus {
     device_name: Option<String>,
     issue: Option<&'static str>,
     capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_library: Option<native_library::NativeLibraryStatus>,
 }
 
 impl ConnectionStatus {
@@ -433,6 +437,7 @@ impl ConnectionStatus {
             device_name: None,
             issue: None,
             capabilities: Vec::new(),
+            native_library: None,
         }
     }
     fn from_saved(saved: &SavedConnection, reachable: bool, issue: Option<&'static str>) -> Self {
@@ -443,6 +448,7 @@ impl ConnectionStatus {
             device_name: Some(saved.device_name.clone()),
             issue,
             capabilities: saved.capabilities.clone(),
+            native_library: None,
         }
     }
 }
@@ -792,12 +798,15 @@ pub async fn pc_connection_status(
                     state.refresh_capabilities(generation, saved.capabilities.clone())?;
                 }
                 // /hello は無認証。登録解除された端末を「接続中」と表示しない。
-                let authorized = client
+                let legacy = client
                     .get(format!("{}/api/v1/collections", saved.url))
                     .bearer_auth(&saved.token)
                     .timeout(PROBE_TIMEOUT)
-                    .send()
-                    .await;
+                    .send();
+                let (authorized, native_library) = tokio::join!(
+                    legacy,
+                    native_library::discover(&client, &saved, generation),
+                );
                 let issue = match authorized {
                     Ok(response) if response.status().is_success() => None,
                     Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
@@ -811,7 +820,12 @@ pub async fn pc_connection_status(
                     Ok(_) => Some("remote_error"),
                     Err(_) => Some("offline"),
                 };
-                Ok(ConnectionStatus::from_saved(&saved, issue.is_none(), issue))
+                state.with_connection(generation, || {
+                    Ok(ConnectionStatus {
+                        native_library,
+                        ..ConnectionStatus::from_saved(&saved, issue.is_none(), issue)
+                    })
+                })
             }
         }
         Err(error) if error.code == "certificate_untrusted" => Ok(ConnectionStatus::from_saved(
@@ -1585,8 +1599,9 @@ mod tests {
 
     use super::*;
 
-    async fn local_response(wire_response: &'static str) -> reqwest::Response {
+    pub(super) async fn local_response(wire_response: impl Into<String>) -> reqwest::Response {
         use std::io::{Read, Write};
+        let wire_response = wire_response.into();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {

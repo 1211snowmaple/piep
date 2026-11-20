@@ -22,25 +22,7 @@ pub(crate) const SAVED_AUDIT_RULE: i64 = 3;
 /// Once the web detail has been consulted, a blank field is what the source
 /// really holds and is no longer reported.
 pub(crate) fn masked_pixiv_metadata(value: &Value) -> Vec<&'static str> {
-    let gated = [value.get("cover_url"), value.pointer("/detail/cover_url")]
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .any(crate::source_assets::is_pixiv_placeholder_image);
-    if !gated || value.get("web_detail").is_some_and(Value::is_object) {
-        return Vec::new();
-    }
-    let detail = value.get("detail").unwrap_or(&Value::Null);
-    ["title", "caption", "tags"]
-        .into_iter()
-        .filter(|key| {
-            detail.get(*key).is_none_or(|field| {
-                field.is_null()
-                    || field.as_str().is_some_and(|text| text.trim().is_empty())
-                    || field.as_array().is_some_and(Vec::is_empty)
-            })
-        })
-        .collect()
+    crate::library::masked_pixiv_metadata(value)
 }
 
 pub(crate) fn masked_metadata_label(fields: &[&str]) -> String {
@@ -109,6 +91,7 @@ pub(crate) fn pixiv_missing_references_for_filenames(
 ) -> Vec<String> {
     let text = value
         .get("text")
+        .or_else(|| value.pointer("/detail/text"))
         .and_then(Value::as_str)
         .unwrap_or_default();
     missing_saved_references(text, &filenames.into_iter().collect())

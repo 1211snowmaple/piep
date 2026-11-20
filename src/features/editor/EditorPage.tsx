@@ -36,8 +36,9 @@ import { AssistLauncher, type AssistLauncherItem } from "@/features/assist/Assis
 import { useAssist } from "@/features/assist/useAssist";
 import { usePageAssist } from "@/app/PageAssistContext";
 import { PROOFREAD_BATCH_CHARS } from "@/services/assistApi";
-import { getDemoEditor } from "@/mocks/demoData";
-import { activateWorkEdit, discardWorkDraft, getAssetUrl, getEditorDocument, importWorkAsset, isTauriRuntime, saveWorkDraft } from "@/services/dbApi";
+import { isTauriRuntime } from "@/services/dbApi";
+import { SHELF_WORK_ID } from "@/services/libraryV2Api";
+import { editorAssetUrl, legacyEditorSource, shelfEditorSource } from "@/features/editor/editorSource";
 import { openSingleDialog } from "@/services/dialogApi";
 import type { AssetEntry, WorkBlockInput } from "@/types/library";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
@@ -161,10 +162,17 @@ function createEditorSaveSnapshot(values: EditorValues): EditorSaveSnapshot {
 export default function EditorPage() {
   const returnTo = useReturnTo();
   const { workId } = useRouteParams("/editor/:workId");
-  const id = Number(workId);
   const runtime = isTauriRuntime();
+  // 新しい棚の作品（UUID）は新しい棚で開いて書く。旧棚の作品は番号で。
+  const source = useMemo(
+    () => (runtime && SHELF_WORK_ID.test(workId ?? "") ? shelfEditorSource(workId!) : legacyEditorSource(Number(workId), runtime)),
+    [runtime, workId],
+  );
+  const id = source.key;
   const queryClient = useQueryClient();
-  const query = useQuery({ queryKey: ["editor-document", id], queryFn: () => runtime ? getEditorDocument(id) : Promise.resolve(getDemoEditor(id)), enabled: Number.isFinite(id) });
+  // 段は最初に届いた中身から作るので、前に開いたときの覚えを使わない（画面を離れたら捨てる）。
+  // 覚えていると、作品の画面で反映を戻した後に開いても前の編集で始まってしまう。
+  const query = useQuery({ queryKey: ["editor-document", id], queryFn: source.load, enabled: source.ready, gcTime: 0 });
   const [dirty, setDirty] = useState(false);
   const savedFingerprintRef = useRef("");
   const savedTitleRef = useRef("");
@@ -255,14 +263,14 @@ export default function EditorPage() {
   useEffect(() => {
     if (!query.data || form.initialized) return;
     const nextBlocks = query.data.blocks.map((block) => ({ clientId: crypto.randomUUID(), blockType: editorType(block.blockType), text: block.text, assetId: block.assetId, attrsJson: block.attrsJson }));
-    const nextTitle = query.data.draftRevision?.title ?? query.data.download.title;
+    const nextTitle = query.data.draftRevision?.title ?? query.data.work.title;
     savedFingerprintRef.current = JSON.stringify({ blocks: nextBlocks });
     savedTitleRef.current = nextTitle;
     titleRef.current = nextTitle;
     form.initialize({ blocks: nextBlocks });
     setBlocks(nextBlocks);
     // 下書きが題を持っていればそれ、無ければいま表示されている題。
-    // `download.title` は反映済みの編集を含んだ「読み手に見えている題」。
+    // `work.title` は反映済みの編集を含んだ「読み手に見えている題」。
     setTitle(nextTitle);
     setDirty(false);
   }, [form, query.data]);
@@ -329,8 +337,7 @@ export default function EditorPage() {
 
   const persistSnapshot = async (snapshot: EditorSaveSnapshot) => {
     if (!query.data) throw new Error("編集データがありません");
-    if (!runtime) return { id: 1, downloadId: id, baseVersion: query.data.baseVersion, status: "draft", title: null, contentHash: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-    return saveWorkDraft(id, query.data.baseVersion, snapshot.title ?? null, snapshot.persistedBlocks);
+    await source.saveDraft(query.data, snapshot.title ?? null, snapshot.persistedBlocks);
   };
   const clearDirtyIfCurrent = (snapshot: EditorSaveSnapshot) => {
     savedFingerprintRef.current = snapshot.fingerprint;
@@ -347,8 +354,7 @@ export default function EditorPage() {
       // 自動保存は黙って済ませる。押していない保存をそのつど知らせても、
       // 目と手が止まるだけで、伝わるものが増えるわけではない。
       if (!snapshot.silent) notifications.show({ color: "green", icon: <Icons.confirm size={IconSize.menu} />, title: "下書きを保存しました", message: "読書画面とEPUBの本文はまだ変わりません" });
-      queryClient.invalidateQueries({ queryKey: ["editor-document", id] });
-      queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
+      source.afterSave(queryClient);
     },
     onError: (error) => notifications.show({ color: "red", title: "下書きを保存できません", message: errorMessage(error) }),
   });
@@ -359,23 +365,19 @@ export default function EditorPage() {
    * 元の本文に戻る道が、手で全部打ち直すことしか無かった。
    */
   const discardMutation = useMutation({
-    mutationFn: async () => {
-      if (!runtime) return getDemoEditor(id);
-      await discardWorkDraft(id);
-      return getEditorDocument(id);
-    },
+    mutationFn: source.discard,
     onSuccess: (fresh) => {
       // form は一度きりしか初期化できないので、値と行の id を入れ替えて
       // 組み直す。id が変わると入力欄が作り直され、消したはずの書きかけが
       // 画面に残らない。
       const nextBlocks = fresh.blocks.map((block) => ({ clientId: crypto.randomUUID(), blockType: editorType(block.blockType), text: block.text, assetId: block.assetId, attrsJson: block.attrsJson }));
       savedFingerprintRef.current = JSON.stringify({ blocks: nextBlocks });
-      savedTitleRef.current = fresh.download.title;
-      titleRef.current = fresh.download.title;
+      savedTitleRef.current = fresh.work.title;
+      titleRef.current = fresh.work.title;
       form.setValues({ blocks: nextBlocks });
       form.resetDirty({ blocks: nextBlocks });
       setBlocks(nextBlocks);
-      setTitle(fresh.download.title);
+      setTitle(fresh.work.title);
       setDirty(false);
       historyRef.current = [];
       futureRef.current = [];
@@ -383,19 +385,18 @@ export default function EditorPage() {
       setAutoSaveBlocked(false);
       setDraftSavedHere(false);
       queryClient.setQueryData(["editor-document", id], fresh);
-      queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
+      source.afterSave(queryClient);
       notifications.show({ color: "green", title: "下書きを破棄しました", message: fresh.activeRevision ? "反映済みの編集版に戻しました" : "取り込んだままの本文に戻しました" });
     },
     onError: (error) => notifications.show({ color: "red", title: "下書きを破棄できません", message: errorMessage(error) }),
   });
   const publishMutation = useMutation({
     mutationFn: async (snapshot: EditorSaveSnapshot) => {
-      const revision = await persistSnapshot(snapshot);
-      return runtime ? activateWorkEdit(revision.id) : revision;
+      if (!query.data) throw new Error("編集データがありません");
+      await source.publish(query.data, snapshot.title ?? null, snapshot.persistedBlocks);
     },
-    // 反映は本文を差し替えるので、カードが出している字数と版の印も変わる。
-    // それらは棚と作者ページの一覧から引いているため、そこも古くしておく。
-    onSuccess: (_revision, snapshot) => { clearDirtyIfCurrent(snapshot); setDraftSavedHere(false); notifications.show({ color: "green", title: "編集版を反映しました", message: "読書画面とEPUBが、この内容になります" }); queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-page", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-search", id] }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["entity-works"] }); },
+    // 反映は本文を差し替えるので、読む画面・一覧の字数と版の印も古くする（`afterPublish`）。
+    onSuccess: (_revision, snapshot) => { clearDirtyIfCurrent(snapshot); setDraftSavedHere(false); notifications.show({ color: "green", title: "編集版を反映しました", message: "読書画面とEPUBが、この内容になります" }); source.afterPublish(queryClient); },
     onError: (error) => notifications.show({ color: "red", title: "編集版を反映できません", message: errorMessage(error) }),
   });
   /**
@@ -665,7 +666,7 @@ export default function EditorPage() {
     try {
       const path = await openSingleDialog({ title: "画像を追加", filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp", "gif", "avif"] }] });
       if (!path) return;
-      const asset = await importWorkAsset(id, path);
+      const asset = await source.importImage(doc, path);
       queryClient.setQueryData(["editor-document", id], { ...doc, assets: [...doc.assets, asset] });
       // 画像は作品に属する。エディタの手元だけ増やすと、作品詳細のアセット欄と
       // タブの件数が古いままになる。
@@ -675,15 +676,15 @@ export default function EditorPage() {
       nextBlocks.splice(index, 0, { ...makeBlock("image"), assetId: asset.id });
       replaceBlocks(nextBlocks);
     } catch (error) { notifications.show({ color: "red", title: "画像を追加できません", message: errorMessage(error) }); }
-  }, [blocks.length, form, id, query.data, queryClient, replaceBlocks, runtime]);
+  }, [blocks.length, form, id, query.data, queryClient, replaceBlocks, runtime, source]);
   if (query.isLoading) return <div className="page"><LoadingState label="エディタを準備しています" /></div>;
   if (query.error || !query.data) return <div className="page"><ErrorState error={query.error ?? "作品がありません"} retry={() => query.refetch()} /></div>;
   const doc = query.data;
   const assets = doc.assets;
-  const allowPageBreak = doc.download.source === "pixiv";
+  const allowPageBreak = doc.work.source === "pixiv";
   // 編集が載っている土台の版と、いま手元にある版。ずれていれば知らせる。
   const editBase = doc.draftRevision?.baseVersion ?? doc.activeRevision?.baseVersion ?? null;
-  const staleBase = editBase !== null && editBase < doc.download.currentVersion ? editBase : null;
+  const staleBase = editBase !== null && editBase < doc.work.currentVersion ? editBase : null;
   const virtualItems = editorVirtualizer.getVirtualItems();
   const renderedEditorItems = virtualItems.length ? virtualItems : blocks.slice(0, 8).map((block, index) => ({ index, key: block.clientId, start: blocks.slice(0, index).reduce((sum, item) => sum + estimateEditorBlockSize(item.blockType), 0) }));
   const virtualHeight = editorVirtualizer.getTotalSize() || blocks.reduce((sum, block) => sum + estimateEditorBlockSize(block.blockType), 0);
@@ -694,7 +695,7 @@ export default function EditorPage() {
   // まだ dirty のまま navigate へ入るので、同じ問いがもう一枚開いていた。
   // 未保存の登録（177行）は既定スコープで navigate も見ているため、この一行で
   // 確認は変わらず出る。テンプレート編集の画面も同じ作りになっている。
-  const goBack = () => returnTo(`/works/${id}`);
+  const goBack = () => returnTo(source.workPath);
   const hasDraft = Boolean(doc.draftRevision) || draftSavedHere;
   return (
     <div className="editor-page">
@@ -744,7 +745,7 @@ export default function EditorPage() {
                 知らせていなかった。反映中の編集版は読書画面と EPUB と一覧の題まで
                 上書きするので、新しい本文が黙って隠れる。 */}
             {staleBase !== null && <Alert className="editor-stale-base" color="yellow" icon={<Icons.warning size={IconSize.action} />} title="取り込み直した本文があります">
-              <Text size="sm">この編集は v{staleBase} の本文をもとにしています。取得元からは v{doc.download.currentVersion} を取り込み済みです。{doc.activeRevision ? "反映中の編集版が新しい本文を覆っているため、読書画面とEPUBには古い本文が出ます。" : "下書きは古い本文のままです。"}</Text>
+              <Text size="sm">この編集は v{staleBase} の本文をもとにしています。取得元からは v{doc.work.currentVersion} を取り込み済みです。{doc.activeRevision ? "反映中の編集版が新しい本文を覆っているため、読書画面とEPUBには古い本文が出ます。" : "下書きは古い本文のままです。"}</Text>
               <Text size="xs" c="dimmed" mt={4}>新しい本文で編集し直すには、下書きを破棄してから開き直してください。</Text>
             </Alert>}
             <BlockInsertMenu label="先頭にブロックを追加" allowPageBreak={allowPageBreak} onInsert={(type) => insertBlock(type, 0)} onImage={() => addAsset(0)} />
@@ -763,7 +764,7 @@ export default function EditorPage() {
         </ScrollArea>
 
         <ProofreadPanel opened={proofreadOpened} onClose={proofreadPanel.close} items={proofreadItems} progress={proofreadProgress} running={proofreadRunning} error={proofreadError} blockNumber={proofreadBlockNumber} onApply={applyProofread} onDismiss={(item) => markProofread(new Set([item.key]), "dismissed")} onJump={jumpToBlock} onCancel={cancelProofread} />
-        <EditorPreviewPane ref={previewRef} viewportRef={previewScrollRef} blocks={blocks} assets={assets} activeBlock={activeBlock} allowPageBreak={allowPageBreak} seriesTitle={doc.download.seriesTitle} title={doc.download.title} authorName={doc.download.authorName} onActivate={activateBlock} />
+        <EditorPreviewPane ref={previewRef} viewportRef={previewScrollRef} blocks={blocks} assets={assets} activeBlock={activeBlock} allowPageBreak={allowPageBreak} seriesTitle={doc.work.seriesTitle} title={doc.work.title} authorName={doc.work.authorName} onActivate={activateBlock} />
       </div>
     </div>
   );
@@ -875,7 +876,7 @@ function ImageBlock({ asset, assets, value, caption, missingRef, onChange, onCap
   const [assetId, setAssetId] = useState(value ?? null);
   const [captionValue, setCaptionValue] = useState(caption ?? "");
   const selectedAsset = assets.find((item) => item.id === assetId) ?? asset;
-  return <Stack gap="xs">{missingRef !== null && !assetId && <Alert color="yellow" variant="light" p="xs" icon={<Icons.warning size={IconSize.menu} />}><Text size="xs">取得元の画像{missingRef ? ` ${missingRef}` : ""}は取り込めませんでした。手元の画像を選ぶか、このブロックを削除してください。このままなら、読書画面には「取得できなかった画像」の札が出ます。</Text></Alert>}<Group wrap="nowrap" align="flex-start"><Box className="editor-image-preview">{selectedAsset ? <Image src={getAssetUrl(selectedAsset.localPath)} alt="" w="100%" h="100%" fit="contain" /> : <Icons.imageFile size={IconSize.hero} />}</Box><Stack flex={1} gap="xs"><Select label="画像" placeholder="選択してください" searchable data={assets.filter((item) => item.mimeType?.startsWith("image/")).map((item) => ({ value: String(item.id), label: item.filename }))} value={assetId ? String(assetId) : null} onChange={(next) => { const nextId = next ? Number(next) : null; setAssetId(nextId); onChange(nextId); }} clearable /><TextInput label="キャプション（任意）" value={captionValue} onChange={(event) => { setCaptionValue(event.currentTarget.value); onCaptionChange(event.currentTarget.value); }} /></Stack></Group></Stack>;
+  return <Stack gap="xs">{missingRef !== null && !assetId && <Alert color="yellow" variant="light" p="xs" icon={<Icons.warning size={IconSize.menu} />}><Text size="xs">取得元の画像{missingRef ? ` ${missingRef}` : ""}は取り込めませんでした。手元の画像を選ぶか、このブロックを削除してください。このままなら、読書画面には「取得できなかった画像」の札が出ます。</Text></Alert>}<Group wrap="nowrap" align="flex-start"><Box className="editor-image-preview">{selectedAsset ? <Image src={editorAssetUrl(selectedAsset)} alt="" w="100%" h="100%" fit="contain" /> : <Icons.imageFile size={IconSize.hero} />}</Box><Stack flex={1} gap="xs"><Select label="画像" placeholder="選択してください" searchable data={assets.filter((item) => item.mimeType?.startsWith("image/")).map((item) => ({ value: String(item.id), label: item.filename }))} value={assetId ? String(assetId) : null} onChange={(next) => { const nextId = next ? Number(next) : null; setAssetId(nextId); onChange(nextId); }} clearable /><TextInput label="キャプション（任意）" value={captionValue} onChange={(event) => { setCaptionValue(event.currentTarget.value); onCaptionChange(event.currentTarget.value); }} /></Stack></Group></Stack>;
 }
 
 function LinkBlock({ url, label, onUrlChange, onLabelChange, error }: { url: string; label: string; onUrlChange: (value: string) => void; onLabelChange: (value: string) => void; error?: React.ReactNode }) {
@@ -930,7 +931,7 @@ const EditorPreviewPane = forwardRef<PreviewHandle, {
   const imageSources = useMemo(() => [...new Set(previewBlocks.flatMap((block) => {
     if (block.blockType !== "image" || !block.assetId) return [];
     const asset = assetMap.get(block.assetId);
-    const src = asset ? getAssetUrl(asset.localPath) : null;
+    const src = asset ? editorAssetUrl(asset) : null;
     return src ? [src] : [];
   }))], [assetMap, previewBlocks]);
   useEffect(() => {
@@ -957,7 +958,7 @@ const EditorPreviewPane = forwardRef<PreviewHandle, {
   const imageSrcAt = (index: number) => {
     const block = previewBlocks[index];
     const asset = block?.blockType === "image" && block.assetId ? assetMap.get(block.assetId) : undefined;
-    return asset ? getAssetUrl(asset.localPath) : null;
+    return asset ? editorAssetUrl(asset) : null;
   };
   const contentWidth = previewContentWidth(viewportRef.current?.clientWidth ?? 620);
   // 改ページは前から数えないと番号が出せない。仮想化すると前のブロックは
@@ -1017,7 +1018,7 @@ const PreviewBlock = memo(function PreviewBlock({ block, asset, pageNumber, acti
   else if (block.blockType === "quote") content = <blockquote>{renderNotationLines(block.text)}</blockquote>;
   else if (block.blockType === "separator") content = <hr />;
   else if (block.blockType === "pageBreak") content = <div className="editor-preview-page-break"><span>pixiv page {pageNumber}</span></div>;
-  else if (block.blockType === "image") content = <figure>{asset ? <PreviewImage src={getAssetUrl(asset.localPath)} alt={block.text || asset.filename} /> : <Text c="dimmed">{missingImageRef(block.attrsJson) !== null ? "取得できなかった画像（手元の画像を選んでください）" : "画像を選択してください"}</Text>}{block.text && <figcaption>{block.text}</figcaption>}</figure>;
+  else if (block.blockType === "image") content = <figure>{asset ? <PreviewImage src={editorAssetUrl(asset)} alt={block.text || asset.filename} /> : <Text c="dimmed">{missingImageRef(block.attrsJson) !== null ? "取得できなかった画像（手元の画像を選んでください）" : "画像を選択してください"}</Text>}{block.text && <figcaption>{block.text}</figcaption>}</figure>;
   else if (block.blockType === "link") content = <a className="editor-preview-link" href={block.text || undefined} onClick={(event) => event.preventDefault()}><Icons.link size={IconSize.nav} /><span><strong>{linkLabel(block.attrsJson) || block.text || "URLを入力"}</strong><small>{block.text}</small></span></a>;
   else content = <p>{renderNotationLines(block.text)}</p>;
   return <div className="editor-preview-block" data-active={active || undefined} data-preview-block-id={block.clientId} onClick={() => onActivate(block.clientId, "preview")}>{content}</div>;

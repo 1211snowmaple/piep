@@ -25,6 +25,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
+#[path = "update_jobs_shelf.rs"]
+pub(super) mod shelf;
+
+#[cfg(test)]
+#[path = "update_jobs_history_tests.rs"]
+mod history_tests;
+
 const UPDATE_JOB_DELAY_MS: u64 = 2_000;
 /// 新作だけの確認で、作者の間にあける時間。
 ///
@@ -77,7 +84,7 @@ enum WebLookup {
     Failed(String),
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct CachedWebListing {
     entries: HashMap<String, crate::pixiv_api::web::NovelListEntryWeb>,
     unavailable_ids: HashSet<String>,
@@ -90,6 +97,7 @@ struct CachedWebListing {
 /// 分かる。セッションが無ければ作品単体は従来の経路へ進めるが、作者全体の
 /// 改稿確認を「変更なし」として完了させてはいけない。
 struct WebUpdateIndex {
+    library: Option<Arc<crate::library::Library>>,
     api: Option<crate::pixiv_api::web::WebPixivAPI>,
     asked_authors: HashSet<String>,
     /// 作者ID → 一覧と、個別取得でも 404 だった保存済み作品。
@@ -210,6 +218,7 @@ impl WebUpdateIndex {
             }
         };
         Self {
+            library: None,
             api,
             asked_authors: HashSet::new(),
             entries: HashMap::new(),
@@ -236,13 +245,25 @@ impl WebUpdateIndex {
             return Ok(None);
         }
         if !self.asked_authors.contains(author_id) {
-            let ids: Vec<String> = state
-                .db
-                .pixiv_works_for_author(author_id)
-                .map_err(|error| format!("保存済み作品の一覧を読めません: {error}"))?
+            let ids: Vec<String> = if let Some(library) = &self.library {
+                let (library, author) = (Arc::clone(library), author_id.to_string());
+                tauri::async_runtime::spawn_blocking(move || {
+                    shelf::author_cards(&library, "pixiv", &author)
+                })
+                .await
+                .map_err(|e| e.to_string())??
                 .into_iter()
-                .map(|work| work.source_id)
-                .collect();
+                .map(|card| card.external_key)
+                .collect()
+            } else {
+                state
+                    .db
+                    .pixiv_works_for_author(author_id)
+                    .map_err(|error| format!("保存済み作品の一覧を読めません: {error}"))?
+                    .into_iter()
+                    .map(|work| work.source_id)
+                    .collect()
+            };
             self.asked_authors.insert(author_id.to_string());
             if ids.is_empty() {
                 return Ok(Some(self.entries.entry(author_id.to_string()).or_default()));
@@ -251,7 +272,7 @@ impl WebUpdateIndex {
             match api
                 .user_novels_by_ids_with_control(author_id, &ids, || {
                     state
-                        .db
+                        .jobs()
                         .update_job_status_value(job_id)
                         .is_ok_and(|status| status == "running")
                 })
@@ -297,13 +318,22 @@ impl WebUpdateIndex {
         dl: &DownloadEntry,
         job_id: &str,
     ) -> WebLookup {
-        match self.author_listing(state, &dl.author_id, job_id).await {
+        self.lookup_key(state, &dl.author_id, &dl.source_id, job_id)
+            .await
+    }
+
+    async fn lookup_key(
+        &mut self,
+        state: &Arc<AppState>,
+        author: &str,
+        key: &str,
+        job_id: &str,
+    ) -> WebLookup {
+        match self.author_listing(state, author, job_id).await {
             Err(error) => WebLookup::Failed(error),
             Ok(None) => WebLookup::Unknown,
-            Ok(Some(listing)) if listing.unavailable_ids.contains(&dl.source_id) => {
-                WebLookup::Unavailable
-            }
-            Ok(Some(listing)) => match listing.entries.get(&dl.source_id) {
+            Ok(Some(listing)) if listing.unavailable_ids.contains(key) => WebLookup::Unavailable,
+            Ok(Some(listing)) => match listing.entries.get(key) {
                 // 伏せられた作品はメタデータが当てにならない。判定に使わない。
                 Some(entry) if entry.is_masked => WebLookup::Unknown,
                 Some(entry) => WebLookup::Found(Box::new(entry.clone())),
@@ -347,7 +377,7 @@ fn has_pending_restart(job_id: &str) -> bool {
 }
 
 fn make_job_id() -> String {
-    format!("job-{:032x}", rand::random::<u128>())
+    crate::library::LibraryId::now_v7().to_string()
 }
 
 fn pixiv_token(credentials: &UpdateCredentials) -> Option<String> {
@@ -503,14 +533,40 @@ fn format_thousands(value: i64) -> String {
 /// 文言を決める。改稿だと思って取りに行ったのに中身が同じだった場合
 /// （配信元が更新時刻だけ動かした場合）も、そうと分かるようにする。
 fn describe_candidate_save(
-    updated: &DownloadEntry,
+    saved: &super::downloader::SavedWork,
     previous_title: Option<&str>,
     previous_length: Option<i64>,
     previous_version: Option<i64>,
 ) -> ItemOutcome {
+    let updated = match saved {
+        super::downloader::SavedWork::Legacy(updated) => updated,
+        super::downloader::SavedWork::Shelf(shelf) => {
+            let reference = SavedRef::Shelf(shelf.work);
+            return match previous_length {
+                Some(before) if shelf.revised => ItemOutcome::Saved(
+                    reference,
+                    format!(
+                        "改稿を保存: {}（{}, v{}）",
+                        shelf.title,
+                        describe_source_change(
+                            previous_title.unwrap_or(&shelf.title),
+                            &shelf.title,
+                            before,
+                            shelf.text_length
+                        ),
+                        shelf.version
+                    ),
+                ),
+                Some(_) if !shelf.created => {
+                    ItemOutcome::Skipped(format!("中身は変わっていません: {}", shelf.title))
+                }
+                _ => ItemOutcome::Saved(reference, format!("新作を保存: {}", shelf.title)),
+            };
+        }
+    };
     match (previous_length, previous_version) {
         (Some(before), Some(version)) if updated.current_version > version => ItemOutcome::Saved(
-            updated.id,
+            SavedRef::Legacy(updated.id),
             format!(
                 "改稿を保存: {}（{}, v{}）",
                 updated.title,
@@ -526,7 +582,10 @@ fn describe_candidate_save(
         (Some(_), Some(_)) => {
             ItemOutcome::Skipped(format!("中身は変わっていません: {}", updated.title))
         }
-        _ => ItemOutcome::Saved(updated.id, format!("新作を保存: {}", updated.title)),
+        _ => ItemOutcome::Saved(
+            SavedRef::Legacy(updated.id),
+            format!("新作を保存: {}", updated.title),
+        ),
     }
 }
 
@@ -640,15 +699,20 @@ fn item_from_payload(
 /// 判断し、分からなければ従来どおりシリーズも走査する（取りこぼさない側に倒す）。
 fn series_covered_by_watched_author(
     state: &Arc<AppState>,
+    library: Option<&crate::library::Library>,
     target: &crate::database::UpdateTarget,
     watched_authors: &HashSet<(String, String)>,
 ) -> Result<bool, String> {
     if watched_authors.is_empty() {
         return Ok(false);
     }
-    let authors = state
-        .db
-        .series_author_keys(&target.source, &target.source_key)?;
+    let authors = if let Some(library) = library {
+        super::watching::series_authors(library, &target.source, &target.source_key)?
+    } else {
+        state
+            .db
+            .series_author_keys(&target.source, &target.source_key)?
+    };
     Ok(authors
         .iter()
         .any(|author| watched_authors.contains(&(target.source.clone(), author.clone()))))
@@ -691,6 +755,7 @@ fn candidate_matches_scope(
 fn build_initial_items(
     state: &Arc<AppState>,
     request: &StartUpdateJobRequest,
+    library: Option<&crate::library::Library>,
 ) -> Result<Vec<UpdateJobItemInput>, String> {
     let mut items = Vec::new();
     let mut included_work_keys = HashSet::new();
@@ -706,10 +771,21 @@ fn build_initial_items(
         .work_ids
         .as_ref()
         .map(|ids| ids.iter().copied().collect::<HashSet<_>>());
-    let target_filter = request
-        .target_ids
-        .as_ref()
-        .map(|ids| ids.iter().copied().collect::<HashSet<_>>());
+    let registered_targets = if let Some(library) = library {
+        super::watching::selected_targets(library, request.target_ids.as_deref())?
+    } else {
+        state.db.list_update_targets(None, true)?
+    };
+    let target_filter = request.target_ids.as_ref().map(|ids| {
+        if library.is_some() {
+            registered_targets
+                .iter()
+                .map(|t| t.id)
+                .collect::<HashSet<_>>()
+        } else {
+            ids.iter().copied().collect::<HashSet<_>>()
+        }
+    });
     // A one-off check from an entity page specifies its target by provider key.
     // Its scope names the kind, not every saved watch target of that kind.
     let include_registered_targets =
@@ -721,17 +797,21 @@ fn build_initial_items(
         .filter(|target| target.target_type == "author")
         .map(|target| (target.source.clone(), target.source_key.clone()))
         .collect();
-    let eligible_targets: HashSet<(String, String, String)> = state
-        .db
-        .list_update_targets(None, true)?
-        .into_iter()
+    let eligible_targets: HashSet<(String, String, String)> = registered_targets
+        .iter()
         .filter(|t| {
             include_registered_targets
                 && ((include_author && t.target_type == "author")
                     || (include_series && t.target_type == "series"))
                 && target_filter.as_ref().is_none_or(|ids| ids.contains(&t.id))
         })
-        .map(|t| (t.source, t.target_type, t.source_key))
+        .map(|t| {
+            (
+                t.source.clone(),
+                t.target_type.clone(),
+                t.source_key.clone(),
+            )
+        })
         .chain(request.adhoc_targets.iter().flatten().map(|t| {
             (
                 t.source.clone(),
@@ -741,11 +821,11 @@ fn build_initial_items(
         }))
         .collect();
 
-    let mut works = if include_work {
+    let mut works = if include_work && library.is_none() {
         if let Some(filter) = &work_filter {
             let mut entries = Vec::new();
             for id in filter {
-                entries.push(state.db.get_download(*id)?);
+                entries.push(state.db.get_download(id.legacy()?)?);
             }
             entries
         } else {
@@ -756,7 +836,7 @@ fn build_initial_items(
     };
     // A one-off author check also checks every saved work by that author for
     // revisions, regardless of each work's individual watch setting.
-    if include_author && !new_works_only {
+    if library.is_none() && include_author && !new_works_only {
         for adhoc in request.adhoc_targets.iter().flatten() {
             if adhoc.target_type == "author" {
                 works.extend(
@@ -767,7 +847,18 @@ fn build_initial_items(
             }
         }
     }
-    let held_work_keys = state.db.held_update_candidate_keys()?;
+    let held_work_keys = state.candidates().held_update_candidate_keys()?;
+    if let Some(library) = library {
+        for item in shelf::work_items(library, request, &eligible_targets)? {
+            let key = (
+                item.source.clone().unwrap(),
+                item.source_id.clone().unwrap(),
+            );
+            if !held_work_keys.contains(&key) && included_work_keys.insert(key) {
+                items.push(item);
+            }
+        }
+    }
     for dl in works {
         if dl.source != "pixiv" && dl.source != "fanbox" {
             continue;
@@ -809,12 +900,21 @@ fn build_initial_items(
         if adhoc.target_type != "author" && adhoc.target_type != "series" {
             continue;
         }
-        let registered =
+        let registered = if let Some(library) = library {
+            super::watching::find(
+                library,
+                &adhoc.target_type,
+                &adhoc.source,
+                &adhoc.source_key,
+            )?
+        } else {
             state
                 .db
-                .find_update_target(&adhoc.target_type, &adhoc.source, &adhoc.source_key)?;
+                .find_update_target(&adhoc.target_type, &adhoc.source, &adhoc.source_key)?
+        };
         let target = registered.unwrap_or_else(|| crate::database::UpdateTarget {
-            id: 0,
+            id: 0.into(),
+            watch_generation: None,
             target_type: adhoc.target_type.clone(),
             source: adhoc.source.clone(),
             source_key: adhoc.source_key.clone(),
@@ -850,7 +950,7 @@ fn build_initial_items(
     if include_work || include_author || include_series {
         let mut cursor: Option<(String, String)> = None;
         loop {
-            let page = state.db.list_pending_update_candidates_after(
+            let page = state.candidates().list_pending_update_candidates_after(
                 cursor
                     .as_ref()
                     .map(|(source, source_id)| (source.as_str(), source_id.as_str())),
@@ -871,12 +971,17 @@ fn build_initial_items(
                     continue;
                 }
                 // すでに手元にあるものは、改稿として見つけた場合だけ残す。
-                let saved = state
-                    .db
-                    .get_download_by_source(&candidate.source, &candidate.source_id)?;
-                if saved.is_some() && candidate.kind != CandidateKind::Revision.key() {
+                let saved = if let Some(library) = library {
+                    shelf::saved_card(library, &candidate.source, &candidate.source_id)?.is_some()
+                } else {
                     state
                         .db
+                        .get_download_by_source(&candidate.source, &candidate.source_id)?
+                        .is_some()
+                };
+                if saved && candidate.kind != CandidateKind::Revision.key() {
+                    state
+                        .candidates()
                         .clear_update_candidate(&candidate.source, &candidate.source_id)?;
                     continue;
                 }
@@ -899,7 +1004,7 @@ fn build_initial_items(
     }
 
     if include_registered_targets && (include_author || include_series) {
-        let targets = state.db.list_update_targets(None, true)?;
+        let targets = registered_targets;
         // 作者を監視しているなら、その人のシリーズはその一覧に出てくる。
         // 両方を走査すると同じものを二度取りに行くので、取得先への負荷になる。
         let watched_authors: HashSet<(String, String)> = targets
@@ -930,7 +1035,7 @@ fn build_initial_items(
             }
             if target.target_type == "series"
                 && include_author
-                && series_covered_by_watched_author(state, &target, &watched_authors)?
+                && series_covered_by_watched_author(state, library, &target, &watched_authors)?
             {
                 continue;
             }
@@ -961,7 +1066,7 @@ fn build_initial_items(
 }
 
 async fn emit_snapshot(app: &tauri::AppHandle, state: &Arc<AppState>, job_id: &str) {
-    match state.db.update_job_snapshot(job_id) {
+    match state.jobs().update_job_snapshot(job_id) {
         Ok(snapshot) => {
             if let Err(error) = app.emit("update-job-progress", snapshot) {
                 log::warn!("更新ジョブ {job_id} の進捗を画面へ送れません: {error}");
@@ -985,7 +1090,10 @@ async fn emit_progress_delta(
     job_id: &str,
     changed_item_id: Option<i64>,
 ) {
-    match state.db.update_job_progress_delta(job_id, changed_item_id) {
+    match state
+        .jobs()
+        .update_job_progress_delta(job_id, changed_item_id)
+    {
         Ok(delta) => {
             if let Err(error) = app.emit("update-job-progress-delta", delta) {
                 log::warn!("更新ジョブ {job_id} の差分進捗を画面へ送れません: {error}");
@@ -1009,7 +1117,7 @@ async fn announce_author_listing(
 ) -> Result<(), String> {
     let label = format!("{author_name}の投稿一覧を読んでいます");
     state
-        .db
+        .jobs()
         .transition_update_job_status(job_id, "running", "running", Some(&label))?;
     emit_progress_delta(app, state, job_id, None).await;
     Ok(())
@@ -1049,7 +1157,7 @@ fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCr
         };
         if let Err(error) = run_result {
             let state = app.state::<Arc<AppState>>().inner().clone();
-            if let Err(log_error) = state.db.append_update_job_log(&job_id, "error", &error) {
+            if let Err(log_error) = state.jobs().append_update_job_log(&job_id, "error", &error) {
                 log::error!("更新ジョブ {job_id} の失敗をDBへ記録できません: {log_error}");
             }
             if has_pending_restart(&job_id) {
@@ -1059,7 +1167,7 @@ fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCr
             } else {
                 // A late network/database error must not resurrect a job after the
                 // user canceled it while an item was in flight.
-                match state.db.update_job_status_value(&job_id).as_deref() {
+                match state.jobs().update_job_status_value(&job_id).as_deref() {
                     Ok("canceling") => {
                         if let Err(cancel_error) =
                             finish_update_job_cancellation(&app, &state, &job_id).await
@@ -1073,7 +1181,7 @@ fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCr
                     _ => {
                         if let Err(status_error) =
                             state
-                                .db
+                                .jobs()
                                 .set_update_job_status(&job_id, "failed", Some(&error))
                         {
                             log::error!(
@@ -1116,12 +1224,12 @@ async fn finish_update_job_cancellation(
     state: &Arc<AppState>,
     job_id: &str,
 ) -> Result<(), String> {
-    state.db.prepare_update_job_resume(job_id, false)?;
+    state.jobs().prepare_update_job_resume(job_id, false)?;
     state
-        .db
+        .jobs()
         .set_update_job_status(job_id, "canceled", Some("キャンセルしました"))?;
     state
-        .db
+        .jobs()
         .append_update_job_log(job_id, "warn", "更新ジョブをキャンセルしました")?;
     emit_snapshot(app, state, job_id).await;
     Ok(())
@@ -1137,12 +1245,12 @@ async fn transition_running_worker_status(
     label: &str,
 ) -> Result<bool, String> {
     if state
-        .db
+        .jobs()
         .transition_update_job_status(job_id, "running", next_status, Some(label))?
     {
         return Ok(true);
     }
-    if state.db.update_job_status_value(job_id)? == "canceling" {
+    if state.jobs().update_job_status_value(job_id)? == "canceling" {
         finish_update_job_cancellation(app, state, job_id).await?;
     }
     Ok(false)
@@ -1150,7 +1258,7 @@ async fn transition_running_worker_status(
 
 /// 更新の確認を始める。返るのは開始直後の姿。
 ///
-/// 監視対象が一つも無ければ `Err`。**空のジョブを作らない**のは、進みも終わりも
+/// 確認する対象が一つも無ければ `Err`。**空のジョブを作らない**のは、進みも終わりも
 /// 無いものが一覧に並ぶと、失敗したのか終わったのか見分けが付かないためである。
 ///
 /// 作ったあとは背景で走る。進み具合は `update-job-progress` で流れるので、
@@ -1161,13 +1269,19 @@ pub async fn start_update_job(
     request: StartUpdateJobRequest,
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let items = build_initial_items(&state, &request)?;
+    let library = shelf::switched_library(&app);
+    let (item_state, item_request) = (Arc::clone(&state), request.clone());
+    let items = tauri::async_runtime::spawn_blocking(move || {
+        build_initial_items(&item_state, &item_request, library.as_deref())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     if items.is_empty() {
         return Err("更新監視対象がありません".to_string());
     }
     let job_id = make_job_id();
     let snapshot = state
-        .db
+        .jobs()
         .create_update_job_if_idle(&job_id, &request, &items)?;
     spawn_update_job(
         app.clone(),
@@ -1238,9 +1352,9 @@ pub async fn start_save_job(
     // back, a fresh SavePage can submit the same candidates again while the
     // first worker is still running. The check and insert must be atomic.
     let snapshot = state
-        .db
+        .jobs()
         .create_update_job_if_idle(&job_id, &request, &items)?;
-    state.db.append_update_job_log(
+    state.jobs().append_update_job_log(
         &job_id,
         "info",
         &format!("{}件の保存を受け付けました", items.len()),
@@ -1304,15 +1418,15 @@ pub async fn pause_update_job(
     job_id: String,
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    state.db.prepare_update_job_resume(&job_id, false)?;
+    state.jobs().prepare_update_job_resume(&job_id, false)?;
     state
-        .db
+        .jobs()
         .set_update_job_status(&job_id, "paused", Some("一時停止しました"))?;
     state
-        .db
+        .jobs()
         .append_update_job_log(&job_id, "warn", "更新ジョブを一時停止しました")?;
     emit_snapshot(&app, &state, &job_id).await;
-    state.db.update_job_snapshot(&job_id)
+    state.jobs().update_job_snapshot(&job_id)
 }
 
 /// 止めたジョブを続きから走らせる。
@@ -1331,14 +1445,14 @@ pub async fn resume_update_job(
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     state
-        .db
+        .jobs()
         .resume_update_job_if_idle(&job_id, retry_failed.unwrap_or(false))?;
     state
-        .db
+        .jobs()
         .append_update_job_log(&job_id, "info", "更新ジョブを再開しました")?;
     spawn_update_job(app.clone(), job_id.clone(), credentials);
     emit_snapshot(&app, &state, &job_id).await;
-    state.db.update_job_snapshot(&job_id)
+    state.jobs().update_job_snapshot(&job_id)
 }
 
 /// ジョブを中止する。返るのは要求したあとの姿。
@@ -1353,14 +1467,14 @@ pub async fn cancel_update_job(
     job_id: String,
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let current = state.db.update_job_status_value(&job_id)?;
+    let current = state.jobs().update_job_status_value(&job_id)?;
     match canceled_status_for(&current)? {
         Some("canceled") => finish_update_job_cancellation(&app, &state, &job_id).await?,
         Some("canceling") => {
             state
-                .db
+                .jobs()
                 .set_update_job_status(&job_id, "canceling", Some("キャンセル中"))?;
-            state.db.append_update_job_log(
+            state.jobs().append_update_job_log(
                 &job_id,
                 "warn",
                 "更新ジョブのキャンセルを要求しました",
@@ -1372,7 +1486,7 @@ pub async fn cancel_update_job(
     // did so without credentials; that worker first changed the job back to
     // running and then commonly stopped at auth_required instead of canceled.
     emit_snapshot(&app, &state, &job_id).await;
-    state.db.update_job_snapshot(&job_id)
+    state.jobs().update_job_snapshot(&job_id)
 }
 
 /// ジョブの今の姿を返す。候補とログは頁で切って返す。
@@ -1391,7 +1505,7 @@ pub async fn get_update_job(
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>();
     state
-        .db
+        .jobs()
         .update_job_snapshot_page(&job_id, candidate_after_id, log_before_id)
 }
 
@@ -1405,7 +1519,7 @@ pub async fn list_update_job_item_states(
     job_id: String,
 ) -> Result<Vec<UpdateJobItemState>, String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.list_update_job_item_states(&job_id)
+    state.jobs().list_update_job_item_states(&job_id)
 }
 
 /// 実行中の「結果」に必要な保留項目だけを返す。
@@ -1416,7 +1530,7 @@ pub async fn list_update_job_held_item_states(
     job_id: String,
 ) -> Result<Vec<UpdateJobItemState>, String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.list_update_job_held_item_states(&job_id)
+    state.jobs().list_update_job_held_item_states(&job_id)
 }
 
 /// ジョブの一覧を、要約だけで返す。
@@ -1425,7 +1539,28 @@ pub async fn list_update_job_held_item_states(
 #[tauri::command]
 pub async fn list_update_jobs(app: tauri::AppHandle) -> Result<Vec<UpdateJobSummary>, String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.list_update_jobs()
+    current_job_summaries(&state)
+}
+
+fn current_job_summaries(state: &AppState) -> Result<Vec<UpdateJobSummary>, String> {
+    state.jobs().list_update_jobs()
+}
+
+fn clear_finished_jobs(state: &AppState, include_shelf: bool) -> Result<usize, String> {
+    if let Some(library) = state.library_v2.switched() {
+        let hidden = if include_shelf {
+            library
+                .set_job_history_hidden(crate::library::LibraryId::now_v7(), None, true)
+                .map_err(|e| e.to_string())?
+        } else {
+            0
+        };
+        return state
+            .jobs()
+            .clear_finished_update_jobs()
+            .map(|count| count + hidden);
+    }
+    state.jobs().clear_finished_update_jobs()
 }
 
 /// 選んだ候補を保存キューへ積み、ジョブを動かし直す。
@@ -1451,17 +1586,17 @@ pub async fn save_update_job_candidates(
     let changed = {
         let _library_write_guard = state.library_gate.clone().write_owned().await;
         state
-            .db
+            .jobs()
             .queue_update_job_candidates(&job_id, &candidate_ids)?
     };
     if changed > 0 {
-        state.db.append_update_job_log(
+        state.jobs().append_update_job_log(
             &job_id,
             "info",
             &format!("{}件の候補を保存キューに追加しました", changed),
         )?;
         state
-            .db
+            .jobs()
             .set_update_job_status(&job_id, "queued", Some("候補保存待ち"))?;
         spawn_update_job(
             app.clone(),
@@ -1470,7 +1605,7 @@ pub async fn save_update_job_candidates(
         );
     }
     emit_snapshot(&app, &state, &job_id).await;
-    state.db.update_job_snapshot(&job_id)
+    state.jobs().update_job_snapshot(&job_id)
 }
 
 fn snapshot_credentials_missing() -> UpdateCredentials {
@@ -1490,14 +1625,28 @@ fn snapshot_credentials_missing() -> UpdateCredentials {
 #[tauri::command]
 pub async fn clear_update_job(app: tauri::AppHandle, job_id: String) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.clear_update_job(&job_id)
+    if let Some(library) = state.library_v2.switched() {
+        if let Some(job) = library
+            .migrated_job_history_id(&job_id)
+            .map_err(|e| e.to_string())?
+        {
+            return library
+                .set_job_history_hidden(crate::library::LibraryId::now_v7(), Some(job), true)
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+        }
+    }
+    state.jobs().clear_update_job(&job_id)
 }
 
 /// 終わった更新ジョブをまとめて消す。操作履歴の「完了履歴を消去」から呼ぶ。
 #[tauri::command]
-pub async fn clear_finished_update_jobs(app: tauri::AppHandle) -> Result<usize, String> {
+pub async fn clear_finished_update_jobs(
+    app: tauri::AppHandle,
+    include_shelf: Option<bool>,
+) -> Result<usize, String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.clear_finished_update_jobs()
+    clear_finished_jobs(&state, include_shelf.unwrap_or(true))
 }
 
 /// この作品を今後の候補から外す（あるいは、その決定を取り消す）。
@@ -1513,8 +1662,10 @@ pub async fn dismiss_update_candidate(
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
     let _library_write_guard = state.library_gate.clone().write_owned().await;
-    state.db.remember_job_candidate(&source, &source_id)?;
-    state.db.set_update_candidate_status(
+    state
+        .candidates()
+        .remember_job_candidate(&source, &source_id)?;
+    state.candidates().set_update_candidate_status(
         &source,
         &source_id,
         if dismissed { "dismissed" } else { "pending" },
@@ -1527,16 +1678,20 @@ pub async fn list_deferred_update_candidates(
     app: tauri::AppHandle,
 ) -> Result<Vec<crate::database::UpdateCandidateRow>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    tokio::task::spawn_blocking(move || state.db.list_deferred_update_candidate_summaries(-1))
-        .await
-        .map_err(|error| format!("保留候補を読み取れません: {error}"))?
+    tokio::task::spawn_blocking(move || {
+        state
+            .candidates()
+            .list_deferred_update_candidate_summaries(-1)
+    })
+    .await
+    .map_err(|error| format!("保留候補を読み取れません: {error}"))?
 }
 
 /// ライブラリに保存済みで、取得状態の確認が必要な作品数を返す。
 #[tauri::command]
 pub async fn count_saved_deferred_update_candidates(app: tauri::AppHandle) -> Result<i64, String> {
     app.state::<Arc<AppState>>()
-        .db
+        .candidates()
         .count_saved_deferred_update_candidates()
 }
 
@@ -1556,19 +1711,25 @@ pub async fn list_incomplete_save_repair_works(
     limit: i64,
 ) -> Result<Vec<IncompleteSaveRepairWork>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    tokio::task::spawn_blocking(move || state.db.list_incomplete_save_repair_works(limit))
-        .await
-        .map_err(|error| format!("補完する作品を読み取れません: {error}"))?
-        .map(|works| {
-            works
-                .into_iter()
-                .map(|(source_id, title)| IncompleteSaveRepairWork {
-                    source: "pixiv",
-                    source_id,
-                    title,
-                })
-                .collect()
-        })
+    let library = state.library_v2.switched();
+    tokio::task::spawn_blocking(move || match library {
+        Some(library) => library
+            .incomplete_save_repairs(limit.clamp(1, 500) as usize)
+            .map_err(|error| error.to_string()),
+        None => state.db.list_incomplete_save_repair_works(limit),
+    })
+    .await
+    .map_err(|error| format!("補完する作品を読み取れません: {error}"))?
+    .map(|works| {
+        works
+            .into_iter()
+            .map(|(source_id, title)| IncompleteSaveRepairWork {
+                source: "pixiv",
+                source_id,
+                title,
+            })
+            .collect()
+    })
 }
 
 /// 補完の保存ジョブへ渡した作品を、今の版で試したと記録する。
@@ -1578,8 +1739,13 @@ pub async fn record_incomplete_save_repair_attempts(
     source_ids: Vec<String>,
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    tokio::task::spawn_blocking(move || {
-        state.db.record_incomplete_save_repair_attempts(&source_ids)
+    let library = state.library_v2.switched();
+    tokio::task::spawn_blocking(move || match library {
+        Some(library) => library
+            .record_incomplete_save_attempts(&source_ids, chrono::Utc::now().timestamp_millis())
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        None => state.db.record_incomplete_save_repair_attempts(&source_ids),
     })
     .await
     .map_err(|error| format!("補完の記録を書けません: {error}"))?
@@ -1604,7 +1770,10 @@ pub async fn recheck_deferred_update_candidates(
     }
     let keys: HashSet<_> = keys.into_iter().collect();
     let mut items = Vec::new();
-    for candidate in state.db.list_update_candidates_by_status("deferred", -1)? {
+    for candidate in state
+        .candidates()
+        .list_update_candidates_by_status("deferred", -1)?
+    {
         if !keys.contains(&format!("{}:{}", candidate.source, candidate.source_id)) {
             continue;
         }
@@ -1612,6 +1781,12 @@ pub async fn recheck_deferred_update_candidates(
             serde_json::from_str(&candidate.payload_json).map_err(|e| e.to_string())?;
         payload["kind"] = serde_json::json!("permission_check");
         payload["refreshPostAccess"] = serde_json::json!(refresh_post_access.unwrap_or(false));
+        if let Some(generation) = state
+            .candidates()
+            .generation(&candidate.source, &candidate.source_id)?
+        {
+            payload["discoveryGeneration"] = serde_json::json!(generation);
+        }
         items.push(item_from_payload(
             "candidate",
             "queued",
@@ -1649,8 +1824,10 @@ pub async fn recheck_deferred_update_candidates(
         credentials: credentials.clone(),
     };
     let job_id = make_job_id();
-    let snapshot = state.db.create_update_job(&job_id, &request, &items)?;
-    state.db.append_update_job_log(
+    let snapshot = state
+        .jobs()
+        .create_update_job_if_idle(&job_id, &request, &items)?;
+    state.jobs().append_update_job_log(
         &job_id,
         "info",
         "保留した作品の閲覧条件を再確認します。保存や監視登録は行いません",
@@ -1692,12 +1869,18 @@ fn is_known_hold(state: &AppState, item: &UpdateJobItem, reason: &str) -> Result
     else {
         return Ok(false);
     };
-    Ok(match state.db.update_candidate_hold(source, source_id)? {
-        Some((status, kind)) if status == "held" || status == "dismissed" => {
-            reason == BLOCKED_CANDIDATE_MESSAGE || kind.as_deref() == Some(hold_kind_for(reason))
-        }
-        _ => false,
-    })
+    Ok(
+        match state
+            .candidates()
+            .update_candidate_hold(source, source_id)?
+        {
+            Some((status, kind)) if status == "held" || status == "dismissed" => {
+                reason == BLOCKED_CANDIDATE_MESSAGE
+                    || kind.as_deref() == Some(hold_kind_for(reason))
+            }
+            _ => false,
+        },
+    )
 }
 
 /// 保留を項目に書き、ログに残す。前の回と変わらない保留は数えず、警告にもしない。
@@ -1707,19 +1890,25 @@ fn complete_held_item(
     item: &UpdateJobItem,
     known: bool,
     reason: &str,
-    result_download_id: Option<i64>,
+    saved: Option<SavedRef>,
     log: &str,
 ) -> Result<(), String> {
-    state
-        .db
-        .complete_update_job_item(item.id, "held", Some(reason), result_download_id)?;
+    state.jobs().complete_saved_item(
+        item.id,
+        "held",
+        Some(reason),
+        saved.and_then(SavedRef::legacy),
+        saved.and_then(SavedRef::shelf),
+    )?;
     if known {
-        state.db.mark_update_job_item_known_hold(item.id)?;
-        state
-            .db
-            .append_update_job_log(job_id, "info", &format!("{log}（前回から変わらない保留）"))
+        state.jobs().mark_update_job_item_known_hold(item.id)?;
+        state.jobs().append_update_job_log(
+            job_id,
+            "info",
+            &format!("{log}（前回から変わらない保留）"),
+        )
     } else {
-        state.db.append_update_job_log(job_id, "warn", log)
+        state.jobs().append_update_job_log(job_id, "warn", log)
     }
 }
 
@@ -1735,10 +1924,14 @@ async fn hold_candidate(
         .source_id
         .as_deref()
         .ok_or("保留する作品IDがありません")?;
-    let existing = state.db.get_download_by_source(source, source_id)?;
+    let existing = if state.library_v2.switched().is_none() {
+        state.db.get_download_by_source(source, source_id)?
+    } else {
+        None
+    };
     let mut payload: Value =
         serde_json::from_str(&item.payload_json).unwrap_or_else(|_| serde_json::json!({}));
-    let kind = if existing.is_some() {
+    let kind = if state.candidates().saved(source, source_id)? {
         "revision"
     } else {
         "new"
@@ -1764,7 +1957,7 @@ async fn hold_candidate(
     if hold_kind != "restricted" {
         payload["originalData"]["isRestricted"] = serde_json::json!(false);
     }
-    state.db.upsert_update_candidate(&UpdateCandidateInput {
+    state.candidates().hold(&UpdateCandidateInput {
         source: source.into(),
         source_id: source_id.into(),
         kind: kind.into(),
@@ -1772,18 +1965,8 @@ async fn hold_candidate(
         payload_json: payload.to_string(),
         target_type: item.target_type.clone(),
     })?;
-    if state
-        .db
-        .update_candidate_status(source, source_id)?
-        .as_deref()
-        != Some("dismissed")
-    {
-        state
-            .db
-            .set_update_candidate_status(source, source_id, "held")?;
-    }
     state
-        .db
+        .jobs()
         .set_update_job_item_payload(item.id, &payload.to_string())
 }
 
@@ -1793,6 +1976,7 @@ async fn recheck_deferred_item(
     credentials: &UpdateCredentials,
     mut payload: Value,
 ) -> Result<ItemOutcome, String> {
+    let expected = payload.get("discoveryGeneration").and_then(Value::as_i64);
     let source = item.source.as_deref().ok_or("取得元がありません")?;
     let id = item.source_id.as_deref().ok_or("作品IDがありません")?;
     if source == "fanbox" && payload.get("holdKind").and_then(Value::as_str) == Some("restricted") {
@@ -1834,7 +2018,7 @@ async fn recheck_deferred_item(
         }
     }
     let _library_write_guard = state.library_gate.write().await;
-    let kind = if state.db.get_download_by_source(source, id)?.is_some() {
+    let kind = if state.candidates().saved(source, id)? {
         "revision"
     } else {
         "new"
@@ -1844,6 +2028,7 @@ async fn recheck_deferred_item(
         object.remove("holdKind");
         object.remove("holdReason");
         object.remove("refreshPostAccess");
+        object.remove("discoveryGeneration");
     }
     if let Some(original) = payload
         .get_mut("originalData")
@@ -1858,19 +2043,19 @@ async fn recheck_deferred_item(
     if kind == "new" {
         payload["subtitle"] = serde_json::json!("未保存");
     }
-    state.db.upsert_update_candidate(&UpdateCandidateInput {
-        source: source.into(),
-        source_id: id.into(),
-        kind: kind.into(),
-        title: item.title.clone(),
-        payload_json: payload.to_string(),
-        target_type: item.target_type.clone(),
-    })?;
+    state.candidates().recheck_available(
+        &UpdateCandidateInput {
+            source: source.into(),
+            source_id: id.into(),
+            kind: kind.into(),
+            title: item.title.clone(),
+            payload_json: payload.to_string(),
+            target_type: item.target_type.clone(),
+        },
+        expected,
+    )?;
     state
-        .db
-        .set_update_candidate_status(source, id, "pending")?;
-    state
-        .db
+        .jobs()
         .set_update_job_item_payload(item.id, &payload.to_string())?;
     Ok(ItemOutcome::Available(format!(
         "{}: 候補に戻しました。保存するか選んでください",
@@ -1885,19 +2070,55 @@ async fn recheck_deferred_item(
 #[tauri::command]
 pub async fn count_dismissed_update_candidates(app: tauri::AppHandle) -> Result<i64, String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.count_dismissed_update_candidates()
+    state.candidates().count_dismissed_update_candidates()
 }
 
-/// まだ取り込んでいない改稿がある作品の鍵（`{source}:{sourceId}`）。
+/// まだ取り込んでいない改稿がある作品。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingRevisionWork {
+    /// 作品の画面と同じ ID。切り替えた棚では作品 UUID、そうでなければ旧棚の番号。
+    pub work: String,
+    /// 更新確認がこの改稿を見つけた時刻。取得元が直した日そのものは持っていない。
+    pub found_at: String,
+}
+
+/// まだ取り込んでいない改稿がある作品。
 ///
 /// 画面はこれを一度だけ引いて、手元にある作品と突き合わせる。作品の一覧に
 /// 列を足さないのは、これが作品の属性ではなく更新側が見つけた事実だから。
 #[tauri::command]
 pub async fn list_pending_revisions(
     app: tauri::AppHandle,
-) -> Result<Vec<crate::database::PendingRevision>, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.pending_revision_keys()
+) -> Result<Vec<PendingRevisionWork>, String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    tokio::task::spawn_blocking(move || {
+        if let Some(library) = state.library_v2.switched() {
+            return library
+                .pending_revisions()
+                .map_err(|error| error.to_string())
+                .map(|rows| {
+                    rows.into_iter()
+                        .map(|(work, found)| PendingRevisionWork {
+                            work: work.to_string(),
+                            found_at: chrono::DateTime::from_timestamp_millis(found)
+                                .unwrap_or_default()
+                                .to_rfc3339(),
+                        })
+                        .collect()
+                });
+        }
+        state.db.pending_revision_keys().map(|rows| {
+            rows.into_iter()
+                .map(|row| PendingRevisionWork {
+                    work: row.download_id.to_string(),
+                    found_at: row.found_at,
+                })
+                .collect()
+        })
+    })
+    .await
+    .map_err(|error| format!("改稿の一覧を読み取れません: {error}"))?
 }
 
 /// A provider revision fetched only for comparison. It is deliberately not
@@ -1907,7 +2128,8 @@ pub async fn list_pending_revisions(
 #[serde(rename_all = "camelCase")]
 pub struct PendingRevisionPreview {
     pub metadata: crate::database::queries::RevisionMetadata,
-    pub download_id: i64,
+    /// 作品の画面と同じ ID（`list_pending_revisions` の `work`）。
+    pub work: String,
     pub base_version: i64,
     pub text: String,
     pub text_length: i64,
@@ -1922,33 +2144,59 @@ pub struct PendingRevisionPreview {
 #[tauri::command]
 pub async fn preview_pending_revision(
     app: tauri::AppHandle,
-    download_id: i64,
+    work: String,
     credentials: UpdateCredentials,
 ) -> Result<PendingRevisionPreview, String> {
-    let state = app.state::<Arc<AppState>>();
-    if !state
-        .db
-        .pending_revision_keys()?
-        .iter()
-        .any(|revision| revision.download_id == download_id)
-    {
-        return Err("この作品には未保存の改稿がありません".to_string());
-    }
+    const NONE: &str = "この作品には未保存の改稿がありません";
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let lookup_state = state.clone();
+    let lookup_work = work.clone();
+    let (source, source_id, base_version) = tokio::task::spawn_blocking(move || {
+        if let Some(library) = lookup_state.library_v2.switched() {
+            let id = crate::library::LibraryId::parse_str(&lookup_work)
+                .map_err(|_| "作品の指定が不正です".to_string())?;
+            if !library
+                .has_pending_revision(id)
+                .map_err(|error| error.to_string())?
+            {
+                return Err(NONE.to_string());
+            }
+            let card = library.work_card(id).map_err(|error| error.to_string())?;
+            return Ok((card.provider, card.external_key, card.version_number as i64));
+        }
+        let download_id: i64 = lookup_work
+            .parse()
+            .map_err(|_| "作品の指定が不正です".to_string())?;
+        if !lookup_state
+            .db
+            .pending_revision_keys()?
+            .iter()
+            .any(|revision| revision.download_id == download_id)
+        {
+            return Err(NONE.to_string());
+        }
+        let download = lookup_state.db.get_download(download_id)?;
+        Ok((
+            download.source,
+            download.source_id,
+            download.current_version,
+        ))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
 
-    let download = state.db.get_download(download_id)?;
-    let value = match download.source.as_str() {
+    let value = match source.as_str() {
         "pixiv" => {
             let token = pixiv_token(&credentials)
                 .ok_or_else(|| "差分を取るには、設定でpixivに接続してください".to_string())?;
-            let novel =
-                super::downloader::fetch_pixiv_novel(download.source_id.clone(), token).await?;
+            let novel = super::downloader::fetch_pixiv_novel(source_id.clone(), token).await?;
             serde_json::to_value(novel).map_err(|error| error.to_string())?
         }
         "fanbox" => {
             let cookie = fanbox_cookie(&credentials)
                 .ok_or_else(|| "差分を取るには、設定でFANBOXに接続してください".to_string())?;
             super::downloader::fetch_fanbox_post(
-                download.source_id.clone(),
+                source_id.clone(),
                 cookie,
                 fanbox_user_agent(&credentials),
             )
@@ -1956,15 +2204,15 @@ pub async fn preview_pending_revision(
         }
         _ => return Err("この取得元の改稿比較には対応していません".to_string()),
     };
-    let text = super::downloader::fetched_plain_text(&value, &download.source);
-    if !super::downloader::fetched_has_material_content(&value, &download.source) {
+    let text = super::downloader::fetched_plain_text(&value, &source);
+    if !super::downloader::fetched_has_material_content(&value, &source) {
         return Err("取得元から比較できる本文・画像・添付を取得できませんでした".to_string());
     }
     let text_length = text.chars().count() as i64;
     Ok(PendingRevisionPreview {
-        metadata: crate::database::queries::revision_metadata(&value, &download.source, None),
-        download_id,
-        base_version: download.current_version,
+        metadata: crate::database::queries::revision_metadata(&value, &source, None),
+        work,
+        base_version,
         text,
         text_length,
     })
@@ -1975,7 +2223,7 @@ pub async fn preview_pending_revision(
 pub async fn restore_dismissed_update_candidates(app: tauri::AppHandle) -> Result<usize, String> {
     let state = app.state::<Arc<AppState>>();
     let _library_write_guard = state.library_gate.clone().write_owned().await;
-    state.db.restore_dismissed_update_candidates()
+    state.candidates().restore_dismissed_update_candidates()
 }
 
 async fn run_update_job(
@@ -1984,7 +2232,7 @@ async fn run_update_job(
     credentials: UpdateCredentials,
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let starting_status = state.db.update_job_status_value(&job_id)?;
+    let starting_status = state.jobs().update_job_status_value(&job_id)?;
     match starting_status.as_str() {
         "canceling" => {
             finish_update_job_cancellation(&app, &state, &job_id).await?;
@@ -1994,13 +2242,13 @@ async fn run_update_job(
         // A stale scheduled task must not revive a paused or terminal job.
         _ => return Ok(()),
     }
-    if !state.db.transition_update_job_status(
+    if !state.jobs().transition_update_job_status(
         &job_id,
         &starting_status,
         "running",
         Some("更新チェックを開始しています"),
     )? {
-        if state.db.update_job_status_value(&job_id)? == "canceling" {
+        if state.jobs().update_job_status_value(&job_id)? == "canceling" {
             finish_update_job_cancellation(&app, &state, &job_id).await?;
         }
         return Ok(());
@@ -2009,8 +2257,14 @@ async fn run_update_job(
 
     // 保存した作品をそのまま監視に載せるかは、ジョブを始めたときの依頼が持つ。
     // 再開したワーカーも同じ設定で動く。
-    let watch_saved = state.db.update_job_watch_saved(&job_id).unwrap_or(false);
-    let new_works_only = state.db.update_job_new_works_only(&job_id).unwrap_or(false);
+    let watch_saved = state
+        .jobs()
+        .update_job_watch_saved(&job_id)
+        .unwrap_or(false);
+    let new_works_only = state
+        .jobs()
+        .update_job_new_works_only(&job_id)
+        .unwrap_or(false);
     crate::downloader::session::set_pixiv_web_session(
         credentials.pixiv_cookie.as_deref(),
         credentials.pixiv_user_agent.as_deref(),
@@ -2019,6 +2273,7 @@ async fn run_update_job(
     // web の一覧はジョブの間だけ覚えておく。セッションが無ければ空のまま、
     // 何もしない置物として振る舞う。
     let mut web_index = WebUpdateIndex::new(&credentials);
+    web_index.library = shelf::switched_library(&app);
     let mut fanbox_index = FanboxUpdateIndex::default();
     // 通常の失敗が続く場合も、取得元を続けて叩かず停止する。
     let mut consecutive_errors: u32 = 0;
@@ -2026,7 +2281,7 @@ async fn run_update_job(
     let mut processed_since_trim: u32 = 0;
     // The save page uses each changed-item event to update its individual
     // rows. Preserve that behavior for explicit save jobs.
-    let throttle_fast_progress = state.db.update_job_mode_value(&job_id)? != "save";
+    let throttle_fast_progress = state.jobs().update_job_mode_value(&job_id)? != "save";
     let mut last_progress_emit = Instant::now() - FAST_PROGRESS_INTERVAL;
     // このワーカーが保存できたもの。終わりに、作者とシリーズの横顔をまとめて
     // 取りに行くための控え。再開で別のワーカーに替わったら空から数え直す -
@@ -2037,7 +2292,7 @@ async fn run_update_job(
         if has_pending_restart(&job_id) {
             break;
         }
-        let status = state.db.update_job_status_value(&job_id)?;
+        let status = state.jobs().update_job_status_value(&job_id)?;
         if status == "paused"
             || status == "auth_required"
             || status == "completed"
@@ -2048,11 +2303,13 @@ async fn run_update_job(
         }
         if status == "canceling" {
             state
-                .db
+                .jobs()
                 .set_update_job_status(&job_id, "canceled", Some("キャンセルしました"))?;
-            state
-                .db
-                .append_update_job_log(&job_id, "warn", "更新ジョブをキャンセルしました")?;
+            state.jobs().append_update_job_log(
+                &job_id,
+                "warn",
+                "更新ジョブをキャンセルしました",
+            )?;
             emit_snapshot(&app, &state, &job_id).await;
             // 中止でも、そこまでに保存できた作品は手元に残っている。完了と
             // 同じように索引の遅れを拾う。
@@ -2060,8 +2317,8 @@ async fn run_update_job(
             break;
         }
 
-        let Some(item) = state.db.next_update_job_item(&job_id)? else {
-            let snapshot = state.db.update_job_snapshot(&job_id)?;
+        let Some(item) = state.jobs().next_update_job_item(&job_id)? else {
+            let snapshot = state.jobs().update_job_snapshot(&job_id)?;
             // 仕上げは、完了と印を付ける前に。「完了」が出てからまだ取りに
             // 行っているのでは、画面が閉じられる頃に途中で切れる。
             // まとめ保存だけでなく、更新監視が新作を自動保存した場合にも
@@ -2071,14 +2328,16 @@ async fn run_update_job(
             // Rebuild the complete saved set from durable items so profiles saved
             // by an earlier worker are not omitted.
             let profile_download_ids = state
-                .db
+                .jobs()
                 .saved_update_job_download_ids(&job_id)
                 .unwrap_or_else(|error| {
                     log::warn!("更新ジョブ {job_id} の保存済み作品を復元できません: {error}");
                     saved_download_ids.clone()
                 });
-            if !profile_download_ids.is_empty() {
-                refresh_profiles_for_saved_downloads(
+            if !profile_download_ids.is_empty()
+                || (state.library_v2.switched().is_some() && snapshot.saved_count > 0)
+            {
+                refresh_profiles_for_saved_works(
                     &app,
                     &state,
                     &job_id,
@@ -2089,7 +2348,7 @@ async fn run_update_job(
                 // プロフィール取得中に停止要求が来た場合、仕上げを完了扱いに
                 // してしまわない。残りの作品は保存済みなので、次回の保存で
                 // プロフィールを再取得できる。
-                match state.db.update_job_status_value(&job_id)?.as_str() {
+                match state.jobs().update_job_status_value(&job_id)?.as_str() {
                     "canceling" => {
                         finish_update_job_cancellation(&app, &state, &job_id).await?;
                         break;
@@ -2108,18 +2367,18 @@ async fn run_update_job(
             } else {
                 "完了しました"
             };
-            if !state.db.transition_update_job_status(
+            if !state.jobs().transition_update_job_status(
                 &job_id,
                 "running",
                 final_status,
                 Some(label),
             )? {
-                if state.db.update_job_status_value(&job_id)? == "canceling" {
+                if state.jobs().update_job_status_value(&job_id)? == "canceling" {
                     finish_update_job_cancellation(&app, &state, &job_id).await?;
                 }
                 break;
             }
-            state.db.append_update_job_log(
+            state.jobs().append_update_job_log(
                 &job_id,
                 if final_status == "failed" {
                     "error"
@@ -2179,7 +2438,7 @@ async fn run_update_job(
                 (item.source.as_deref(), item.source_id.as_ref())
             {
                 let _guard = state.library_gate.write().await;
-                state.db.clear_resolved_unavailable_candidates(
+                state.candidates().clear_resolved_unavailable_candidates(
                     source,
                     std::slice::from_ref(source_id),
                 )?;
@@ -2203,68 +2462,63 @@ async fn run_update_job(
             }
             Ok(ItemOutcome::Available(message)) => {
                 state
-                    .db
+                    .jobs()
                     .complete_update_job_item(item.id, "candidate", None, None)?;
                 state
-                    .db
+                    .jobs()
                     .append_update_job_log(&job_id, "success", &message)?;
             }
             Ok(ItemOutcome::Done(message)) => {
                 state
-                    .db
+                    .jobs()
                     .complete_update_job_item(item.id, "done", None, None)?;
                 state
-                    .db
+                    .jobs()
                     .append_update_job_log(&job_id, "success", &message)?;
             }
-            Ok(ItemOutcome::Saved(download_id, message)) => {
-                saved_download_ids.push(download_id);
-                state
-                    .db
-                    .complete_update_job_item(item.id, "saved", None, Some(download_id))?;
+            Ok(ItemOutcome::Saved(saved, message)) => {
+                saved_download_ids.extend(saved.legacy());
+                state.jobs().complete_saved_item(
+                    item.id,
+                    "saved",
+                    None,
+                    saved.legacy(),
+                    saved.shelf(),
+                )?;
                 // 保存できた候補は、もう「決めていないもの」ではない。
                 if let (Some(source), Some(source_id)) =
                     (item.source.as_deref(), item.source_id.as_deref())
                 {
-                    if let Err(error) = state.db.clear_update_candidate(source, source_id) {
+                    if let Err(error) = state.candidates().clear_update_candidate(source, source_id)
+                    {
                         log::warn!(
                             "保存済み候補 {source}:{source_id} を候補一覧から外せません: {error}"
                         );
                     }
                 }
                 state
-                    .db
+                    .jobs()
                     .append_update_job_log(&job_id, "success", &message)?;
                 // 保存したものを続けて追いたい、という設定のときだけ監視に載せる。
                 // 失敗しても保存そのものは済んでいるので、警告に留める。
                 if watch_saved {
-                    if let Err(error) = state.db.set_watch_updates(download_id, true) {
-                        log::warn!("更新監視を有効にできません ({download_id}): {error}");
-                    }
+                    watch_saved_work(&app, &state, saved);
                 }
             }
-            Ok(ItemOutcome::PartialSaved(download_id, message)) => {
+            Ok(ItemOutcome::PartialSaved(saved, message)) => {
                 // The novel body is usable, but the candidate must remain
                 // discoverable because its referenced illustrations are absent.
-                saved_download_ids.push(download_id);
+                saved_download_ids.extend(saved.legacy());
                 let reason = format!("[一部保存] {message}");
                 let known = is_known_hold(&state, &item, &reason)?;
                 if item.item_type != "target" {
                     hold_candidate(&state, &item, None, &reason).await?;
                 }
-                complete_held_item(
-                    &state,
-                    &job_id,
-                    &item,
-                    known,
-                    &reason,
-                    Some(download_id),
-                    &reason,
-                )?;
+                complete_held_item(&state, &job_id, &item, known, &reason, Some(saved), &reason)?;
             }
             Ok(ItemOutcome::Skipped(message) | ItemOutcome::LocalSkipped(message)) => {
                 state
-                    .db
+                    .jobs()
                     .complete_update_job_item(item.id, "skipped", None, None)?;
                 // 候補を実際に取りに行き、正常に「保存不要」と判定できたなら
                 // 未処理として残さない。改稿では、取得元の更新時刻だけが動いて
@@ -2274,18 +2528,22 @@ async fn run_update_job(
                     if let (Some(source), Some(source_id)) =
                         (item.source.as_deref(), item.source_id.as_deref())
                     {
-                        if let Err(error) = state.db.clear_update_candidate(source, source_id) {
+                        if let Err(error) =
+                            state.candidates().clear_update_candidate(source, source_id)
+                        {
                             log::warn!(
                                 "処理済み候補 {source}:{source_id} を候補一覧から外せません: {error}"
                             );
                         }
                     }
                 }
-                state.db.append_update_job_log(&job_id, "info", &message)?;
+                state
+                    .jobs()
+                    .append_update_job_log(&job_id, "info", &message)?;
             }
             Ok(ItemOutcome::AuthRequired(message)) => {
                 state
-                    .db
+                    .jobs()
                     .complete_update_job_item(item.id, "queued", Some(&message), None)?;
                 if restart_pending {
                     break;
@@ -2301,7 +2559,9 @@ async fn run_update_job(
                     {
                         break;
                     }
-                    state.db.append_update_job_log(&job_id, "warn", &message)?;
+                    state
+                        .jobs()
+                        .append_update_job_log(&job_id, "warn", &message)?;
                     emit_snapshot(&app, &state, &job_id).await;
                     break;
                 }
@@ -2313,10 +2573,10 @@ async fn run_update_job(
                     // newly supplied credentials.
                     break;
                 }
-                let control_status = state.db.update_job_status_value(&job_id)?;
+                let control_status = state.jobs().update_job_status_value(&job_id)?;
                 if matches!(control_status.as_str(), "paused" | "canceling") {
                     state
-                        .db
+                        .jobs()
                         .complete_update_job_item(item.id, "queued", None, None)?;
                     if control_status == "canceling" {
                         finish_update_job_cancellation(&app, &state, &job_id).await?;
@@ -2326,9 +2586,12 @@ async fn run_update_job(
                 let kind = classify_failure(&error);
                 if kind == FailureKind::Auth {
                     let message = format!("{}の認証を更新してください", item.title);
-                    state
-                        .db
-                        .complete_update_job_item(item.id, "queued", Some(&message), None)?;
+                    state.jobs().complete_update_job_item(
+                        item.id,
+                        "queued",
+                        Some(&message),
+                        None,
+                    )?;
                     if !transition_running_worker_status(
                         &app,
                         &state,
@@ -2340,20 +2603,27 @@ async fn run_update_job(
                     {
                         break;
                     }
-                    state.db.append_update_job_log(&job_id, "warn", &message)?;
+                    state
+                        .jobs()
+                        .append_update_job_log(&job_id, "warn", &message)?;
                     emit_snapshot(&app, &state, &job_id).await;
                     break;
                 }
 
                 if kind == FailureKind::Verification {
                     let message = format!("{}: {error}。未確認のまま一時停止しました", item.title);
-                    state
-                        .db
-                        .complete_update_job_item(item.id, "queued", Some(&message), None)?;
+                    state.jobs().complete_update_job_item(
+                        item.id,
+                        "queued",
+                        Some(&message),
+                        None,
+                    )?;
                     if transition_running_worker_status(&app, &state, &job_id, "paused", &message)
                         .await?
                     {
-                        state.db.append_update_job_log(&job_id, "warn", &message)?;
+                        state
+                            .jobs()
+                            .append_update_job_log(&job_id, "warn", &message)?;
                         emit_snapshot(&app, &state, &job_id).await;
                     }
                     break;
@@ -2366,7 +2636,7 @@ async fn run_update_job(
                         && error.to_ascii_lowercase().contains("cloudflare")
                     {
                         let message = "FANBOXのアクセス確認が必要なため一時停止しました。連続再試行はしません。時間をおいて公式サイトと連携状態を確認してください";
-                        state.db.complete_update_job_item(
+                        state.jobs().complete_update_job_item(
                             item.id,
                             "queued",
                             Some(message),
@@ -2379,7 +2649,9 @@ async fn run_update_job(
                         {
                             break;
                         }
-                        state.db.append_update_job_log(&job_id, "warn", message)?;
+                        state
+                            .jobs()
+                            .append_update_job_log(&job_id, "warn", message)?;
                         emit_snapshot(&app, &state, &job_id).await;
                         break;
                     }
@@ -2401,7 +2673,7 @@ async fn run_update_job(
                             delay_ms / 1000,
                             item.title
                         );
-                        state.db.complete_update_job_item(
+                        state.jobs().complete_update_job_item(
                             item.id,
                             "queued",
                             Some(&message),
@@ -2414,7 +2686,9 @@ async fn run_update_job(
                         {
                             break;
                         }
-                        state.db.append_update_job_log(&job_id, "warn", &message)?;
+                        state
+                            .jobs()
+                            .append_update_job_log(&job_id, "warn", &message)?;
                         emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
                         wait_for_retry_or_control(&state, &job_id, delay_ms).await?;
                         continue;
@@ -2431,15 +2705,20 @@ async fn run_update_job(
                         },
                         item.title
                     );
-                    state
-                        .db
-                        .complete_update_job_item(item.id, "queued", Some(&message), None)?;
+                    state.jobs().complete_update_job_item(
+                        item.id,
+                        "queued",
+                        Some(&message),
+                        None,
+                    )?;
                     if !transition_running_worker_status(&app, &state, &job_id, "paused", &message)
                         .await?
                     {
                         break;
                     }
-                    state.db.append_update_job_log(&job_id, "warn", &message)?;
+                    state
+                        .jobs()
+                        .append_update_job_log(&job_id, "warn", &message)?;
                     emit_snapshot(&app, &state, &job_id).await;
                     break;
                 }
@@ -2461,10 +2740,13 @@ async fn run_update_job(
                         &format!("{}: {}", item.title, reason),
                     )?;
                 } else {
-                    state
-                        .db
-                        .complete_update_job_item(item.id, "failed", Some(&reason), None)?;
-                    state.db.append_update_job_log(
+                    state.jobs().complete_update_job_item(
+                        item.id,
+                        "failed",
+                        Some(&reason),
+                        None,
+                    )?;
+                    state.jobs().append_update_job_log(
                         &job_id,
                         "error",
                         &format!("{}: {}", item.title, reason),
@@ -2482,11 +2764,20 @@ async fn run_update_job(
                         item.source_id.as_deref(),
                         item.target_type.as_deref(),
                     ) {
-                        if let Err(error) =
+                        let result = if let Some(library) = super::watching::active(&app) {
+                            serde_json::from_str::<crate::database::UpdateTarget>(
+                                &item.payload_json,
+                            )
+                            .map_err(|e| e.to_string())
+                            .and_then(|target| {
+                                super::watching::record(&library, &target, None, None, 0, true)
+                            })
+                        } else {
                             state
                                 .db
                                 .mark_update_target_failed(target_type, source, source_key)
-                        {
+                        };
+                        if let Err(error) = result {
                             log::warn!(
                                 "更新対象 {target_type}:{source}:{source_key} の失敗回数を記録できません: {error}"
                             );
@@ -2502,7 +2793,9 @@ async fn run_update_job(
                     {
                         break;
                     }
-                    state.db.append_update_job_log(&job_id, "warn", &message)?;
+                    state
+                        .jobs()
+                        .append_update_job_log(&job_id, "warn", &message)?;
                     emit_snapshot(&app, &state, &job_id).await;
                     break;
                 }
@@ -2517,7 +2810,10 @@ async fn run_update_job(
         processed_since_trim += 1;
         if processed_since_trim >= LOG_TRIM_INTERVAL {
             processed_since_trim = 0;
-            if let Err(error) = state.db.trim_update_job_logs(&job_id, MAX_UPDATE_JOB_LOGS) {
+            if let Err(error) = state
+                .jobs()
+                .trim_update_job_logs(&job_id, MAX_UPDATE_JOB_LOGS)
+            {
                 log::warn!("更新ジョブ {job_id} の古いログを整理できません: {error}");
             }
         }
@@ -2528,7 +2824,7 @@ async fn run_update_job(
             emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
             last_progress_emit = Instant::now();
         }
-        if state.db.update_job_status_value(&job_id)? == "canceling" {
+        if state.jobs().update_job_status_value(&job_id)? == "canceling" {
             finish_update_job_cancellation(&app, &state, &job_id).await?;
             break;
         }
@@ -2554,57 +2850,96 @@ async fn run_update_job(
 /// 取得元は作品と同じ相手。`refresh_entity_profile` が自前で 3 秒の間隔を
 /// 持っているので、ここでは待たない。1 件ごとの失敗は記録だけに留める -
 /// 本文はもう手元にあり、横顔は次の機会にも埋められる。
-async fn refresh_profiles_for_saved_downloads(
+async fn refresh_profiles_for_saved_works(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
     job_id: &str,
     download_ids: &[i64],
     credentials: &UpdateCredentials,
 ) {
-    if download_ids.is_empty() {
-        return;
-    }
     // 同じ作者の作品を 10 件保存しても、取りに行くのは 1 回でいい。
     let mut targets: Vec<(&'static str, String, String)> = Vec::new();
     let mut seen: HashSet<(&'static str, String, String)> = HashSet::new();
-    for id in download_ids {
-        let Ok(entry) = state.db.get_download(*id) else {
-            continue;
-        };
-        // person_id が無い作品もある。その場合は作者IDが同じ役をする。
-        let person = entry
-            .person_id
-            .clone()
-            .filter(|key| !key.trim().is_empty())
-            .unwrap_or_else(|| entry.author_id.clone());
-        if !person.trim().is_empty() {
-            let key = ("person", entry.source.clone(), person);
-            let incomplete = state
-                .db
-                .get_person(&key.1, &key.2)
-                .map(|profile| {
-                    profile.current_version <= 0
-                        || profile.content_hash.is_none()
-                        || profile.last_fetched_at.is_none()
-                })
-                .unwrap_or(true);
-            if incomplete && seen.insert(key.clone()) {
-                targets.push(key);
+    if let Some(library) = state.library_v2.switched() {
+        let profile_state = state.clone();
+        let profile_job = job_id.to_owned();
+        let profiles = tauri::async_runtime::spawn_blocking(move || {
+            let works = profile_state
+                .jobs()
+                .list_update_job_item_states(&profile_job)?
+                .into_iter()
+                .filter(|i| i.status == "saved")
+                .filter_map(|i| i.work_id)
+                .collect::<Vec<_>>();
+            library
+                .missing_profiles_for_works(&works)
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        match profiles {
+            Ok(profiles) => {
+                targets = profiles
+                    .into_iter()
+                    .map(|(kind, provider, key)| {
+                        (
+                            if kind == crate::library::EntityKind::Person {
+                                "person"
+                            } else {
+                                "series"
+                            },
+                            provider,
+                            key,
+                        )
+                    })
+                    .collect()
+            }
+            Err(error) => {
+                log::warn!("保存した作品のプロフィールを照合できません: {error}");
+                return;
             }
         }
-        if let Some(series) = entry.series_id.clone().filter(|key| !key.trim().is_empty()) {
-            let key = ("series", entry.source.clone(), series);
-            let incomplete = state
-                .db
-                .get_series(&key.1, &key.2)
-                .map(|profile| {
-                    profile.current_version <= 0
-                        || profile.content_hash.is_none()
-                        || profile.last_fetched_at.is_none()
-                })
-                .unwrap_or(true);
-            if incomplete && seen.insert(key.clone()) {
-                targets.push(key);
+    } else {
+        for id in download_ids {
+            let Ok(entry) = state.db.get_download(*id) else {
+                continue;
+            };
+            // person_id が無い作品もある。その場合は作者IDが同じ役をする。
+            let person = entry
+                .person_id
+                .clone()
+                .filter(|key| !key.trim().is_empty())
+                .unwrap_or_else(|| entry.author_id.clone());
+            if !person.trim().is_empty() {
+                let key = ("person", entry.source.clone(), person);
+                let incomplete = state
+                    .db
+                    .get_person(&key.1, &key.2)
+                    .map(|profile| {
+                        profile.current_version <= 0
+                            || profile.content_hash.is_none()
+                            || profile.last_fetched_at.is_none()
+                    })
+                    .unwrap_or(true);
+                if incomplete && seen.insert(key.clone()) {
+                    targets.push(key);
+                }
+            }
+            if let Some(series) = entry.series_id.clone().filter(|key| !key.trim().is_empty()) {
+                let key = ("series", entry.source.clone(), series);
+                let incomplete = state
+                    .db
+                    .get_series(&key.1, &key.2)
+                    .map(|profile| {
+                        profile.current_version <= 0
+                            || profile.content_hash.is_none()
+                            || profile.last_fetched_at.is_none()
+                    })
+                    .unwrap_or(true);
+                if incomplete && seen.insert(key.clone()) {
+                    targets.push(key);
+                }
             }
         }
     }
@@ -2613,10 +2948,12 @@ async fn refresh_profiles_for_saved_downloads(
     }
     let total = targets.len();
     let initial_label = format!("作者・シリーズ情報を確認しています（0/{total}件完了）");
-    match state
-        .db
-        .transition_update_job_status(job_id, "running", "running", Some(&initial_label))
-    {
+    match state.jobs().transition_update_job_status(
+        job_id,
+        "running",
+        "running",
+        Some(&initial_label),
+    ) {
         Ok(true) => {}
         Ok(false) => return,
         Err(error) => {
@@ -2624,7 +2961,7 @@ async fn refresh_profiles_for_saved_downloads(
             return;
         }
     }
-    if let Err(error) = state.db.append_update_job_log(
+    if let Err(error) = state.jobs().append_update_job_log(
         job_id,
         "info",
         &format!("作者・シリーズ情報を確認しています（{}件）", targets.len()),
@@ -2633,8 +2970,11 @@ async fn refresh_profiles_for_saved_downloads(
     }
     emit_progress_delta(app, state, job_id, None).await;
     for (index, (entity_type, source, source_key)) in targets.into_iter().enumerate() {
-        let current_status = state.db.update_job_status_value(job_id).unwrap_or_default();
-        if matches!(current_status.as_str(), "canceling" | "paused") {
+        let current_status = state
+            .jobs()
+            .update_job_status_value(job_id)
+            .unwrap_or_default();
+        if current_status != "running" {
             break;
         }
         let params = crate::commands::database::RefreshEntityProfileParams {
@@ -2650,7 +2990,7 @@ async fn refresh_profiles_for_saved_downloads(
             crate::commands::database::refresh_entity_profile(app.clone(), params).await
         {
             log::warn!("{entity_type}:{source}:{source_key} の情報を取れません: {error}");
-            let _ = state.db.append_update_job_log(
+            let _ = state.jobs().append_update_job_log(
                 job_id,
                 "warn",
                 &format!("{entity_type}:{source}:{source_key} の情報を取得できません: {error}"),
@@ -2661,7 +3001,7 @@ async fn refresh_profiles_for_saved_downloads(
             index + 1
         );
         match state
-            .db
+            .jobs()
             .transition_update_job_status(job_id, "running", "running", Some(&label))
         {
             Ok(true) => {}
@@ -2675,10 +3015,89 @@ async fn refresh_profiles_for_saved_downloads(
     }
 }
 
+/// 保存した作品の指し先。旧棚の番号か、正本に切り替えた棚の作品。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavedRef {
+    Legacy(i64),
+    Shelf(crate::library::LibraryId),
+}
+
+impl SavedRef {
+    fn of(saved: &super::downloader::SavedWork) -> Self {
+        match saved {
+            super::downloader::SavedWork::Legacy(entry) => SavedRef::Legacy(entry.id),
+            super::downloader::SavedWork::Shelf(saved) => SavedRef::Shelf(saved.work),
+        }
+    }
+
+    fn shelf(self) -> Option<crate::library::LibraryId> {
+        match self {
+            Self::Shelf(id) => Some(id),
+            Self::Legacy(_) => None,
+        }
+    }
+
+    /// 旧棚の番号（横顔の取り直しは旧棚の番号で持つ）。
+    fn legacy(self) -> Option<i64> {
+        match self {
+            SavedRef::Legacy(id) => Some(id),
+            SavedRef::Shelf(_) => None,
+        }
+    }
+}
+
+/// 切り替えた棚の作品の一覧の一件（棚から外した作品は無いものとする）。棚を切り替えていなければ None。
+fn shelf_card(
+    app: &tauri::AppHandle,
+    source: &str,
+    key: &str,
+) -> Option<Result<Option<crate::library::WorkCard>, String>> {
+    let library = app
+        .try_state::<Arc<super::library_v2::LibraryV2>>()?
+        .switched()?;
+    Some(shelf::saved_card(&library, source, key))
+}
+
+/// 保存した作品を更新の監視に載せる。
+fn watch_saved_work(app: &tauri::AppHandle, state: &AppState, saved: SavedRef) {
+    let result = match saved {
+        SavedRef::Legacy(id) => state.db.set_watch_updates(id, true),
+        SavedRef::Shelf(work) => (|| {
+            let library = app
+                .try_state::<Arc<super::library_v2::LibraryV2>>()
+                .and_then(|shelf| {
+                    let library = shelf.switched()?;
+                    shelf.forget_derived();
+                    Some(library)
+                })
+                .ok_or("新しい棚に書けません")?;
+            let current = library
+                .user_state(work, library.id)
+                .map_err(|e| e.to_string())?;
+            library
+                .set_user_state(
+                    crate::library::LibraryId::now_v7(),
+                    work,
+                    library.id,
+                    current.generation,
+                    crate::library::UserStateChange {
+                        favorite: None,
+                        watching: Some(true),
+                    },
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })(),
+    };
+    if let Err(error) = result {
+        log::warn!("更新監視を有効にできません ({saved:?}): {error}");
+    }
+}
+
 enum ItemOutcome {
     Done(String),
-    Saved(i64, String),
-    PartialSaved(i64, String),
+    Saved(SavedRef, String),
+    PartialSaved(SavedRef, String),
     Skipped(String),
     LocalSkipped(String),
     AuthRequired(String),
@@ -2849,7 +3268,7 @@ async fn wait_for_retry_or_control(
         tokio::time::sleep(std::time::Duration::from_millis(step_ms)).await;
         remaining_ms -= step_ms;
         if !matches!(
-            state.db.update_job_status_value(job_id)?.as_str(),
+            state.jobs().update_job_status_value(job_id)?.as_str(),
             "queued" | "running"
         ) {
             break;
@@ -2876,7 +3295,7 @@ async fn process_update_job_item(
             let repair_save = item.item_type == "candidate"
                 && payload.get("kind").and_then(Value::as_str) == Some("save");
             if state
-                .db
+                .candidates()
                 .candidate_acquisition_blocked(source, id, repair_save)?
             {
                 return Ok(ItemOutcome::Held(BLOCKED_CANDIDATE_MESSAGE.into()));
@@ -3104,6 +3523,22 @@ fn remember_fanbox_deep_check(state: &Arc<AppState>, download_id: i64) {
     }
 }
 
+/// 保存済みの作品を取り直して切り替えた棚へ保存した結果を、一文にする。
+fn describe_work_update(dl: &DownloadEntry, saved: &super::downloader::SavedWork) -> ItemOutcome {
+    match saved {
+        super::downloader::SavedWork::Shelf(shelf) if shelf.revised => ItemOutcome::Saved(
+            SavedRef::Shelf(shelf.work),
+            format!(
+                "更新を保存: {}（{}, v{}）",
+                shelf.title,
+                describe_source_change(&dl.title, &shelf.title, dl.text_length, shelf.text_length),
+                shelf.version
+            ),
+        ),
+        _ => ItemOutcome::Skipped(format!("最新: {}", saved.title())),
+    }
+}
+
 async fn process_work_item(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
@@ -3113,11 +3548,23 @@ async fn process_work_item(
     web_index: &mut WebUpdateIndex,
     fanbox_index: &mut FanboxUpdateIndex,
 ) -> Result<ItemOutcome, String> {
+    if let Some(library) = shelf::switched_library(app) {
+        return shelf::process_work(
+            app,
+            state,
+            &library,
+            job_id,
+            item,
+            credentials,
+            (web_index, fanbox_index),
+        )
+        .await;
+    }
     let payload: Value = serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
     let fanbox_author_check =
         payload.get("fanboxAuthorCheck").and_then(Value::as_bool) == Some(true);
     let dl: DownloadEntry = serde_json::from_value(payload).map_err(|e| e.to_string())?;
-    let auto_save = state.db.update_job_mode_value(job_id)? == "auto_save";
+    let auto_save = state.jobs().update_job_mode_value(job_id)? == "auto_save";
     if dl.source == "pixiv" {
         let Some(token) = pixiv_token(credentials) else {
             return Ok(ItemOutcome::AuthRequired(
@@ -3222,6 +3669,12 @@ async fn process_work_item(
             None,
         )
         .await?;
+        let updated = match updated {
+            super::downloader::SavedWork::Legacy(updated) => updated,
+            shelf @ super::downloader::SavedWork::Shelf(_) => {
+                return Ok(describe_work_update(&dl, &shelf));
+            }
+        };
         // 本文まで取り直した直後なので、この版が手元にあると言い切れる。
         if let Some(listed) = listed_update.as_deref() {
             if let Err(error) = state.db.set_download_source_updated_at(updated.id, listed) {
@@ -3230,7 +3683,7 @@ async fn process_work_item(
         }
         if updated.current_version > dl.current_version {
             Ok(ItemOutcome::Saved(
-                updated.id,
+                SavedRef::Legacy(updated.id),
                 format!(
                     "更新を保存: {}（{}, v{}）",
                     updated.title,
@@ -3350,10 +3803,16 @@ async fn process_work_item(
             Some(user_agent),
         )
         .await?;
+        let updated = match updated {
+            super::downloader::SavedWork::Legacy(updated) => updated,
+            shelf @ super::downloader::SavedWork::Shelf(_) => {
+                return Ok(describe_work_update(&dl, &shelf));
+            }
+        };
         remember_fanbox_deep_check(state, updated.id);
         if updated.current_version > dl.current_version {
             Ok(ItemOutcome::Saved(
-                updated.id,
+                SavedRef::Legacy(updated.id),
                 format!(
                     "更新を保存: {}（{}, v{}）",
                     updated.title,
@@ -3388,7 +3847,7 @@ async fn record_work_revision_candidate(
     auto_save: bool,
 ) -> Result<bool, String> {
     if state
-        .db
+        .candidates()
         .update_candidate_status(&download.source, &download.source_id)?
         .as_deref()
         == Some("dismissed")
@@ -3408,7 +3867,8 @@ async fn record_work_revision_candidate(
         "localSavedAt": download.downloaded_at,
     });
     let target = crate::database::UpdateTarget {
-        id: 0,
+        id: 0.into(),
+        watch_generation: None,
         target_type: "work".to_string(),
         source: download.source.clone(),
         source_key: download.source_id.clone(),
@@ -3475,7 +3935,7 @@ fn record_candidate(
     }
     if matches!(
         state
-            .db
+            .candidates()
             .update_candidate_status(&source, &source_id)?
             .as_deref(),
         Some("held" | "dismissed")
@@ -3488,14 +3948,16 @@ fn record_candidate(
         .and_then(|v| v.as_str())
         .unwrap_or("無題")
         .to_string();
-    state.db.upsert_update_candidate(&UpdateCandidateInput {
-        source: source.clone(),
-        source_id: source_id.clone(),
-        kind: kind.key().to_string(),
-        title: title.clone(),
-        payload_json: serde_json::to_string(&payload).map_err(|e| e.to_string())?,
-        target_type: Some(target.target_type.clone()),
-    })?;
+    state
+        .candidates()
+        .upsert_update_candidate(&UpdateCandidateInput {
+            source: source.clone(),
+            source_id: source_id.clone(),
+            kind: kind.key().to_string(),
+            title: title.clone(),
+            payload_json: serde_json::to_string(&payload).map_err(|e| e.to_string())?,
+            target_type: Some(target.target_type.clone()),
+        })?;
     let restricted = source == "fanbox"
         && source_item.get("isRestricted").and_then(Value::as_bool) == Some(true);
     if restricted {
@@ -3503,19 +3965,21 @@ fn record_candidate(
         payload["holdReason"] = serde_json::json!(
             super::downloader::fanbox_missing_material_error(source_item)
         );
-        state.db.upsert_update_candidate(&UpdateCandidateInput {
-            source: source.clone(),
-            source_id: source_id.clone(),
-            kind: kind.key().into(),
-            title: title.clone(),
-            payload_json: payload.to_string(),
-            target_type: Some(target.target_type.clone()),
-        })?;
         state
-            .db
+            .candidates()
+            .upsert_update_candidate(&UpdateCandidateInput {
+                source: source.clone(),
+                source_id: source_id.clone(),
+                kind: kind.key().into(),
+                title: title.clone(),
+                payload_json: payload.to_string(),
+                target_type: Some(target.target_type.clone()),
+            })?;
+        state
+            .candidates()
             .set_update_candidate_status(&source, &source_id, "held")?;
     }
-    state.db.insert_update_job_candidate(
+    state.jobs().insert_update_job_candidate(
         job_id,
         &item_from_payload(
             "candidate",
@@ -3554,6 +4018,10 @@ async fn scan_pixiv_revisions(
     auto_save: bool,
     web_index: &mut WebUpdateIndex,
 ) -> Result<i64, String> {
+    if let Some(library) = web_index.library.clone() {
+        return shelf::scan_pixiv_revisions(state, &library, job_id, target, auto_save, web_index)
+            .await;
+    }
     let saved = state.db.pixiv_works_for_author(&target.source_key)?;
     if saved.is_empty() {
         return Ok(0);
@@ -3573,7 +4041,7 @@ async fn scan_pixiv_revisions(
             .collect();
         let _guard = state.library_gate.write().await;
         state
-            .db
+            .candidates()
             .clear_resolved_unavailable_candidates("pixiv", &available_ids)?;
     }
     let mut found = 0i64;
@@ -3614,7 +4082,7 @@ async fn scan_pixiv_revisions(
             None => {}
         }
         if state
-            .db
+            .candidates()
             .update_candidate_status("pixiv", &source_id)?
             .as_deref()
             == Some("dismissed")
@@ -3660,7 +4128,7 @@ async fn scan_pixiv_revisions(
             .db
             .insert_update_job_unavailable_work(job_id, &work, &reason)?
         {
-            state.db.append_update_job_log(
+            state.jobs().append_update_job_log(
                 job_id,
                 "warn",
                 &format!("{}: {reason}", target.display_name),
@@ -3677,12 +4145,18 @@ async fn process_target_item(
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
     web_index: &mut WebUpdateIndex,
-    fanbox_index: &FanboxUpdateIndex,
+    fanbox_index: &mut FanboxUpdateIndex,
 ) -> Result<ItemOutcome, String> {
     let target: crate::database::UpdateTarget =
         serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
-    let auto_save = state.db.update_job_mode_value(job_id)? == "auto_save";
-    let new_works_only = state.db.update_job_new_works_only(job_id)?;
+    let auto_save = state.jobs().update_job_mode_value(job_id)? == "auto_save";
+    let new_works_only = state.jobs().update_job_new_works_only(job_id)?;
+    let library = shelf::switched_library(app);
+    let mut fanbox_checkpoint = None;
+    let full_fanbox = library.is_some()
+        && !new_works_only
+        && target.source == "fanbox"
+        && target.target_type == "author";
 
     let items: Vec<Value> = if target.source == "pixiv" && target.target_type == "author" {
         let Some(token) = pixiv_token(credentials) else {
@@ -3721,6 +4195,14 @@ async fn process_target_item(
             ));
         };
         let user_agent = fanbox_user_agent(credentials);
+        if full_fanbox {
+            fanbox_index
+                .lookup(&target.source_key, "", &cookie, &user_agent)
+                .await?;
+            if !fanbox_index.posts.contains_key(&target.source_key) {
+                return Err("FANBOX の改稿一覧を完全に確認できません".into());
+            }
+        }
         let posts = match fanbox_index
             .posts_since(&target.source_key, target.last_seen_source_id.as_deref())
         {
@@ -3734,6 +4216,22 @@ async fn process_target_item(
                 )
                 .await?
             }
+        };
+        if full_fanbox {
+            fanbox_checkpoint = posts
+                .first()
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+        }
+        let posts = if full_fanbox {
+            shelf::fanbox_scan_posts(
+                library.as_ref().unwrap(),
+                &fanbox_index.posts[&target.source_key],
+                &posts,
+            )?
+        } else {
+            posts
         };
         posts
             .into_iter()
@@ -3760,33 +4258,56 @@ async fn process_target_item(
         let Some(listed_id) = listed_id.filter(|id| !id.is_empty()) else {
             continue;
         };
-        let kind = match state
-            .db
-            .get_download_by_source(&target.source, &listed_id)?
-        {
-            None => default_kind,
-            Some(_) if new_works_only => continue,
-            Some(existing) => {
-                // すでに持っている作品。一覧が更新時刻を持っていて、それが
-                // 保存済みのものと違うときだけ「改稿」として拾う。
-                // pixiv の一覧は投稿日しか持たないので、そちらは監視オンの
-                // 作品を辿る経路（work 項目）に任せる。
-                let listed_updated =
-                    string_at(source_item, &[&["updatedDatetime"], &["updated_datetime"]]);
-                match (listed_updated, existing.source_updated_at.as_deref()) {
-                    (Some(listed), Some(stored))
-                        if !crate::source_time::same_instant(Some(&listed), Some(stored)) =>
-                    {
-                        CandidateKind::Revision
+        let shelf_candidate = if let Some(library) = &library {
+            match shelf::listed_candidate(
+                library,
+                &target.source,
+                &listed_id,
+                source_item,
+                default_kind,
+                new_works_only,
+            )? {
+                Some(candidate) => Some(candidate),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        let kind = if let Some((kind, _)) = &shelf_candidate {
+            *kind
+        } else {
+            match state
+                .db
+                .get_download_by_source(&target.source, &listed_id)?
+            {
+                None => default_kind,
+                Some(_) if new_works_only => continue,
+                Some(existing) => {
+                    // すでに持っている作品。一覧が更新時刻を持っていて、それが
+                    // 保存済みのものと違うときだけ「改稿」として拾う。
+                    // pixiv の一覧は投稿日しか持たないので、そちらは監視オンの
+                    // 作品を辿る経路（work 項目）に任せる。
+                    let listed_updated =
+                        string_at(source_item, &[&["updatedDatetime"], &["updated_datetime"]]);
+                    match (listed_updated, existing.source_updated_at.as_deref()) {
+                        (Some(listed), Some(stored))
+                            if !crate::source_time::same_instant(Some(&listed), Some(stored)) =>
+                        {
+                            CandidateKind::Revision
+                        }
+                        _ => continue,
                     }
-                    _ => continue,
                 }
             }
         };
+        let source_item = shelf_candidate
+            .as_ref()
+            .map(|(_, item)| item)
+            .unwrap_or(source_item);
 
         // 一度「今後は出さない」と決めた作品は、見つけても候補にしない。
         if state
-            .db
+            .candidates()
             .update_candidate_status(&target.source, &listed_id)?
             .as_deref()
             == Some("dismissed")
@@ -3816,7 +4337,11 @@ async fn process_target_item(
         found += scan_pixiv_revisions(state, job_id, &target, auto_save, web_index).await?;
     }
 
-    let first = items.first();
+    let first = if full_fanbox {
+        fanbox_checkpoint.as_ref()
+    } else {
+        items.first()
+    };
     let first_id = first.and_then(|value| {
         if target.source == "pixiv" {
             normalize_pixiv_novel_id(value)
@@ -3833,14 +4358,25 @@ async fn process_target_item(
     });
     {
         let _library_write_guard = state.library_gate.write().await;
-        state.db.mark_update_target_checked(
-            &target.target_type,
-            &target.source,
-            &target.source_key,
-            first_id.as_deref(),
-            first_updated.as_deref(),
-            found,
-        )?;
+        if let Some(library) = &library {
+            super::watching::record(
+                library,
+                &target,
+                first_id.as_deref(),
+                first_updated.as_deref(),
+                found,
+                false,
+            )?;
+        } else {
+            state.db.mark_update_target_checked(
+                &target.target_type,
+                &target.source,
+                &target.source_key,
+                first_id.as_deref(),
+                first_updated.as_deref(),
+                found,
+            )?;
+        }
     }
 
     // 新作一覧とプロフィールは別の取得口を持つ。作者の作品を確認しただけでは、
@@ -3864,7 +4400,7 @@ async fn process_target_item(
                 target.source,
                 target.source_key
             );
-            let _ = state.db.append_update_job_log(
+            let _ = state.jobs().append_update_job_log(
                 job_id,
                 "warn",
                 &format!(
@@ -3892,6 +4428,30 @@ async fn process_candidate_item(
     let source = item.source.as_deref().unwrap_or("");
     let source_id = item.source_id.as_deref().unwrap_or("");
     let kind = payload.get("kind").and_then(|v| v.as_str());
+    // 切り替えた棚では、手元にあるかどうか・監視しているかを棚で見る。
+    if let Some(card) = shelf_card(app, source, source_id) {
+        let card = card?;
+        let refetch = kind == Some("revision")
+            || (kind == Some("save")
+                && (card.as_ref().is_some_and(|card| card.watching)
+                    || state
+                        .candidates()
+                        .has_incomplete_save_candidate(source, source_id)?));
+        if card.is_some() && !refetch {
+            return Ok(ItemOutcome::Skipped(format!(
+                "保存済みのためスキップ: {}",
+                item.title
+            )));
+        }
+        let previous = card.map(|card| {
+            (
+                card.title,
+                card.text_length as i64,
+                card.version_number as i64,
+            )
+        });
+        return save_candidate(app, state, item, credentials, &payload, previous).await;
+    }
     let existing = state.db.get_download_by_source(source, source_id)?;
     // 改稿の候補は「すでに手元にある作品」が対象なので、保存済みでも取りに行く。
     // 中身が本当に変わっていなければ download_and_save 側が版を上げずに終わる。
@@ -3916,16 +4476,39 @@ async fn process_candidate_item(
             && (existing
                 .as_ref()
                 .is_some_and(|download| download.watch_updates)
-                || state.db.has_incomplete_save_candidate(source, source_id)?));
+                || state
+                    .candidates()
+                    .has_incomplete_save_candidate(source, source_id)?));
     if existing.is_some() && !refetch_existing {
         return Ok(ItemOutcome::Skipped(format!(
             "保存済みのためスキップ: {}",
             item.title
         )));
     }
-    let previous_title = existing.as_ref().map(|download| download.title.clone());
-    let previous_length = existing.as_ref().map(|download| download.text_length);
-    let previous_version = existing.as_ref().map(|download| download.current_version);
+    let previous = existing.as_ref().map(|download| {
+        (
+            download.title.clone(),
+            download.text_length,
+            download.current_version,
+        )
+    });
+    save_candidate(app, state, item, credentials, &payload, previous).await
+}
+
+/// 候補を取りに行って保存する。`previous` は手元にあった版（題・字数・版の番号）。
+async fn save_candidate(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    item: &UpdateJobItem,
+    credentials: &UpdateCredentials,
+    payload: &Value,
+    previous: Option<(String, i64, i64)>,
+) -> Result<ItemOutcome, String> {
+    let source = item.source.as_deref().unwrap_or("");
+    let source_id = item.source_id.as_deref().unwrap_or("");
+    let previous_title = previous.as_ref().map(|(title, _, _)| title.clone());
+    let previous_length = previous.as_ref().map(|(_, length, _)| *length);
+    let previous_version = previous.as_ref().map(|(_, _, version)| *version);
 
     if source == "pixiv" {
         let Some(token) = pixiv_token(credentials) else {
@@ -3938,10 +4521,10 @@ async fn process_candidate_item(
         let title =
             string_at(&value, &[&["detail", "title"], &["title"]]).unwrap_or(item.title.clone());
         let author_name = string_at(&value, &[&["detail", "user", "name"], &["user", "name"]])
-            .or_else(|| string_at(&payload, &[&["originalData", "user", "name"]]))
+            .or_else(|| string_at(payload, &[&["originalData", "user", "name"]]))
             .unwrap_or_else(|| "unknown".to_string());
         let author_id = string_at(&value, &[&["detail", "user", "id"], &["user", "id"]])
-            .or_else(|| string_at(&payload, &[&["originalData", "user", "id"]]))
+            .or_else(|| string_at(payload, &[&["originalData", "user", "id"]]))
             .unwrap_or_else(|| "0".to_string());
         let source_created_at = string_at(
             &value,
@@ -3970,16 +4553,21 @@ async fn process_candidate_item(
             None,
         )
         .await?;
-        let missing = crate::database::queries::saved_pixiv_missing_references(
-            &value,
-            &state.db.get_current_assets(&updated)?,
-        );
-        // この版を利用者が編集して、もう埋めてあるかもしれない。
-        let missing = state.db.references_left_by_active_edit(
-            updated.id,
-            updated.current_version,
-            missing,
-        )?;
+        let missing = match &updated {
+            super::downloader::SavedWork::Legacy(updated) => {
+                let missing = crate::database::queries::saved_pixiv_missing_references(
+                    &value,
+                    &state.db.get_current_assets(updated)?,
+                );
+                // この版を利用者が編集して、もう埋めてあるかもしれない。
+                state.db.references_left_by_active_edit(
+                    updated.id,
+                    updated.current_version,
+                    missing,
+                )?
+            }
+            super::downloader::SavedWork::Shelf(saved) => saved.missing_references.clone(),
+        };
         // A gate that still hides the details must not settle as complete:
         // clearing the candidate here would lose the work from the audit,
         // because an unchanged body creates no new version to inspect.
@@ -3999,7 +4587,7 @@ async fn process_candidate_item(
                 ));
             }
             return Ok(ItemOutcome::PartialSaved(
-                updated.id,
+                SavedRef::of(&updated),
                 format!(
                     "本文は保存しましたが、{}。候補を残して再試行できます",
                     losses.join("。")
@@ -4045,7 +4633,7 @@ async fn process_candidate_item(
         }
         let title = string_at(&value, &[&["title"]]).unwrap_or(item.title.clone());
         let author_name = string_at(&value, &[&["user", "name"]])
-            .or_else(|| string_at(&payload, &[&["originalData", "user", "name"]]))
+            .or_else(|| string_at(payload, &[&["originalData", "user", "name"]]))
             .unwrap_or_else(|| "unknown".to_string());
         let author_id = string_at(
             &value,
@@ -4053,7 +4641,7 @@ async fn process_candidate_item(
         )
         .or_else(|| {
             string_at(
-                &payload,
+                payload,
                 &[
                     &["originalData", "creatorId"],
                     &["originalData", "creator_id"],
@@ -4180,7 +4768,7 @@ mod tests {
         // 初めての保留は知らせる。
         assert!(!super::is_known_hold(&state, &item, &gone).unwrap());
         state
-            .db
+            .candidates()
             .upsert_update_candidate(&crate::database::UpdateCandidateInput {
                 source: "pixiv".into(),
                 source_id: "42".into(),
@@ -4193,7 +4781,7 @@ mod tests {
         // 候補があっても、保留でなければ前回の保留ではない。
         assert!(!super::is_known_hold(&state, &item, &gone).unwrap());
         state
-            .db
+            .candidates()
             .set_update_candidate_status("pixiv", "42", "held")
             .unwrap();
         assert!(super::is_known_hold(&state, &item, &gone).unwrap());
@@ -4249,7 +4837,7 @@ mod tests {
             })
             .unwrap();
         for (source_id, kind) in [("old", "revision"), ("new", "new")] {
-            state.db.upsert_update_candidate(&crate::database::UpdateCandidateInput {
+            state.candidates().upsert_update_candidate(&crate::database::UpdateCandidateInput {
                 source: "pixiv".into(), source_id: source_id.into(),
                 kind: kind.into(), title: source_id.into(),
                 payload_json: serde_json::json!({
@@ -4268,7 +4856,7 @@ mod tests {
                 new_works_only: Some(true),
                 adhoc_targets: None,
             };
-            let items = build_initial_items(&state, &request).unwrap();
+            let items = build_initial_items(&state, &request, None).unwrap();
             assert!(!items
                 .iter()
                 .any(|item| item.source_id.as_deref() == Some("old")));
@@ -4290,6 +4878,7 @@ mod tests {
                     new_works_only: Some(false),
                     ..request
                 },
+                None,
             )
             .unwrap();
             assert!(full
@@ -4344,7 +4933,7 @@ mod tests {
             .unwrap();
         let job_id = make_job_id();
         state
-            .db
+            .jobs()
             .create_update_job(
                 &job_id,
                 &StartUpdateJobRequest {
@@ -4362,6 +4951,7 @@ mod tests {
             .unwrap();
         let reason = super::unavailable_saved_pixiv_work_message(&work.title, &work.source_id);
         let mut web_index = super::WebUpdateIndex {
+            library: None,
             api: Some(crate::pixiv_api::web::WebPixivAPI::new().unwrap()),
             asked_authors: HashSet::from(["80000003".to_string()]),
             entries: std::collections::HashMap::from([(
@@ -4389,13 +4979,13 @@ mod tests {
             .db
             .insert_update_job_unavailable_work(&job_id, &work, &reason)
             .unwrap());
-        let snapshot = state.db.update_job_snapshot(&job_id).unwrap();
+        let snapshot = state.jobs().update_job_snapshot(&job_id).unwrap();
         assert_eq!(snapshot.totals, 1);
         assert_eq!(snapshot.processed, 1);
         assert_eq!(snapshot.held_count, 1);
         assert_eq!(snapshot.error_count, 0);
         assert_eq!(
-            state.db.list_update_job_item_states(&job_id).unwrap()[0].status,
+            state.jobs().list_update_job_item_states(&job_id).unwrap()[0].status,
             "held"
         );
         assert!(state
@@ -4405,14 +4995,17 @@ mod tests {
             .is_some());
         assert!(json_path.is_file());
         assert_eq!(
-            state.db.count_saved_deferred_update_candidates().unwrap(),
+            state
+                .candidates()
+                .count_saved_deferred_update_candidates()
+                .unwrap(),
             1
         );
         // 次の確認でもまだ見つからない。確かめはするが、何も変わっていないので
         // 「保留あり」とは言わない。保留は要確認に残る。
         let next_job = make_job_id();
         state
-            .db
+            .jobs()
             .create_update_job(
                 &next_job,
                 &StartUpdateJobRequest {
@@ -4432,34 +5025,43 @@ mod tests {
             .db
             .insert_update_job_unavailable_work(&next_job, &work, &reason)
             .unwrap();
-        let again = state.db.update_job_snapshot(&next_job).unwrap();
+        let again = state.jobs().update_job_snapshot(&next_job).unwrap();
         assert_eq!(
             (again.processed, again.held_count, again.known_held_count),
             (1, 0, 1)
         );
         assert!(state
-            .db
+            .jobs()
             .list_update_job_held_item_states(&next_job)
             .unwrap()
             .is_empty());
         assert_eq!(
-            state.db.count_saved_deferred_update_candidates().unwrap(),
+            state
+                .candidates()
+                .count_saved_deferred_update_candidates()
+                .unwrap(),
             1
         );
         state
-            .db
+            .candidates()
             .clear_resolved_unavailable_candidates("pixiv", &["different".into()])
             .unwrap();
         assert_eq!(
-            state.db.count_saved_deferred_update_candidates().unwrap(),
+            state
+                .candidates()
+                .count_saved_deferred_update_candidates()
+                .unwrap(),
             1
         );
         state
-            .db
+            .candidates()
             .clear_resolved_unavailable_candidates("pixiv", std::slice::from_ref(&work.source_id))
             .unwrap();
         assert_eq!(
-            state.db.count_saved_deferred_update_candidates().unwrap(),
+            state
+                .candidates()
+                .count_saved_deferred_update_candidates()
+                .unwrap(),
             0
         );
         web_index.gave_up = true;
@@ -4565,19 +5167,19 @@ mod tests {
             target_type: Some("author".into()),
         };
         state
-            .db
+            .candidates()
             .upsert_update_candidate(&candidate("a-requested".into(), "requested"))
             .unwrap();
         // More recent, unrelated candidates used to consume the entire global
         // 2,000-row allowance before the requested author's scope was applied.
         for index in 0..2_001 {
             state
-                .db
+                .candidates()
                 .upsert_update_candidate(&candidate(format!("noise-{index:04}"), "another-author"))
                 .unwrap();
         }
         state
-            .db
+            .candidates()
             .upsert_update_candidate(&candidate("z-requested".into(), "requested"))
             .unwrap();
         let request = StartUpdateJobRequest {
@@ -4595,7 +5197,7 @@ mod tests {
                 display_name: "Requested".into(),
             }]),
         };
-        let items = build_initial_items(&state, &request).unwrap();
+        let items = build_initial_items(&state, &request, None).unwrap();
         let keys = items
             .iter()
             .filter(|item| item.item_type == "candidate")
@@ -4673,7 +5275,7 @@ mod tests {
             new_works_only: None,
             adhoc_targets: None,
         };
-        let items = build_initial_items(&state, &request).unwrap();
+        let items = build_initial_items(&state, &request, None).unwrap();
         let keys: Vec<_> = items
             .iter()
             .map(|item| (item.item_type.as_str(), item.source_id.as_deref()))
@@ -4742,7 +5344,7 @@ mod tests {
             new_works_only: Some(true),
             adhoc_targets: None,
         };
-        let items = build_initial_items(&state, &request).unwrap();
+        let items = build_initial_items(&state, &request, None).unwrap();
         let keys: Vec<_> = items
             .iter()
             .map(|item| (item.item_type.as_str(), item.source_id.as_deref()))
@@ -4763,7 +5365,7 @@ mod tests {
             }]),
             ..request
         };
-        let adhoc_items = build_initial_items(&state, &adhoc_request).unwrap();
+        let adhoc_items = build_initial_items(&state, &adhoc_request, None).unwrap();
         assert_eq!(adhoc_items.len(), 1);
         assert_eq!(adhoc_items[0].item_type, "target");
         drop(state);
@@ -4822,7 +5424,7 @@ mod tests {
                 display_name: "作者".into(),
             }]),
         };
-        let items = build_initial_items(&state, &request).unwrap();
+        let items = build_initial_items(&state, &request, None).unwrap();
         let work = items.iter().find(|item| item.item_type == "work").unwrap();
         assert_eq!(work.source_id.as_deref(), Some("post-1"));
         assert_eq!(
@@ -4927,7 +5529,7 @@ mod tests {
                 display_name: "requested".into(),
             }]),
         };
-        let items = build_initial_items(&state, &request).unwrap();
+        let items = build_initial_items(&state, &request, None).unwrap();
         let targets: Vec<_> = items
             .iter()
             .filter(|item| item.item_type == "target")
@@ -4951,7 +5553,8 @@ mod tests {
         source_key: &str,
     ) -> crate::database::UpdateTarget {
         crate::database::UpdateTarget {
-            id: 1,
+            id: 1.into(),
+            watch_generation: None,
             target_type: target_type.into(),
             source: source.into(),
             source_key: source_key.into(),
@@ -4994,6 +5597,7 @@ mod tests {
     #[test]
     fn durable_candidates_obey_exact_current_watch_scope() {
         let mut candidate = crate::database::UpdateCandidateRow {
+            work_id: None,
             metadata: Default::default(),
             source: "fanbox".into(), source_id: "11".into(), kind: "new".into(), title: "作品".into(),
             payload_json: serde_json::json!({"originSourceKey":"creator", "originalData":{"creatorId":"creator"}}).to_string(),
@@ -5243,14 +5847,12 @@ mod tests {
     }
 
     #[test]
-    fn job_ids_are_fixed_width_random_values() {
+    fn job_ids_are_unique_library_uuids() {
         let ids = (0..10_000).map(|_| make_job_id()).collect::<HashSet<_>>();
         assert_eq!(ids.len(), 10_000);
-        assert!(ids.iter().all(|id| {
-            id.len() == 36
-                && id.starts_with("job-")
-                && id[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
-        }));
+        assert!(ids
+            .iter()
+            .all(|id| { id.parse::<crate::library::LibraryId>().is_ok() }));
     }
 
     /// 預かるのは、取得元とIDが揃っているものだけ。

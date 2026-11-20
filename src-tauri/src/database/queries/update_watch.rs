@@ -24,6 +24,22 @@ const UPDATE_TARGET_LIST_COLUMNS: &str = "t.*,
     END AS icon_path";
 
 impl Database {
+    /// 候補を棚で解決した後、旧実行キューには表示用の解決印だけを残す。
+    pub(crate) fn resolve_unavailable_job_items(
+        &self,
+        source: &str,
+        keys: &[String],
+    ) -> Result<(), String> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let keys = serde_json::to_string(keys).map_err(|e| e.to_string())?;
+        self.conn.lock().map_err(|e|e.to_string())?.execute("UPDATE update_job_items SET payload_json=json_set(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.acquisitionResolved',json('true'))
+             WHERE source=?1 AND source_id IN (SELECT value FROM json_each(?2)) AND status='held'
+               AND (error LIKE '%[見つからない]%' OR error LIKE '%公開元で投稿が見つかりません%' OR error LIKE '%公開元で投稿が見つからない%')
+               AND COALESCE(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.acquisitionResolved') END,0)=0",params![source,keys]).map_err(|e|e.to_string())?;
+        Ok(())
+    }
     pub fn clear_resolved_unavailable_candidates(
         &self,
         source: &str,
@@ -409,6 +425,7 @@ impl Database {
                 let payload_json: String = row.get(4)?;
                 let payload = if for_display { serde_json::from_str(&payload_json).unwrap_or_default() } else { serde_json::Value::Null };
                 Ok(UpdateCandidateRow {
+            work_id: None,
                     metadata: if for_display { super::UpdateWorkMetadata::from_row(
                         row,
                         10,
@@ -521,6 +538,7 @@ impl Database {
         let rows = statement
             .query_map(refs.as_slice(), |row| {
                 Ok(UpdateCandidateRow {
+                    work_id: None,
                     source: row.get(0)?,
                     source_id: row.get(1)?,
                     kind: row.get(2)?,
@@ -619,6 +637,14 @@ impl Database {
             payload_json: payload.to_string(),
             target_type: Some("work".into()),
         })
+    }
+
+    pub(crate) fn latest_job_candidate(
+        &self,
+        source: &str,
+        key: &str,
+    ) -> Result<(String, String), String> {
+        self.read_conn()?.query_row("SELECT title,payload_json FROM update_job_items WHERE source=?1 AND source_id=?2 AND item_type='candidate' ORDER BY id DESC LIMIT 1",params![source,key],|r|Ok((r.get(0)?,r.get(1)?))).map_err(|_|"候補が見つかりません。画面を再読み込みしてください".into())
     }
 
     /// この作品を今後は候補に出さない。決定は取り消せる。

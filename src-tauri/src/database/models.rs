@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use piep_reader_render::pages::{ReaderOutlineEntry, ReaderSearchHit};
+pub use piep_reader_render::{AssetEntry, WorkBlock};
+
 /// ダウンロードエントリ（DB行に対応）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,20 +132,6 @@ pub struct EntityVersion {
     pub change_summary: Option<String>,
 }
 
-/// アセットエントリ（DB行に対応）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AssetEntry {
-    pub id: i64,
-    pub download_id: i64,
-    pub asset_type: String,
-    pub filename: String,
-    pub local_path: String,
-    pub original_url: Option<String>,
-    pub mime_type: Option<String>,
-    pub file_size_bytes: i64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScoreReason {
@@ -185,19 +174,6 @@ pub struct WorkEditRevision {
     pub content_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-}
-
-/// A block in the local editor document.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkBlock {
-    pub id: i64,
-    pub edit_revision_id: i64,
-    pub order: i64,
-    pub block_type: String,
-    pub text: Option<String>,
-    pub asset_id: Option<i64>,
-    pub attrs_json: Option<String>,
 }
 
 /// Input shape for saving editor blocks from the frontend.
@@ -297,26 +273,6 @@ pub struct EditedSourceForm {
     /// 編集画面で足した絵。版の置き場の外（`editor-assets/`）にあるので、
     /// 本文が指していても書き出す側からは見えない。書き出す側が本へ加える。
     pub added_images: Vec<AssetEntry>,
-}
-
-/// 作品全体の見出し 1 つ。読書画面の目次が使う。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReaderOutlineEntry {
-    /// 1 起点のページ番号。
-    pub page: usize,
-    /// そのページの中で何番目の見出しか（0 起点）。
-    pub index: usize,
-    pub title: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReaderSearchHit {
-    /// One-based transport/source page number for direct navigation.
-    pub page: usize,
-    pub snippet: String,
-    pub count: usize,
 }
 
 /// Runtime measurements used by the large-library diagnostics screen.  The
@@ -709,6 +665,9 @@ pub struct CollectionSuggestionMember {
     pub source: String,
     pub source_id: String,
     pub download_id: Option<i64>,
+    /// 新しい棚の作品 ID（UUID）。旧棚の候補では None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<String>,
     pub title: String,
     pub author_name: String,
     pub cover_path: Option<String>,
@@ -771,6 +730,9 @@ pub struct CollectionAdditionCandidate {
     pub source: String,
     pub source_id: String,
     pub download_id: i64,
+    /// 新しい棚の作品 ID（UUID）。旧棚の候補では None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<String>,
     pub title: String,
     pub author_name: String,
     pub cover_path: Option<String>,
@@ -831,7 +793,11 @@ pub struct CollectionNameCandidate {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CollectionSuggestionRequest {
+    #[serde(default)]
     pub seed_download_ids: Vec<i64>,
+    /// 切り替えた棚の種の作品（UUID）。
+    #[serde(default)]
+    pub seed_works: Vec<String>,
     pub limit: Option<i64>,
 }
 
@@ -916,11 +882,61 @@ pub struct FilterFacets {
     pub asset_types: Vec<FacetCount>,
 }
 
+/// 切り替え前は旧番号、切り替え後は棚の UUID。別の棚の番号に読み替えて書かない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WatchId {
+    Legacy(i64),
+    Shelf(crate::library::LibraryId),
+}
+
+/// 作品の明示的な範囲。切り替え後は UUID、移行前の画面は旧番号で指定する。
+pub type WorkId = WatchId;
+
+impl From<i64> for WatchId {
+    fn from(value: i64) -> Self {
+        Self::Legacy(value)
+    }
+}
+impl std::fmt::Display for WatchId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Legacy(v) => v.fmt(f),
+            Self::Shelf(v) => v.fmt(f),
+        }
+    }
+}
+impl rusqlite::types::FromSql for WatchId {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        Ok(Self::Legacy(value.as_i64()?))
+    }
+}
+impl rusqlite::types::ToSql for WatchId {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        match self {
+            Self::Legacy(value) => Ok(rusqlite::types::ToSqlOutput::Owned((*value).into())),
+            Self::Shelf(_) => Err(rusqlite::Error::InvalidParameterName(
+                "新しい棚の UUID を旧棚の番号に使えません".into(),
+            )),
+        }
+    }
+}
+impl WatchId {
+    pub fn legacy(self) -> Result<i64, String> {
+        match self {
+            Self::Legacy(v) => Ok(v),
+            Self::Shelf(_) => Err("新しい棚の UUID は旧棚では使えません".into()),
+        }
+    }
+}
+
 /// 更新チェック対象（作品・著者・シリーズ）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateTarget {
-    pub id: i64,
+    pub id: WatchId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_generation: Option<i64>,
     pub target_type: String,
     pub source: String,
     pub source_key: String,
@@ -951,13 +967,17 @@ pub struct UpdateTarget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchGroup {
-    pub id: i64,
+    pub id: WatchId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_generation: Option<i64>,
     pub name: String,
     pub sort_order: i64,
     pub created_at: String,
     pub updated_at: String,
     /// 中の監視対象（`update_targets.id`）。
-    pub target_ids: Vec<i64>,
+    pub target_ids: Vec<WatchId>,
 }
 
 /// 更新チェック対象の作成・更新入力
@@ -1031,8 +1051,8 @@ pub struct UpdateCredentials {
 pub struct StartUpdateJobRequest {
     pub scope: String,
     pub mode: String,
-    pub work_ids: Option<Vec<i64>>,
-    pub target_ids: Option<Vec<i64>>,
+    pub work_ids: Option<Vec<WorkId>>,
+    pub target_ids: Option<Vec<WatchId>>,
     pub credentials: Option<UpdateCredentials>,
     /// このジョブが保存した作品を、そのまま更新監視に載せるか。
     /// 設定の「保存した作品を自動で監視する」から渡ってくる。
@@ -1111,6 +1131,8 @@ pub struct UpdateJobCandidate {
     pub id: i64,
     #[serde(default)]
     pub download_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<crate::library::LibraryId>,
     pub key: String,
     pub source: String,
     pub source_id: String,
@@ -1197,6 +1219,8 @@ pub struct UpdateJobItemState {
     /// Local library ID, when this job item is already saved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<crate::library::LibraryId>,
 }
 
 /// A small progress notification for a running update/save job.
@@ -1226,6 +1250,8 @@ pub struct UpdateCandidateInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCandidateRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_id: Option<crate::library::LibraryId>,
     #[serde(default, skip_serializing_if = "UpdateWorkMetadata::is_empty")]
     pub metadata: UpdateWorkMetadata,
     pub source: String,
@@ -1253,61 +1279,25 @@ pub struct UpdateWorkMetadata {
 }
 
 impl UpdateWorkMetadata {
+    /// 実行キューの表示用の写し。本文を含めず、移行と通常の作成で同じ形にする。
+    pub(crate) fn execution_display(payload: &str) -> serde_json::Result<String> {
+        crate::library::ExecutionMetadata::execution_display(payload)
+    }
     fn is_empty(&self) -> bool {
         self.author_name.is_none()
             && self.published_at.is_none()
             && self.updated_at.is_none()
             && self.saved_at.is_none()
     }
-    pub(super) fn from_payload(payload: &serde_json::Value) -> Self {
-        fn field(value: &serde_json::Value, paths: &[&str]) -> Option<String> {
-            paths.iter().find_map(|path| {
-                value
-                    .pointer(path)
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|s| !s.trim().is_empty())
-                    .map(str::to_string)
-            })
-        }
-        let value = payload.get("originalData").unwrap_or(payload);
-        let value = crate::fanbox_api::payload::post_or_self(value);
+    pub(crate) fn from_payload(payload: &serde_json::Value) -> Self {
+        let m = crate::library::ExecutionMetadata::from_payload(payload);
         Self {
-            author_name: field(
-                value,
-                &[
-                    "/user/name",
-                    "/creator/name",
-                    "/authorName",
-                    "/userName",
-                    "/author_name",
-                    "/detail/user/name",
-                    "/detail/authorName",
-                ],
-            ),
-            published_at: field(
-                value,
-                &[
-                    "/create_date",
-                    "/createDate",
-                    "/publishedDatetime",
-                    "/cdate",
-                    "/detail/createDate",
-                    "/detail/cdate",
-                ],
-            ),
-            updated_at: field(
-                value,
-                &[
-                    "/uploadDate",
-                    "/updateDate",
-                    "/updatedDatetime",
-                    "/detail/uploadDate",
-                ],
-            ),
-            saved_at: None,
+            author_name: m.author_name,
+            published_at: m.published_at,
+            updated_at: m.updated_at,
+            saved_at: m.saved_at,
         }
     }
-
     pub(super) fn from_row(
         row: &rusqlite::Row<'_>,
         start: usize,

@@ -1,4 +1,4 @@
-import type { DownloadEntry, SourceKind } from "@/types/library";
+import type { ListedWork, SourceKind } from "@/types/library";
 
 export interface WorkKey {
   source: string;
@@ -60,6 +60,11 @@ export interface WorkCollectionSummary {
   totalTextLength: number;
   createdAt: string;
   updatedAt: string;
+  /**
+   * 新しい棚から読んだもの。表紙（`coverPath`・`coverImagePath`・各マスの `coverPath`）は
+   * パスでなくファイルの識別子で、`shelfFileUrl` で URL にする。
+   */
+  shelf?: "v2";
 }
 
 export interface WorkCollectionMember {
@@ -80,9 +85,9 @@ export interface WorkCollectionMember {
   createdAt: string;
   updatedAt: string;
   /** 保存済みメンバーの作品そのもの。棚と同じ `WorkCard` に渡せる。 */
-  work: DownloadEntry | null;
+  work: ListedWork | null;
   /** 同じ作品の別版。続きではないので、行の中に畳む。 */
-  editions: DownloadEntry[];
+  editions: ListedWork[];
 }
 
 export interface WorkCollection extends WorkCollectionSummary {
@@ -136,6 +141,8 @@ export interface CollectionSuggestionEvidence {
 
 export interface CollectionSuggestionMember extends WorkKey {
   downloadId: number | null;
+  /** 新しい棚の作品（UUID）。旧棚の候補には無い。 */
+  work?: string | null;
   title: string;
   authorName: string;
   coverPath: string | null;
@@ -197,7 +204,10 @@ export interface CollectionSweepResult {
 export interface CollectionAdditionCandidate {
   source: string;
   sourceId: string;
+  /** 旧棚の作品の番号。新しい棚では 0 で、作品は `work` で指す。 */
   downloadId: number;
+  /** 新しい棚の作品（UUID）。 */
+  work?: string | null;
   title: string;
   authorName: string;
   coverPath: string | null;

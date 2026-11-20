@@ -250,7 +250,7 @@ describe("LibraryPage search", () => {
     window.location.hash = "#/library?tab=people&saved=41&ewatch=watched&emin=8&edone=1&esort=name&eorder=asc&csort=name&corder=asc&sort=title&order=desc";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(["saved-searches"], [{
-      id: 41,
+      id: "41",
       name: "更新の多いコレクション",
       query: null,
       paramsJson: JSON.stringify({
@@ -284,7 +284,7 @@ describe("LibraryPage search", () => {
     window.location.hash = "#/library?saved=43&revised=1";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(["saved-searches"], [{
-      id: 43,
+      id: "43",
       name: "読みかけの長編",
       query: null,
       paramsJson: JSON.stringify({
@@ -324,7 +324,7 @@ describe("LibraryPage search", () => {
     window.location.hash = "#/library?tab=series&saved=42&csort=name&corder=desc&esort=name&eorder=desc&ewatch=watched&emin=9&edone=1";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     client.setQueryData(["saved-searches"], [{
-      id: 42,
+      id: "42",
       name: "停止中の短いシリーズ",
       query: null,
       paramsJson: JSON.stringify({
@@ -461,7 +461,7 @@ describe("LibraryPage search", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
-    await waitFor(() => expect(client.getQueryData(["library-facets"])).toBeDefined());
+    await waitFor(() => expect(client.getQueryData(["library-facets", false])).toBeDefined());
     fireEvent.change(within(spotlight).getByRole("textbox", { name: "条件を検索" }), { target: { value: "青葉" } });
     // jsdom cannot position the non-portaled dropdown, so Mantine keeps its
     // options hidden even though the same store is open in a real window.
@@ -653,6 +653,15 @@ describe("search suggestion actions", () => {
       .toEqual({ kind: "navigate", target: "/series/pixiv/12552619" });
     expect(searchSuggestionAction({ kind: "author", label: "作者名", value: "作者名", source: "pixiv", sourceKey: "creator/42" }))
       .toEqual({ kind: "navigate", target: "/people/pixiv/creator%2F42" });
+  });
+
+  it("opens a title suggestion by the old number or the new shelf's work id", () => {
+    expect(searchSuggestionAction({ kind: "title", label: "題", value: "42", source: "pixiv", sourceKey: "7" }))
+      .toEqual({ kind: "navigate", target: "/works/7" });
+    expect(searchSuggestionAction({ kind: "title", label: "題", value: "42", source: "pixiv", sourceKey: "0190A000-0000-7000-8000-000000000002" }))
+      .toEqual({ kind: "navigate", target: "/works/0190a000-0000-7000-8000-000000000002" });
+    expect(searchSuggestionAction({ kind: "title", label: "題", value: "42", source: "pixiv", sourceKey: "w3" }))
+      .toEqual({ kind: "query", query: "\"題\"" });
   });
 
   it("turns non-entity suggestions into explicit filters", () => {

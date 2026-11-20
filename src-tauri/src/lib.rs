@@ -7,10 +7,28 @@ pub mod database;
 mod downloader;
 pub mod epub;
 pub mod fanbox_api;
+/// 元ファイルを保持する新しいライブラリの保管・履歴モデル。
+pub mod library;
+pub mod library_assist;
+pub mod library_collection_edit;
+pub mod library_collections;
+pub mod library_entity;
+pub mod library_entity_list;
+pub mod library_epub;
+pub mod library_facets;
+pub mod library_health;
+pub mod library_original_images;
+pub mod library_search;
+pub mod library_suggest;
+pub mod library_suggestion_corpus;
+pub mod library_suggestions;
+pub mod library_view;
+pub mod library_work_edit;
 mod logging;
 /// 棚の実物で取り出しを確かめる example から触れるように公開している。
 pub mod pdf;
 pub mod pixiv_api;
+pub mod search_suggest;
 /// 単独サーバー `piep-server` からも使うので公開している。
 pub mod server;
 mod smoke_test;
@@ -74,6 +92,8 @@ impl LibraryProcessLock {
 /// アプリ全体で共有されるDB状態
 pub struct AppState {
     pub db: Database,
+    /// 起動時に登録した棚の状態を、取得ワーカーも同じ口から参照する。
+    pub(crate) library_v2: Arc<commands::library_v2::LibraryV2>,
     /// Export holds a read guard while every library mutation holds a write
     /// guard, giving backups one coherent DB/filesystem generation.
     pub library_gate: Arc<tokio::sync::RwLock<()>>,
@@ -86,6 +106,7 @@ impl AppState {
     pub fn new(db: Database) -> Self {
         Self {
             db,
+            library_v2: Arc::new(commands::library_v2::LibraryV2::default()),
             library_gate: Arc::new(tokio::sync::RwLock::new(())),
             _library_process_lock: None,
         }
@@ -94,6 +115,7 @@ impl AppState {
     fn new_with_library_lock(db: Database, library_process_lock: LibraryProcessLock) -> Self {
         Self {
             db,
+            library_v2: Arc::new(commands::library_v2::LibraryV2::default()),
             library_gate: Arc::new(tokio::sync::RwLock::new(())),
             _library_process_lock: Some(library_process_lock),
         }
@@ -135,7 +157,12 @@ fn prepare_library(
 
     let db = Database::open(&db_path, &storage_dir)
         .map_err(|e| format!("Failed to open database: {e}"))?;
-    let state = Arc::new(AppState::new_with_library_lock(db, library_process_lock));
+    let mut state = AppState::new_with_library_lock(db, library_process_lock);
+    state.library_v2 = app
+        .state::<Arc<commands::library_v2::LibraryV2>>()
+        .inner()
+        .clone();
+    let state = Arc::new(state);
     // 中断した復元の後始末は、起動の条件にしない。片付かなかった分は
     // 控えを残したまま次の起動でもう一度試せる。ここで止めると、読める
     // 棚を持っている人が窓を開けられなくなる。
@@ -154,11 +181,15 @@ fn prepare_library(
         }
         Err(error) => log::warn!("分割復元の記録を読めません: {error}"),
     }
-    if let Err(e) = state.db.recover_update_jobs_on_startup() {
+    state
+        .jobs()
+        .import_previous_queue()
+        .map_err(|e| format!("以前の実行キューを引き継げません: {e}"))?;
+    if let Err(e) = state.jobs().recover_update_jobs_on_startup() {
         log::warn!("Failed to recover update jobs: {}", e);
     }
     // 終わったジョブは放っておくと溜まり続ける。起動時に一度だけ整理する。
-    match state.db.prune_update_jobs(
+    match state.jobs().prune_update_jobs(
         commands::update_jobs::KEEP_UPDATE_JOBS,
         commands::update_jobs::KEEP_UPDATE_JOB_DAYS,
     ) {
@@ -222,6 +253,22 @@ pub fn run() -> tauri::Result<()> {
         .plugin(tauri_plugin_process::init())
         .manage(commands::startup::StartupGate::default())
         .manage(commands::startup::WindowSchemeFile::default())
+        .manage(Arc::new(commands::library_v2::LibraryV2::default()))
+        // 新しい棚の画像（評価文書 4.1 の 2）。開いていなければ 503。
+        .register_asynchronous_uri_scheme_protocol(
+            commands::library_v2::URI_SCHEME,
+            |context, request, responder| {
+                let state = Arc::clone(
+                    &context
+                        .app_handle()
+                        .state::<Arc<commands::library_v2::LibraryV2>>(),
+                );
+                let path = request.uri().path().to_owned();
+                tauri::async_runtime::spawn_blocking(move || {
+                    responder.respond(commands::library_v2::respond(&state, &path));
+                });
+            },
+        )
         .setup(|app| {
             let app_data = app
                 .path()
@@ -254,6 +301,12 @@ pub fn run() -> tauri::Result<()> {
                 .background_color(commands::startup::window_background(&app_data))
                 .build()?;
 
+            // 新しい棚（あれば）は旧棚の準備と別に開く。画面は旧棚の準備だけを待つ。
+            commands::library_v2::open_in_background(
+                Arc::clone(&app.state::<Arc<commands::library_v2::LibraryV2>>()),
+                &app_data,
+            );
+
             // ここから先は棚の規模に比例して時間がかかる。`setup` はメインスレッド
             // なので、ここで待つと窓が固まり、Windows が「応答なし」を付ける。
             let handle = app.handle().clone();
@@ -280,6 +333,57 @@ pub fn run() -> tauri::Result<()> {
             // 起動 (commands::startup)
             commands::startup::startup_wait_for_library,
             commands::startup::startup_remember_color_scheme,
+            // 新しい棚の読み取り (commands::library_v2)
+            commands::library_v2::library_v2_status,
+            commands::library_v2::library_v2_set_user_state,
+            commands::library_v2::library_v2_remove_work,
+            commands::library_v2::library_v2_edit_collection,
+            commands::library_v2::library_v2_editor,
+            commands::library_v2::library_v2_edit_history,
+            commands::library_v2::library_v2_job_history,
+            commands::library_v2::library_v2_job_history_items,
+            commands::library_v2::library_v2_job_history_logs,
+            commands::library_v2::library_v2_job_history_visibility,
+            commands::library_v2::library_v2_save_editor,
+            commands::library_v2::library_v2_edit_pointer,
+            commands::library_v2::library_v2_import_edit_image,
+            commands::library_v2::library_v2_reading_position,
+            commands::library_v2::library_v2_set_reading_position,
+            commands::library_v2::library_v2_clear_reading_positions,
+            commands::library_v2::library_v2_adopt_device_positions,
+            commands::library_v2::library_v2_search,
+            commands::library_v2::library_v2_decorations,
+            commands::library_v2::library_v2_work,
+            commands::library_v2::library_v2_content,
+            commands::library_v2::library_v2_outline,
+            commands::library_v2::library_v2_search_content,
+            commands::library_v2::library_v2_neighbors,
+            commands::library_v2::library_v2_media,
+            commands::library_v2::library_v2_render_pdf_page,
+            commands::library_v2::library_v2_entity,
+            commands::library_v2::library_v2_entity_tags,
+            commands::library_v2::library_v2_search_suggest,
+            commands::library_v2::library_v2_person_series,
+            commands::library_v2::library_v2_entity_original,
+            commands::library_v2::library_v2_entities,
+            commands::library_v2::library_v2_entity_collections,
+            commands::library_v2::library_v2_work_collections,
+            // 新しい棚の数と手入れ (commands::library_health)
+            commands::library_health::library_v2_search_index_status,
+            commands::library_health::library_v2_dashboard,
+            commands::library_health::library_v2_shelf_counts,
+            commands::library_health::library_v2_diagnostics,
+            commands::library_health::library_v2_maintain,
+            commands::library_health::library_v2_optimize_search_index,
+            commands::library_health::library_v2_verify,
+            commands::library_health::library_v2_reclaim,
+            commands::library_health::library_v2_filter_facets,
+            commands::library_health::library_v2_search_filter_facets,
+            commands::library_health::library_v2_find_work,
+            commands::library_v2::library_v2_collections,
+            commands::library_v2::library_v2_collection,
+            commands::library_v2::library_v2_revision_snapshot,
+            commands::library_v2::library_v2_original,
             // サーバーモード (commands::server)
             commands::server::server_status,
             commands::server::server_embedded_start,
@@ -287,6 +391,7 @@ pub fn run() -> tauri::Result<()> {
             commands::server::server_create_reader_pairing,
             commands::server::server_revoke_device,
             commands::server::server_list_remote_devices,
+            commands::server::server_set_remote_shelf_reader,
             commands::server::server_remote_status,
             commands::server::server_update_remote,
             commands::server::server_check_remote_update,
@@ -378,6 +483,20 @@ pub fn run() -> tauri::Result<()> {
             commands::assist::assist_recap_previous,
             commands::assist::assist_load_note,
             commands::assist::assist_delete_note,
+            commands::assist_shelf::library_v2_assist_related_tags,
+            commands::assist_shelf::library_v2_assist_accept_related_tags,
+            commands::assist_shelf::library_v2_assist_remove_related_tag,
+            commands::assist_shelf::library_v2_assist_suggest_tags,
+            commands::assist_shelf::library_v2_assist_accept_tags,
+            commands::assist_shelf::library_v2_assist_work_tags,
+            commands::assist_shelf::library_v2_assist_remove_tag,
+            commands::assist_shelf::library_v2_assist_interpret_search,
+            commands::assist_shelf::library_v2_assist_describe_author,
+            commands::assist_shelf::library_v2_assist_propose_splits,
+            commands::assist_shelf::library_v2_assist_summarize_work,
+            commands::assist_shelf::library_v2_assist_recap_previous,
+            commands::assist_shelf::library_v2_assist_load_note,
+            commands::assist_shelf::library_v2_assist_delete_note,
             commands::database::db_try_naming_engine,
             commands::database::db_name_collection_suggestion,
             commands::database::db_remove_work_collection_members,
@@ -422,6 +541,16 @@ pub fn run() -> tauri::Result<()> {
             commands::database::cancel_entity_profile_repair,
             commands::original_images::get_original_image_status,
             commands::original_images::upgrade_pixiv_images_to_original,
+            commands::original_images::library_v2_original_image_status,
+            commands::backup_shelf::library_v2_backup,
+            commands::backup_shelf::library_v2_export_entity_archive,
+            commands::backup_shelf::library_v2_import_archive,
+            commands::reimport_shelf::library_v2_reimport_folders,
+            commands::backup_shelf::library_v2_inspect_backup,
+            commands::backup_shelf::library_v2_schedule_restore,
+            commands::backup_shelf::library_v2_restore_state,
+            commands::backup_shelf::library_v2_cancel_restore,
+            commands::original_images::library_v2_upgrade_pixiv_images_to_original,
             commands::original_images::cancel_original_image_upgrade,
             commands::database::db_get_download_by_source,
             commands::database::db_get_reader_metadata,

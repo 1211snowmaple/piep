@@ -30,24 +30,34 @@ export function CollectionCoverModal({
   onClose,
   collection,
   busy,
+  importImage,
   onSave,
 }: {
   opened: boolean;
   onClose: () => void;
   collection: WorkCollection;
   busy: boolean;
-  onSave: (input: WorkCollectionInput) => void;
+  /**
+   * 選んだ画像を棚へ取り込み、ファイルの識別子を返す（新しい棚）。渡さなければ画像の場所を
+   * そのまま保存する（旧棚）。取り込んでから見本に出すので、見本も保存後と同じ画像になる。
+   */
+  importImage?: (path: string) => Promise<string>;
+  /** `coverWork` は「1作を選ぶ」で選んだ作品（取得元と作品の番号）。 */
+  onSave: (input: WorkCollectionInput, coverWork: { source: string; sourceId: string } | null) => void;
 }) {
   const [mode, setMode] = useState<CollectionCoverMode>("mosaic");
-  const [coverDownloadId, setCoverDownloadId] = useState<number | null>(null);
+  // 表紙の作品は取得元と作品の番号で選ぶ（新しい棚の作品は旧棚の番号を持たないことがある）。
+  const [coverKey, setCoverKey] = useState<string | null>(null);
   const [imagePath, setImagePath] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     if (!opened) return;
     setMode(collection.coverMode);
-    setCoverDownloadId(collection.coverDownloadId);
+    const current = collection.members.find((member) => member.downloadId !== null && member.downloadId === collection.coverDownloadId);
+    setCoverKey(current ? memberKey(current) : null);
     setImagePath(collection.coverImagePath);
-  }, [collection.coverDownloadId, collection.coverImagePath, collection.coverMode, opened]);
+  }, [collection.coverDownloadId, collection.coverImagePath, collection.coverMode, collection.members, opened]);
 
   const pickImage = async () => {
     try {
@@ -55,14 +65,24 @@ export function CollectionCoverModal({
         title: "コレクションの表紙にする画像",
         filters: [{ name: "画像", extensions: ["png", "jpg", "jpeg", "webp"] }],
       });
-      if (path) { setImagePath(path); setMode("file"); }
+      if (!path) return;
+      if (importImage) {
+        setImporting(true);
+        setImagePath(await importImage(path));
+      } else {
+        setImagePath(path);
+      }
+      setMode("file");
     } catch (error) {
       notifications.show({ color: "red", title: "画像を選べません", message: errorMessage(error) });
+    } finally {
+      setImporting(false);
     }
   };
 
   // 選んだ設定でどう見えるかを、その場で出す。保存してから確かめさせない。
-  const preview = { ...collection, coverMode: mode, coverImagePath: imagePath, coverPath: coverPathFor(collection, coverDownloadId) };
+  const coverMember = collection.members.find((member) => memberKey(member) === coverKey) ?? null;
+  const preview = { ...collection, coverMode: mode, coverImagePath: imagePath, coverPath: coverMember?.work?.coverPath ?? coverMember?.coverPath ?? null };
   const members = collection.members.filter((member) => member.work);
 
   return (
@@ -100,9 +120,9 @@ export function CollectionCoverModal({
                     <UnstyledButton
                       key={`${member.source}:${member.sourceId}`}
                       className="collection-cover-pick__item"
-                      data-selected={coverDownloadId === member.downloadId || undefined}
+                      data-selected={coverKey === memberKey(member) || undefined}
                       aria-label={`${member.title}を表紙にする`}
-                      onClick={() => setCoverDownloadId(member.downloadId)}
+                      onClick={() => setCoverKey(memberKey(member))}
                     >
                       <WorkCover work={member.work!} variant="compact" />
                     </UnstyledButton>
@@ -123,18 +143,18 @@ export function CollectionCoverModal({
         <ActionRow>
           <Button variant="default" onClick={onClose}>キャンセル</Button>
           <Button
-            loading={busy}
-            disabled={(mode === "single" && !coverDownloadId) || (mode === "file" && !imagePath)}
+            loading={busy || importing}
+            disabled={(mode === "single" && !coverMember) || (mode === "file" && !imagePath)}
             onClick={() =>
               onSave({
                 id: collection.id,
                 name: collection.name,
                 description: collection.description,
                 collectionKind: collection.collectionKind,
-                coverDownloadId,
+                coverDownloadId: coverMember?.downloadId ?? null,
                 coverMode: mode,
                 coverImagePath: imagePath,
-              })
+              }, coverMember ? { source: coverMember.source, sourceId: coverMember.sourceId } : null)
             }
           >
             この表紙にする
@@ -145,9 +165,6 @@ export function CollectionCoverModal({
   );
 }
 
-/** 選び直した作品の表紙を、保存前の見本に反映する。 */
-function coverPathFor(collection: WorkCollection, downloadId: number | null): string | null {
-  if (downloadId === null) return null;
-  const member = collection.members.find((value) => value.downloadId === downloadId);
-  return member?.work?.coverPath ?? member?.coverPath ?? null;
+function memberKey(member: { source: string; sourceId: string }): string {
+  return `${member.source}:${member.sourceId}`;
 }

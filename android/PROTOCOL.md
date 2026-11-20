@@ -20,6 +20,14 @@
 
 本棚がまだ届いていないときと差し替えの間は 503（`library_not_ready`）を返す。Android はこれを「準備中」と表示する。
 
+### 新しい棚の読取 API
+
+接続確認の際、Rust が登録済みの認証鍵で `GET /api/v2/identity` を確かめる。新形式の応答と
+棚・利用者・同期 epoch のヘッダーが一致すれば、接続状態の `nativeLibrary` に版と対応能力を載せる。
+`pc_native_works` と `pc_native_bundle` はその接続状態の `scope` を受け取る。接続先を変更した場合や、
+応答の利用者・棚・同期 epoch が変わった場合は一覧を開き直す。API の詳しい形は
+[新ライブラリの認証付き資産 API](../docs/plan/library-api-v2.md) を参照。携帯の一覧と読書画面は従来の経路を使う。
+
 ## API
 
 共通: `<url>/api/v1`。JSON は UTF-8、属性名は camelCase。リクエストはサイズ上限を設ける。エラーは `{code, message}` と HTTP ステータスで返し、ローカルファイルパスや内部エラー文字列を返さない。ブラウザー向け CORS は有効にしない。

@@ -1,20 +1,27 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
+/** EPUB キューの一件。旧棚は番号、新しい棚は作品の ID（文字列）。 */
+export type EpubQueueId = number | string;
+
 interface WorkspaceContextValue {
-  epubQueue: number[];
-  addToEpubQueue: (ids: number | number[]) => void;
-  removeFromEpubQueue: (ids: number | number[]) => void;
+  epubQueue: EpubQueueId[];
+  addToEpubQueue: (ids: EpubQueueId | EpubQueueId[]) => void;
+  removeFromEpubQueue: (ids: EpubQueueId | EpubQueueId[]) => void;
   clearEpubQueue: () => void;
-  isQueuedForEpub: (id: number) => boolean;
+  isQueuedForEpub: (id: EpubQueueId) => boolean;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 const STORAGE_KEY = "piep.epub-queue.v2";
 
-function readQueue(): number[] {
+function isQueueId(id: unknown): id is EpubQueueId {
+  return (typeof id === "number" && Number.isInteger(id) && id > 0) || (typeof id === "string" && id.trim().length > 0);
+}
+
+function readQueue(): EpubQueueId[] {
   try {
     const value = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as unknown;
-    return Array.isArray(value) ? [...new Set(value.filter((id): id is number => Number.isInteger(id) && id > 0))] : [];
+    return Array.isArray(value) ? [...new Set(value.filter(isQueueId))] : [];
   } catch {
     return [];
   }
@@ -22,7 +29,7 @@ function readQueue(): number[] {
 
 // Storage is unavailable in tests and can throw on quota in a real webview;
 // losing the persisted queue must never take the whole screen down with it.
-function writeQueue(queue: number[]) {
+function writeQueue(queue: EpubQueueId[]) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(queue));
   } catch {
@@ -31,18 +38,18 @@ function writeQueue(queue: number[]) {
 }
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
-  const [epubQueue, setEpubQueue] = useState<number[]>(readQueue);
+  const [epubQueue, setEpubQueue] = useState<EpubQueueId[]>(readQueue);
   // Writing to storage inside the state updater runs twice under StrictMode and
   // makes the reducer impure, so persistence is a plain effect on the result.
   useEffect(() => { writeQueue(epubQueue); }, [epubQueue]);
-  const addToEpubQueue = useCallback((input: number | number[]) => {
+  const addToEpubQueue = useCallback((input: EpubQueueId | EpubQueueId[]) => {
     const ids = Array.isArray(input) ? input : [input];
     setEpubQueue((current) => {
       const next = [...new Set([...current, ...ids])];
       return next.length === current.length ? current : next;
     });
   }, []);
-  const removeFromEpubQueue = useCallback((input: number | number[]) => {
+  const removeFromEpubQueue = useCallback((input: EpubQueueId | EpubQueueId[]) => {
     const ids = new Set(Array.isArray(input) ? input : [input]);
     setEpubQueue((current) => {
       const next = current.filter((id) => !ids.has(id));

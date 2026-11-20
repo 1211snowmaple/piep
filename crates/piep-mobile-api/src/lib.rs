@@ -227,6 +227,186 @@ impl From<&MobileMetadata> for MobileRevision {
     }
 }
 
+/// 新しい棚の作品の一件（棚の UUID で指し、旧棚の番号を持たない）。項目は `MobileWork` に揃える。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfWork {
+    /// 作品の UUID。
+    pub id: String,
+    /// 今の保存版の UUID。版が変わると変わるので、表紙を取り直す目印になる。
+    pub snapshot_id: String,
+    pub source: String,
+    pub source_id: String,
+    pub title: String,
+    pub author_name: String,
+    /// 取得元の作者の ID。分からなければ空。
+    pub author_id: String,
+    pub content_type: String,
+    pub tags: Vec<String>,
+    pub excerpt: Option<String>,
+    pub text_length: i64,
+    pub asset_count: i64,
+    pub has_cover: bool,
+    pub current_version: i64,
+    /// 反映中の編集があるか。
+    pub edited: bool,
+    /// 反映中の編集の UUID。編集し直すと変わるので、読書位置と保存の印を分ける目印になる。
+    #[serde(default)]
+    pub edit_id: Option<String>,
+    pub favorite: bool,
+    /// この利用者のお気に入りの更新世代（十進の文字列）。付け外しの `expected` に渡す。
+    #[serde(default)]
+    pub favorite_generation: String,
+    pub series_title: Option<String>,
+    pub series_id: Option<String>,
+    /// 公開日（ISO 8601）。
+    pub source_created_at: Option<String>,
+    /// 保存日（ISO 8601）。
+    pub downloaded_at: String,
+}
+
+/// 新しい棚の作品のお気に入りを付け外しする。`request_id` は端末が作る UUID で、送り直しても
+/// 一度だけ効く。`expected` は手元の更新世代（十進の文字列）。違えば 409 で今の値が返る。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfFavoriteUpdate {
+    pub request_id: String,
+    pub expected: String,
+    pub favorite: bool,
+}
+
+/// お気に入りの今の値と更新世代（十進の文字列）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfFavorite {
+    pub favorite: bool,
+    pub generation: String,
+}
+
+/// 新しい棚の読書位置の場所。`view_kind` は `snapshot`（版の写し）か `edit`（編集）で、
+/// `view_id` はその UUID。ページは本文の区切り（pixiv の `[newpage]`、編集の改ページ）で数えた
+/// 0 からの番号、`ratio_ppm` はそのページの中のスクロールの割合（百万分率）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfReadingLocation {
+    pub view_kind: String,
+    pub view_id: String,
+    pub page: u64,
+    pub ratio_ppm: u32,
+}
+
+/// 新しい棚の作品の読書位置（認証した利用者のもの）。`location` が空なのは、消した位置か、
+/// ページで表せない位置。`mine` はこの端末が書いた位置か。`updated_at` は棚が受けた時刻
+/// （ミリ秒）。`generation` は更新世代（十進の文字列。まだ位置が無ければ "0"）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfReading {
+    pub work: String,
+    pub location: Option<MobileShelfReadingLocation>,
+    pub finished: bool,
+    pub mine: bool,
+    pub updated_at: Option<i64>,
+    pub generation: String,
+}
+
+/// 読書位置の一覧の一ページ。初めは `cursor` を空で頼み、返った `cursor` を次へ渡す。
+/// `more` なら続きがある。続きが無くなったあとも、同じ `cursor` で変わった分だけを受け取れる。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfReadingPage {
+    pub items: Vec<MobileShelfReading>,
+    pub cursor: String,
+    pub more: bool,
+}
+
+/// 新しい棚の作品の読書位置を書く。`request_id` は端末が作る UUID で、送り直しても一度だけ
+/// 効く。`expected` は手元の更新世代（十進の文字列）。違えば 409 で今の位置が返る。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfReadingUpdate {
+    pub request_id: String,
+    pub expected: String,
+    pub location: MobileShelfReadingLocation,
+    pub finished: bool,
+}
+
+/// 新しい棚の一覧の一ページ。続きは `next_cursor` を変えずに次の要求へ渡す。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfPage {
+    pub items: Vec<MobileShelfWork>,
+    pub next_cursor: Option<String>,
+    pub total_estimate: Option<i64>,
+    pub index_complete: bool,
+}
+
+/// 新しい棚の作品の保存した版の一つ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfVersion {
+    /// その版の写しの ID。以前の版を読むときはこの写しの本を引く。
+    pub snapshot_id: String,
+    pub version: i64,
+    pub text_length: Option<i64>,
+    /// 保存日（ISO 8601）。
+    pub saved_at: String,
+}
+
+/// 新しい棚の作品の画面。`work.excerpt` は取得元の説明。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfWorkDetail {
+    pub work: MobileShelfWork,
+    pub people: Vec<MobilePerson>,
+    pub series: Vec<MobileSeriesMembership>,
+    /// 古い順。
+    pub versions: Vec<MobileShelfVersion>,
+    /// 反映中の編集の基準の版。編集がなければ空。
+    pub edit_base_version: Option<i64>,
+}
+
+/// 新しい棚の検索欄の候補（旧 API の `search/suggest` の一件と同じ形）。作者・シリーズは
+/// `source`・`source_key` が取得元と ID、題は `value` が取得元の ID で `source_key` が棚の
+/// 作品の ID、タグは `value` がタグ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileSearchSuggestion {
+    pub kind: String,
+    pub label: String,
+    pub value: String,
+    pub count: Option<i64>,
+    pub exact_match: bool,
+    pub source: Option<String>,
+    pub source_key: Option<String>,
+}
+
+/// 新しい棚の検索欄の候補の一覧。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileSearchSuggestions {
+    pub items: Vec<MobileSearchSuggestion>,
+}
+
+/// 新しい棚のコレクションの一回。棚に無い（未保存の）回は `work` が空で、入れた時の題と作者。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfCollectionMember {
+    pub title: String,
+    pub author_name: String,
+    pub position: i64,
+    pub work: Option<MobileShelfWork>,
+}
+
+/// 新しい棚のコレクションの画面。`id` は棚の UUID、表紙は `cover_mode` の枠ごとに
+/// `/collections/{id}/cover/{single|file|tile-N}` から引く。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileShelfCollectionDetail {
+    #[serde(flatten)]
+    pub summary: MobileCollection,
+    pub members: Vec<MobileShelfCollectionMember>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

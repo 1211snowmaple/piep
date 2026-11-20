@@ -11,6 +11,7 @@ import {
   type UpdateScheduleSettings,
 } from "@/features/updates/updateSchedule";
 import type { WatchGroup } from "@/types/library";
+import { watchGroupMatches, watchGroupSelection } from "@/lib/watchIdentity";
 
 /**
  * When the check runs by itself, and what it does with what it finds.
@@ -57,7 +58,7 @@ export function UpdateScheduleCard({ onChanged, groups }: { onChanged?: () => vo
       });
   };
 
-  const scopeGroup = settings.groupId === null ? null : groups?.find((group) => group.id === settings.groupId) ?? null;
+  const scopeGroup = settings.groupId === null ? null : groups?.find((group) => watchGroupMatches(group, settings.groupId)) ?? null;
   // グループが読めるまでは、範囲の名前を決められない。
   const summaryReady = loaded && (settings.groupId === null || groups !== undefined);
   const scopeOptions = [
@@ -102,10 +103,10 @@ export function UpdateScheduleCard({ onChanged, groups }: { onChanged?: () => vo
           label="確認する範囲"
           description="監視グループを選ぶと、その中の作者・シリーズだけを確認します"
           data={scopeOptions}
-          value={settings.groupId === null ? "all" : String(settings.groupId)}
+          value={settings.groupId === null ? "all" : String(scopeGroup?.id ?? settings.groupId)}
           allowDeselect={false}
           disabled={!loaded || saving}
-          onChange={(value) => apply({ groupId: !value || value === "all" ? null : Number(value) })}
+          onChange={(value) => apply({ groupId: watchGroupSelection(value, groups ?? []) })}
         />
 
         <Box>

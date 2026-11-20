@@ -43,7 +43,8 @@ export function compareRevisionMetadata(before: RevisionMetadata, after: Revisio
   const oldAssets = new Map(before.assets.map((asset) => [asset.key, asset]));
   const newAssets = new Map(after.assets.map((asset) => [asset.key, asset]));
   const assets: AssetChange[] = [];
-  for (const key of new Set([...oldAssets.keys(), ...newAssets.keys()])) {
+  if (before.assetsKnown === false || after.assetsKnown === false) unknown.push("画像・添付");
+  else for (const key of new Set([...oldAssets.keys(), ...newAssets.keys()])) {
     const left = oldAssets.get(key), right = newAssets.get(key);
     const kind = (right ?? left)!.kind;
     if (!left) assets.push({ key, kind, change: "added", after: right });

@@ -8,8 +8,8 @@ use super::library::Library;
 use super::standalone::run_listener;
 use super::store::{DeviceSummary, FavoriteChange, Role, ServerStore};
 use super::sync_send::{
-    admin_delete, admin_get, admin_get_if_present, admin_post, pair_admin, prepare_snapshot,
-    send_prepared, RemoteServer, SendHandle, SendProgress, CANCELED,
+    admin_delete, admin_get, admin_get_if_present, admin_post, admin_put, pair_admin,
+    prepare_snapshot, send_prepared, RemoteServer, SendHandle, SendProgress, CANCELED,
 };
 use super::{pairing_payload, tls, DEFAULT_PORT};
 use crate::AppState;
@@ -34,6 +34,8 @@ const AUTO_SEND_RETRY: Duration = Duration::from_secs(15 * 60);
 const FAVORITES_POLL: Duration = Duration::from_secs(60);
 /// 一度に受け取る携帯のお気に入りの数。
 const FAVORITES_PAGE: usize = 500;
+/// サーバーの棚の読書位置を一度に読む数（サーバーの上限）。
+const SHELF_READING_PAGE: usize = 500;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
@@ -68,6 +70,50 @@ pub struct DesktopServerSettings {
     pub last_send: LastSend,
     /// 単独サーバーから、携帯のお気に入りをどこまで取り込んだか。
     pub favorites_cursor: i64,
+    /// 単独サーバーの新しい棚から、携帯の読書位置をどこまで取り込んだか（サーバーの印）。
+    pub shelf_reading_cursor: String,
+    /// 単独サーバーの新しい棚から、携帯のお気に入りをどこまで取り込んだか（サーバーの印）。
+    pub shelf_favorites_cursor: String,
+    /// サーバーが配っている棚の写しの、変更の記録の最後の番号（0 は分からない）。これより後に
+    /// この棚で変えた作品だけを、携帯の変更との食い違いとして扱う。
+    pub shelf_shipped_sequence: i64,
+    /// 送ったがまだ配られていない写しの番号（0 は無い）。サーバーが別の写しを配り始めたら
+    /// （印の同期 epoch が `shelf_pending_from` から変わったら）`shelf_shipped_sequence` にする。
+    pub shelf_pending_sequence: i64,
+    /// 送ったときに配っていた写しの同期 epoch（配っていなければ空）。
+    pub shelf_pending_from: String,
+}
+
+/// サーバーの棚のお気に入りの一ページ。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShelfFavoritesPage {
+    library_id: crate::library::LibraryId,
+    items: Vec<ShelfFavoriteItem>,
+    cursor: String,
+    more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShelfFavoriteItem {
+    work: crate::library::LibraryId,
+    favorite: bool,
+}
+
+/// サーバーの棚の読書位置の一ページ。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShelfReadingPage {
+    library_id: crate::library::LibraryId,
+    items: Vec<ShelfReadingItem>,
+    cursor: String,
+    more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ShelfReadingItem {
+    work: crate::library::LibraryId,
+    position: crate::library::ReadingPosition,
 }
 
 struct ActiveEmbedded {
@@ -191,7 +237,11 @@ fn save_settings(path: &Path, settings: &DesktopServerSettings) -> Result<(), St
 }
 
 mod credential {
-    //! 管理者の鍵は Windows の資格情報マネージャーに置く。
+    //! 管理者の鍵は Windows の資格情報マネージャーに、サーバーの URL ごとに置く。
+    //!
+    //! 前の版は URL によらず一つの名前に置いていた。その名前の鍵は前の版が今もつないでいる
+    //! サーバーのものなので、書き換えも消しもしない。URL ごとの鍵が無いとき（前の版がつないだ
+    //! サーバーのまま）だけ読む。
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Security::Credentials::{
         CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
@@ -199,16 +249,22 @@ mod credential {
     };
 
     const NOT_FOUND_HRESULT: i32 = 0x8007_0490_u32 as i32;
+    const LEGACY: &str = "io.github.u1211snowmaple.piep/server-admin-token";
 
-    fn target() -> Vec<u16> {
-        "io.github.u1211snowmaple.piep/server-admin-token"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect()
+    /// サーバーの URL ごとの名前（大文字・小文字と末尾の `/` は区別しない）。
+    pub(super) fn name(url: &str) -> String {
+        format!(
+            "{LEGACY}/{}",
+            url.trim().trim_end_matches('/').to_ascii_lowercase()
+        )
     }
 
-    pub fn store(token: &str) -> Result<(), String> {
-        let mut target = target();
+    fn wide(name: &str) -> Vec<u16> {
+        name.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    pub fn store(url: &str, token: &str) -> Result<(), String> {
+        let mut target = wide(&name(url));
         let mut blob = token.as_bytes().to_vec();
         let credential = CREDENTIALW {
             Type: CRED_TYPE_GENERIC,
@@ -222,8 +278,15 @@ mod credential {
             .map_err(|_| "サーバーの鍵を資格情報マネージャーに保存できません".to_string())
     }
 
-    pub fn load() -> Result<Option<String>, String> {
-        let target = target();
+    pub fn load(url: &str) -> Result<Option<String>, String> {
+        match read(&name(url))? {
+            Some(token) => Ok(Some(token)),
+            None => read(LEGACY),
+        }
+    }
+
+    fn read(name: &str) -> Result<Option<String>, String> {
+        let target = wide(name);
         let mut pointer: *mut CREDENTIALW = std::ptr::null_mut();
         if let Err(error) = unsafe {
             CredReadW(
@@ -253,8 +316,9 @@ mod credential {
             .map_err(|_| "保存されたサーバーの鍵を読み取れません".to_string())
     }
 
-    pub fn delete() -> Result<(), String> {
-        let target = target();
+    /// この URL の鍵を消す。前の版の一つの名前の鍵は残す（前の版が使っている）。
+    pub fn delete(url: &str) -> Result<(), String> {
+        let target = wide(&name(url));
         match unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None) } {
             Ok(()) => Ok(()),
             Err(error) if error.code().0 == NOT_FOUND_HRESULT => Ok(()),
@@ -452,8 +516,8 @@ impl DesktopServer {
     /// 携帯の登録文字列。単独サーバーにつないでいればそちらで、無ければ内蔵サーバーで発行する。
     pub async fn create_reader_pairing(&self) -> Result<PairingDetails, String> {
         if let Some(remote) = self.settings().remote {
-            let token =
-                credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+            let token = credential::load(&remote.url)?
+                .ok_or("サーバーの鍵がありません。登録し直してください")?;
             let body = admin_post(
                 &remote,
                 &token,
@@ -502,7 +566,8 @@ impl DesktopServer {
             .settings()
             .remote
             .ok_or("単独サーバーにつないでいません")?;
-        let token = credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+        let token = credential::load(&remote.url)?
+            .ok_or("サーバーの鍵がありません。登録し直してください")?;
         let body = admin_get(&remote, &token, "devices").await?;
         Ok(body.as_array().cloned().unwrap_or_default())
     }
@@ -512,7 +577,8 @@ impl DesktopServer {
             .settings()
             .remote
             .ok_or("単独サーバーにつないでいません")?;
-        let token = credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+        let token = credential::load(&remote.url)?
+            .ok_or("サーバーの鍵がありません。登録し直してください")?;
         admin_get(&remote, &token, "status").await
     }
 
@@ -538,7 +604,8 @@ impl DesktopServer {
             .settings()
             .remote
             .ok_or("単独サーバーにつないでいません")?;
-        let token = credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+        let token = credential::load(&remote.url)?
+            .ok_or("サーバーの鍵がありません。登録し直してください")?;
         admin_post(&remote, &token, "update/check", &serde_json::json!({})).await
     }
 
@@ -548,7 +615,8 @@ impl DesktopServer {
             .settings()
             .remote
             .ok_or("単独サーバーにつないでいません")?;
-        let token = credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+        let token = credential::load(&remote.url)?
+            .ok_or("サーバーの鍵がありません。登録し直してください")?;
         let ticket = admin_post(&remote, &token, "tickets", &serde_json::json!({})).await?;
         let path = ticket["path"]
             .as_str()
@@ -561,15 +629,40 @@ impl DesktopServer {
             .settings()
             .remote
             .ok_or("単独サーバーにつないでいません")?;
-        let token = credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+        let token = credential::load(&remote.url)?
+            .ok_or("サーバーの鍵がありません。登録し直してください")?;
         admin_post(&remote, &token, "update", &serde_json::json!({})).await?;
         Ok(())
     }
 
+    /// 単独サーバーの携帯に、新しい棚を読む許可を付け外しする。
+    pub async fn set_remote_shelf_reader(&self, device_id: &str, read: bool) -> Result<(), String> {
+        if device_id.is_empty()
+            || !device_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        {
+            return Err("端末を指定し直してください".into());
+        }
+        let remote = self
+            .settings()
+            .remote
+            .ok_or("単独サーバーにつないでいません")?;
+        let token = credential::load(&remote.url)?
+            .ok_or("サーバーの鍵がありません。登録し直してください")?;
+        admin_put(
+            &remote,
+            &token,
+            &format!("devices/{device_id}/shelf"),
+            &serde_json::json!({ "read": read }),
+        )
+        .await
+    }
+
     pub async fn revoke_device(&self, device_id: &str) -> Result<(), String> {
         if let Some(remote) = self.settings().remote {
-            let token =
-                credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+            let token = credential::load(&remote.url)?
+                .ok_or("サーバーの鍵がありません。登録し直してください")?;
             return admin_delete(&remote, &token, &format!("devices/{device_id}")).await;
         }
         if self.store.revoke_device(device_id)? {
@@ -593,24 +686,36 @@ impl DesktopServer {
             fingerprint: parsed.fingerprint,
         };
         let token = pair_admin(&remote, &parsed.secret, device_name).await?;
-        credential::store(&token)?;
+        credential::store(&remote.url, &token)?;
         self.change_settings(|settings| {
             settings.remote = Some(remote);
             settings.last_send = LastSend::default();
             // 別のサーバーの記録の番号は、このサーバーでは意味を持たない。
             settings.favorites_cursor = 0;
+            settings.shelf_reading_cursor.clear();
+            settings.shelf_favorites_cursor.clear();
+            settings.shelf_shipped_sequence = 0;
+            settings.shelf_pending_sequence = 0;
+            settings.shelf_pending_from.clear();
         })
     }
 
     pub async fn disconnect_remote(&self) -> Result<(), String> {
         self.send.cancel.store(true, Ordering::Relaxed);
         let _running = self.send_lock.lock().await;
-        credential::delete()?;
+        if let Some(remote) = self.settings().remote {
+            credential::delete(&remote.url)?;
+        }
         self.change_settings(|settings| {
             settings.remote = None;
             settings.auto_send = false;
             settings.last_send = LastSend::default();
             settings.favorites_cursor = 0;
+            settings.shelf_reading_cursor.clear();
+            settings.shelf_favorites_cursor.clear();
+            settings.shelf_shipped_sequence = 0;
+            settings.shelf_pending_sequence = 0;
+            settings.shelf_pending_from.clear();
         })
     }
 
@@ -639,11 +744,19 @@ impl DesktopServer {
         let Some(remote) = self.settings().remote else {
             return Ok(0);
         };
-        let Some(token) = credential::load()? else {
+        let Some(token) = credential::load(&remote.url)? else {
             return Ok(0);
         };
+        // 新しい棚を配っているサーバーなら、携帯が棚に書いたお気に入りを棚から読む。
+        let (mut applied, from_shelf) = match self.pull_shelf_favorites_locked(state).await {
+            Ok(Some(applied)) => (applied, true),
+            Ok(None) => (0, false),
+            Err(error) => {
+                log::warn!("携帯のお気に入りを棚から取り込めません: {error}");
+                (0, false)
+            }
+        };
         let mut since = self.settings().favorites_cursor;
-        let mut applied = 0;
         loop {
             let path = format!("favorites?since={since}&limit={FAVORITES_PAGE}");
             // 古いサーバーには口が無い。携帯からも変えられないので、取り込むものも無い。
@@ -659,15 +772,26 @@ impl DesktopServer {
             let full = items.len() >= FAVORITES_PAGE;
             let gate = state.library_gate.clone().write_owned().await;
             let library = Arc::clone(state);
+            // 正本に切り替えた棚にも当てる（棚から読めたときは棚の値を使うので当てない）。
+            // 旧棚は今までどおり書く。
+            let shelf = state.library_v2.writable().ok().filter(|_| !from_shelf);
             applied += tokio::task::spawn_blocking(move || {
                 let _gate = gate;
                 let mut applied = 0;
                 for item in &items {
-                    if library
+                    let mut changed = library
                         .db
                         .set_favorite_by_source(&item.source, &item.source_id, item.favorite)?
-                        .is_some()
-                    {
+                        .is_some();
+                    if let Some(shelf) = &shelf {
+                        changed |= crate::commands::library_v2::follow_remote_favorite(
+                            shelf,
+                            &item.source,
+                            &item.source_id,
+                            item.favorite,
+                        )?;
+                    }
+                    if changed {
                         applied += 1;
                     }
                 }
@@ -688,10 +812,166 @@ impl DesktopServer {
                 break;
             }
         }
-        if applied > 0 {
+        // 携帯が新しい棚に書いた読書位置も、同じ機会に取り込む。取り込めなくてもお気に入りは止めない。
+        let read = match self.pull_shelf_reading_locked(state).await {
+            Ok(read) => read,
+            Err(error) => {
+                log::warn!("携帯の読書位置を取り込めません: {error}");
+                0
+            }
+        };
+        if applied > 0 || read > 0 {
+            state.library_v2.forget_derived();
             self.notify_favorites();
         }
         Ok(applied)
+    }
+
+    /// サーバーの印 `cursor` の写しに当てはまる、送った写しの番号。送った写しが配られ始めて
+    /// いれば（印の同期 epoch が送ったときと違えば）、それを配っている写しの番号にする。
+    fn shipped_for(&self, cursor: &str) -> Result<i64, String> {
+        let epoch = cursor.split('.').next().unwrap_or_default();
+        let settings = self.settings();
+        if settings.shelf_pending_sequence > 0
+            && !epoch.is_empty()
+            && epoch != settings.shelf_pending_from
+        {
+            let shipped = settings.shelf_pending_sequence;
+            self.change_settings(|settings| {
+                settings.shelf_shipped_sequence = shipped;
+                settings.shelf_pending_sequence = 0;
+                settings.shelf_pending_from.clear();
+            })?;
+            return Ok(shipped);
+        }
+        Ok(settings.shelf_shipped_sequence)
+    }
+
+    /// 単独サーバーの新しい棚から、携帯が書いた読書位置を正本に切り替えた棚へ取り込む。
+    ///
+    /// サーバーの棚は配る写しなので、写しを入れ替える前に取り込んでおけば携帯の位置は消えない。
+    /// 一覧は初めに全部、そのあとは変わった分だけ。どちらの位置が新しいかは書いた時刻で決め、
+    /// 同じ位置を何度読んでも二度は書かない。印が別の写しのものならサーバーが初めから返す。
+    async fn pull_shelf_reading_locked(&self, state: &Arc<AppState>) -> Result<usize, String> {
+        let Ok(library) = state.library_v2.writable() else {
+            return Ok(0);
+        };
+        let Some(remote) = self.settings().remote else {
+            return Ok(0);
+        };
+        let Some(token) = credential::load(&remote.url)? else {
+            return Ok(0);
+        };
+        // 印はサーバーが作る（数字・英字・`-`・`.` だけ）。それ以外なら初めから読み直す。
+        let mut cursor = self.settings().shelf_reading_cursor;
+        if !cursor
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+        {
+            cursor.clear();
+        }
+        let mut applied = 0;
+        loop {
+            let path = format!("shelf/reading?cursor={cursor}&limit={SHELF_READING_PAGE}");
+            // 新しい棚を配っていないサーバーには口が無い。携帯も新しい棚へ書いていない。
+            let Some(page) = admin_get_if_present(&remote, &token, &path).await? else {
+                break;
+            };
+            let page: ShelfReadingPage = serde_json::from_value(page)
+                .map_err(|_| "サーバーの棚の読書位置を読み取れません".to_string())?;
+            if page.library_id != library.id {
+                return Err("サーバーの棚は、この棚の写しではありません".into());
+            }
+            let shelf = Arc::clone(&library);
+            let items = page.items;
+            let shipped = self.shipped_for(&page.cursor)?;
+            applied += tokio::task::spawn_blocking(move || {
+                let mut applied = 0;
+                for item in &items {
+                    if crate::commands::library_v2::adopt_remote_reading(
+                        &shelf,
+                        item.work,
+                        &item.position,
+                        shipped,
+                    )? {
+                        applied += 1;
+                    }
+                }
+                Ok::<_, String>(applied)
+            })
+            .await
+            .map_err(|error| format!("読書位置を書けません: {error}"))??;
+            let next = page.cursor;
+            self.change_settings(|settings| settings.shelf_reading_cursor = next.clone())?;
+            if !page.more || next == cursor {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(applied)
+    }
+
+    /// 単独サーバーの新しい棚から、携帯が付け外ししたお気に入りを正本に切り替えた棚へ取り込む。
+    /// 前に送ってからこの棚でも変えた作品はこの棚の値を残す。新しい棚を配っていないサーバー
+    /// （口が無い）や、切り替える前の棚なら `None`。
+    async fn pull_shelf_favorites_locked(
+        &self,
+        state: &Arc<AppState>,
+    ) -> Result<Option<usize>, String> {
+        let Ok(library) = state.library_v2.writable() else {
+            return Ok(None);
+        };
+        let Some(remote) = self.settings().remote else {
+            return Ok(None);
+        };
+        let Some(token) = credential::load(&remote.url)? else {
+            return Ok(None);
+        };
+        let mut cursor = self.settings().shelf_favorites_cursor;
+        if !cursor
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
+        {
+            cursor.clear();
+        }
+        let mut applied = 0;
+        loop {
+            let path = format!("shelf/favorites?cursor={cursor}&limit={SHELF_READING_PAGE}");
+            let Some(page) = admin_get_if_present(&remote, &token, &path).await? else {
+                return Ok(None);
+            };
+            let page: ShelfFavoritesPage = serde_json::from_value(page)
+                .map_err(|_| "サーバーの棚のお気に入りを読み取れません".to_string())?;
+            if page.library_id != library.id {
+                return Err("サーバーの棚は、この棚の写しではありません".into());
+            }
+            let shelf = Arc::clone(&library);
+            let items = page.items;
+            let shipped = self.shipped_for(&page.cursor)?;
+            applied += tokio::task::spawn_blocking(move || {
+                let mut applied = 0;
+                for item in &items {
+                    if crate::commands::library_v2::adopt_remote_favorite(
+                        &shelf,
+                        item.work,
+                        item.favorite,
+                        shipped,
+                    )? {
+                        applied += 1;
+                    }
+                }
+                Ok::<_, String>(applied)
+            })
+            .await
+            .map_err(|error| format!("お気に入りを書けません: {error}"))??;
+            let next = page.cursor;
+            self.change_settings(|settings| settings.shelf_favorites_cursor = next.clone())?;
+            if !page.more || next == cursor {
+                break;
+            }
+            cursor = next;
+        }
+        Ok(Some(applied))
     }
 
     /// 送信を 1 回行う。すでに送っていれば何もしない。
@@ -703,13 +983,16 @@ impl DesktopServer {
         if let Err(error) = self.pull_favorites_locked(&state).await {
             log::warn!("携帯のお気に入りを取り込めません: {error}");
         }
+        // 切り替えた棚があれば、旧棚ではなくその棚の写しを送る。
+        let shelf = state.library_v2.writable().ok();
         // 写しを作る前に読む。この間に変わっても、次回もう一度送るだけで取りこぼさない。
-        let generation = state.db.library_generation().ok();
+        let generation = change_generation(&state);
         let remote = self
             .settings()
             .remote
             .ok_or("単独サーバーにつないでいません")?;
-        let token = credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+        let token = credential::load(&remote.url)?
+            .ok_or("サーバーの鍵がありません。登録し直してください")?;
         self.send.cancel.store(false, Ordering::Relaxed);
         if let Ok(mut progress) = self.send.progress.lock() {
             *progress = SendProgress {
@@ -718,31 +1001,59 @@ impl DesktopServer {
                 ..Default::default()
             };
         }
-        let snapshot = self.dir.join("outgoing").join("piep-snapshot.db");
-        let result = async {
-            let (report, files, skipped) =
-                prepare_snapshot(&state, &self.app_data, &snapshot).await?;
-            if let Ok(mut progress) = self.send.progress.lock() {
-                progress.outside_paths = report.outside;
-                progress.skipped_names = skipped;
+        let finished_at = Some(chrono::Utc::now().to_rfc3339());
+        let result = if let Some(library) = shelf {
+            let outgoing = self.dir.join("outgoing").join("shelf");
+            // 送る前に読んだ印の写しが、送ったときに配っていた写し。
+            let from = self.settings().shelf_reading_cursor;
+            let from = from.split('.').next().unwrap_or_default().to_string();
+            match super::shelf_send::send_shelf(&remote, &token, library, &outgoing, &self.send)
+                .await
+            {
+                Ok(sent) => self
+                    .change_settings(|settings| {
+                        settings.shelf_pending_sequence = sent.shipped_sequence;
+                        settings.shelf_pending_from = from.clone();
+                    })
+                    .map(|()| LastSend {
+                        finished_at: finished_at.clone(),
+                        works: sent.works.map(|works| works as i64),
+                        files_added: Some(sent.sent as i64),
+                        ..Default::default()
+                    }),
+                Err(error) => Err(error),
             }
-            send_prepared(&remote, &token, &snapshot, files, &self.send).await
-        }
-        .await;
-        let _ = fs::remove_file(&snapshot);
+        } else {
+            let snapshot = self.dir.join("outgoing").join("piep-snapshot.db");
+            let result = async {
+                let (report, files, skipped) =
+                    prepare_snapshot(&state, &self.app_data, &snapshot).await?;
+                if let Ok(mut progress) = self.send.progress.lock() {
+                    progress.outside_paths = report.outside;
+                    progress.skipped_names = skipped;
+                }
+                send_prepared(&remote, &token, &snapshot, files, &self.send).await
+            }
+            .await;
+            let _ = fs::remove_file(&snapshot);
+            result.map(|outcome| LastSend {
+                finished_at: finished_at.clone(),
+                generation: Some(outcome.generation),
+                works: Some(outcome.works),
+                files_added: Some(outcome.files_added),
+                files_removed: Some(outcome.files_removed),
+                missing_referenced: Some(outcome.missing_referenced),
+                unchanged: outcome.unchanged,
+                error: None,
+            })
+        };
         let finished_at = Some(chrono::Utc::now().to_rfc3339());
         let (phase, record) = match result {
-            Ok(outcome) => (
+            Ok(record) => (
                 "done",
                 LastSend {
                     finished_at,
-                    generation: Some(outcome.generation),
-                    works: Some(outcome.works),
-                    files_added: Some(outcome.files_added),
-                    files_removed: Some(outcome.files_removed),
-                    missing_referenced: Some(outcome.missing_referenced),
-                    unchanged: outcome.unchanged,
-                    error: None,
+                    ..record
                 },
             ),
             Err(error) if error == CANCELED => (
@@ -817,7 +1128,7 @@ impl DesktopServer {
                     }
                 }
                 if server.settings().auto_send && server.settings().remote.is_some() {
-                    let generation = state.db.library_generation().ok();
+                    let generation = change_generation(&state);
                     if generation != seen {
                         seen = generation;
                         changed_at = Some(Instant::now());
@@ -842,6 +1153,14 @@ impl DesktopServer {
                 tokio::time::sleep(AUTO_SEND_POLL).await;
             }
         });
+    }
+}
+
+/// 送るべき変更があったかを見る印。切り替えた棚があればその棚の、無ければ旧棚の印。
+fn change_generation(state: &AppState) -> Option<i64> {
+    match state.library_v2.writable() {
+        Ok(library) => library.change_marker().ok(),
+        Err(_) => state.db.library_generation().ok(),
     }
 }
 
@@ -876,6 +1195,49 @@ pub fn list_local_interfaces() -> Result<Vec<LocalInterface>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_server_keeps_its_own_key_name() {
+        assert_eq!(
+            credential::name("https://Maple.example:8443/"),
+            credential::name("https://maple.example:8443")
+        );
+        assert_ne!(
+            credential::name("https://maple.example:8443"),
+            credential::name("https://127.0.0.1:8443")
+        );
+        assert!(credential::name("https://a")
+            .starts_with("io.github.u1211snowmaple.piep/server-admin-token/"));
+    }
+
+    #[test]
+    fn the_shipped_number_applies_once_the_server_serves_another_copy() {
+        let dir = std::env::temp_dir().join(format!("piep-desktop-{}", uuid::Uuid::now_v7()));
+        let server = DesktopServer::new(&dir).unwrap();
+        server
+            .change_settings(|settings| {
+                settings.shelf_shipped_sequence = 5;
+                settings.shelf_pending_sequence = 9;
+                settings.shelf_pending_from = "old".into();
+            })
+            .unwrap();
+        // 送ったときと同じ写しを配っている間は、前の番号のまま。
+        assert_eq!(server.shipped_for("old.s.3").unwrap(), 5);
+        assert_eq!(server.shipped_for("").unwrap(), 5);
+        // 別の写しを配り始めたら、送った番号にする。
+        assert_eq!(server.shipped_for("new.f.0").unwrap(), 9);
+        let settings = server.settings();
+        assert_eq!(
+            (
+                settings.shelf_shipped_sequence,
+                settings.shelf_pending_sequence
+            ),
+            (9, 0)
+        );
+        assert_eq!(server.shipped_for("newer.s.1").unwrap(), 9);
+        drop(server);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_busy_attempt_does_not_count_as_sent() {

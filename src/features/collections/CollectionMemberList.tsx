@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ActionIcon, Badge, Box, Button, Card, Collapse, Group, Text, Tooltip } from "@mantine/core";
 import { WorkCard } from "@/components/WorkCard";
 import { WorkCover } from "@/components/WorkCover";
+import { Locked } from "@/components/Locked";
 import { formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { ProviderMark } from "@/lib/providers";
@@ -18,8 +19,9 @@ interface MemberListProps {
   view: MemberView;
   busy: boolean;
   selectionMode: boolean;
-  selected: ReadonlySet<number>;
-  onSelect: (downloadId: number, selected: boolean) => void;
+  /** 選んだ回。鍵は `取得元:作品の番号`（旧棚・新しい棚で同じ）。 */
+  selected: ReadonlySet<string>;
+  onSelect: (memberKey: string, selected: boolean) => void;
   onMove: (index: number, delta: number) => void | boolean | Promise<boolean>;
   onDropAt: (from: number, to: number) => void | boolean | Promise<boolean>;
   onRemove: (member: WorkCollectionMember) => void;
@@ -31,6 +33,8 @@ interface MemberListProps {
    * 先頭を動かしたときに1ページ目の先頭が動く。
    */
   page?: { start: number; end: number };
+  /** 並べ替え・外すが使えない理由（新しい棚）。あれば同じ場所に押せない形で置く。 */
+  locked?: string | null;
 }
 
 /**
@@ -57,6 +61,7 @@ export function CollectionMemberList({
   onDropAt,
   onRemove,
   page,
+  locked = null,
 }: MemberListProps) {
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const [dragOver, setDragOver] = useState<number | null>(null);
@@ -242,16 +247,29 @@ export function CollectionMemberList({
               {/* キーボードで並べ替えられる道を必ず残す。掴んで運ぶだけには
                   しない。 */}
               <Group gap={0} className="collection-member__nudge">
-                <Tooltip label="一つ前へ">
-                  <ActionIcon variant="subtle" size="sm" aria-label={`${member.title}を一つ前へ`} disabled={index === 0 || busy || selectionMode} onClick={() => moveWithKeyboard(index, -1)}>
-                    <Icons.up size={IconSize.menu} />
-                  </ActionIcon>
-                </Tooltip>
-                <Tooltip label="一つ後へ">
-                  <ActionIcon variant="subtle" size="sm" aria-label={`${member.title}を一つ後へ`} disabled={index === members.length - 1 || busy || selectionMode} onClick={() => moveWithKeyboard(index, 1)}>
-                    <Icons.down size={IconSize.menu} />
-                  </ActionIcon>
-                </Tooltip>
+                {locked ? (
+                  <>
+                    <Locked reason={locked} label={`${member.title}を一つ前へ`}>
+                      <ActionIcon variant="subtle" size="sm"><Icons.up size={IconSize.menu} /></ActionIcon>
+                    </Locked>
+                    <Locked reason={locked} label={`${member.title}を一つ後へ`}>
+                      <ActionIcon variant="subtle" size="sm"><Icons.down size={IconSize.menu} /></ActionIcon>
+                    </Locked>
+                  </>
+                ) : (
+                  <>
+                    <Tooltip label="一つ前へ">
+                      <ActionIcon variant="subtle" size="sm" aria-label={`${member.title}を一つ前へ`} disabled={index === 0 || busy || selectionMode} onClick={() => moveWithKeyboard(index, -1)}>
+                        <Icons.up size={IconSize.menu} />
+                      </ActionIcon>
+                    </Tooltip>
+                    <Tooltip label="一つ後へ">
+                      <ActionIcon variant="subtle" size="sm" aria-label={`${member.title}を一つ後へ`} disabled={index === members.length - 1 || busy || selectionMode} onClick={() => moveWithKeyboard(index, 1)}>
+                        <Icons.down size={IconSize.menu} />
+                      </ActionIcon>
+                    </Tooltip>
+                  </>
+                )}
               </Group>
             </div>
           )}
@@ -262,8 +280,8 @@ export function CollectionMemberList({
                 work={member.work}
                 compact={view === "compact"}
                 selectionMode={selectionMode}
-                selected={member.downloadId ? selected.has(member.downloadId) : false}
-                onSelect={onSelect}
+                selected={selected.has(collectionMemberKey(member))}
+                onToggleSelect={(next) => onSelect(collectionMemberKey(member), next)}
               />
             ) : (
               <MissingMemberCard member={member} />
@@ -279,7 +297,14 @@ export function CollectionMemberList({
             {member.editions.length > 0 && <EditionFold member={member} />}
           </div>
 
-          {!selectionMode && (
+          {!selectionMode && locked && (
+            <Locked reason={locked} label={`${member.title}をコレクションから外す`}>
+              <ActionIcon className="collection-member__remove" color="red" variant="subtle">
+                <Icons.delete size={IconSize.menu} />
+              </ActionIcon>
+            </Locked>
+          )}
+          {!selectionMode && !locked && (
             <Tooltip label="コレクションから外す">
               <ActionIcon
                 className="collection-member__remove"
@@ -383,4 +408,9 @@ function EditionFold({ member }: { member: WorkCollectionMember }) {
       </Collapse>
     </div>
   );
+}
+
+/** コレクションの回を選ぶときの鍵（旧棚・新しい棚で同じ）。 */
+export function collectionMemberKey(member: { source: string; sourceId: string }): string {
+  return `${member.source}:${member.sourceId}`;
 }

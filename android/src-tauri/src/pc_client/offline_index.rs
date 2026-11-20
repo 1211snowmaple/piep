@@ -19,7 +19,7 @@ const SNIPPET_AFTER: usize = 56;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextHit {
-    work_id: i64,
+    work_id: OfflineKey,
     page: i64,
     snippet: String,
     /// 語を含むページの数。
@@ -87,7 +87,7 @@ fn decode_entities(text: &str) -> String {
 }
 
 /// 保存版の本文を索引に入れ直す。呼ぶ側が `state.lock` を持ち、保存版の切替と競合させない。
-pub(super) fn index_work(state: &OfflineState, work_id: i64) -> Result<(), ClientError> {
+pub(super) fn index_work(state: &OfflineState, work_id: &OfflineKey) -> Result<(), ClientError> {
     let (manifest, snapshot) = read_manifest(state, work_id)?;
     let generation = snapshot_generation(&snapshot)?;
     let mut texts = Vec::with_capacity(manifest.summary.page_count);
@@ -96,28 +96,29 @@ pub(super) fn index_work(state: &OfflineState, work_id: i64) -> Result<(), Clien
             &read_offline_page(state, work_id, page)?.page.html,
         ));
     }
+    let work_key = work_id.dir_name();
     state.db.transaction(|tx| {
-        tx.execute("DELETE FROM offline_text WHERE work_id = ?1", [work_id])
+        tx.execute("DELETE FROM offline_text WHERE work_key = ?1", [&work_key])
             .map_err(records_error)?;
         for (page, text) in texts.iter().enumerate() {
             if text.is_empty() {
                 continue;
             }
             tx.execute(
-                "INSERT INTO offline_text(text, work_id, page) VALUES(?1, ?2, ?3)",
-                rusqlite::params![text, work_id, page as i64],
+                "INSERT INTO offline_text(text, work_key, page) VALUES(?1, ?2, ?3)",
+                rusqlite::params![text, work_key, page as i64],
             )
             .map_err(records_error)?;
         }
         tx.execute(
-            "INSERT INTO offline_catalog(work_id, generation, source, source_id) VALUES(?1, ?2, ?3, ?4)
-             ON CONFLICT(work_id) DO UPDATE SET generation=excluded.generation,
+            "INSERT INTO offline_catalog(work_key, generation, source, source_id) VALUES(?1, ?2, ?3, ?4)
+             ON CONFLICT(work_key) DO UPDATE SET generation=excluded.generation,
                  source=excluded.source, source_id=excluded.source_id",
             rusqlite::params![
-                work_id,
+                work_key,
                 generation,
-                manifest.summary.work.source,
-                manifest.summary.work.source_id
+                manifest.summary.work.source(),
+                manifest.summary.work.source_id()
             ],
         )
         .map_err(records_error)?;
@@ -125,12 +126,16 @@ pub(super) fn index_work(state: &OfflineState, work_id: i64) -> Result<(), Clien
     })
 }
 
-pub(super) fn remove_work(state: &OfflineState, work_id: i64) -> Result<(), ClientError> {
+pub(super) fn remove_work(state: &OfflineState, work_id: &OfflineKey) -> Result<(), ClientError> {
+    let work_key = work_id.dir_name();
     state.db.transaction(|tx| {
-        tx.execute("DELETE FROM offline_text WHERE work_id = ?1", [work_id])
+        tx.execute("DELETE FROM offline_text WHERE work_key = ?1", [&work_key])
             .map_err(records_error)?;
-        tx.execute("DELETE FROM offline_catalog WHERE work_id = ?1", [work_id])
-            .map_err(records_error)?;
+        tx.execute(
+            "DELETE FROM offline_catalog WHERE work_key = ?1",
+            [&work_key],
+        )
+        .map_err(records_error)?;
         Ok(())
     })
 }
@@ -138,9 +143,9 @@ pub(super) fn remove_work(state: &OfflineState, work_id: i64) -> Result<(), Clie
 /// 索引を保存版にそろえる。読めない保存版は索引から外し、一覧の「問題」に任せる。
 pub(super) fn reconcile(state: &OfflineState) -> Result<(), ClientError> {
     let (works, _) = scan_works(state)?;
-    let indexed: BTreeMap<i64, String> = state.db.transaction(|tx| {
+    let indexed: BTreeMap<String, String> = state.db.transaction(|tx| {
         let mut query = tx
-            .prepare("SELECT work_id, generation FROM offline_catalog")
+            .prepare("SELECT work_key, generation FROM offline_catalog")
             .map_err(records_error)?;
         let rows = query
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -149,21 +154,34 @@ pub(super) fn reconcile(state: &OfflineState) -> Result<(), ClientError> {
     })?;
     let mut present = BTreeSet::new();
     for work in &works {
-        let work_id = work.work.id;
-        present.insert(work_id);
+        let Some(work_id) = work.work.key() else {
+            continue;
+        };
+        let work_id = &work_id;
+        present.insert(work_id.dir_name());
         let current = read_manifest(state, work_id)
             .and_then(|(_, snapshot)| snapshot_generation(&snapshot))
             .ok();
-        if current.is_some() && current.as_ref() != indexed.get(&work_id) {
+        if current.is_some() && current.as_ref() != indexed.get(&work_id.dir_name()) {
             // 1 作品が読めなくても、ほかの作品の索引は作る。
             if index_work(state, work_id).is_err() {
                 remove_work(state, work_id)?;
             }
         }
     }
-    for work_id in indexed.keys().filter(|id| !present.contains(id)) {
-        remove_work(state, *work_id)?;
-    }
+    // 読めない鍵の行も、ここで消える（置き場の名前と同じ形だけを書くので、本来は無い）。
+    state.db.transaction(|tx| {
+        for work_key in indexed.keys().filter(|key| !present.contains(*key)) {
+            tx.execute("DELETE FROM offline_text WHERE work_key = ?1", [work_key])
+                .map_err(records_error)?;
+            tx.execute(
+                "DELETE FROM offline_catalog WHERE work_key = ?1",
+                [work_key],
+            )
+            .map_err(records_error)?;
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -194,15 +212,15 @@ fn like_pattern(term: &str) -> String {
 fn pages_with(
     tx: &rusqlite::Transaction<'_>,
     term: &str,
-) -> Result<Vec<(i64, i64, String)>, ClientError> {
+) -> Result<Vec<(String, i64, String)>, ClientError> {
     let (sql, value) = if term.chars().count() >= 3 {
         (
-            "SELECT work_id, page, text FROM offline_text WHERE offline_text MATCH ?1 ORDER BY work_id, page",
+            "SELECT work_key, page, text FROM offline_text WHERE offline_text MATCH ?1 ORDER BY work_key, page",
             format!("\"{}\"", term.replace('"', "\"\"")),
         )
     } else {
         (
-            "SELECT work_id, page, text FROM offline_text WHERE text LIKE ?1 ESCAPE '\\' ORDER BY work_id, page",
+            "SELECT work_key, page, text FROM offline_text WHERE text LIKE ?1 ESCAPE '\\' ORDER BY work_key, page",
             like_pattern(term),
         )
     };
@@ -237,7 +255,7 @@ fn snippet(text: &str, term: &str) -> String {
     out
 }
 
-/// すべての語を含む作品を、作品の番号の順に返す。語が別のページにあってもよい。
+/// すべての語を含む作品を、置き場の名前の順に返す。語が別のページにあってもよい。
 pub(super) fn search(state: &OfflineState, query: &str) -> Result<Vec<TextHit>, ClientError> {
     if query.chars().count() > MAX_QUERY_CHARS {
         return Err(ClientError::remote());
@@ -247,9 +265,9 @@ pub(super) fn search(state: &OfflineState, query: &str) -> Result<Vec<TextHit>, 
         return Ok(Vec::new());
     }
     state.db.transaction(|tx| {
-        let mut found: Option<BTreeMap<i64, (i64, String, i64)>> = None;
+        let mut found: Option<BTreeMap<String, (i64, String, i64)>> = None;
         for term in &terms {
-            let mut works: BTreeMap<i64, (i64, String, i64)> = BTreeMap::new();
+            let mut works: BTreeMap<String, (i64, String, i64)> = BTreeMap::new();
             for (work_id, page, text) in pages_with(tx, term)? {
                 works
                     .entry(work_id)
@@ -267,13 +285,15 @@ pub(super) fn search(state: &OfflineState, query: &str) -> Result<Vec<TextHit>, 
         Ok(found
             .unwrap_or_default()
             .into_iter()
-            .take(MAX_HITS)
-            .map(|(work_id, (page, snippet, pages))| TextHit {
-                work_id,
-                page,
-                snippet,
-                pages,
+            .filter_map(|(work_key, (page, snippet, pages))| {
+                Some(TextHit {
+                    work_id: OfflineKey::from_dir_name(&work_key)?,
+                    page,
+                    snippet,
+                    pages,
+                })
             })
+            .take(MAX_HITS)
             .collect())
     })
 }

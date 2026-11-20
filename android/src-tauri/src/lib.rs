@@ -42,7 +42,11 @@ pub fn run() {
             app.manage(pc_client::reading_sync::ReadingSyncState::new(
                 records.clone(),
             ));
+            app.manage(pc_client::shelf_reading::ShelfReadingState::new(
+                records.clone(),
+            ));
             app.manage(records);
+            app.manage(pc_client::native_reader::NativeReaderState::default());
             let covers = pc_client::cover_protocol::CoverCacheState::new(
                 app.path().app_cache_dir()?.join("covers"),
             );
@@ -69,10 +73,29 @@ pub fn run() {
             pc_client::pc_set_favorite,
             pc_client::pc_get_metadata,
             pc_client::pc_get_page,
+            pc_client::native_library::pc_native_works,
+            pc_client::native_library::pc_native_search,
+            pc_client::native_library::pc_native_work,
+            pc_client::native_library::pc_native_set_favorite,
+            pc_client::native_library::pc_native_entities,
+            pc_client::native_library::pc_native_entity_detail,
+            pc_client::native_library::pc_native_entity_series,
+            pc_client::native_library::pc_native_collections,
+            pc_client::native_library::pc_native_work_collections,
+            pc_client::native_library::pc_native_collection,
+            pc_client::native_library::pc_native_suggest,
+            pc_client::native_library::pc_native_lookup_work,
+            pc_client::native_library::pc_native_bundle,
+            pc_client::native_reader::pc_native_open,
+            pc_client::native_reader::pc_native_open_snapshot,
+            pc_client::native_reader::pc_native_page,
             pc_client::pc_get_outline,
             pc_client::reading_sync::reading_record,
             pc_client::reading_sync::reading_sync,
             pc_client::reading_sync::reading_get,
+            pc_client::shelf_reading::pc_native_reading_record,
+            pc_client::shelf_reading::pc_native_reading_sync,
+            pc_client::shelf_reading::pc_native_reading_get,
             pc_client::local_reading::reading_local_get,
             pc_client::local_reading::reading_local_put,
             pc_client::local_reading::reading_local_shelf,
@@ -81,6 +104,7 @@ pub fn run() {
             pc_client::offline::offline_search_text,
             pc_client::offline::offline_list_issues,
             pc_client::offline::offline_save_work,
+            pc_client::offline::offline_save_shelf_work,
             pc_client::offline::offline_get_page,
             pc_client::offline::offline_get_outline,
             pc_client::offline::offline_get_asset,

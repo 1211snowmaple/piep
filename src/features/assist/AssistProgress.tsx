@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Group, Loader, Stack, Text } from "@mantine/core";
 import { formatDuration } from "@/lib/format";
-import type { AssistFeatureId, AssistProgressEvent } from "@/services/assistApi";
+import type { AssistFeatureId, AssistProgressEvent, AssistWork } from "@/services/assistApi";
 import { subscribeTauriEvent } from "@/services/eventBus";
 
 const STAGE_LABELS: Record<AssistProgressEvent["stage"], string> = {
@@ -34,7 +34,7 @@ export function AssistProgressLine({
   active,
 }: {
   feature: AssistFeatureId;
-  downloadId: number;
+  downloadId: AssistWork;
   active: boolean;
 }) {
   const [progress, setProgress] = useState<AssistProgressEvent | null>(null);

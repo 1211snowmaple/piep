@@ -16,7 +16,6 @@ import {
   Group,
   Image,
   Menu,
-  Pagination,
   Paper,
   Select,
   SimpleGrid,
@@ -76,8 +75,9 @@ import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import type { ReaderMetadata } from "@/types/library";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
-
-type WorkTab = "overview" | "content" | "assets" | "history" | "json";
+import { ShelfWorkPage } from "@/features/library/ShelfWorkPage";
+import { SHELF_WORK_ID } from "@/services/libraryV2Api";
+import { ContentPagination, Info, parseWorkTab } from "@/features/library/workPageParts";
 
 // React StrictMode briefly mounts, cleans up, and mounts an effect again in
 // development. Track the active work so that rehearsal does not evict the
@@ -96,11 +96,16 @@ function locationsFor(client: object) {
   return locations;
 }
 
-function parseWorkTab(value: string | null): WorkTab {
-  return value === "content" || value === "assets" || value === "history" || value === "json" ? value : "overview";
-}
 
 export default function WorkPage() {
+  const { workId } = useRouteParams("/works/:workId");
+  // 新しい棚の一覧（試験中）から来た作品は、新しい棚の ID（UUID）で指される。旧棚の作品の
+  // 画面とは読む先も操作も違うので、別の画面にする。
+  if (SHELF_WORK_ID.test(workId ?? "")) return <ShelfWorkPage key={workId} workId={workId!.toLowerCase()} />;
+  return <LegacyWorkPage />;
+}
+
+function LegacyWorkPage() {
   const navigate = useAppNavigate();
   const returnTo = useReturnTo();
   // Links inside a caption or the body often name something already in the
@@ -212,7 +217,7 @@ export default function WorkPage() {
     // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
     staleTime: 30_000,
   });
-  const pendingRevision = pendingRevisions.data?.find((entry) => entry.downloadId === id);
+  const pendingRevision = pendingRevisions.data?.find((entry) => entry.work === String(id));
   useEffect(() => {
     if (tab !== "history" || !documentQuery.data || pendingRevisions.isLoading) return;
     setSelectedVersion((current) => {
@@ -316,8 +321,8 @@ export default function WorkPage() {
   const pendingRevisionPreview = useQuery({
     queryKey: ["pending-revision-preview", id],
     queryFn: () => runtime
-      ? previewPendingRevisionCommand(id)
-      : Promise.resolve<import("@/services/updateJobApi").PendingRevisionPreview>({ downloadId: id, baseVersion: documentQuery.data?.download.currentVersion ?? 1, text: getDemoReader(id).plainText, textLength: getDemoReader(id).plainText.length }),
+      ? previewPendingRevisionCommand(String(id))
+      : Promise.resolve<import("@/services/updateJobApi").PendingRevisionPreview>({ work: String(id), baseVersion: documentQuery.data?.download.currentVersion ?? 1, text: getDemoReader(id).plainText, textLength: getDemoReader(id).plainText.length }),
     enabled: validId && tab === "history" && selectedVersion === "pending" && Boolean(pendingRevision),
     staleTime: 0,
   });
@@ -437,7 +442,7 @@ export default function WorkPage() {
     const originalPath = original?.dataset.localPath;
     if (originalPath) {
       event.preventDefault();
-      setPdfOriginal({ downloadId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
+      setPdfOriginal({ workId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
       return;
     }
     void openContentLink(event);
@@ -668,7 +673,7 @@ export default function WorkPage() {
             const original = Boolean(asset.originalUrl && (/original/i.test(asset.originalUrl) || !/\/c\//.test(asset.originalUrl)));
             const openTarget = () => {
               if (image) previewAsset(asset);
-              else if (pdf) setPdfOriginal({ downloadId: id, localPath: asset.localPath, fileName: asset.filename });
+              else if (pdf) setPdfOriginal({ workId: id, localPath: asset.localPath, fileName: asset.filename });
             };
             return <Card key={asset.id} p={0} className="asset-card surface--interactive" onClick={openTarget}>
               <Box className="asset-card__preview">
@@ -783,28 +788,4 @@ export default function WorkPage() {
       <PdfOriginalViewer target={pdfOriginal} onClose={() => setPdfOriginal(null)} />
     </div>
   );
-}
-
-/** Read every source page for one saved version while keeping IPC bursts small.
- *
- *  版どうしを比べるのはここだけなので、平文を頼むのもここだけ。読書画面は
- *  HTML しか使わないため、既定では積まずに運ぶ。 */
-/**
- * The same controls the reader moves between source pages with.
- *
- * It is the same act on the same document, so it should not be a different
- * shape here - two wide buttons that could only step one page at a time, in a
- * novel that has forty of them.
- */
-function ContentPagination({ current, total, onChange }: { current: number; total: number; onChange: (page: number) => void }) {
-  if (total <= 1) return null;
-  return <Group justify="center" gap={6} wrap="nowrap" className="content-pagination">
-    <Pagination total={total} value={current} onChange={onChange} siblings={1} boundaries={1} withEdges size="sm" radius="sm" />
-    <Divider orientation="vertical" h={24} />
-    <Text size="sm" fw={650} ff="monospace" c="dimmed">{current} / {total}</Text>
-  </Group>;
-}
-
-function Info({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
-  return <Group wrap="nowrap" align="flex-start"><Avatar size="sm" variant="light" color="gray">{icon}</Avatar><Box><Text size="xs" c="dimmed">{label}</Text><Text size="sm" fw={650} mt={2}>{value}</Text></Box></Group>;
 }

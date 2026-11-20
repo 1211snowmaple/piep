@@ -25,6 +25,8 @@ import { demoDashboard } from "@/mocks/demoData";
 import { formatBytes, formatNumber } from "@/lib/format";
 import { getProvider } from "@/lib/providers";
 import { getDashboardSummary, getSearchIndexStatus, isTauriRuntime } from "@/services/dbApi";
+import { libraryV2Dashboard, libraryV2SearchIndexStatus } from "@/services/shelfHealthApi";
+import { searchShelf, useShelfMode } from "@/features/library/shelfV2";
 import { store } from "@/store";
 
 export type QuickSaveSource = "pixiv" | "fanbox";
@@ -80,13 +82,25 @@ const TOP_TAG_COUNT = 24;
 export default function DashboardPage() {
   const navigate = useAppNavigate();
   const runtime = isTauriRuntime();
+  // 新しい棚を見ているあいだは、数も最近の保存も新しい棚から出す（一覧と同じ棚）。
+  const { shelfMode, deciding } = useShelfMode(runtime);
   const summary = useQuery({
-    queryKey: ["dashboard"],
-    queryFn: () => runtime ? getDashboardSummary() : Promise.resolve(demoDashboard),
+    queryKey: ["dashboard", shelfMode],
+    queryFn: async () => {
+      if (!runtime) return demoDashboard;
+      if (!shelfMode) return getDashboardSummary();
+      const [counts, recent] = await Promise.all([
+        libraryV2Dashboard(),
+        searchShelf({ sortBy: "downloaded_at", sortOrder: "desc", limit: 4 }),
+      ]);
+      return { ...counts, recentDownloads: recent.items };
+    },
+    enabled: !deciding,
   });
   const index = useQuery({
-    queryKey: ["search-index-status"],
-    queryFn: () => runtime ? getSearchIndexStatus() : Promise.resolve({
+    queryKey: ["search-index-status", shelfMode],
+    enabled: !deciding,
+    queryFn: () => runtime ? (shelfMode ? libraryV2SearchIndexStatus() : getSearchIndexStatus()) : Promise.resolve({
       totalDownloads: demoDashboard.stats.totalDownloads,
       indexedDownloads: demoDashboard.stats.totalDownloads,
       pendingDownloads: 0,
@@ -114,7 +128,7 @@ export default function DashboardPage() {
   });
   const chartData = useMemo(() => buildTrend(summary.data?.monthlyDownloads ?? []), [summary.data]);
 
-  if (summary.isLoading) return <div className="page"><LoadingState label="ホームを準備しています" /></div>;
+  if (summary.isLoading || deciding) return <div className="page"><LoadingState label="ホームを準備しています" /></div>;
   if (summary.error || !summary.data) return <div className="page"><ErrorState error={summary.error} retry={() => summary.refetch()} /></div>;
   const data = summary.data;
   const indexProgress = index.data?.totalDownloads ? Math.round(index.data.indexedDownloads / index.data.totalDownloads * 100) : 100;

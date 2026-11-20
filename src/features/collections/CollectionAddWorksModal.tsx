@@ -7,8 +7,14 @@ import { WorkCard } from "@/components/WorkCard";
 import { formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { searchDownloadsV2 } from "@/services/dbApi";
+import { searchShelf } from "@/features/library/shelfV2";
 import type { WorkCollection } from "@/types/collections";
-import type { DownloadEntry, SearchV2Params } from "@/types/library";
+import type { ListedWork, SearchV2Params } from "@/types/library";
+
+/** 作品を取得元と取得元の ID で指す（旧棚の番号も新しい棚の ID も持たない回を含めて一つの形）。 */
+function keyOf(work: { source: string; sourceId: string }): string {
+  return `${work.source}\u0000${work.sourceId}`;
+}
 
 /** 検索語を打たなくても棚が出る、という前提を崩さない程度の件数。 */
 const PAGE_SIZE = 60;
@@ -24,19 +30,23 @@ type Scope = "recent" | "authors" | "tags" | "series" | "favorite";
  *
  * 絞り込みは「この束の続きを探している」という状況に合わせる。だいたいの場合、
  * 入れたい作品は同じ作者か、同じタグか、同じシリーズにいる。
+ *
+ * `shelf` のときは新しい棚から探す（作品は取得元の ID で指して渡す）。
  */
 export function CollectionAddWorksModal({
   opened,
   onClose,
   collection,
   busy,
+  shelf = false,
   onAdd,
 }: {
   opened: boolean;
   onClose: () => void;
   collection: WorkCollection;
   busy: boolean;
-  onAdd: (works: DownloadEntry[]) => void;
+  shelf?: boolean;
+  onAdd: (works: ListedWork[]) => void;
 }) {
   const [scope, setScope] = useState<Scope>("authors");
   const [query, setQuery] = useState("");
@@ -44,10 +54,10 @@ export function CollectionAddWorksModal({
   // Keep the records, not only their ids. Search/scope changes replace the
   // visible result page, but choices made on a previous page must still be
   // present when the user confirms the add.
-  const [selected, setSelected] = useState<Map<number, DownloadEntry>>(() => new Map());
+  const [selected, setSelected] = useState<Map<string, ListedWork>>(() => new Map());
 
-  const memberIds = useMemo(
-    () => new Set(collection.members.map((member) => member.downloadId).filter((id): id is number => id !== null)),
+  const memberKeys = useMemo(
+    () => new Set(collection.members.map(keyOf)),
     [collection.members],
   );
 
@@ -110,17 +120,20 @@ export function CollectionAddWorksModal({
   }, [authors, debouncedQuery, scope, seriesKey, sharedTags]);
 
   const searchQuery = useQuery({
-    queryKey: ["collection-add-works", collection.id, params],
-    queryFn: () => searchDownloadsV2(params),
+    queryKey: [shelf ? "library-v2-collection-add-works" : "collection-add-works", collection.id, params],
+    // 新しい棚は検索語を `text` で受ける。
+    queryFn: (): Promise<{ items: ListedWork[] }> => shelf
+      ? searchShelf({ ...params, text: params.query, query: null })
+      : searchDownloadsV2(params),
     enabled: opened,
   });
 
   const results = searchQuery.data?.items ?? [];
   const selectedWorks = [...selected.values()];
-  const toggle = (work: DownloadEntry, next: boolean) =>
+  const toggle = (work: ListedWork, next: boolean) =>
     setSelected((current) => {
       const updated = new Map(current);
-      if (next) updated.set(work.id, work); else updated.delete(work.id);
+      if (next) updated.set(keyOf(work), work); else updated.delete(keyOf(work));
       return updated;
     });
 
@@ -159,15 +172,16 @@ export function CollectionAddWorksModal({
         ) : (
           <div className="collection-add__grid">
             {results.map((work) => {
-              const already = memberIds.has(work.id);
+              const key = keyOf(work);
+              const already = memberKeys.has(key);
               return (
-                <div key={work.id} className="collection-add__slot" data-member={already || undefined}>
+                <div key={key} className="collection-add__slot" data-member={already || undefined}>
                   <WorkCard
                     work={work}
                     compact
                     selectionMode
-                    selected={already || selected.has(work.id)}
-                    onSelect={already ? undefined : (_id, next) => toggle(work, next)}
+                    selected={already || selected.has(key)}
+                    onToggleSelect={already ? () => undefined : (next) => toggle(work, next)}
                   />
                   {already && <Badge size="xs" variant="filled" color="gray" className="collection-add__badge">追加済み</Badge>}
                 </div>

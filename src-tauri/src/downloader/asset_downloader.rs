@@ -57,6 +57,32 @@ fn fanbox_file_filename(file: &Value) -> String {
     sanitize_filename(&format!("{name}_{key}.{ext}"))
 }
 
+/// FANBOX の添付の、今の保存名から以前の保存名（取得元の ID を付ける前の `名前.拡張子`）へ。
+/// 以前の名前で持っている版を、同じ添付を持つものとして扱うのに使う。
+pub fn fanbox_former_file_names(data: &Value) -> HashMap<String, String> {
+    let data = crate::fanbox_api::payload::post_or_self(data);
+    let Some(body) = data.get("body") else {
+        return HashMap::new();
+    };
+    body.get("fileMap")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|map| map.values())
+        .chain(
+            body.get("files")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .map(|file| {
+            let name = file.get("name").and_then(|v| v.as_str()).unwrap_or("file");
+            let url = file.get("url").and_then(|v| v.as_str()).unwrap_or("");
+            let former = format!("{name}.{}", extract_extension(url, "bin"));
+            (fanbox_file_filename(file), sanitize_filename(&former))
+        })
+        .collect()
+}
+
 /// FANBOX の画像の保存名。id は投稿内で一意なので、そのまま使える。
 fn fanbox_image_filename(image: &Value) -> String {
     let id = image.get("id").and_then(|v| v.as_str()).unwrap_or("image");
@@ -77,24 +103,7 @@ fn short_url_digest(url: &str) -> String {
         .collect()
 }
 
-/// ファイル名サニタイザー
-/// OS依存の禁止文字 (< > : " / \ | ? *) や、ディレクトリトラバーサルを示す ".." を安全な文字列に置換する
-pub fn sanitize_filename(name: &str) -> String {
-    let mut cleaned = name.replace("..", "__");
-
-    // Windowsの不正文字をアンダースコアに置換
-    let invalid_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
-    for &c in &invalid_chars {
-        cleaned = cleaned.replace(c, "_");
-    }
-
-    let trimmed = cleaned.trim();
-    if trimmed.is_empty() {
-        "asset_file".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
+pub use piep_reader_render::sanitize_filename;
 
 /// Authentication is supplied manually rather than through a cookie jar, so
 /// it must never follow an arbitrary asset URL from post JSON. Keep this list
@@ -124,7 +133,7 @@ fn intended_as_image(path: &Path) -> bool {
     )
 }
 
-fn validate_asset_file(
+pub(crate) fn validate_asset_file(
     path: &Path,
     intended_path: &Path,
     max_bytes: u64,
@@ -859,7 +868,6 @@ async fn copy_saved_asset(source: &Path, destination: &Path) -> Result<(), Strin
 
 /// 全てのアセットを一括並行ダウンロードし、ローカルリンクをバインドする
 pub async fn download_and_link_assets(
-    _app: &tauri::AppHandle,
     json_data: &mut Value,
     json_path: &Path,
     is_fanbox: bool,

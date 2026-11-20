@@ -61,13 +61,13 @@ impl SendHandle {
         }
     }
 
-    fn update(&self, change: impl FnOnce(&mut SendProgress)) {
+    pub(super) fn update(&self, change: impl FnOnce(&mut SendProgress)) {
         if let Ok(mut progress) = self.progress.lock() {
             change(&mut progress);
         }
     }
 
-    fn check_cancel(&self) -> Result<(), String> {
+    pub(super) fn check_cancel(&self) -> Result<(), String> {
         if self.cancel.load(Ordering::Relaxed) {
             Err(CANCELED.to_string())
         } else {
@@ -84,11 +84,11 @@ impl Default for SendHandle {
 
 pub const CANCELED: &str = "送信を止めました";
 
-fn normalized_base(url: &str) -> String {
+pub(super) fn normalized_base(url: &str) -> String {
     url.trim_end_matches('/').to_string()
 }
 
-fn net_error(error: reqwest::Error) -> String {
+pub(super) fn net_error(error: reqwest::Error) -> String {
     // 誤り文に URL の問い合わせや鍵が混ざらないよう、種類だけを言う。
     if error.is_timeout() {
         "サーバーの応答が時間内にありませんでした".into()
@@ -168,7 +168,7 @@ pub async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, Stri
 }
 
 /// 応答の状態コードを誤りに直す。サーバーの `message` は決まった文だけなのでそのまま出す。
-async fn check_status(response: reqwest::Response) -> Result<reqwest::Response, String> {
+pub(super) async fn check_status(response: reqwest::Response) -> Result<reqwest::Response, String> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
@@ -285,6 +285,28 @@ pub async fn admin_post(
         .map_err(net_error)
 }
 
+/// 本文の要らない応答（204）を返す口へ JSON を置く。
+pub async fn admin_put(
+    remote: &RemoteServer,
+    token: &str,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<(), String> {
+    let client = build_client(remote).await?;
+    let response = client
+        .put(format!(
+            "{}/api/v1/admin/{path}",
+            normalized_base(&remote.url)
+        ))
+        .bearer_auth(token)
+        .json(body)
+        .send()
+        .await
+        .map_err(net_error)?;
+    check_status(response).await?;
+    Ok(())
+}
+
 pub async fn admin_delete(remote: &RemoteServer, token: &str, path: &str) -> Result<(), String> {
     let client = build_client(remote).await?;
     let response = client
@@ -364,7 +386,7 @@ pub fn scan_library_files(app_data: &Path) -> Result<(Vec<LocalFile>, i64), Stri
     Ok((files, skipped))
 }
 
-fn file_sha256(path: &Path) -> Result<String, String> {
+pub(super) fn file_sha256(path: &Path) -> Result<String, String> {
     let mut file =
         File::open(path).map_err(|error| format!("送るファイルを読めません: {error}"))?;
     let mut hasher = Sha256::new();

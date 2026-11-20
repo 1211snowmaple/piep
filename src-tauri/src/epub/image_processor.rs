@@ -20,6 +20,10 @@ fn sniff_image_mime(path: &Path) -> Option<&'static str> {
         .with_guessed_format()
         .ok()?
         .format()?;
+    format_mime(format)
+}
+
+fn format_mime(format: ImageFormat) -> Option<&'static str> {
     match format {
         ImageFormat::Jpeg => Some("image/jpeg"),
         ImageFormat::Png => Some("image/png"),
@@ -110,6 +114,37 @@ pub fn process_image(
     );
 
     Ok((encoded, mime))
+}
+
+/// 中身のバイト列から縮める。表紙を配るとき、棚の実体を一時ファイルへ書き出さずに済む。
+/// 形式は中身で決め、分からない形式は断る。GIF と縮めない指定は中身をそのまま返す。
+pub fn process_image_bytes(
+    bytes: &[u8],
+    options: &ImageCompressOptions,
+) -> Result<(Vec<u8>, String), String> {
+    let reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("画像デコードエラー: {}", e))?;
+    let original_mime = reader
+        .format()
+        .and_then(format_mime)
+        .ok_or_else(|| "画像の形式が分かりません".to_string())?;
+    if !options.enabled || original_mime == "image/gif" {
+        return Ok((bytes.to_vec(), original_mime.to_string()));
+    }
+    let img = reader
+        .decode()
+        .map_err(|e| format!("画像デコードエラー: {}", e))?;
+    let img = resize_if_needed(img, options);
+    let output_format = options
+        .output_format
+        .as_deref()
+        .unwrap_or(match original_mime {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            _ => "jpeg",
+        });
+    encode_image(&img, output_format, options)
 }
 
 fn resize_if_needed(img: DynamicImage, options: &ImageCompressOptions) -> DynamicImage {

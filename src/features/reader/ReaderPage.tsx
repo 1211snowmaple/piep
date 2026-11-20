@@ -42,13 +42,15 @@ import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
 import { getWorkCollection, listCollectionsForWork } from "@/services/collectionApi";
-import { getAssetUrl, getDownloads, getReaderContentPage, getReaderMetadata, getReaderOutline, isTauriRuntime, searchDownloadsV2, searchReaderContent } from "@/services/dbApi";
+import { getDownloads, isTauriRuntime, searchDownloadsV2 } from "@/services/dbApi";
 import { openExternalUrl, revealPathInFileManager } from "@/services/openerApi";
-import { getDemoReader } from "@/mocks/demoData";
+import { legacyReaderSource, shelfReaderSource, SHELF_WORK_ID, type ReaderSource } from "@/features/reader/readerSource";
 import { RecapPanel } from "@/features/assist/RecapPanel";
 import { NeighborPlaceholder, NeighborTile, formatReadingTime } from "@/features/reader/ReaderNextUp";
 import type { WorkCollection } from "@/types/collections";
-import type { DownloadEntry, ReaderMetadata, SearchV2Params, SearchV2Result } from "@/types/library";
+import type { DownloadEntry, SearchV2Params, SearchV2Result, ShelfEntry } from "@/types/library";
+import { libraryV2Neighbors, type ShelfCard, type ShelfNeighbors } from "@/services/libraryV2Api";
+import { shelfEntry, shelfWritable, useLibraryV2Status } from "@/features/library/shelfV2";
 
 interface ReadingContextRow {
   key: string;
@@ -60,10 +62,44 @@ interface ReadingContextRow {
    *  display arrangement: calling its neighbours 続き would invent a sequence
    *  the reader never asked for. */
   sequential: boolean;
-  previous: { id: number; title: string } | null;
-  next: { id: number; title: string } | null;
+  previous: NeighborRef | null;
+  next: NeighborRef | null;
   /** いま読んでいる作品。「前回のあらすじ」をここにぶら下げる。 */
-  currentId: number;
+  currentId: ReaderWorkKey;
+}
+
+/** 旧棚の作品は番号、新しい棚の作品は UUID。 */
+type ReaderWorkKey = number | string;
+interface NeighborRef { id: ReaderWorkKey; title: string }
+
+/**
+ * 新しい棚の前後の作品を、旧棚と同じ札の行にする。旧棚と同じ名乗り方・同じ数え方で、
+ * 隣の作品の詳しい情報（表紙・作者・字数）は、引いた並びにもう入っている。
+ */
+function shelfReadingContexts(rows: ShelfNeighbors[], currentId: string, authorName: string) {
+  const neighbors = new Map<ReaderWorkKey, ShelfEntry>();
+  const ref = (card: ShelfCard | null): NeighborRef | null => {
+    if (!card) return null;
+    neighbors.set(card.id, shelfEntry(card));
+    return { id: card.id, title: card.title };
+  };
+  const contexts = rows.map((row): ReadingContextRow => {
+    const base = { key: `${row.kind}:${row.id}`, sequential: row.ordered, currentId, previous: ref(row.previous), next: ref(row.next) };
+    if (row.kind === "collection") {
+      const progress = row.ordered ? `${row.position} / ${row.total}` : `${row.total}作品`;
+      return {
+        ...base,
+        label: `コレクション「${row.title}」`,
+        detail: [progress, row.ordered ? "読む順あり" : "順序なし", row.missing > 0 ? `未保存${row.missing}作品は除外` : null].filter(Boolean).join(" · "),
+      };
+    }
+    if (row.kind === "series") {
+      return { ...base, label: row.title ? `公式シリーズ「${row.title}」` : "公式シリーズ", detail: `${row.position} / ${row.total} · 公式順` };
+    }
+    // 作者の投稿順は「物語の次」ではないため、続きとしては案内しない。
+    return { ...base, sequential: false, label: `${row.title || authorName}の作品`, detail: `${row.total}作品の公開順` };
+  });
+  return { contexts, neighbors };
 }
 
 function adjacentWorks(items: { id: number; title: string }[], currentId: number) {
@@ -122,10 +158,10 @@ async function loadReaderSequence(params: SearchV2Params, currentId: number): Pr
 function ReadingContextCard({ context, neighbors, onOpen }: {
   context: ReadingContextRow;
   /** 隣の作品の詳しい情報。届くまでは題だけで描く。 */
-  neighbors: ReadonlyMap<number, DownloadEntry>;
+  neighbors: ReadonlyMap<ReaderWorkKey, DownloadEntry | ShelfEntry>;
   onOpen: (path: string) => void;
 }) {
-  const href = (id: number) => `/reader/${id}${context.collectionId ? `?collection=${encodeURIComponent(context.collectionId)}` : ""}`;
+  const href = (id: ReaderWorkKey) => `/reader/${id}${context.collectionId ? `?collection=${encodeURIComponent(context.collectionId)}` : ""}`;
   const previousLabel = context.sequential ? "前の作品はありません" : "ほかの作品はありません";
   const nextLabel = context.sequential ? "次の作品はありません" : "ほかの作品はありません";
   // 順序のない並びは「前・次」と呼ばない。並べてあるだけで、読む順ではない。
@@ -144,8 +180,9 @@ function ReadingContextCard({ context, neighbors, onOpen }: {
         {!context.sequential && <Text size="xs" c="dimmed">読む順は決まっていません。同じまとまりの作品です。</Text>}
         {/* 読む順があって、前の話があるときだけ。順序なしのまとまりで
             「前回のあらすじ」を出すと、無い連続性をあるように見せてしまう。 */}
-        {context.sequential && context.previous && (
-          <RecapPanel currentId={context.currentId} previous={context.previous} />
+        {/* 前回のあらすじは、読む話と前の話が同じ棚の作品のときだけ（覚え書きはその棚に残る）。 */}
+        {context.sequential && context.previous && typeof context.currentId === typeof context.previous.id && (
+          <RecapPanel currentId={context.currentId} previous={{ id: context.previous.id, title: context.previous.title }} />
         )}
         {/* 題だけのボタンだったころは、どれが何の話か、どれだけの長さか、
             読みかけたものかが、押してみるまで分からなかった。 */}
@@ -267,10 +304,22 @@ const READER_FONTS: Record<ReaderFont, { label: string; family: string }> = {
 
 const defaults: ReaderSettings = { fontSize: 18, lineHeight: 1.72, maxWidth: 680, font: "serif", theme: "white", writing: "horizontal" };
 
+/** 棚へ読書位置を書く間隔の下限（ミリ秒）。同じページを読んでいるあいだ。 */
+const SHELF_READING_INTERVAL = 15_000;
+
 /** 版の選択で「編集版」を表す値。数字の版番号と混ざらない印。 */
 const EDITED_VERSION = "edit";
 
 export default function ReaderPage() {
+  const { workId } = useRouteParams("/reader/:workId");
+  // 新しい棚（試験中）の作品は UUID で来る。読む先だけを差し替え、画面は同じものを使う。
+  const shelfId = SHELF_WORK_ID.test(workId ?? "") ? workId!.toLowerCase() : null;
+  const source = useMemo(() => shelfId ? shelfReaderSource(shelfId) : legacyReaderSource(Number(workId)), [shelfId, workId]);
+  return <Reader source={source} />;
+}
+
+/** 読む画面。本文・目次・本文内検索・作品の頭をどこから読むかは `source` が決める。 */
+function Reader({ source }: { source: ReaderSource }) {
   const navigate = useAppNavigate();
   // A saved work reached from inside the text opens in the reader: somebody
   // following "前編はこちら" mid-chapter wants to keep reading.
@@ -279,9 +328,9 @@ export default function ReaderPage() {
   // back to it - keeping its tab and scroll position - instead of pushing a
   // fresh copy and leaving the header pointing back into the reader.
   const returnTo = useReturnTo();
-  const { workId } = useRouteParams("/reader/:workId");
   const [searchParams] = useAppSearchParams();
-  const id = Number(workId);
+  const id = source.key;
+  const validId = typeof id === "string" || Number.isFinite(id);
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
   const requestedVersion = Number(searchParams.get("version"));
@@ -317,27 +366,47 @@ export default function ReaderPage() {
   const pendingOutlineRef = useRef<number | null>(null);
   // ページを送ったあと、届いた本文の先頭へ寄せるための印。
   const pendingPageStartRef = useRef(false);
-  const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(id, version);
   const metadataQuery = useQuery({
-    queryKey: ["reader-metadata", id],
-    queryFn: () => runtime ? getReaderMetadata(id) : Promise.resolve((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision, draftEditRevision: null } satisfies ReaderMetadata; })()),
-    enabled: Number.isFinite(id),
+    queryKey: source.head.queryKey,
+    queryFn: source.head.queryFn,
+    select: source.head.select,
+    enabled: validId,
   });
+  // 読書位置・しおりの鍵。新しい棚の作品でも、旧棚から移したものは旧棚の番号で引く（両方の棚で
+  // 同じ記録）。頭が届くまでは分からないので、位置を戻すのも書くのも頭が届いてから。
+  const readingId = metadataQuery.data?.head.readingKey ?? null;
+  // 正本に切り替えた新しい棚では、読書位置を棚にも書く（携帯と同じ形：ページとその中の割合）。
+  // 端末の記録（何行目か）はこの端末で開き直すための控えとして残す。
+  const shelfStatus = useLibraryV2Status(runtime && source.shelf);
+  const shelfReading = source.shelf && shelfWritable(shelfStatus.data) ? source.shelfReading ?? null : null;
+  const shelfReadingQuery = useQuery({
+    queryKey: ["library-v2-reading", id, version],
+    queryFn: () => shelfReading!.read(version),
+    enabled: Boolean(shelfReading),
+    staleTime: Infinity,
+    gcTime: 0,
+  });
+  // 棚の状態と棚の位置が届くまでは位置を戻さない。ほかの端末で読み進めた位置を飛ばさない。
+  const shelfReadingPending = runtime && source.shelf && (shelfStatus.isPending || (Boolean(shelfReading) && shelfReadingQuery.isPending));
+  const remoteReading = shelfReadingQuery.data ?? null;
+  const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(readingId ?? id, version);
+  // 前後の作品・保存フォルダーは旧棚の作品だけ。
+  const legacyWork = metadataQuery.data?.legacy?.download;
   const contentQuery = useQuery({
     queryKey: ["reader-content-page", id, version, sourcePage - 1],
-    queryFn: () => runtime ? getReaderContentPage(id, version, sourcePage - 1) : Promise.resolve((() => { const demo = getDemoReader(id); return { page: 0, pageCount: 1, html: demo.html, plainText: demo.plainText, totalPlainTextChars: demo.plainText.length, sourcePageStarts: [0] }; })()),
-    enabled: Number.isFinite(id),
+    queryFn: () => source.page(version, sourcePage - 1),
+    enabled: validId,
     placeholderData: (previous) => previous,
   });
   const outlineQuery = useQuery({
     queryKey: ["reader-outline", id, version],
-    queryFn: () => runtime ? getReaderOutline(id, version) : Promise.resolve([]),
-    enabled: Number.isFinite(id),
+    queryFn: () => source.outline(version),
+    enabled: validId,
     staleTime: 60_000,
   });
   const readerSearchQuery = useQuery({
     queryKey: ["reader-content-search", id, version, debouncedReaderSearch],
-    queryFn: () => runtime ? searchReaderContent(id, debouncedReaderSearch, version) : Promise.resolve([]),
+    queryFn: () => source.search(debouncedReaderSearch, version),
     enabled: searchOpened && debouncedReaderSearch.trim().length > 0,
   });
   /**
@@ -350,7 +419,7 @@ export default function ReaderPage() {
    */
   const markedPagesQuery = useQuery({
     queryKey: ["reader-content-search", id, version, markedTerm],
-    queryFn: () => runtime ? searchReaderContent(id, markedTerm, version) : Promise.resolve([]),
+    queryFn: () => source.search(markedTerm, version),
     enabled: markedTerm.trim().length > 0,
     staleTime: 60_000,
   });
@@ -364,12 +433,12 @@ export default function ReaderPage() {
     // 前後移動が外したはずの作品を指したままだった。
     queryKey: ["work-collection", requestedCollectionId],
     queryFn: () => getWorkCollection(requestedCollectionId!),
-    enabled: runtime && Boolean(requestedCollectionId),
+    enabled: runtime && !source.shelf && Boolean(requestedCollectionId),
   });
   const memberCollectionsQuery = useQuery({
-    queryKey: ["reader-member-collections", metadataQuery.data?.download.source, metadataQuery.data?.download.sourceId],
+    queryKey: ["reader-member-collections", legacyWork?.source, legacyWork?.sourceId],
     queryFn: async () => {
-      const summaries = await listCollectionsForWork(metadataQuery.data!.download.source, metadataQuery.data!.download.sourceId);
+      const summaries = await listCollectionsForWork(legacyWork!.source, legacyWork!.sourceId);
       const collections: WorkCollection[] = [];
       // Avoid one unbounded Promise.all while still loading every membership;
       // otherwise the 21st collection silently disappeared from reading context.
@@ -378,7 +447,7 @@ export default function ReaderPage() {
       }
       return collections;
     },
-    enabled: runtime && Boolean(metadataQuery.data),
+    enabled: runtime && Boolean(legacyWork),
     staleTime: 30_000,
   });
   const officialSeriesQuery = useQuery({
@@ -387,19 +456,29 @@ export default function ReaderPage() {
     // this work", not "what is in this series". Without it, opening episode 1
     // of a long series cached the first 200 items and episode 250 read that
     // cache, found itself missing, and dropped the continuation row entirely.
-    queryKey: ["reader-official-series", metadataQuery.data?.download.source, metadataQuery.data?.download.seriesId, id],
-    queryFn: () => loadReaderSequence({ seriesSource: metadataQuery.data!.download.source, seriesKey: metadataQuery.data!.download.seriesId!, sortBy: "series_order", sortOrder: "asc", projection: "bulk" }, id),
-    enabled: runtime && Boolean(metadataQuery.data?.download.seriesId),
+    queryKey: ["reader-official-series", legacyWork?.source, legacyWork?.seriesId, id],
+    queryFn: () => loadReaderSequence({ seriesSource: legacyWork!.source, seriesKey: legacyWork!.seriesId!, sortBy: "series_order", sortOrder: "asc", projection: "bulk" }, legacyWork!.id),
+    enabled: runtime && Boolean(legacyWork?.seriesId),
     staleTime: 60_000,
   });
   const authorWorksQuery = useQuery({
-    queryKey: ["reader-author-sequence", metadataQuery.data?.download.source, metadataQuery.data?.download.personId ?? metadataQuery.data?.download.authorId, id],
-    queryFn: () => loadReaderSequence({ personSource: metadataQuery.data!.download.source, personKey: metadataQuery.data!.download.personId || metadataQuery.data!.download.authorId, sortBy: "source_created_at", sortOrder: "asc", projection: "bulk" }, id),
-    enabled: runtime && Boolean(metadataQuery.data?.download.personId || metadataQuery.data?.download.authorId),
+    queryKey: ["reader-author-sequence", legacyWork?.source, legacyWork?.personId ?? legacyWork?.authorId, id],
+    queryFn: () => loadReaderSequence({ personSource: legacyWork!.source, personKey: legacyWork!.personId || legacyWork!.authorId, sortBy: "source_created_at", sortOrder: "asc", projection: "bulk" }, legacyWork!.id),
+    enabled: runtime && Boolean(legacyWork?.personId || legacyWork?.authorId),
     staleTime: 60_000,
   });
-  const readingContexts = useMemo<ReadingContextRow[]>(() => {
-    const work = metadataQuery.data?.download;
+  const shelfNeighborsQuery = useQuery({
+    queryKey: ["library-v2-neighbors", id],
+    queryFn: () => libraryV2Neighbors(String(id)),
+    enabled: runtime && source.shelf && validId,
+    staleTime: 60_000,
+  });
+  const shelfContexts = useMemo(
+    () => shelfNeighborsQuery.data ? shelfReadingContexts(shelfNeighborsQuery.data, String(id), metadataQuery.data?.head.authorName ?? "") : null,
+    [id, metadataQuery.data?.head.authorName, shelfNeighborsQuery.data],
+  );
+  const legacyContexts = useMemo<ReadingContextRow[]>(() => {
+    const work = legacyWork;
     if (!work) return [];
     const rows: ReadingContextRow[] = [];
     const seenCollections = new Set<string>();
@@ -447,22 +526,24 @@ export default function ReaderPage() {
       if (adjacent.previous || adjacent.next) rows.push({ key: `author:${work.source}:${work.authorId}`, label: `${work.authorName}の作品`, detail: `${total}作品の公開順`, sequential: false, currentId: work.id, ...adjacent });
     }
     return rows;
-  }, [authorWorksQuery.data, explicitCollectionQuery.data, memberCollectionsQuery.data, metadataQuery.data?.download, officialSeriesQuery.data]);
+  }, [authorWorksQuery.data, explicitCollectionQuery.data, legacyWork, memberCollectionsQuery.data, officialSeriesQuery.data]);
+  const readingContexts = shelfContexts?.contexts ?? legacyContexts;
   // 読了の札に表紙・作者・分量を出すため、隣の作品だけ詳しく読む。並びは
   // 軽い形（題と番号だけ）で引いているので、そこには表紙が無い。
-  const neighborIds = useMemo(() => [...new Set(readingContexts.flatMap((context) => [context.previous?.id, context.next?.id]).filter((value): value is number => typeof value === "number"))].sort((a, b) => a - b), [readingContexts]);
+  const neighborIds = useMemo(() => [...new Set(legacyContexts.flatMap((context) => [context.previous?.id, context.next?.id]).filter((value): value is number => typeof value === "number"))].sort((a, b) => a - b), [legacyContexts]);
   const neighborsQuery = useQuery({
     queryKey: ["reader-neighbors", neighborIds],
     queryFn: () => getDownloads(neighborIds),
     enabled: runtime && neighborIds.length > 0,
     staleTime: 60_000,
   });
-  const neighbors = useMemo(() => new Map((neighborsQuery.data ?? []).map((entry) => [entry.id, entry])), [neighborsQuery.data]);
+  const legacyNeighbors = useMemo(() => new Map<ReaderWorkKey, DownloadEntry>((neighborsQuery.data ?? []).map((entry) => [entry.id, entry])), [neighborsQuery.data]);
+  const neighbors: ReadonlyMap<ReaderWorkKey, DownloadEntry | ShelfEntry> = shelfContexts?.neighbors ?? legacyNeighbors;
   // Only while reading: an address you cannot follow is noise here, whereas the
   // detail screen deliberately shows the work as its author wrote it.
   const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === sourcePage - 1;
   const currentContent = contentReady ? contentQuery.data : null;
-  const cleanHtml = useMemo(() => prepareDocumentHtml(currentContent?.html ?? "", getAssetUrl, { linkifyBareUrls: true }), [currentContent?.html]);
+  const cleanHtml = useMemo(() => prepareDocumentHtml(currentContent?.html ?? "", source.assetUrl, { linkifyBareUrls: true }), [currentContent?.html, source]);
   // 探した語には本文の中で印を入れる。ページ番号を返すだけだったころは、
   // 押しても本文の頭へ動くだけで、どこに在ったのかは自分で探し直しだった。
   const marked = useMemo(() => highlightMatches(cleanHtml, markedTerm), [cleanHtml, markedTerm]);
@@ -471,9 +552,9 @@ export default function ReaderPage() {
   const pageCount = contentQuery.data?.pageCount ?? 1;
   const hasSourcePages = pageCount > 1;
   const vertical = settings.writing === "vertical";
-  const positionKey = `piep.reader-position.${id}.${version ?? "current"}`;
+  const positionKey = `piep.reader-position.${readingId ?? "pending"}.${version ?? "current"}`;
   // 残り時間の目安に使う全体の字数。編集版なら編集版の字数になる。
-  const totalChars = contentQuery.data?.totalPlainTextChars || metadataQuery.data?.download.textLength || 0;
+  const totalChars = contentQuery.data?.totalPlainTextChars || metadataQuery.data?.head.textLength || 0;
   const sequenceContextLimited = Boolean(officialSeriesQuery.data?.truncated || authorWorksQuery.data?.truncated);
 
   useEffect(() => { setVersion(normalizedRequestedVersion); }, [normalizedRequestedVersion]);
@@ -565,7 +646,7 @@ export default function ReaderPage() {
     for (const page of neighbours) {
       void queryClient.prefetchQuery({
         queryKey: ["reader-content-page", id, version, page],
-        queryFn: () => getReaderContentPage(id, version, page),
+        queryFn: () => source.page(version, page),
         staleTime: 60_000,
       });
     }
@@ -575,7 +656,7 @@ export default function ReaderPage() {
       type: "inactive",
       predicate: (query) => !keep.has(query.queryKey[3] as number),
     });
-  }, [contentQuery.data?.page, id, pageCount, queryClient, runtime, sourcePage, version]);
+  }, [contentQuery.data?.page, id, pageCount, queryClient, runtime, source, sourcePage, version]);
 
   useEffect(() => {
     const update = () => setFullscreen(Boolean(document.fullscreenElement));
@@ -639,9 +720,18 @@ export default function ReaderPage() {
   // scrollTop of 0 over the stored position and lose the reader's place.
   useEffect(() => {
     const viewport = scrollRef.current;
-    if (!viewport || !metadataQuery.data || !contentQuery.data) return;
+    if (!viewport || readingId === null || !contentQuery.data) return;
     if (restoredKeyRef.current === positionKey) return;
-    const saved = readReadingPosition(id, version);
+    if (shelfReadingPending) return;
+    const local = readReadingPosition(readingId, version);
+    // ほかの端末（携帯）で、この端末より後に読み進めた位置なら、そちらから開く。時刻を持たない
+    // 古い端末の記録は、今までどおり端末の記録を使う。
+    const remote = remoteReading && !remoteReading.mine && !remoteReading.finished
+      && (!local || (local.at !== undefined && remoteReading.updatedAt > local.at))
+      ? remoteReading
+      : null;
+    const saved = remote ? { page: remote.page, top: 0, mode: undefined, anchor: undefined } : local;
+    const savedRatio = remote ? remote.ratio : null;
     const savedPage = Math.min(Math.max(1, saved?.page ?? 1), Math.max(1, pageCount));
     const savedTop = Math.max(0, saved?.top ?? 0);
     if (sourcePage !== savedPage) {
@@ -665,6 +755,19 @@ export default function ReaderPage() {
     const sameMode = (saved?.mode ?? "horizontal") === (vertical ? "vertical" : "horizontal");
     const attempt = () => {
       if (cancelled) return;
+      // ほかの端末の位置はページの中の割合。組み上がって長さが落ち着くまで寄せ直す。
+      if (savedRatio !== null) {
+        const length = flowLength(viewport, vertical);
+        scrollToFlowOffset(viewport, vertical, savedRatio * length);
+        const settled = length === lastLength && Math.abs(flowOffset(viewport, vertical) - savedRatio * Math.max(0, length)) < 2;
+        if (settled || performance.now() >= deadline) {
+          restoredKeyRef.current = positionKey;
+          return;
+        }
+        lastLength = length;
+        frame = requestAnimationFrame(attempt);
+        return;
+      }
       // 行の目印があればそれで戻す。文字の大きさを変えていても同じ行へ着く。
       // px しか憶えていなかったころは、読書設定を触った瞬間に迷子になった。
       const article = articleRef.current;
@@ -701,7 +804,7 @@ export default function ReaderPage() {
     // 動かないので、フレーム待ちだけに任せると位置がいつまでも戻らない。
     attempt();
     return () => { cancelled = true; cancelAnimationFrame(frame); };
-  }, [contentReady, contentQuery.data, id, metadataQuery.data, pageCount, positionKey, sourcePage, version, vertical]);
+  }, [contentReady, contentQuery.data, pageCount, positionKey, readingId, remoteReading, shelfReadingPending, sourcePage, version, vertical]);
   useEffect(() => {
     const pending = pendingBookmarkRef.current;
     const viewport = scrollRef.current;
@@ -728,7 +831,7 @@ export default function ReaderPage() {
   }, [contentQuery.data?.page, contentReady, sourcePage, vertical]);
   useEffect(() => {
     const viewport = scrollRef.current;
-    if (!viewport || !contentReady) return;
+    if (!viewport || !contentReady || readingId === null) return;
     // 読んでいる位置の保存は、スクロールのたびに `getItem` + `parse` +
     // `stringify` + `setItem` を同期で走らせていた。指を滑らせている間は
     // 1秒に数十回になり、長い本ではその分だけ引っかかる。**進み具合の表示は
@@ -736,6 +839,25 @@ export default function ReaderPage() {
     // 最後に読んでいた場所は失われない。
     let pendingTop: number | null = null;
     let pendingPersist = false;
+    // 棚へは間引いて書く（書くたびに棚の記録が一つ増える）。ページを移ったとき・読み終えたとき・
+    // 離れるときは必ず書く。割合は最後に本当にスクロールしたときに測ったもの。
+    let shelfAt = 0;
+    let shelfPage = 0;
+    let shelfDirty = false;
+    let lastRatio = 0;
+    const toShelf = (finished: boolean, force: boolean) => {
+      if (!shelfReading) return;
+      const now = Date.now();
+      if (!force && !finished && sourcePage === shelfPage && now - shelfAt < SHELF_READING_INTERVAL) {
+        shelfDirty = true;
+        return;
+      }
+      shelfAt = now;
+      shelfPage = sourcePage;
+      shelfDirty = false;
+      shelfReading.write(version, sourcePage, finished ? 1 : lastRatio, finished)
+        .catch((error: unknown) => console.warn("読書位置を棚へ書けません", error));
+    };
     let saveTimer: number | null = null;
     let progressFrame: number | null = null;
     const flush = () => {
@@ -752,19 +874,21 @@ export default function ReaderPage() {
       // 最後のページを読み切ったら、読みかけの棚から降ろす。降ろす口が
       // 「作品を消したとき」しか無かったので、読み終えた本も棚に積まれ続けていた。
       if (sourcePage >= pageCount && atFlowEdge(viewport, vertical, 1)) {
-        clearReadingPosition(id, version);
+        clearReadingPosition(readingId, version);
+        toShelf(true, true);
         pendingTop = null;
         pendingPersist = false;
         return;
       }
       const article = articleRef.current;
       const anchor = article ? currentAnchor(viewport, article, vertical) : null;
-      writeReadingPosition(id, version, {
+      writeReadingPosition(readingId, version, {
         page: sourcePage,
         top: pendingTop,
         mode: vertical ? "vertical" : "horizontal",
         ...(anchor === null ? {} : { anchor }),
       });
+      toShelf(false, false);
       pendingTop = null;
       pendingPersist = false;
     };
@@ -801,6 +925,7 @@ export default function ReaderPage() {
       // 縦書きの `scrollTop` は常に 0 なので、そのまま憶えると「先頭」しか
       // 記録されない。読み始めからの距離で憶える。
       pendingTop = offset;
+      lastRatio = total <= 0 ? 0 : Math.max(0, Math.min(1, offset / total));
       pendingPersist = false;
     };
     const update = (event?: Event) => {
@@ -830,31 +955,30 @@ export default function ReaderPage() {
       }
       if (saveTimer !== null) window.clearTimeout(saveTimer);
       flush();
+      if (shelfDirty) toShelf(false, true);
     };
-  }, [contentReady, hasSourcePages, id, positionKey, sourcePage, pageCount, totalChars, version, vertical]);
+  }, [contentReady, hasSourcePages, positionKey, readingId, shelfReading, sourcePage, pageCount, totalChars, version, vertical]);
   // 手元にある作品・作者を指すリンクに印を付ける。押す前に、それがこの道具の
   // 中の場所だと分かる。
   useLibraryLinkMarks(articleRef, preparedHtml);
 
   if (metadataQuery.isLoading || contentQuery.isLoading) return <div className="page"><LoadingState label="リーダーを準備しています" /></div>;
   if (metadataQuery.error || contentQuery.error || !metadataQuery.data || !contentQuery.data) return <div className="page"><ErrorState error={metadataQuery.error ?? contentQuery.error ?? "作品が見つかりません"} retry={() => { metadataQuery.refetch(); contentQuery.refetch(); }} /></div>;
-  const doc = metadataQuery.data;
-  const work = doc.download;
+  const work = metadataQuery.data.head;
+  const legacy = metadataQuery.data.legacy;
   const currentVersion = version ?? work.currentVersion;
   // 反映中の編集が、いま手元にある版より古い本文の上に載っているか。
-  const staleEditBase = doc.activeEditRevision && doc.activeEditRevision.baseVersion < work.currentVersion
-    ? doc.activeEditRevision.baseVersion
-    : null;
+  const staleEditBase = work.staleEditBase;
   const openSource = async () => {
-    const url = sourceUrl(work.source, work.sourceId, work.contentType, work.personId || work.authorId);
+    const url = sourceUrl(work.source, work.sourceId, work.contentType, work.authorKey);
     if (!url) return;
     if (runtime) await openExternalUrl(url); else window.open(url, "_blank", "noopener,noreferrer");
   };
   // 保存した JSON を既定のアプリで開いていたので、名前と違ってフォルダーが出なかった。
   // 作品ページと同じく、保存フォルダーで JSON を選んだ状態にする。
   const openSavedFolder = async () => {
-    if (!runtime) return;
-    try { await revealPathInFileManager(work.jsonPath); }
+    if (!runtime || !legacy) return;
+    try { await revealPathInFileManager(legacy.download.jsonPath); }
     catch (error) { notifications.show({ color: "red", title: "保存フォルダーを開けません", message: errorMessage(error) }); }
   };
   /** pixiv の原稿ページ番号を、実際に運ばれてくるページ番号へ直す。
@@ -874,7 +998,7 @@ export default function ReaderPage() {
     const originalPath = original?.dataset.localPath;
     if (originalPath) {
       event.preventDefault();
-      setPdfOriginal({ downloadId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
+      setPdfOriginal({ workId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
       return;
     }
     const image = (event.target as HTMLElement).closest<HTMLImageElement>("img.novel-image, .reader-content img");
@@ -996,19 +1120,21 @@ export default function ReaderPage() {
             <Text component="span" ref={progressTextRef} size="xs" c="dimmed" className="reader-progress-text" aria-live="off" />
           </Group>
           <Group gap="xs" wrap="nowrap">
+            {/* 新しい棚の作品は、そう名乗る。読むだけの写しで、旧棚と中身が違うことがある。 */}
+            {source.shelf && <Tooltip label={shelfReading ? "新しい棚（試験中）から読んでいます。読書位置はこの棚に書きます。" : "新しい棚（試験中）から読んでいます。読むだけで、ここからは何も書き換えません。"}><Badge color="gray" variant="light">新しい棚（試験中）</Badge></Tooltip>}
             {/* 編集版が古い版の上に載っているときは、そう名乗る。取り込み直した
                 本文があるのに、読み手にはそれが見えないままだった。 */}
             {/* 狭い窓でも隠さない。隠していたころは、版の選択のいちばん上の
                 「編集版」だけが手がかりだった。取り込んだ版を選んで読んで
                 いるあいだは、編集版ではないので名乗らない。 */}
-            {doc.isEdited && version === null && (staleEditBase === null
+            {work.isEdited && version === null && (staleEditBase === null
               ? <Tooltip label="ローカルで編集し、反映した本文を表示しています。取り込んだ本文は版の選択から読めます。"><Badge color="blue" variant="light">編集版</Badge></Tooltip>
               : <Tooltip label={`この編集版は v${staleEditBase} の本文をもとにしています。取り込み済みの v${work.currentVersion} は表示されていません。`}>
                   <Badge color="yellow" variant="light">編集版（v{staleEditBase}基準）</Badge>
                 </Tooltip>)}
             {/* 自動保存の下書きは、反映するまでここには出ない。直したのに
                 変わらない、と思わせないよう、残っていることだけ告げる。 */}
-            {doc.draftEditRevision && <Tooltip label="編集画面に反映していない下書きがあります。読書画面には反映した本文（無ければ取り込んだ本文）が出ています。"><Badge color="yellow" variant="light">未反映の下書き</Badge></Tooltip>}
+            {work.hasDraft && <Tooltip label="編集画面に反映していない下書きがあります。読書画面には反映した本文（無ければ取り込んだ本文）が出ています。"><Badge color="yellow" variant="light">未反映の下書き</Badge></Tooltip>}
             <BookmarkControls
               bookmarks={bookmarks}
               addDisabled={!contentReady}
@@ -1023,18 +1149,20 @@ export default function ReaderPage() {
                 何が起きたのか読み手には分からなかった。 */}
             <Select
               size="xs"
-              value={doc.isEdited && version === null ? EDITED_VERSION : String(currentVersion)}
+              value={work.isEdited && version === null ? EDITED_VERSION : String(currentVersion)}
               onChange={(value) => setVersion(!value || value === EDITED_VERSION ? null : Number(value))}
               data={[
-                ...(doc.isEdited ? [{ value: EDITED_VERSION, label: "編集版" }] : []),
-                ...doc.versions.map((item) => ({ value: String(item.version), label: `v${item.version}` })),
+                ...(work.isEdited ? [{ value: EDITED_VERSION, label: "編集版" }] : []),
+                ...work.versions.map((item) => ({ value: String(item), label: `v${item}` })),
               ]}
-              w={doc.isEdited ? 108 : 84}
+              w={work.isEdited ? 108 : 84}
               aria-label="表示バージョン"
             />
             <Tooltip label="表示設定"><ActionIcon variant="subtle" color="gray" aria-label="リーダーの表示設定" onClick={settingsDrawer.open}><Icons.readerSettings size={IconSize.nav} /></ActionIcon></Tooltip>
             <Tooltip label={fullscreen ? "全画面を終了" : "全画面で読む"}><ActionIcon variant="subtle" color="gray" aria-label={fullscreen ? "全画面を終了" : "全画面表示"} onClick={() => fullscreen ? document.exitFullscreen() : document.documentElement.requestFullscreen()}>{fullscreen ? <Icons.fullscreenExit size={IconSize.nav} /> : <Icons.fullscreenEnter size={IconSize.nav} />}</ActionIcon></Tooltip>
-            <Button variant="subtle" color="gray" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>
+            {source.shelf
+              ? <Tooltip label="新しい棚の作品は、まだ編集できません"><Button variant="subtle" color="gray" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} disabled>編集</Button></Tooltip>
+              : <Button variant="subtle" color="gray" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>}
           </Group>
         </Group>
         <div ref={progressRef} className="reader-progress" role="progressbar" aria-label="読書進捗" aria-valuemin={0} aria-valuemax={100}>
@@ -1071,7 +1199,7 @@ export default function ReaderPage() {
                 <ProviderMark provider={work.source} />
                 <Group gap={2} wrap="nowrap">
                   <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.externalLink size={IconSize.inline} />} onClick={openSource}>元ページをブラウザで</Button>
-                  <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={openSavedFolder}>保存フォルダー</Button>
+                  <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime || !legacy} onClick={openSavedFolder}>保存フォルダー</Button>
                 </Group>
               </Group>
               <Title order={1} className="reader-title-page__title">{work.title}</Title>

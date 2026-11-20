@@ -9,6 +9,12 @@ const dbApi = vi.hoisted(() => ({
   getSeries: vi.fn(),
 }));
 
+const v2 = vi.hoisted(() => ({ libraryV2FindWork: vi.fn(), libraryV2Entity: vi.fn() }));
+vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
+  ...v2,
+}));
+
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
@@ -93,5 +99,19 @@ describe("本文のリンクに、手元にあることを示す印", () => {
     render(<Body html={`<a href="https://example.com/">外の記事</a>`} />);
     await Promise.resolve();
     expect(dbApi.getDownloadBySource).not.toHaveBeenCalled();
+  });
+
+  it("新しい棚を見ているときは棚で引き、旧棚には聞かない", async () => {
+    localStorage.setItem("piep.library-shelf-v2", "true");
+    try {
+      v2.libraryV2FindWork.mockResolvedValue({ id: "0195f1c2-0000-7000-8000-000000000001", title: "棚の題" });
+      const html = `<a href="https://www.pixiv.net/novel/show.php?id=90000007" class="novel-link-card"><span class="link-card-info"><span class="link-card-title">https://www.pixiv.net/novel/show.php?id=90000007</span></span></a>`;
+      const view = render(<Body html={html} />);
+      await waitFor(() => expect(view.container.querySelector(".link-card-title")?.textContent).toBe("棚の題"));
+      expect(v2.libraryV2FindWork).toHaveBeenCalledWith("pixiv", "90000007");
+      expect(dbApi.getDownloadBySource).not.toHaveBeenCalled();
+    } finally {
+      localStorage.removeItem("piep.library-shelf-v2");
+    }
   });
 });

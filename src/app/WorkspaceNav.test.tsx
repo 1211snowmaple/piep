@@ -61,7 +61,7 @@ Object.defineProperty(window, "matchMedia", {
 
 function saved(overrides: Partial<SavedSearchRecord> = {}): SavedSearchRecord {
   return {
-    id: 1,
+    id: "0196a1b2-0000-7000-8000-000000000001",
     name: "長編ファンタジー",
     query: "tag:ファンタジー",
     paramsJson: "{}",
@@ -371,7 +371,7 @@ describe("library sidebar", () => {
   it("opens a saved search by id rather than by copying its conditions into the link", async () => {
     renderApp("#/library");
     fireEvent.click(await row("長編ファンタジー"));
-    await waitFor(() => expect(window.location.hash).toContain("saved=1"));
+    await waitFor(() => expect(window.location.hash).toContain("saved=0196a1b2-0000-7000-8000-000000000001"));
   });
 
   it("still renders when the library cannot be reached", async () => {
@@ -417,7 +417,7 @@ describe("collapsed rail", () => {
     window.localStorage.setItem("piep.nav-railed", "true");
     matchMediaMatches = true;
     shelfApi.getLibraryShelfCounts.mockResolvedValue(counts);
-    shelfApi.listSavedSearches.mockResolvedValue([saved(), saved({ id: 2, name: "青葉しおり 全作" })]);
+    shelfApi.listSavedSearches.mockResolvedValue([saved(), saved({ id: "0196a1b2-0000-7000-8000-000000000002", name: "青葉しおり 全作" })]);
   });
   afterEach(() => { matchMediaMatches = false; });
 
@@ -443,7 +443,7 @@ describe("collapsed rail", () => {
     expect(nav().getByLabelText("青葉しおり 全作").textContent).toBe("青");
 
     fireEvent.click(fantasy);
-    await waitFor(() => expect(window.location.hash).toContain("saved=1"));
+    await waitFor(() => expect(window.location.hash).toContain("saved=0196a1b2-0000-7000-8000-000000000001"));
   });
 
   it("shows nothing where the saved searches would be when there are none", async () => {

@@ -11,7 +11,9 @@ import { countActiveActivities } from "@/features/jobs/activityAggregation";
 import { useUpdateJobSummaries } from "@/features/updates/updateJobs";
 import { countSavedDeferredUpdateCandidatesCommand } from "@/services/updateJobApi";
 import { parseAcquisitionFilter } from "@/lib/acquisition";
-import { readingWorkIds, subscribeReadingPositions } from "@/features/library/readingShelf";
+import { readingKeysAdopted, readingWorkIds, subscribeReadingPositions } from "@/features/library/readingShelf";
+import { useShelfMode } from "@/features/library/shelfV2";
+import { libraryV2ShelfCounts } from "@/services/shelfHealthApi";
 import { formatCompactCount, formatNumber } from "@/lib/format";
 import { isTauriRuntime } from "@/services/dbApi";
 import { getLibraryShelfCounts, listSavedSearches } from "@/services/shelfApi";
@@ -119,10 +121,18 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
   // here and resolved by the library, which alone knows what still exists.
   const [readingIds, setReadingIds] = useState(() => readingWorkIds());
   useEffect(() => subscribeReadingPositions(() => setReadingIds(readingWorkIds())), []);
+  // 新しい棚を見ているあいだは、件数も新しい棚で数える（一覧と数を合わせる）。読みかけは、
+  // 端末の記録を棚へ引き取ったあとは棚の読書位置で、引き取る前は端末の旧棚の番号で数える。
+  const { shelfMode, deciding } = useShelfMode(runtime);
   const counts = useQuery({
-    queryKey: ["library-shelf-counts", readingIds],
-    queryFn: () => runtime ? getLibraryShelfCounts(readingIds) : Promise.resolve(PREVIEW_COUNTS),
+    queryKey: ["library-shelf-counts", shelfMode, readingIds],
+    queryFn: () => !runtime
+      ? Promise.resolve(PREVIEW_COUNTS)
+      : shelfMode
+        ? libraryV2ShelfCounts(readingKeysAdopted() ? null : readingIds)
+        : getLibraryShelfCounts(readingIds),
     staleTime: 30_000,
+    enabled: !deciding,
   });
   const attentionCount = useQuery({
     queryKey: ["deferred-candidate-count"],
@@ -144,7 +154,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
   const isOpen = (id: GroupId) => openGroups?.[id] ?? DEFAULT_OPEN[id];
 
   const shelf = activeShelf(location.pathname, location.searchParams);
-  const activeSavedId = Number.parseInt(location.searchParams.get("saved") ?? "", 10);
+  const activeSavedId = location.searchParams.get("saved") || null;
   // Collections are a library tab now, so a collection screen keeps the
   // library section highlighted rather than needing an entry of its own.
   const onAttention = location.pathname === "/library" && Boolean(parseAcquisitionFilter(location.searchParams.get("acquisition")));
@@ -222,7 +232,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
               {shelfRows}
               {attentionRow}
             </NavGroup>
-            <NavGroup id="saved" label="保存した検索" icon={Icons.savedSearch} open={isOpen("saved")} onToggle={toggle} active={Number.isSafeInteger(activeSavedId)}>
+            <NavGroup id="saved" label="保存した検索" icon={Icons.savedSearch} open={isOpen("saved")} onToggle={toggle} active={Boolean(activeSavedId)}>
               {saved.length === 0
                 ? <Text px="sm" size="xs" c="dimmed" py={4}>検索条件を保存すると、ここから開けます。</Text>
                 : savedRows}

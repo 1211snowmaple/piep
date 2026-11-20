@@ -56,6 +56,8 @@ impl Database {
             .query_map([], |row| {
                 let members: String = row.get(5)?;
                 Ok(WatchGroup {
+                    legacy_id: None,
+                    watch_generation: None,
                     id: row.get(0)?,
                     name: row.get(1)?,
                     sort_order: row.get(2)?,

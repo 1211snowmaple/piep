@@ -6,6 +6,7 @@ import { useAppNavigate } from "@/app/router";
 import { getProvider, ProviderMark } from "@/lib/providers";
 import { formatDate, formatNumber } from "@/lib/format";
 import { getAssetUrl } from "@/services/dbApi";
+import { shelfFileUrl } from "@/services/libraryV2Api";
 import type { EntityFacet } from "@/types/library";
 
 /**
@@ -23,7 +24,15 @@ function watchTooltip(watch: EntityWatchState, kind: "person" | "series"): strin
   return `${noun}の更新を監視する`;
 }
 
-export function EntityCard({ entity, kind, selectionMode = false, selected = false, onSelect, watch = null, onToggleWatch }: {
+/** 変えられないときの文言。押したら何が起きるかでなく、いまの状態を言う。 */
+function watchStateText(watch: EntityWatchState, kind: "person" | "series"): string {
+  const noun = kind === "person" ? "この作者" : "このシリーズ";
+  if (watch === "watching") return `${noun}は更新監視中`;
+  if (watch === "paused") return `${noun}の更新監視は停止中`;
+  return `${noun}は更新監視していません`;
+}
+
+export function EntityCard({ entity, kind, selectionMode = false, selected = false, onSelect, watch = null, onToggleWatch, watchHint }: {
   entity: EntityFacet;
   kind: "person" | "series";
   selectionMode?: boolean;
@@ -33,6 +42,8 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
   watch?: EntityWatchState;
   /** 追いかけるかどうかを、その場で切り替える。 */
   onToggleWatch?: (entity: EntityFacet, next: boolean) => void;
+  /** 変えられない理由。渡すと監視のボタンは状態だけを見せ、押せない（場所と幅は変えない）。 */
+  watchHint?: string;
 }) {
   const navigate = useAppNavigate();
   const route = kind === "person" ? "people" : "series";
@@ -43,7 +54,9 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
   // 表紙は凝っているので、一覧に並ぶのは読めない切れ端ばかりになっていた。
   // 詳細画面は最初から icon だけを見ており、同じ作者が画面によって
   // 別の顔になっていた。シリーズの枠は表紙を出す場所なので今までどおり。
-  const icon = getAssetUrl(kind === "person" ? entity.iconPath : entity.iconPath ?? entity.coverPath);
+  // 新しい棚の画像はファイルの識別子。旧棚のパスとは URL への直し方が違う。
+  const asset = (path: string | null | undefined) => entity.shelf === "v2" ? shelfFileUrl(path) : getAssetUrl(path);
+  const icon = asset(kind === "person" ? entity.iconPath : entity.iconPath ?? entity.coverPath);
   // 保存元が画像を持ちうるのに、この人は置いていない。「まだ無い」ではなく
   // 「置いていない」なので、保存元と同じく一枚の絵で示す。
   //
@@ -53,7 +66,7 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
   // シリーズの banner は cover_path そのもの - 左の表紙枠に出ているのと
   // 同じ一枚である。同じ絵を一枚のカードに二度置いても、意味は増えない。
   // 人物の banner はアバターとは別のプロフィール背景なので、そちらは残す。
-  const banner = kind === "person" ? getAssetUrl(entity.bannerPath) : null;
+  const banner = kind === "person" ? asset(entity.bannerPath) : null;
   const open = () => navigate(`/${route}/${encodeURIComponent(entity.source)}/${encodeURIComponent(entity.sourceKey)}`);
   // Selection mode is modal, as it is on works: the whole card picks instead of
   // following the link, so a press can never do the thing you did not mean.
@@ -123,16 +136,20 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
             開く合図の山括弧は置かない - カード全体が押せるのは作品カードと
             同じで、あちらにも無い。 */}
         <Group gap={2} wrap="nowrap" className="entity-card__actions">
-        {!selectionMode && onToggleWatch && (
-          <Tooltip label={watchTooltip(watch, kind)}>
+        {!selectionMode && (onToggleWatch || watchHint) && (
+          <Tooltip label={watchHint ? `${watchStateText(watch, kind)}（${watchHint}）` : watchTooltip(watch, kind)}>
             <ActionIcon
               className="entity-card__watch"
               variant="subtle"
               size="lg"
               data-state={watch ?? "off"}
-              aria-label={watchTooltip(watch, kind)}
+              // 押せない形でも吹き出しは出し、押してもカードを開かない（disabled だと押した位置の
+              // 下のカードへ抜ける）。
+              data-disabled={watchHint ? true : undefined}
+              aria-disabled={watchHint ? true : undefined}
+              aria-label={watchHint ? `${watchStateText(watch, kind)}（${watchHint}）` : watchTooltip(watch, kind)}
               aria-pressed={watch === "watching"}
-              onClick={(event) => { event.stopPropagation(); onToggleWatch(entity, watch !== "watching"); }}
+              onClick={(event) => { event.stopPropagation(); if (!watchHint) onToggleWatch?.(entity, watch !== "watching"); }}
             >
               <Icons.watch size={IconSize.action} />
             </ActionIcon>

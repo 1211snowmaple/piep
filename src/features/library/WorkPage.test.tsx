@@ -259,9 +259,9 @@ describe("WorkPage content preview", () => {
       plainText: version === 2 ? "保存済みの本文。" : "最初の本文。",
       totalPlainTextChars: 20,
     }));
-    updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ downloadId: 101, foundAt: "2026-09-01T00:00:00Z" }]);
+    updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ work: "101", foundAt: "2026-09-01T00:00:00Z" }]);
     updateJobApi.previewPendingRevisionCommand.mockResolvedValue({
-      downloadId: 101,
+      work: "101",
       baseVersion: 2,
       text: "取得元で直された本文と追記。",
       textLength: 14,
@@ -271,7 +271,7 @@ describe("WorkPage content preview", () => {
 
     expect(await screen.findByText("保存済み v2 → 取得元の改稿（未保存） の変更")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /取得元の改稿/ })).toHaveAttribute("data-active");
-    await waitFor(() => expect(updateJobApi.previewPendingRevisionCommand).toHaveBeenCalledWith(101));
+    await waitFor(() => expect(updateJobApi.previewPendingRevisionCommand).toHaveBeenCalledWith("101"));
     expect(Array.from(document.querySelectorAll('ins[data-kind="added"]')).map((node) => node.textContent).join("")).toContain("取得元");
     expect(screen.getByRole("radio", { name: "取得元の改稿（未保存）全文" })).toBeInTheDocument();
   });

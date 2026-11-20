@@ -54,14 +54,20 @@ pub async fn render_pdf_attachment_page(
             return Err("PDF ではありません".to_string());
         }
         let rendered = crate::pdf::render_page(Path::new(&asset.local_path), page, width)?;
+        Ok(PdfPageImage::from(rendered))
+    })
+    .await
+    .map_err(|error| format!("ページを表示できませんでした: {error}"))?
+}
+
+impl From<crate::pdf::RenderedPage> for PdfPageImage {
+    fn from(rendered: crate::pdf::RenderedPage) -> Self {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&rendered.webp);
-        Ok(PdfPageImage {
+        Self {
             image: format!("data:image/webp;base64,{encoded}"),
             width: rendered.width,
             height: rendered.height,
             page_count: rendered.page_count,
-        })
-    })
-    .await
-    .map_err(|error| format!("ページを表示できませんでした: {error}"))?
+        }
+    }
 }

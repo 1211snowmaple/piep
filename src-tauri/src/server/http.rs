@@ -4,6 +4,7 @@
 //! `pair` だけで、応答にパスや内部の誤り文を出さない。
 
 pub mod admin_web;
+mod shelf_admin;
 
 pub use admin_web::{AdminAsset, AdminWeb, ConnectionInfo};
 
@@ -103,6 +104,7 @@ pub struct ServerContext {
     pub public_url: Option<String>,
     /// 自己署名で待ち受けているときの証明書の指紋。
     pub fingerprint: Option<String>,
+    reader_shelf: OnceLock<Arc<super::v2::Context>>,
     /// 自己更新の係。`install` で置いた単独サーバーにだけある。
     update: OnceLock<Arc<UpdateController>>,
     /// 管理画面。管理者の口を持つ単独サーバーにだけある。
@@ -115,6 +117,10 @@ pub struct ServerContext {
     dimensions: Mutex<HashMap<IllustrationKey, (u32, u32)>>,
     /// 携帯がお気に入りを変えたと、デスクトップ版の画面へ知らせる係。内蔵サーバーにだけある。
     favorites_listener: OnceLock<FavoritesListener>,
+    /// 新しい棚の写しの受け取り。単独サーバーにだけある。
+    shipments: OnceLock<Arc<super::standalone::shipment::ShelfShipments>>,
+    /// 単独サーバーの置き場（設定を書くため）。
+    paths: OnceLock<super::standalone::ServerPaths>,
 }
 
 pub type FavoritesListener = Arc<dyn Fn() + Send + Sync>;
@@ -203,6 +209,7 @@ impl ServerContext {
             receiver,
             public_url,
             fingerprint,
+            reader_shelf: OnceLock::new(),
             update: OnceLock::new(),
             web: OnceLock::new(),
             started_at: chrono::Utc::now().to_rfc3339(),
@@ -212,7 +219,19 @@ impl ServerContext {
             illustration_workers: Arc::new(tokio::sync::Semaphore::new(ILLUSTRATION_WORKERS)),
             dimensions: Mutex::new(HashMap::new()),
             favorites_listener: OnceLock::new(),
+            shipments: OnceLock::new(),
+            paths: OnceLock::new(),
         })
+    }
+
+    /// 単独サーバーの置き場と、新しい棚の写しの受け取りを置く。
+    pub(super) fn set_shipments(
+        &self,
+        paths: super::standalone::ServerPaths,
+        shipments: Arc<super::standalone::shipment::ShelfShipments>,
+    ) {
+        let _ = self.paths.set(paths);
+        let _ = self.shipments.set(shipments);
     }
 
     pub fn set_favorites_listener(&self, listener: FavoritesListener) {
@@ -221,6 +240,43 @@ impl ServerContext {
 
     pub fn set_update(&self, controller: Arc<UpdateController>) {
         let _ = self.update.set(controller);
+    }
+
+    /// 配信する新しい棚を決め、本文の検索の索引を棚に合わせ始める。索引を作るあいだは棚を
+    /// 開いたままにするので、開いただけの棚（確かめて閉じるもの）では始めない。
+    pub(super) fn set_reader_shelf(&self, shelf: Arc<super::v2::Context>) -> Result<(), String> {
+        self.reader_shelf
+            .set(Arc::clone(&shelf))
+            .map_err(|_| "新しい棚は既に設定されています".to_owned())?;
+        if let Library::Swappable(db) = &self.library {
+            // 携帯が新しい棚で変えたお気に入りを、旧 API の変更の記録にも残す。デスクトップ版は
+            // 今までどおりその記録を取り込み、旧 API の画面も同じ値を出す。
+            let (store, db) = (Arc::clone(&self.store), Arc::clone(db));
+            shelf.set_favorite_mirror(Box::new(move |source, source_id, device, favorite| {
+                let Some(current) = db.current() else {
+                    return;
+                };
+                let update = super::store::FavoriteUpdate {
+                    favorite,
+                    device_time: super::store::now_ms(),
+                };
+                if let Err(error) =
+                    store.apply_favorite(&current, source, source_id, device, &update)
+                {
+                    log::warn!("お気に入りを旧 API の記録へ写せません: {error}");
+                }
+            }));
+            // デスクトップ版がまだ取り込んでいない携帯の変更を、入れ替えた写しへ当て直す。
+            let (store, follow) = (Arc::clone(&self.store), Arc::clone(&shelf));
+            let spawned = std::thread::Builder::new()
+                .name("piep-v2-favorites".into())
+                .spawn(move || reapply_shelf_favorites(&store, &follow));
+            if let Err(error) = spawned {
+                log::warn!("お気に入りを当て直すスレッドを作れません: {error}");
+            }
+        }
+        shelf.prepare_search();
+        Ok(())
     }
 
     pub fn set_admin_web(&self, web: AdminWeb) {
@@ -367,6 +423,40 @@ fn require_admin(ctx: &ServerContext, headers: &HeaderMap) -> Result<AuthorizedD
     }
 }
 
+/// 旧 API の変更の記録のうち、デスクトップ版がまだ取り込んでいないものを新しい棚へ当てる。
+fn reapply_shelf_favorites(store: &ServerStore, shelf: &super::v2::Context) {
+    let mut since = 0;
+    let mut applied = 0;
+    loop {
+        let changes = match store.favorite_changes_since(since, 500) {
+            Ok(changes) => changes,
+            Err(error) => {
+                log::warn!("お気に入りの記録を読めません: {error}");
+                return;
+            }
+        };
+        let Some(last) = changes.last() else {
+            break;
+        };
+        since = last.cursor;
+        for change in &changes {
+            match shelf.follow_favorite(
+                Some(&change.device_id),
+                &change.source,
+                &change.source_id,
+                change.favorite,
+            ) {
+                Ok(true) => applied += 1,
+                Ok(false) => {}
+                Err(error) => log::warn!("お気に入りを新しい棚へ当て直せません: {error}"),
+            }
+        }
+    }
+    if applied > 0 {
+        log::info!("携帯のお気に入り {applied} 件を新しい棚へ当て直しました");
+    }
+}
+
 async fn with_db<T, F>(ctx: &Ctx, work: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
@@ -425,6 +515,34 @@ fn admin_routes(ctx: Ctx) -> Router {
         .route("/api/v1/admin/devices/{id}", delete(admin_revoke))
         .route("/api/v1/admin/favorites", get(admin_favorites))
         .route("/api/v1/admin/favorites/ack", post(admin_favorites_ack))
+        .route("/api/v1/admin/shelf/reading", get(admin_shelf_reading))
+        .route("/api/v1/admin/shelf/favorites", get(admin_shelf_favorites))
+        .route(
+            "/api/v1/admin/shelf/shipments",
+            get(shelf_admin::status).post(shelf_admin::open),
+        )
+        .route(
+            "/api/v1/admin/shelf/shipments/{id}",
+            delete(shelf_admin::abort),
+        )
+        .route(
+            "/api/v1/admin/shelf/shipments/{id}/needed",
+            post(shelf_admin::needed),
+        )
+        .route(
+            "/api/v1/admin/shelf/shipments/{id}/chunks/{chunk}",
+            put(shelf_admin::put_chunk).layer(DefaultBodyLimit::max(
+                piep_storage::MAX_ENCODED_CHUNK_BYTES as usize + 1024,
+            )),
+        )
+        .route(
+            "/api/v1/admin/shelf/shipments/{id}/commit",
+            post(shelf_admin::commit),
+        )
+        .route(
+            "/api/v1/admin/devices/{id}/shelf",
+            put(shelf_admin::set_reader),
+        )
         .route("/api/v1/admin/sync/sessions", post(sync_open))
         .route("/api/v1/admin/sync/sessions/{id}", delete(sync_abort))
         .route(
@@ -485,13 +603,16 @@ async fn authorize_before_body(ctx: Ctx, request: Request, next: Next, admin: bo
 
 /// 読み手の口。管理の API は載せない。
 pub fn reader_router(ctx: Ctx) -> Router {
-    finish(read_routes(ctx))
+    finish(read_routes(Arc::clone(&ctx)), &ctx)
 }
 
 /// 読み手と管理の両方を受ける口。管理の口を分けるときは、そちらにもこれを使う。
 /// 管理者の登録と証明書の確認に `pair` と `hello` が要るからである。
 pub fn combined_router(ctx: Ctx) -> Router {
-    finish(read_routes(Arc::clone(&ctx)).merge(admin_routes(ctx)))
+    finish(
+        read_routes(Arc::clone(&ctx)).merge(admin_routes(Arc::clone(&ctx))),
+        &ctx,
+    )
 }
 
 /// 管理者の口に、管理画面も載せる。`AdminWeb` を渡した単独サーバーだけが使う。
@@ -499,21 +620,37 @@ pub fn admin_router(ctx: Ctx) -> Router {
     finish(
         read_routes(Arc::clone(&ctx))
             .merge(admin_routes(Arc::clone(&ctx)))
-            .merge(admin_web::web_routes(ctx)),
+            .merge(admin_web::web_routes(Arc::clone(&ctx))),
+        &ctx,
     )
     .layer(Extension(admin_web::PageHere))
 }
 
-fn finish(router: Router) -> Router {
-    router
+fn finish(router: Router, ctx: &Ctx) -> Router {
+    let legacy = router
         .fallback(|| async { ApiError::not_found() })
         // 本文と一覧の JSON は大きく縮む。既定の判定は画像を素通りさせる。
         // 頼まれたときだけ圧縮するので、古い端末の受け取り方は変わらない。
         .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))
-        .layer(middleware::from_fn(observe))
+        .layer(middleware::from_fn(legacy_no_store));
+    // v2 の資産は形式とキャッシュの条件を自分で決める。配信時に圧縮し直さない。
+    let routes = match ctx.reader_shelf.get() {
+        Some(shelf) => legacy.merge(super::v2::router(Arc::clone(shelf))),
+        None => legacy,
+    };
+    routes.layer(middleware::from_fn(observe))
 }
 
-/// 応答に印を付け、記録を残す。
+async fn legacy_no_store(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response
+}
+
+/// 要求の記録を残す。
 ///
 /// 記録に載せるのは端点の型と状態コードと所要時間だけで、作品 ID も問い合わせも載せない。
 /// 検索語や登録の鍵が残らないようにするためである。成功は読書のたびに起きるので debug に落とす。
@@ -526,11 +663,7 @@ async fn observe(request: Request, next: Next) -> Response {
         .map_or("(経路なし)".to_string(), |path| {
             path.as_str().to_string()
         });
-    let mut response = next.run(request).await;
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-store"),
-    );
+    let response = next.run(request).await;
     let status = response.status();
     let elapsed = started.elapsed().as_millis();
     if status.is_success() {
@@ -1510,16 +1643,29 @@ async fn favorite_put(
         Library::Swappable(_) => {
             let store = Arc::clone(&ctx.store);
             let (key, id) = (source.clone(), source_id.clone());
+            let device_id = device.id.clone();
             let stored = with_db(&ctx, move |db| {
                 store
-                    .apply_favorite(db, &key, &id, &device.id, &update)
+                    .apply_favorite(db, &key, &id, &device_id, &update)
                     .map_err(|error| {
                         log::error!("お気に入りを書けません: {error}");
                         ApiError::internal()
                     })
             })
             .await?;
-            stored.ok_or_else(ApiError::not_found)?.favorite
+            let stored = stored.ok_or_else(ApiError::not_found)?;
+            // 旧 API の画面（作者・シリーズなど）で変えた値も、新しい棚の一覧と揃える。
+            if let Some(shelf) = ctx.reader_shelf.get().cloned() {
+                let (key, id, favorite) = (source.clone(), source_id.clone(), stored.favorite);
+                let device = device.id.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if let Err(error) = shelf.follow_favorite(Some(&device), &key, &id, favorite) {
+                        log::warn!("お気に入りを新しい棚へ当てられません: {error}");
+                    }
+                })
+                .await;
+            }
+            stored.favorite
         }
     };
     Ok(Json(FavoriteState {
@@ -1582,6 +1728,44 @@ async fn admin_favorites_ack(
     Ok(Json(serde_json::json!({ "cursor": ack.cursor })))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShelfReadingQuery {
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
+/// 携帯が新しい棚に書いた読書位置を、デスクトップ版が自分の棚へ取り込むために読む。
+/// 棚の持ち主の位置だけ。新しい棚を配っているサーバーにだけある。
+async fn admin_shelf_reading(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    Query(query): Query<ShelfReadingQuery>,
+) -> Result<Response, ApiError> {
+    require_admin(&ctx, &headers)?;
+    let shelf = ctx
+        .reader_shelf
+        .get()
+        .cloned()
+        .ok_or_else(ApiError::not_found)?;
+    Ok(shelf.owner_reading(query.cursor, query.limit).await)
+}
+
+/// 新しい棚の持ち主のお気に入り（携帯が付け外ししたものをデスクトップ版が取り込む）。
+async fn admin_shelf_favorites(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    Query(query): Query<ShelfReadingQuery>,
+) -> Result<Response, ApiError> {
+    require_admin(&ctx, &headers)?;
+    let shelf = ctx
+        .reader_shelf
+        .get()
+        .cloned()
+        .ok_or_else(ApiError::not_found)?;
+    Ok(shelf.owner_favorites(query.cursor, query.limit).await)
+}
+
 async fn reading_put(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
@@ -1618,7 +1802,9 @@ struct AdminStatus {
     version: &'static str,
     api_version: u32,
     works: Option<i64>,
-    devices: Vec<super::store::DeviceSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    library_v2: Option<super::v2::ShelfStatus>,
+    devices: Vec<serde_json::Value>,
     sync: Option<super::sync_receive::ReceiverStatus>,
     public_url: Option<String>,
     update: Option<UpdateStatus>,
@@ -1626,6 +1812,9 @@ struct AdminStatus {
     started_at: String,
     /// `available`、`public-only`（公開の口しかない）、`disabled`（止めてある）、`none`。
     admin_web: &'static str,
+    /// 送られた棚を組み終えて、次の起動で配るのを待っているか（単独サーバーだけ）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shelf_pending: Option<bool>,
 }
 
 async fn admin_status(
@@ -1641,11 +1830,25 @@ async fn admin_status(
         .map_err(|_| ApiError::internal())?,
         None => None,
     };
-    let devices = ctx.store.list_devices().map_err(|_| ApiError::internal())?;
+    let library_v2 = if let Some(shelf) = ctx.reader_shelf.get().cloned() {
+        Some(
+            tokio::task::spawn_blocking(move || shelf.shelf_status())
+                .await
+                .map_err(|_| ApiError::internal())?
+                .map_err(|error| {
+                    log::error!("新しい棚の配信状態を確認できません: {error}");
+                    ApiError::internal()
+                })?,
+        )
+    } else {
+        None
+    };
+    let devices = device_rows(&ctx)?;
     Ok(Json(AdminStatus {
         version: super::update::VERSION,
         api_version: API_VERSION,
         works,
+        library_v2,
         devices,
         sync: ctx.receiver.as_ref().map(|receiver| receiver.status()),
         public_url: ctx.public_url.clone(),
@@ -1653,6 +1856,7 @@ async fn admin_status(
         server_name: ctx.store.server_name(),
         started_at: ctx.started_at.clone(),
         admin_web: admin_web_state(&ctx),
+        shelf_pending: ctx.shipments.get().map(|shipments| shipments.pending()),
     }))
 }
 
@@ -1762,11 +1966,26 @@ async fn admin_pairing(
 async fn admin_devices(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
-) -> Result<Json<Vec<super::store::DeviceSummary>>, ApiError> {
+) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     require_admin(&ctx, &headers)?;
-    Ok(Json(
-        ctx.store.list_devices().map_err(|_| ApiError::internal())?,
-    ))
+    Ok(Json(device_rows(&ctx)?))
+}
+
+/// 端末の一覧。新しい棚を配っているサーバーだけ、携帯ごとに棚を読めるかを添える。
+fn device_rows(ctx: &ServerContext) -> Result<Vec<serde_json::Value>, ApiError> {
+    let devices = ctx.store.list_devices().map_err(|_| ApiError::internal())?;
+    let shelf = ctx.reader_shelf.get().cloned();
+    let mut rows = Vec::with_capacity(devices.len());
+    for device in devices {
+        let reads = shelf.as_ref().map(|shelf| shelf.reads(&device.id));
+        let mut row = serde_json::to_value(&device).map_err(|_| ApiError::internal())?;
+        // 新しい棚を配っているサーバーだけ、携帯ごとに棚を読めるかを添える。
+        if let (Some(reads), Some(object)) = (reads, row.as_object_mut()) {
+            object.insert("readsShelf".into(), serde_json::Value::Bool(reads));
+        }
+        rows.push(row);
+    }
+    Ok(rows)
 }
 
 async fn admin_revoke(
@@ -1782,6 +2001,7 @@ async fn admin_revoke(
         .map_err(|_| ApiError::internal())?
     {
         admin_web::note_device(&ctx, &headers, &ip, "端末の解除");
+        shelf_admin::forget_reader(&ctx, id).await;
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found())

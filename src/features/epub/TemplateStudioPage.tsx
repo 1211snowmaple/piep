@@ -53,7 +53,8 @@ import {
   saveTemplateFile,
   saveTemplateSettings,
 } from "@/services/epubApi";
-import type { DownloadEntry } from "@/types/library";
+import type { DownloadEntry, ShelfEntry } from "@/types/library";
+import { searchShelf, shelfEntriesByIds, useShelfMode } from "@/features/library/shelfV2";
 import type {
   DataField,
   InfoField,
@@ -112,9 +113,9 @@ export default function TemplateStudioPage() {
 
   // The work the preview renders. Kept in the address so a reload comes back to
   // the same comparison rather than to an arbitrary book.
-  const sampleParam = Number.parseInt(params.get("sample") ?? "", 10);
-  const sampleId = Number.isSafeInteger(sampleParam) ? sampleParam : null;
-  const setSample = (id: number | null) => {
+  // 旧棚の作品は番号、新しい棚の作品は ID（文字列）。
+  const sampleId = parseSample(params.get("sample"));
+  const setSample = (id: SampleId | null) => {
     const next = new URLSearchParams(params);
     if (id === null) next.delete("sample");
     else next.set("sample", String(id));
@@ -296,11 +297,24 @@ function NewTemplateModal({ opened, onClose, templates, pending, onCreate }: {
 // 編集の中身
 // ============================================================
 
+/** 見本の作品。旧棚は番号、新しい棚は作品の ID。 */
+type SampleId = number | string;
+
+function parseSample(value: string | null): SampleId | null {
+  const text = value?.trim() ?? "";
+  if (!text) return null;
+  if (/^\d+$/.test(text)) {
+    const id = Number.parseInt(text, 10);
+    return Number.isSafeInteger(id) ? id : null;
+  }
+  return text;
+}
+
 function TemplateWorkspace({ template, runtime, sampleId, onSampleChange, onChanged }: {
   template: TemplateInfo;
   runtime: boolean;
-  sampleId: number | null;
-  onSampleChange: (id: number | null) => void;
+  sampleId: SampleId | null;
+  onSampleChange: (id: SampleId | null) => void;
   onChanged: () => void;
 }) {
   const [tab, setTab] = useState<string | null>("structure");
@@ -740,8 +754,8 @@ function PreviewPanel({ preview, loading, error, target, onTarget, sampleId, onS
   error: unknown;
   target: PreviewTarget;
   onTarget: (target: PreviewTarget) => void;
-  sampleId: number | null;
-  onSampleChange: (id: number | null) => void;
+  sampleId: SampleId | null;
+  onSampleChange: (id: SampleId | null) => void;
   runtime: boolean;
   onRefresh: () => void;
 }) {
@@ -807,24 +821,31 @@ function PreviewFrame({ html, css, label }: { html: string; css: string; label: 
   return <iframe ref={frame} className="template-studio__frame" title={`${label}のプレビュー`} sandbox="" srcDoc={source} />;
 }
 
-function SamplePicker({ sampleId, onChange, runtime }: { sampleId: number | null; onChange: (id: number | null) => void; runtime: boolean }) {
+function SamplePicker({ sampleId, onChange, runtime }: { sampleId: SampleId | null; onChange: (id: SampleId | null) => void; runtime: boolean }) {
   const [query, setQuery] = useState("");
+  // 一覧を新しい棚から出しているときは、見本も新しい棚から選ぶ。
+  const { shelfMode, deciding } = useShelfMode(runtime);
   const recent = useQuery({
-    queryKey: ["template-preview-works", query],
-    queryFn: () => (runtime
-      ? searchDownloadsV2({ text: query || null, limit: 20, sortBy: "downloaded_at", sortOrder: "desc" })
-      : Promise.resolve({ items: [] as DownloadEntry[] })),
-    enabled: runtime,
+    queryKey: ["template-preview-works", shelfMode, query],
+    queryFn: (): Promise<{ items: Array<DownloadEntry | ShelfEntry> }> => {
+      if (!runtime) return Promise.resolve({ items: [] });
+      const params = { text: query || null, limit: 20, sortBy: "downloaded_at", sortOrder: "desc" } as const;
+      return shelfMode ? searchShelf(params) : searchDownloadsV2(params);
+    },
+    enabled: runtime && !deciding,
     staleTime: 30_000,
   });
   const current = useQuery({
     queryKey: ["template-preview-work", sampleId],
-    queryFn: () => (runtime && sampleId ? getDownloads([sampleId]) : Promise.resolve([] as DownloadEntry[])),
-    enabled: Boolean(runtime && sampleId),
+    queryFn: (): Promise<Array<DownloadEntry | ShelfEntry>> => {
+      if (!runtime || sampleId === null) return Promise.resolve([]);
+      return typeof sampleId === "string" ? shelfEntriesByIds([sampleId]) : getDownloads([sampleId]);
+    },
+    enabled: Boolean(runtime && sampleId !== null),
   });
   const options = useMemo(() => {
     const items = [...(current.data ?? []), ...(recent.data?.items ?? [])];
-    const seen = new Set<number>();
+    const seen = new Set<SampleId>();
     return items.filter((item) => (seen.has(item.id) ? false : seen.add(item.id)));
   }, [current.data, recent.data]);
 
@@ -840,7 +861,7 @@ function SamplePicker({ sampleId, onChange, runtime }: { sampleId: number | null
       value={sampleId === null ? null : String(sampleId)}
       searchValue={query}
       onSearchChange={setQuery}
-      onChange={(value) => onChange(value ? Number(value) : null)}
+      onChange={(value) => onChange(parseSample(value))}
       disabled={!runtime}
     />
   );

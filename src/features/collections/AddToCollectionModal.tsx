@@ -22,6 +22,8 @@ import { Icons, IconSize } from "@/lib/icons";
 import { addDownloadsToCollection, createCollectionFromDownloads } from "@/services/collectionApi";
 import { invalidateCollectionViews, workCollectionsQueryOptions } from "./collectionQueries";
 import { isTauriRuntime } from "@/services/dbApi";
+import { editShelfCollection, invalidateShelf } from "@/features/library/shelfV2";
+import type { ShelfWorkKey } from "@/services/libraryV2Api";
 import type { CollectionKind } from "@/types/collections";
 
 /**
@@ -37,11 +39,14 @@ export function AddToCollectionModal({
   opened,
   onClose,
   downloadIds,
+  shelfWorks = null,
   defaultName = "",
 }: {
   opened: boolean;
   onClose: () => void;
   downloadIds: number[];
+  /** 新しい棚の作品（取得元と作品の番号）。渡すと新しい棚のコレクションへ入れる。 */
+  shelfWorks?: ShelfWorkKey[] | null;
   /** 新規作成の名前の初期値。作者ページなら作者名など。 */
   defaultName?: string;
 }) {
@@ -52,7 +57,9 @@ export function AddToCollectionModal({
   const [name, setName] = useState("");
   const [kind, setKind] = useState<CollectionKind>("ordered");
 
-  const collectionsQuery = useQuery({ ...workCollectionsQueryOptions(), enabled: opened });
+  const shelf = shelfWorks !== null;
+  const count = shelfWorks?.length ?? downloadIds.length;
+  const collectionsQuery = useQuery({ ...workCollectionsQueryOptions(shelf), enabled: opened });
   const collections = collectionsQuery.data ?? [];
 
   useEffect(() => {
@@ -64,10 +71,19 @@ export function AddToCollectionModal({
     setTarget("__new__");
   }, [opened, defaultName]);
 
-  const invalidate = () => invalidateCollectionViews(queryClient);
+  const invalidate = () => shelf ? void invalidateShelf(queryClient) : invalidateCollectionViews(queryClient);
 
   const mutation = useMutation({
     mutationFn: async () => {
+      if (shelfWorks) {
+        // 新しく作るときも旧棚と同じく投稿日順に並べて入れる。
+        const saved = target === "__new__"
+          ? await editShelfCollection(crypto.randomUUID(), { kind: "create", title: name.trim(), description: null, ordered: kind === "ordered", works: shelfWorks })
+              .then((created) => created && kind === "ordered" ? editShelfCollection(created.id, { kind: "sort", by: "published" }) : created)
+          : await editShelfCollection(target, { kind: "add", works: shelfWorks });
+        if (!saved) throw new Error("コレクションが見つかりません");
+        return saved;
+      }
       if (target === "__new__") {
         return createCollectionFromDownloads(name.trim(), kind, downloadIds);
       }
@@ -78,7 +94,7 @@ export function AddToCollectionModal({
       onClose();
       notifications.show({
         color: "green",
-        message: `「${collection.name}」に${formatNumber(downloadIds.length)}作品を入れました`,
+        message: `「${collection.name}」に${formatNumber(count)}作品を入れました`,
         onClick: () => navigate(`/collections/${collection.id}`),
       });
       if (target === "__new__") navigate(`/collections/${collection.id}`);
@@ -89,13 +105,13 @@ export function AddToCollectionModal({
 
   const blocked = useMemo(() => {
     if (collectionsQuery.isError) return "コレクションを読み込めません";
-    if (downloadIds.length === 0) return "作品が選ばれていません";
+    if (count === 0) return "作品が選ばれていません";
     if (target === "__new__" && !name.trim()) return "名前を入れてください";
     return null;
-  }, [collectionsQuery.isError, downloadIds.length, name, target]);
+  }, [collectionsQuery.isError, count, name, target]);
 
   return (
-    <Modal opened={opened} onClose={onClose} title={`${formatNumber(downloadIds.length)}作品をコレクションにまとめる`} size="lg">
+    <Modal opened={opened} onClose={onClose} title={`${formatNumber(count)}作品をコレクションにまとめる`} size="lg">
       <Stack>
         {!runtime && <Alert color="gray">プレビューではコレクションの変更は保存されません。</Alert>}
         <Radio.Group value={target} onChange={setTarget}>
@@ -185,7 +201,7 @@ export function AddToCollectionModal({
             loading={mutation.isPending}
             onClick={() => mutation.mutate()}
           >
-            {blocked ?? `${formatNumber(downloadIds.length)}作品を入れる`}
+            {blocked ?? `${formatNumber(count)}作品を入れる`}
           </Button>
         </ActionRow>
       </Stack>

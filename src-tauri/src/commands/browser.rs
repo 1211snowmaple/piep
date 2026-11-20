@@ -54,6 +54,28 @@ pub async fn read_browser_page_work_candidates(
     source: String,
 ) -> Result<PageWorkCandidates, String> {
     let page = read_browser_page_works(app.clone(), browser, source.clone()).await?;
+    // 切り替えた棚では、棚に載っている作品を保存済みとする（外した作品は載っていない）。
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let works = page
+                .works
+                .into_iter()
+                .map(|work| {
+                    let saved = library
+                        .find_listed_work(&source, &work.source_id)
+                        .map_err(|e| e.to_string())?
+                        .is_some();
+                    Ok(PageWorkCandidate { work, saved })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(PageWorkCandidates {
+                url: page.url,
+                works,
+                truncated: page.truncated,
+            })
+        })
+        .await;
+    }
     let state = app.state::<Arc<AppState>>();
     let works = page
         .works
@@ -101,6 +123,31 @@ pub async fn read_browser_page_user_candidates(
     browser: String,
 ) -> Result<PageUserCandidates, String> {
     let page = read_browser_page_users(app.clone(), browser).await?;
+    // 切り替えた棚では、棚の監視の登録で見る（止めた登録も「登録済み」）。
+    if let Some(library) = super::watching::active(&app) {
+        return super::watching::blocking(move || {
+            let watched: std::collections::HashSet<String> =
+                super::watching::targets(&library, Some("author"), false)?
+                    .into_iter()
+                    .filter(|target| target.source == "pixiv")
+                    .map(|target| target.source_key)
+                    .collect();
+            let users = page
+                .users
+                .into_iter()
+                .map(|user| {
+                    let watched = watched.contains(&user.user_id);
+                    PageUserCandidate { user, watched }
+                })
+                .collect();
+            Ok(PageUserCandidates {
+                url: page.url,
+                users,
+                truncated: page.truncated,
+            })
+        })
+        .await;
+    }
     let state = app.state::<Arc<AppState>>();
     let users = page
         .users

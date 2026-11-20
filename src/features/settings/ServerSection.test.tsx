@@ -1,7 +1,7 @@
 import { MantineProvider } from "@mantine/core";
 import { ModalsProvider } from "@mantine/modals";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { theme } from "@/theme";
 import type { DesktopServerStatus, RemoteServerStatus } from "@/services/serverApi";
@@ -23,6 +23,7 @@ const api = vi.hoisted(() => ({
   serverSetAutoSend: vi.fn(),
   serverSendNow: vi.fn(),
   serverSendStop: vi.fn(),
+  serverSetRemoteShelfReader: vi.fn(),
 }));
 vi.mock("@/services/serverApi", () => api);
 const opener = vi.hoisted(() => ({ openExternalUrl: vi.fn() }));
@@ -147,6 +148,27 @@ describe("ServerSection", () => {
     await waitFor(() => expect((open as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(open);
     await waitFor(() => expect(opener.openExternalUrl).toHaveBeenCalledWith("https://server.example/admin/#ticket=abc"));
+  });
+
+  it("lets each phone read the new shelf only when the server serves one, and says when a restart is due", async () => {
+    api.serverStatus.mockResolvedValue(connected());
+    api.serverRemoteStatus.mockResolvedValue(remote());
+    renderSection();
+    await screen.findByRole("button", { name: "管理画面を開く" });
+    expect(screen.queryByRole("group", { name: "新しい棚を読む携帯" })).toBeNull();
+
+    expect(screen.queryByText("送ったライブラリは、サーバーを再起動すると読めるようになります。")).toBeNull();
+
+    api.serverRemoteStatus.mockResolvedValue(remote({ devices: [admin, { ...phone, readsShelf: false }], shelfPending: true }));
+    api.serverSetRemoteShelfReader.mockResolvedValue(undefined);
+    cleanup();
+    renderSection();
+    const toggle = await screen.findByRole("switch", { name: "Pixel" });
+    await waitFor(() => expect((toggle as HTMLInputElement).disabled).toBe(false));
+    expect((toggle as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(api.serverSetRemoteShelfReader).toHaveBeenCalledWith("b", true));
+    expect(screen.getByText("送ったライブラリは、サーバーを再起動すると読めるようになります。")).toBeTruthy();
   });
 
   it("checks for an update without applying it", async () => {

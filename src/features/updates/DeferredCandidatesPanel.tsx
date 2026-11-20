@@ -82,7 +82,7 @@ export function DeferredCandidatesPanel({ runtime, onRechecked, onOpenWork }: { 
         <ProviderMark provider={row.source} compact />
         <Stack gap={3} style={{ flex: 1, minWidth: 0 }}><Text size="sm" fw={600}>{row.title}</Text><UpdateWorkMetadata metadata={row.metadata} /></Stack>
         <UpdateStatusBadge title={row.title} {...status} detail={reason} />
-        <UpdateWorkLinks source={row.source} sourceId={row.sourceId} downloadId={row.downloadId} title={row.title} onOpenWork={onOpenWork} />
+        <UpdateWorkLinks source={row.source} sourceId={row.sourceId} downloadId={row.downloadId} workId={row.workId} title={row.title} onOpenWork={onOpenWork} />
       </Group>;
     })}
     {pageCount > 1 && <Pagination size="sm" total={pageCount} value={currentPage} onChange={setPage} aria-label="保留候補のページ" />}

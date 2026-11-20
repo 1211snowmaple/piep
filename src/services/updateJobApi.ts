@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { store } from "@/store";
+import type { WatchId, WorkId } from "@/types/library";
 
 export type UpdateJobStatus =
   | "queued"
@@ -13,7 +14,8 @@ export type UpdateJobStatus =
 
 /** `save` は「選んだ作品をまとめて保存する」ジョブ。監視対象は見に行かない。 */
 /** `targets` は監視グループの確認。`targetIds` に挙げた作者・シリーズだけを見る。 */
-export type UpdateJobScope = "all" | "work" | "author" | "series" | "targets" | "save";
+/** `favorite`・`reading` は切り替えた棚の範囲（棚が今その範囲にある作品を選ぶ）。 */
+export type UpdateJobScope = "all" | "work" | "author" | "series" | "targets" | "save" | "favorite" | "reading";
 export type UpdateJobMode = "check_only" | "auto_save" | "save";
 
 export interface UpdateJobCredentials {
@@ -29,8 +31,8 @@ export interface UpdateJobCredentials {
 export interface StartUpdateJobRequest {
   scope: UpdateJobScope;
   mode: UpdateJobMode;
-  workIds?: number[] | null;
-  targetIds?: number[] | null;
+  workIds?: WorkId[] | null;
+  targetIds?: WatchId[] | null;
   /** Put every work this job saves under update watching. */
   watchSaved?: boolean | null;
   /** 作者とシリーズの新作だけを見る軽い確認にする。改稿は見ない。 */
@@ -89,6 +91,7 @@ export interface UpdateJobCandidate {
   metadata?: UpdateWorkMetadata;
   id: number;
   downloadId?: number | null;
+  workId?: string | null;
   key: string;
   source: "pixiv" | "fanbox";
   sourceId: string;
@@ -160,6 +163,7 @@ export interface SaveJobWork {
 }
 
 export interface DeferredUpdateCandidate {
+  workId?: string | null;
   metadata?: UpdateWorkMetadata;
   source: "pixiv" | "fanbox";
   sourceId: string;
@@ -220,6 +224,7 @@ export interface UpdateJobItemState {
   title?: string | null;
   /** Local saved work ID when this job item resolves to the library. */
   downloadId?: number | null;
+  workId?: string | null;
 }
 
 /** Small event emitted for one live job transition. Full pages stay on getUpdateJob. */
@@ -255,8 +260,8 @@ export async function resumeUpdateJobCommand(
 
 /** Stops a work from being offered again, or takes that decision back. */
 /** Removes every finished update job from the history. Running ones stay. */
-export async function clearFinishedUpdateJobsCommand(): Promise<number> {
-  return invoke<number>("clear_finished_update_jobs");
+export async function clearFinishedUpdateJobsCommand(includeShelf = true): Promise<number> {
+  return invoke<number>("clear_finished_update_jobs", { includeShelf });
 }
 
 export async function dismissUpdateCandidateCommand(
@@ -281,8 +286,8 @@ export async function restoreDismissedUpdateCandidatesCommand(): Promise<number>
 
 /** まだ取り込んでいない改稿。 */
 export interface PendingRevision {
-  /** 手元の作品ID。棚の絞り込みにも、1件の判定にも、同じこれで足りる。 */
-  downloadId: number;
+  /** 作品の画面と同じ ID の文字列（切り替えた棚では作品 UUID、旧棚では番号）。 */
+  work: string;
   /** 更新確認がこの改稿を見つけた時刻。取得元が直した日そのものは持っていない。 */
   foundAt: string;
 }
@@ -290,7 +295,7 @@ export interface PendingRevision {
 /** A provider revision fetched for comparison but not accepted into history. */
 export interface PendingRevisionPreview {
   metadata?: import("./workInspectionApi").RevisionMetadata;
-  downloadId: number;
+  work: string;
   baseVersion: number;
   text: string;
   textLength: number;
@@ -310,10 +315,10 @@ export async function listPendingRevisionsCommand(): Promise<
 
 /** Fetch the pending provider body without creating a saved version. */
 export async function previewPendingRevisionCommand(
-  downloadId: number,
+  work: string,
 ): Promise<PendingRevisionPreview> {
   return invoke<PendingRevisionPreview>("preview_pending_revision", {
-    downloadId,
+    work,
     credentials: await getUpdateJobCredentials(),
   });
 }
