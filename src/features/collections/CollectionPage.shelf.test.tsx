@@ -155,7 +155,8 @@ describe("collections on the new shelf", () => {
     expect(add).toHaveAttribute("aria-disabled", "true");
     fireEvent.click(add);
     expect(screen.queryByText("コレクションに作品を追加")).toBeNull();
-    expect(screen.getByRole("button", { name: "一冊のEPUB（新しい棚では変えられません）" })).toHaveAttribute("data-disabled", "true");
+    // EPUB は棚を書き換えないので、読むだけの棚からも作れる。
+    expect(screen.getByRole("button", { name: "一冊のEPUB" })).not.toHaveAttribute("data-disabled");
     expect(screen.getByRole("button", { name: "このコレクションのその他の操作（新しい棚では変えられません）" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "前の話を一つ後へ（新しい棚では変えられません）" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "前の話をコレクションから外す（新しい棚では変えられません）" })).toBeInTheDocument();
@@ -189,9 +190,9 @@ describe("collections on the new shelf", () => {
     it("edits the collection on the new shelf and keeps what is not connected yet locked", async () => {
       renderWith(<CollectionPage />, "#/collections/c-old");
       expect(await screen.findByRole("heading", { name: "雨の束" })).toBeInTheDocument();
-      // 表紙・EPUB は、切り替えた棚でもまだ押せない（理由が変わる）。合う作品を探すは押せる。
-      await waitFor(() => expect(screen.getByRole("button", { name: "一冊のEPUB（新しい棚ではまだ使えません）" })).toHaveAttribute("data-disabled", "true"));
-      expect(screen.getByRole("button", { name: "表紙を変える（新しい棚ではまだ使えません）" })).toBeInTheDocument();
+      // 切り替えた棚では、表紙・EPUB・合う作品を探すが押せる。
+      await waitFor(() => expect(screen.getByRole("button", { name: "表紙を変える" })).not.toHaveAttribute("data-disabled"));
+      expect(screen.getByRole("button", { name: "一冊のEPUB" })).not.toHaveAttribute("data-disabled");
       expect(screen.getByRole("button", { name: "合う作品を探す" })).not.toHaveAttribute("data-disabled");
 
       // 並べ替えは作品の鍵で、画面の ID（旧棚の ID）のまま送る。

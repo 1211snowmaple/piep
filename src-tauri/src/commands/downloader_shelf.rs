@@ -270,6 +270,47 @@ pub(super) async fn save_to_shelf(
     cookie: Option<String>,
     user_agent: Option<String>,
 ) -> Result<ShelfSaved, String> {
+    save_to_shelf_as(
+        shelf, library, data, source, source_id, cookie, user_agent, false,
+    )
+    .await
+}
+
+/// 保存済みの pixiv の応答に原寸の在り処を足したものを、保存し直す（縮小版の画像の取り直し）。
+///
+/// 手元の版と同じ応答でも保存する（表紙の枠は名前によらず一つなので、普段の保存は「持っている」と
+/// みて何もしない）。URL が変わらない画像・添付は棚から戻し、原寸に変わった画像だけを取りに行く。
+/// 棚は画質の違いを版の違いとして扱わないので、版は増えない。
+pub(crate) async fn save_originals_to_shelf(
+    shelf: Arc<LibraryV2>,
+    library: Arc<Library>,
+    data: Value,
+    source_id: String,
+) -> Result<ShelfSaved, String> {
+    save_to_shelf_as(
+        shelf,
+        library,
+        data,
+        "pixiv".into(),
+        source_id,
+        None,
+        None,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn save_to_shelf_as(
+    shelf: Arc<LibraryV2>,
+    library: Arc<Library>,
+    data: Value,
+    source: String,
+    source_id: String,
+    cookie: Option<String>,
+    user_agent: Option<String>,
+    upgrade_images: bool,
+) -> Result<ShelfSaved, String> {
     let mut data = data;
     let work_lock = work_save_mutex(&source, &source_id);
     let _work_guard = work_lock.lock().await;
@@ -302,7 +343,7 @@ pub(super) async fn save_to_shelf(
         blocking(move || library.work_card(work).map_err(|e| e.to_string())).await
     };
     let mut reader_only = false;
-    if let Some(work) = existing {
+    if let Some(work) = existing.filter(|_| !upgrade_images) {
         let plan = {
             let (library, data, source) = (Arc::clone(&library), data.clone(), source.clone());
             blocking(move || repairs::save_plan(&library, work, &data, &source)).await?
@@ -353,7 +394,7 @@ pub(super) async fn save_to_shelf(
     }
 
     // 原寸は、実際に保存すると決まったここで探す（旧棚の保存と同じ）。
-    if source == "pixiv" && !reader_only {
+    if source == "pixiv" && !reader_only && !upgrade_images {
         match crate::downloader::pixiv_originals::cdn_client() {
             Ok(client) => {
                 crate::downloader::pixiv_originals::add_original_urls(&client, &mut data).await
@@ -372,6 +413,8 @@ pub(super) async fn save_to_shelf(
     let request = LibraryId::now_v7();
     let route = if reader_only {
         "prepare-reader"
+    } else if upgrade_images {
+        "original-image"
     } else {
         "save"
     };

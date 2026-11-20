@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { OriginalImageResult, OriginalImageStatus } from "@/services/dbApi";
 import type { DashboardSummary, FacetCount, FilterFacets, LibraryMaintenanceResult, LibraryShelfCounts, SearchIndexOptimizationResult, SearchIndexStatus } from "@/types/library";
 
 /**
@@ -88,4 +89,14 @@ export function libraryV2FilterFacets(): Promise<FilterFacets> {
 /** 絞り込みの選択肢を名前で探す。 */
 export function libraryV2SearchFilterFacets(kind: "tags" | "authors", query: string | null, limit = 30): Promise<FacetCount[]> {
   return invoke<FacetCount[]>("library_v2_search_filter_facets", { kind, query: query?.trim() || null, limit });
+}
+
+/** 新しい棚の、縮小版のまま残る pixiv の表紙・挿絵の数と、走っている取り直しの進み具合。 */
+export function libraryV2OriginalImageStatus(): Promise<OriginalImageStatus> {
+  return invoke<OriginalImageStatus>("library_v2_original_image_status");
+}
+
+/** 新しい棚で、縮小版の表紙・挿絵を原寸に取り直す（版は増えない）。正本に切り替えた棚だけ。 */
+export function libraryV2UpgradePixivImagesToOriginal(): Promise<OriginalImageResult> {
+  return invoke<OriginalImageResult>("library_v2_upgrade_pixiv_images_to_original");
 }

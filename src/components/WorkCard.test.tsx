@@ -268,7 +268,11 @@ describe("WorkCard", () => {
     // 書き換える操作は押せない。改稿の印は棚の作品 ID で照らすので、旧棚の番号の改稿は出さない。
     expect(screen.getByRole("button", { name: /お気に入り（新しい棚では変えられません）/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /更新監視（新しい棚では変えられません）/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /EPUBキュー（新しい棚ではまだ使えません）/ })).toBeDisabled();
+    // EPUB のキューは棚を書き換えないので積める。新しい棚の作品は ID で積む。
+    const queue = screen.getByRole("button", { name: /雨上がりの図書室で：EPUBキューに追加/ });
+    expect(queue).toBeEnabled();
+    fireEvent.click(queue);
+    expect(screen.getByRole("button", { name: /雨上がりの図書室で：EPUBキューから外す/ })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: /雨上がりの図書室で：読む$/ })).toBeEnabled();
     await vi.waitFor(() => expect(updateJobApi.listPendingRevisionsCommand).toHaveBeenCalled());
     expect(screen.queryByRole("button", { name: /未保存の改稿を比較/ })).toBeNull();

@@ -338,6 +338,25 @@ export type ShelfSearchResult = Omit<SearchV2Result, "items"> & { items: ShelfEn
  * 一覧の一ページを新しい棚から引く。一致した箇所と理由は、語の検索で一致があったときだけ
  * 続けて引く（旧棚の一覧と同じく、カードに一致の理由を出す）。
  */
+/** 棚の一覧が一度に返す件数の上限。 */
+const SHELF_PAGE_LIMIT = 500;
+
+/** 新しい棚の作品を ID で引く（並びは渡した順。外した作品や無い ID は返らない）。 */
+export async function shelfEntriesByIds(ids: string[]): Promise<ShelfEntry[]> {
+  const unique = [...new Set(ids)];
+  const byId = new Map<string, ShelfEntry>();
+  // 棚の一覧は一度に 500 件まで。
+  for (let start = 0; start < unique.length; start += SHELF_PAGE_LIMIT) {
+    const chunk = unique.slice(start, start + SHELF_PAGE_LIMIT);
+    const view = await libraryV2Search(
+      { text: "", versions: "current", mode: "words" },
+      { sort: "saved", descending: true, limit: chunk.length, after: null, filter: { works: chunk }, count: false },
+    );
+    for (const card of view.cards) byId.set(card.id, shelfEntry(card));
+  }
+  return ids.flatMap((id) => byId.get(id) ?? []);
+}
+
 export async function searchShelf(params: SearchV2Params, scope: ShelfEntityScope = {}): Promise<ShelfSearchResult> {
   const { search, query, legacyWorks, person } = shelfRequest(params, scope);
   const view = await libraryV2Search(search, query, legacyWorks, person);

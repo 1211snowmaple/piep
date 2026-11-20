@@ -14,8 +14,10 @@ pub mod library_collection_edit;
 pub mod library_collections;
 pub mod library_entity;
 pub mod library_entity_list;
+pub mod library_epub;
 pub mod library_facets;
 pub mod library_health;
+pub mod library_original_images;
 pub mod library_search;
 pub mod library_suggest;
 pub mod library_suggestion_corpus;
@@ -538,6 +540,8 @@ pub fn run() -> tauri::Result<()> {
             commands::database::cancel_entity_profile_repair,
             commands::original_images::get_original_image_status,
             commands::original_images::upgrade_pixiv_images_to_original,
+            commands::original_images::library_v2_original_image_status,
+            commands::original_images::library_v2_upgrade_pixiv_images_to_original,
             commands::original_images::cancel_original_image_upgrade,
             commands::database::db_get_download_by_source,
             commands::database::db_get_reader_metadata,

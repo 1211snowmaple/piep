@@ -56,7 +56,6 @@ import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import { Locked } from "@/components/Locked";
 import { libraryV2ImportEditImage, type ShelfCollectionChange } from "@/services/libraryV2Api";
 import {
-  SHELF_NOT_YET,
   SHELF_READ_ONLY,
   editShelfCollection,
   invalidateShelf,
@@ -185,12 +184,10 @@ function shelfChange(action: MemberAction): ShelfCollectionChange {
 
 function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, writable = false, onEdit, onChanged }: { collection: WorkCollection; readOnly: boolean; shelf?: boolean; writable?: boolean; onEdit: (assist?: boolean) => void; onChanged: (collection: WorkCollection) => void }) {
   // 新しい棚は、正本に切り替えるまで読むだけ。書き換える操作は同じ場所に押せない形で置き、
-  // 理由を添える。切り替えた棚でも、EPUB はまだつないでいない。
+  // 理由を添える。EPUB は棚を書き換えないので、読むだけの棚からも作れる。
   const onShelf = shelf && writable;
   const readOnly = previewOnly || (shelf && !writable);
   const locked = shelf && !writable ? SHELF_READ_ONLY : null;
-  const pending = shelf ? (writable ? SHELF_NOT_YET : SHELF_READ_ONLY) : null;
-  const pendingOff = previewOnly || shelf;
   // 表紙と複数選択は、切り替えた棚でも使える（読むだけの棚では押せない）。
   const editOff = readOnly;
   const editOnShelf = async (change: ShelfCollectionChange): Promise<WorkCollection> => {
@@ -375,7 +372,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
       // 画像最適化と組み方は、EPUB画面で決めたものをそのまま使う。ここだけ
       // 渡す口が塞がっていたので、**いちばん大きくなる本だけが無圧縮**だった。
       const settings = readExportSettings();
-      return exportCollectionEpub(collection.id, "__auto__", outputDir, skipMissing, toCompressOptions(settings.compression), settings.writingMode);
+      return exportCollectionEpub(collection.id, "__auto__", outputDir, skipMissing, toCompressOptions(settings.compression), settings.writingMode, shelf);
     },
     onSuccess: (path) => { if (path) notifications.show({ color: "green", title: "一冊のEPUBを書き出しました", message: path }); },
     onError: (error) => notifications.show({ color: "red", title: "EPUBを書き出せません", message: errorMessage(error) }),
@@ -531,7 +528,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
           <Group wrap="nowrap" align="center" gap="md">
             <div className="collection-hero__cover">
               <CollectionCover collection={collection} variant="detail" />
-              <Locked reason={pending} label="表紙を変える">
+              <Locked reason={locked} label="表紙を変える">
                 <Button variant="subtle" size="compact-xs" color="gray" disabled={editOff} onClick={coverModal.open}>表紙を変える</Button>
               </Locked>
             </div>
@@ -543,7 +540,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
                 <Badge variant="light" color={ordered ? "piep" : "gray"}>{ordered ? "順序付き" : "順序なし"}</Badge>
                 <Text size="sm" c="dimmed">{formatNumber(collection.memberCount)}作品 · {formatNumber(collection.totalTextLength)}字</Text>
                 {missingCount > 0 && <Badge color="orange" variant="light">収録できない {formatNumber(missingCount)}作品</Badge>}
-                {shelf && <Tooltip label={writable ? "新しい棚から読み書きしています。EPUB はまだ旧棚だけです。" : "新しい棚（試験中）から読んでいます。正本に切り替えるまで、ここからは何も書き換えません。"}><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}
+                {shelf && <Tooltip label={writable ? "新しい棚から読み書きしています。" : "新しい棚（試験中）から読んでいます。正本に切り替えるまで、ここからは何も書き換えません。"}><Badge color="yellow" variant="light">新しい棚（試験中）</Badge></Tooltip>}
               </Group>
               {/* 主操作の「作品を追加」は右端。「合う作品を探す」はその隣に置く。
                   どちらも束へ作品を入れる操作で、違うのは**誰が探すか**だけである。 */}
@@ -551,9 +548,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, shelf = false, wr
                 <Locked reason={locked} label="名前を付け直す">
                   <Button variant="default" disabled={readOnly} onClick={() => onEdit(false)}>名前を付け直す</Button>
                 </Locked>
-                <Locked reason={pending} label="一冊のEPUB">
-                  <Button variant="default" leftSection={<Icons.epub size={IconSize.action} />} loading={epubMutation.isPending} disabled={pendingOff || exportableCount <= 0} onClick={startEpubExport}>一冊のEPUB</Button>
-                </Locked>
+                <Button variant="default" leftSection={<Icons.epub size={IconSize.action} />} loading={epubMutation.isPending} disabled={previewOnly || exportableCount <= 0} onClick={startEpubExport}>一冊のEPUB</Button>
                 {!headerHosted && <AssistLauncher items={assistItems} />}
                 <Locked reason={locked} label="合う作品を探す">
                   <Button

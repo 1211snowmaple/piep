@@ -28,8 +28,10 @@ export function exportCollectionEpub(
   skipMissing = false,
   compressOptions: Record<string, unknown> | null = null,
   writingMode: "vertical" | "horizontal" | null = null,
+  /** 新しい棚のコレクション（ID は棚のもの、作品は棚から読む）。 */
+  shelf = false,
 ): Promise<string> {
-  return invoke<string>("export_collection_epub", { collectionId, templateName, outputDir, compressOptions, skipMissing, writingMode });
+  return invoke<string>("export_collection_epub", { collectionId, templateName, outputDir, compressOptions, skipMissing, writingMode, shelf });
 }
 
 export function listEpubTemplates(): Promise<TemplateInfo[]> {
@@ -73,7 +75,8 @@ export function saveTemplateSettings(templateName: string, settings: TemplateSet
   return invoke<TemplateSettings>("save_template_settings", { templateName, settings });
 }
 
-export function previewEpubTemplate(templateName: string, downloadId: number | null): Promise<TemplatePreview> {
+/** `downloadId` は旧棚の番号か、新しい棚の作品の ID。 */
+export function previewEpubTemplate(templateName: string, downloadId: number | string | null): Promise<TemplatePreview> {
   return invoke<TemplatePreview>("preview_epub_template", { templateName, downloadId });
 }
 

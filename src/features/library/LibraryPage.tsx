@@ -1490,9 +1490,9 @@ export default function LibraryPage() {
     mutationFn: async (action: "epub" | "watch" | "unwatch" | "archive") => {
       if (!runtime) return 0;
       if (action === "epub") {
-        const ids: number[] = [];
+        const ids: Array<number | string> = [];
         for (const entity of selectedEntities) {
-          const result = await searchDownloadsV2({
+          const params: SearchV2Params = {
             ...(entityKind === "person"
               ? { personSource: entity.source, personKey: entity.sourceKey }
               : { seriesSource: entity.source, seriesKey: entity.sourceKey }),
@@ -1502,7 +1502,9 @@ export default function LibraryPage() {
             // 1話目が最後に来る本ができあがる。
             sortBy: entityKind === "series" ? "series_order" : "downloaded_at",
             sortOrder: "asc",
-          });
+          };
+          // 新しい棚では、作品の ID で積む（書き出しは棚から読む）。
+          const result = shelfMode ? await searchShelf(params) : await searchDownloadsV2(params);
           ids.push(...result.items.map((item) => item.id));
         }
         const unique = [...new Set(ids)];
@@ -2136,7 +2138,7 @@ export default function LibraryPage() {
                       見ながら選び、そのまままとめられるのが要点で、
                       「入れたい作品の題名を思い出す」を要求しない。 */}
                   <Button size="sm" variant="light" leftSection={<Icons.collection size={IconSize.menu} />} disabled={!workSelectionCount} onClick={collectModal.open}>コレクション</Button>
-                  <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!selected.length || shelfMode} aria-label={shelfMode ? "EPUB（新しい棚ではまだ作れません）" : undefined} title={shelfMode ? "新しい棚ではまだ作れません" : undefined} onClick={() => { addToEpubQueue(selected); notifications.show({ color: "green", message: `${selected.length}件をEPUBキューに追加しました` }); }}>EPUB</Button>
+                  <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!workSelectionCount} onClick={() => { addToEpubQueue(shelfMode ? shelfSelected.map((work) => work.id) : selected); notifications.show({ color: "green", message: `${workSelectionCount}件をEPUBキューに追加しました` }); }}>EPUB</Button>
                   <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!workSelectionCount}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.favorite size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視をオンにする</Menu.Item>{/* 追加できて解除できないのは片手落ちだった。 */}<Menu.Item leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "unwatch" })}>更新監視を止める</Menu.Item>{/* 読みかけの棚から降ろす口が、作品を消すことしか無かった。
                       途中でやめた作品が、いつまでも棚に積まれ続けていた。 */}
                   {shelfParam === "reading" && <Menu.Item leftSection={<Icons.read size={IconSize.menu} />} onClick={() => { void forgetSelectedReading(); }}>読みかけから外す</Menu.Item>}<Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={confirmDelete}>{shelfMode ? "棚から外す" : "削除"}</Menu.Item></Menu.Dropdown></Menu>
@@ -2156,7 +2158,7 @@ export default function LibraryPage() {
                       {entitiesToWatch.length ? `${formatNumber(entitiesToWatch.length)}件を更新監視` : "更新監視"}
                     </Button>
                   </Tooltip>
-                  <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!selectedEntities.length || entitySelectionMutation.isPending || shelfMode} aria-label={shelfMode ? "EPUB（新しい棚ではまだ作れません）" : undefined} title={shelfMode ? "新しい棚ではまだ作れません" : undefined} loading={entitySelectionMutation.isPending && entitySelectionMutation.variables === "epub"} onClick={() => entitySelectionMutation.mutate("epub")}>EPUB</Button>
+                  <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!selectedEntities.length || entitySelectionMutation.isPending} loading={entitySelectionMutation.isPending && entitySelectionMutation.variables === "epub"} onClick={() => entitySelectionMutation.mutate("epub")}>EPUB</Button>
                   <Menu position="top-end">
                     <Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!selectedEntities.length}>その他</Button></Menu.Target>
                     <Menu.Dropdown>

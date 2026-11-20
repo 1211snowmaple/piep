@@ -66,6 +66,8 @@ import {
   type ShelfVersion,
 } from "@/services/libraryV2Api";
 import { editShelfCollection, invalidateShelf, shelfEntry, shelfWorkCollections, useShelfWritable } from "@/features/library/shelfV2";
+import { EpubQueueGlyph } from "@/components/EpubQueueGlyph";
+import { useWorkspace } from "@/app/WorkspaceContext";
 import { workCollectionsQueryOptions } from "@/features/collections/collectionQueries";
 import { Locked } from "@/components/Locked";
 import { ContentPagination, Info, parseWorkTab } from "@/features/library/workPageParts";
@@ -133,6 +135,10 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   const queryClient = useQueryClient();
   // 正本に切り替えた棚だけ書ける。切り替える前は旧棚から移した写しなので押せない。
   const writable = useShelfWritable(runtime);
+  // EPUB のキューは棚を書き換えないので、読むだけの棚でも積める（旧棚の画面と同じ場所）。
+  const { addToEpubQueue, removeFromEpubQueue, isQueuedForEpub } = useWorkspace();
+  const queued = isQueuedForEpub(workId);
+  const queueLabel = queued ? "EPUBキューから外す" : "EPUBキューに追加";
   const favoriteLabel = !writable ? `お気に入り（${READ_ONLY}）` : work?.favorite ? "お気に入りを解除" : "お気に入りに追加";
   const editLabel = writable ? "編集" : `編集（${READ_ONLY}）`;
   const checkLabel = writable ? "更新を確認" : `更新を確認（${READ_ONLY}）`;
@@ -412,6 +418,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
                   </Group>
                   <Group gap={6} wrap="nowrap" role="group" aria-label="手元の印">
                     <Tooltip label={favoriteLabel}><ActionIcon className="work-hero__action" size={38} variant="default" style={work.favorite ? { "--ai-color": "var(--flag-favorite)", "--ai-bg": "var(--flag-favorite-bg)" } : undefined} aria-label={favoriteLabel} aria-pressed={work.favorite} disabled={!writable} onClick={toggleFavorite}><Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
+                    <Tooltip label={queueLabel}><ActionIcon className="work-hero__action" size={38} variant="default" style={queued ? { "--ai-color": "var(--flag-epub)", "--ai-bg": "var(--flag-epub-bg)" } : undefined} aria-label={queueLabel} aria-pressed={queued} onClick={() => queued ? removeFromEpubQueue(workId) : addToEpubQueue(workId)}><EpubQueueGlyph queued={queued} /></ActionIcon></Tooltip>
                     {writable ? (
                       <Menu position="bottom-end" width={280}>
                         <Menu.Target><Tooltip label={collectionLabel}><Indicator disabled={!collectionCount} label={collectionCount} size={16} offset={3} color="gray"><ActionIcon className="work-hero__action" variant="default" size={38} aria-label={collectionLabel}><Icons.collection size={IconSize.action} /></ActionIcon></Indicator></Tooltip></Menu.Target>

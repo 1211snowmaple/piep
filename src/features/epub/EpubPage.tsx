@@ -40,7 +40,9 @@ import { openSingleDialog } from "@/services/dialogApi";
 import { cancelEpubExport, exportEpubBatch, listEpubTemplates } from "@/services/epubApi";
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
-import type { DownloadEntry } from "@/types/library";
+import type { DownloadEntry, ShelfEntry } from "@/types/library";
+import { shelfEntriesByIds } from "@/features/library/shelfV2";
+import type { EpubQueueId } from "@/app/WorkspaceContext";
 import type { ExportBatchResult, ExportProgress, TemplateInfo } from "@/types/epub";
 import { getOperationJobs, startOperation, type OperationController } from "@/features/jobs/operationJobs";
 import { demoTemplates } from "./templateStudioDemo";
@@ -48,7 +50,24 @@ import { AUTO_TEMPLATE, readExportSettings, toCompressOptions, writeExportSettin
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 type EpubValues = EpubExportSettings;
-type EpubExportRequest = EpubValues & { works: Pick<DownloadEntry, "id" | "title">[] };
+/**
+ * キューの作品を引く。旧棚は番号で、新しい棚は作品の ID でまとめて引き、キューの順に並べ直す。
+ * 一件ずつ引くと、数百冊のキューで開くたびにその数だけ往復していた。
+ */
+async function queuedWorks(queue: EpubQueueId[]): Promise<Array<DownloadEntry | ShelfEntry>> {
+  const legacy = queue.filter((id): id is number => typeof id === "number");
+  const shelf = queue.filter((id): id is string => typeof id === "string");
+  const [legacyWorks, shelfWorks] = await Promise.all([
+    legacy.length ? getDownloads(legacy) : Promise.resolve([] as DownloadEntry[]),
+    shelf.length ? shelfEntriesByIds(shelf) : Promise.resolve([] as ShelfEntry[]),
+  ]);
+  const byId = new Map<EpubQueueId, DownloadEntry | ShelfEntry>();
+  for (const work of legacyWorks) byId.set(work.id, work);
+  for (const work of shelfWorks) byId.set(work.id, work);
+  return queue.flatMap((id) => byId.get(id) ?? []);
+}
+
+type EpubExportRequest = EpubValues & { works: { id: EpubQueueId; title: string }[] };
 
 export default function EpubPage() {
   const navigate = useAppNavigate();
@@ -67,7 +86,7 @@ export default function EpubPage() {
   const queueQuery = useQuery({
     queryKey: ["epub-queue-works", epubQueue],
     queryFn: () => runtime
-      ? getDownloads(epubQueue)
+      ? queuedWorks(epubQueue)
       : Promise.resolve(epubQueue.map((id) => demoWorks.find((work) => work.id === id)).filter((work): work is DownloadEntry => Boolean(work))),
     enabled: epubQueue.length > 0,
   });

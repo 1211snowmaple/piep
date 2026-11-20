@@ -261,9 +261,9 @@ impl Default for ImageCompressOptions {
 pub struct ExportBatchResult {
     pub success_count: u32,
     pub failed_count: u32,
-    pub failed_ids: Vec<i64>,
+    pub failed_ids: Vec<EpubWork>,
     /// 一時ファイルは生成できたが検証を通らず、公開せずキューに残す作品。
-    pub invalid_ids: Vec<i64>,
+    pub invalid_ids: Vec<EpubWork>,
     pub output_files: Vec<String>,
     /// 一時生成後の検査でエラーが見つかり、出力しなかった冊数。
     pub invalid_count: u32,
@@ -271,7 +271,24 @@ pub struct ExportBatchResult {
     /// 途中で止めた。残りは手つかずなので、キューから外してはいけない。
     pub canceled: bool,
     /// 止めたために一度も試していない作品。キューに残す。
-    pub skipped_ids: Vec<i64>,
+    pub skipped_ids: Vec<EpubWork>,
+}
+
+/// 書き出す作品。旧棚は番号、新しい棚は作品の ID（文字列）。JSON ではそのまま数か文字列。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EpubWork {
+    Legacy(i64),
+    Shelf(crate::library::LibraryId),
+}
+
+impl std::fmt::Display for EpubWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Legacy(id) => write!(f, "{id}"),
+            Self::Shelf(id) => write!(f, "{id}"),
+        }
+    }
 }
 
 /// テンプレート情報

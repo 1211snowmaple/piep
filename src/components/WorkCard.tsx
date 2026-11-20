@@ -263,9 +263,10 @@ export const WorkCard = memo(function WorkCard({
 }: WorkCardProps) {
   const navigate = useAppNavigate();
   const { addToEpubQueue, removeFromEpubQueue, isQueuedForEpub } = useWorkspace();
-  // 新しい棚の作品は旧棚の番号を持たない。番号で動く操作（選択・EPUB・印の照合）には渡さない。
+  // 新しい棚の作品は旧棚の番号を持たない。番号で動く操作（選択・印の照合）には渡さない。
+  // EPUB のキューは、旧棚は番号、新しい棚は作品の ID で持つ。
   const legacyId = isShelfEntry(work) ? null : work.id;
-  const queued = legacyId !== null && isQueuedForEpub(legacyId);
+  const queued = isQueuedForEpub(work.id);
   // 印の出どころをカードの中に置くのは、カードが出るところすべてで同じ顔に
   // するため。同じキーの問い合わせは共有されるので、何枚並んでも通信は1回。
   const pendingRevisions = useQuery({
@@ -316,9 +317,8 @@ export const WorkCard = memo(function WorkCard({
       work={work}
       queued={queued}
       onQueue={() => {
-        if (legacyId === null) return;
-        if (queued) removeFromEpubQueue(legacyId);
-        else addToEpubQueue(legacyId);
+        if (queued) removeFromEpubQueue(work.id);
+        else addToEpubQueue(work.id);
       }}
       onToggleFavorite={onToggleFavorite}
       onToggleWatch={onToggleWatch}
@@ -446,15 +446,15 @@ interface WorkActionsProps {
 
 function WorkActions(props: WorkActionsProps) {
   const { work } = props;
-  return isShelfEntry(work) ? <ShelfWorkActions work={work} /> : <LegacyWorkActions {...props} work={work} />;
+  return isShelfEntry(work) ? <ShelfWorkActions work={work} queued={props.queued} onQueue={props.onQueue} /> : <LegacyWorkActions {...props} work={work} />;
 }
 
 /**
  * 新しい棚の作品の操作。棚を正本に切り替えるまでは旧棚から移した写しなので、書き換える操作
  * （お気に入り・更新監視・棚から外す）は押せない形で同じ場所に置く（並びと幅を変えない）。
- * EPUB のキューは、まだ新しい棚につないでいない。
+ * EPUB のキューは棚を書き換えないので、読むだけの棚でも使える。
  */
-function ShelfWorkActions({ work }: { work: ShelfEntry }) {
+function ShelfWorkActions({ work, queued, onQueue }: { work: ShelfEntry; queued: boolean; onQueue: () => void }) {
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
   const writable = useShelfWritable(isTauriRuntime());
@@ -494,6 +494,7 @@ function ShelfWorkActions({ work }: { work: ShelfEntry }) {
   const favoriteLabel = work.favorite ? "お気に入りを解除" : "お気に入りに追加";
   const watchLabel = work.watchUpdates ? "更新監視をオフにする" : "更新監視をオンにする";
   const locked = (label: string) => `${label}（新しい棚では変えられません）`;
+  const queueLabel = queued ? "EPUBキューから外す" : "EPUBキューに追加";
   return (
     <Group gap={2} wrap="nowrap" justify="flex-end" className="work-card__actions" onClick={(event) => event.stopPropagation()} data-read-only={writable ? undefined : true}>
       <Tooltip label="読む">
@@ -523,9 +524,11 @@ function ShelfWorkActions({ work }: { work: ShelfEntry }) {
           </ActionIcon>
         )}
       </Tooltip>
-      <ActionIcon variant="subtle" color="gray" style={off} size="md" disabled aria-label={`${work.title}：EPUBキュー（新しい棚ではまだ使えません）`}>
-        <EpubQueueGlyph queued={false} />
-      </ActionIcon>
+      <Tooltip label={queueLabel}>
+        <ActionIcon variant="subtle" color={queued ? "leaf" : "gray"} style={{ "--ai-color": queued ? "var(--flag-epub)" : "var(--flag-off)", "--ai-bg": queued ? "var(--flag-epub-bg)" : "transparent" }} size="md" aria-label={`${work.title}：${queueLabel}`} aria-pressed={queued} onClick={onQueue}>
+          <EpubQueueGlyph queued={queued} />
+        </ActionIcon>
+      </Tooltip>
       <Menu position="bottom-end" withinPortal>
         <Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" style={off} size="md" aria-label={`${work.title}：その他`}><Icons.more size={IconSize.nav} /></ActionIcon></Tooltip></Menu.Target>
         <Menu.Dropdown>

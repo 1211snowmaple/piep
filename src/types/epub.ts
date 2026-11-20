@@ -68,7 +68,7 @@ export interface EpubValidationReport {
 export interface TemplatePreview {
   sampleTitle: string;
   sampleSource: string;
-  sampleDownloadId: number | null;
+  sampleDownloadId: number | string | null;
   css: string;
   cover: string | null;
   info: string | null;
@@ -83,16 +83,17 @@ export interface TemplatePreview {
 export interface ExportBatchResult {
   successCount: number;
   failedCount: number;
-  failedIds: number[];
+  /** 旧棚は番号、新しい棚は作品の ID（文字列）。 */
+  failedIds: Array<number | string>;
   /** Generated but not validated; these works remain in the export queue. */
-  invalidIds: number[];
+  invalidIds: Array<number | string>;
   outputFiles: string[];
   invalidCount: number;
   issues: EpubValidationIssue[];
   /** 途中で止めた。残りは手つかずなので、キューから外してはいけない。 */
   canceled: boolean;
   /** 止めたために一度も試していない作品。キューに残す。 */
-  skippedIds: number[];
+  skippedIds: Array<number | string>;
 }
 
 export interface ExportProgress {

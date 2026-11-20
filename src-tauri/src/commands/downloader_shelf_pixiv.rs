@@ -492,4 +492,134 @@ mod tests {
             .is_none());
         library.verify().unwrap();
     }
+
+    /// 縮小版の取り直し: 同じ応答でも保存し直し、原寸に変わった表紙だけを取りに行き、ほかは棚から戻す。
+    #[tokio::test]
+    async fn upgrading_to_originals_fetches_only_the_changed_cover_and_restores_the_rest() {
+        let mut served = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(4, 4, image::Rgb([200, 10, 10]))
+            .write_to(&mut served, image::ImageFormat::Png)
+            .unwrap();
+        let served = served.into_inner();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let paths = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&paths);
+        let body = served.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0u8; 4096];
+                let count = socket.read(&mut bytes).await.unwrap();
+                if count == 0 {
+                    continue;
+                }
+                let request = String::from_utf8_lossy(&bytes[..count]).to_string();
+                let path = request
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                seen.lock().unwrap().push(path.clone());
+                let mut response = if path == "/cover_original.png" {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .into_bytes()
+                } else {
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_vec()
+                };
+                if path == "/cover_original.png" {
+                    response.extend_from_slice(&body);
+                }
+                let _ = socket.write_all(&response).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        let temp = Temp(
+            std::env::temp_dir().join(format!("piep-pixiv-originals-{}", LibraryId::now_v7())),
+        );
+        let library = Arc::new(Library::create(&temp.0.join("shelf")).unwrap());
+        library.switch_over().unwrap();
+        let shelf = Arc::new(LibraryV2::with_test_library(Arc::clone(&library)));
+        let cover = format!("http://{address}/cover_master.png");
+        let image = format!("http://{address}/one.png");
+        let original = json!({"detail":{"title":"題", "caption":"説明", "tags":["タグ"]},
+            "text":"本文[uploadedimage:1]", "cover_url":cover, "images":{"1":{"urls":{"original":image}}}});
+        let mut assets = Vec::new();
+        for (role, name, url, shade) in [
+            ("cover", "cover_master.png", &cover, 1u8),
+            ("illustration", "inline_1.png", &image, 2u8),
+        ] {
+            let path = temp.0.join(name);
+            image::RgbImage::from_pixel(1, 1, image::Rgb([shade, 34, 56]))
+                .save(&path)
+                .unwrap();
+            assets.push(StagedAsset {
+                role: role.into(),
+                name: name.into(),
+                path,
+                url: Some(url.clone()),
+                mime_type: Some("image/png".into()),
+            });
+        }
+        let first = library
+            .save_readable_work(
+                WorkSave {
+                    request: LibraryId::now_v7(),
+                    provider: "pixiv",
+                    key: "1",
+                    route: "save",
+                    data: &original,
+                    assets,
+                },
+                None,
+            )
+            .unwrap();
+        let mut upgraded = original.clone();
+        upgraded[crate::downloader::pixiv_originals::COVER_ORIGINAL_FIELD] =
+            json!(format!("http://{address}/cover_original.png"));
+        let saved = save_originals_to_shelf(
+            Arc::clone(&shelf),
+            Arc::clone(&library),
+            upgraded,
+            "1".into(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error} {:?}", paths.lock().unwrap()));
+        assert_eq!(saved.work, first.entity_id);
+        // 版が増えないことは、pixiv の画像の住所で `library_original_images` の試験が確かめる
+        // （ここの住所は手元のサーバーなので、縮小版と原寸を同じ画像とみなせない）。
+        assert_eq!(
+            *paths.lock().unwrap(),
+            vec!["/cover_original.png".to_string()]
+        );
+        let snapshot = library.current_snapshot(first.entity_id).unwrap();
+        assert_ne!(snapshot, first.snapshot_id);
+        assert_eq!(
+            library
+                .media_file(first.entity_id, snapshot, "cover")
+                .unwrap()
+                .id,
+            Fingerprint::of(&served)
+        );
+        // 挿絵は棚から戻したもの（取りに行っていない）。
+        let document = library
+            .reader_document(first.entity_id, ResourceScope::Snapshot(snapshot))
+            .unwrap();
+        assert_eq!(
+            document.bindings[0]
+                .resource
+                .as_ref()
+                .unwrap()
+                .file
+                .as_ref()
+                .unwrap()
+                .id,
+            Fingerprint::of(&std::fs::read(temp.0.join("inline_1.png")).unwrap())
+        );
+        library.verify().unwrap();
+    }
 }

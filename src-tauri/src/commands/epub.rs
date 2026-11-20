@@ -150,6 +150,15 @@ fn apply_active_edit_to_epub_data(
     let Some(edit) = db.active_edit_source_form(download_id)? else {
         return Ok(Vec::new());
     };
+    Ok(apply_edited_source(source, data, edit))
+}
+
+/// 取得元の形へ組み直した編集を、書き出し用の JSON へ差し込む（旧棚・新しい棚で共通）。
+fn apply_edited_source(
+    source: &str,
+    data: &mut serde_json::Value,
+    edit: crate::database::models::EditedSourceForm,
+) -> Vec<crate::database::models::AssetEntry> {
     // 空の本文も反映済みの編集。文字数で有無を判定すると、本文を消した編集や
     // 挿絵だけの編集を無視し、取り込んだ本文が書き出しに戻ってしまう。
     let added_images = edit.added_images;
@@ -178,7 +187,7 @@ fn apply_active_edit_to_epub_data(
             );
         }
     }
-    Ok(added_images)
+    added_images
 }
 
 /// 編集画面で足した絵を、本文が指している名前（ファイル名の幹）で本へ加える。
@@ -260,6 +269,110 @@ pub fn load_manifest(
     let mut manifest = converter::convert_to_manifest(&data, &dl.source, &assets_dir)?;
     add_edited_images(&mut manifest, &added_images);
     Ok((manifest, dl.source, dl.title))
+}
+
+/// 新しい棚の作品を中間形式に変換する。書き出した一時の置き場は、本を組み終えるまで持っておく。
+pub fn load_shelf_manifest(
+    library: &crate::library::Library,
+    work: crate::library::LibraryId,
+) -> Result<
+    (
+        EpubManifest,
+        String,
+        String,
+        crate::library_epub::ShelfEpubStaging,
+    ),
+    String,
+> {
+    let source = library.epub_source(work).map_err(|e| e.to_string())?;
+    let crate::library_epub::ShelfEpubSource {
+        mut data,
+        provider,
+        title,
+        attachments,
+        edit,
+        cover,
+        staging,
+    } = source;
+    if provider == "fanbox" {
+        data = crate::fanbox_api::payload::into_post(data).ok_or_else(|| {
+            "FANBOX投稿JSONの形式を解釈できないためEPUBを作成できません".to_string()
+        })?;
+    }
+    // 添付の中の本文を先に入れる（編集より先。旧棚と同じ順）。
+    crate::database::attachment::apply_attachment_text(&mut data, &provider, &attachments);
+    let added_images = edit
+        .map(|edit| apply_edited_source(&provider, &mut data, edit))
+        .unwrap_or_default();
+    crate::downloader::asset_downloader::inject_local_paths(
+        &mut data,
+        "data_assets",
+        provider == "fanbox",
+    );
+    if let Some(cover) = cover {
+        data["localCoverPath"] = serde_json::Value::String(cover.to_string_lossy().into_owned());
+    }
+    let mut manifest = converter::convert_to_manifest(&data, &provider, &staging.assets_dir())?;
+    add_edited_images(&mut manifest, &added_images);
+    Ok((manifest, provider, title, staging))
+}
+
+/// 読み込んだ一冊。新しい棚の作品は、書き出した一時の置き場を手放すまで画像が読める。
+pub(crate) struct LoadedWork {
+    pub manifest: EpubManifest,
+    pub source: String,
+    pub title: String,
+    pub _staging: Option<crate::library_epub::ShelfEpubStaging>,
+}
+
+/// 旧棚の番号か新しい棚の ID かで、読む棚を選ぶ。
+pub(crate) fn load_work_manifest(
+    state: &AppState,
+    shelf: &crate::commands::library_v2::LibraryV2,
+    work: EpubWork,
+) -> Result<LoadedWork, String> {
+    match work {
+        EpubWork::Legacy(id) => {
+            let (manifest, source, title) = load_manifest(&state.db, id)?;
+            Ok(LoadedWork {
+                manifest,
+                source,
+                title,
+                _staging: None,
+            })
+        }
+        EpubWork::Shelf(id) => {
+            let library = shelf.library()?;
+            let (manifest, source, title, staging) = load_shelf_manifest(&library, id)?;
+            Ok(LoadedWork {
+                manifest,
+                source,
+                title,
+                _staging: Some(staging),
+            })
+        }
+    }
+}
+
+/// 進み具合に出す題。読めなければ ID。
+fn work_title(
+    state: &AppState,
+    shelf: &crate::commands::library_v2::LibraryV2,
+    work: EpubWork,
+) -> String {
+    match work {
+        EpubWork::Legacy(id) => state
+            .db
+            .get_download(id)
+            .map(|download| download.title)
+            .ok(),
+        EpubWork::Shelf(id) => shelf
+            .library()
+            .ok()
+            .and_then(|library| library.work_card(id).ok())
+            .map(|card| card.title),
+    }
+    .unwrap_or_else(|| format!("ID {work}"))
 }
 
 /// ページ内移動のリンクを、束ねた本での通し番号へずらす。
@@ -375,9 +488,29 @@ fn namespace_manifest_for_collection(
     }
 }
 
+/// 一冊にまとめるコレクションの、本に書く情報（旧棚・新しい棚で共通）。
+struct CollectionBook {
+    id: String,
+    name: String,
+    description: Option<String>,
+    revision: i64,
+}
+
+impl CollectionBook {
+    fn legacy(collection: &crate::database::WorkCollection) -> Self {
+        Self {
+            id: collection.summary.id.clone(),
+            name: collection.summary.name.clone(),
+            description: collection.summary.description.clone(),
+            revision: collection.summary.revision,
+        }
+    }
+}
+
+/// `works` の真偽は、その作品が表紙に選ばれているか。
 fn merge_collection_manifests(
-    collection: &crate::database::WorkCollection,
-    mut works: Vec<(i64, EpubManifest)>,
+    collection: &CollectionBook,
+    mut works: Vec<(bool, EpubManifest)>,
 ) -> Result<EpubManifest, String> {
     if works.is_empty() {
         return Err("コレクションに書き出せる作品がありません".to_string());
@@ -395,7 +528,7 @@ fn merge_collection_manifests(
     } else {
         EpubAuthor {
             name: "複数作者".to_string(),
-            id: format!("piep:collection:{}:authors", collection.summary.id),
+            id: format!("piep:collection:{}:authors", collection.id),
             account: None,
             url: None,
             icon_url: None,
@@ -411,7 +544,7 @@ fn merge_collection_manifests(
     let mut stats = EpubStats::default();
     let mut published_dates = Vec::new();
     let mut modified_dates = Vec::new();
-    for (work_index, (download_id, mut manifest)) in works.drain(..).enumerate() {
+    for (work_index, (chosen_cover, mut manifest)) in works.drain(..).enumerate() {
         let work_title = manifest.core.name.clone();
         namespace_manifest_for_collection(&mut manifest, work_index, &work_title);
         for keyword in manifest.core.keywords.drain(..) {
@@ -431,7 +564,7 @@ fn merge_collection_manifests(
             modified_dates.push(value);
         }
         if let Some(image) = manifest.content.cover_image.take() {
-            if collection.summary.cover_download_id == Some(download_id) || cover_image.is_none() {
+            if chosen_cover || cover_image.is_none() {
                 if let Some(previous) = cover_image.replace(image) {
                     illustrations.push(previous);
                 }
@@ -474,7 +607,7 @@ fn merge_collection_manifests(
     stats.attachment_count = attachments.len() as u32;
     published_dates.sort();
     modified_dates.sort();
-    let description_text = collection.summary.description.clone();
+    let description_text = collection.description.clone();
     let description = description_text
         .as_deref()
         .map(|value| format!("<p>{}</p>", crate::epub::xhtml::escape_text(value)));
@@ -482,9 +615,9 @@ fn merge_collection_manifests(
         core: EpubCore {
             id_: crate::epub::meta::uuid_urn(&format!(
                 "piep:collection:{}:revision:{}",
-                collection.summary.id, collection.summary.revision
+                collection.id, collection.revision
             )),
-            name: collection.summary.name.clone(),
+            name: collection.name.clone(),
             author,
             description,
             description_text,
@@ -495,11 +628,11 @@ fn merge_collection_manifests(
                 .cloned()
                 .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string()),
             date_modified: modified_dates.last().cloned(),
-            main_entity_of_page: format!("piep://collections/{}", collection.summary.id),
+            main_entity_of_page: format!("piep://collections/{}", collection.id),
             is_part_of: Some(EpubSeries {
-                name: collection.summary.name.clone(),
+                name: collection.name.clone(),
                 order: None,
-                id: Some(collection.summary.id.clone()),
+                id: Some(collection.id.clone()),
                 url: None,
             }),
             language: first.core.language,
@@ -509,7 +642,7 @@ fn merge_collection_manifests(
             source: "collection".to_string(),
             novel_id: None,
             post_id: None,
-            series_id: Some(collection.summary.id.clone()),
+            series_id: Some(collection.id.clone()),
             post_type: None,
         },
         content: EpubContent {
@@ -540,7 +673,7 @@ fn batch_output_filename(
     title: &str,
     source: &str,
     manifest: &EpubManifest,
-    download_id: i64,
+    download_id: EpubWork,
 ) -> String {
     let provider_id = manifest
         .provider
@@ -793,7 +926,7 @@ fn sync_output_parent(_destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn deduplicate_download_ids(download_ids: Vec<i64>) -> Vec<i64> {
+fn deduplicate_download_ids(download_ids: Vec<EpubWork>) -> Vec<EpubWork> {
     let mut seen = HashSet::with_capacity(download_ids.len());
     download_ids
         .into_iter()
@@ -805,9 +938,74 @@ fn deduplicate_download_ids(download_ids: Vec<i64>) -> Vec<i64> {
 // 単体エクスポート
 // ============================================================
 
+/// 収録する回（表紙に選ばれているか・作品・題）と、収録できない回の題。
+type CollectionParts = (CollectionBook, Vec<(bool, EpubWork, String)>, Vec<String>);
+
+fn collection_parts(db: &crate::database::Database, id: &str) -> Result<CollectionParts, String> {
+    let collection = db.get_work_collection(id)?;
+    if collection.members.is_empty() {
+        return Err("コレクションに作品がありません".to_string());
+    }
+    // 本文が0字の作品も「収録できない」側に数える。手元に行はあるが中身が
+    // 無い（有料記事を取り切れていない）ので、そのまま入れると空の章になる。
+    // 実測で 29 件あった。
+    let mut exportable = Vec::new();
+    let mut missing = Vec::new();
+    for member in &collection.members {
+        match member.download_id {
+            Some(id) if member.text_length > 0 => exportable.push((
+                collection.summary.cover_download_id == Some(id),
+                EpubWork::Legacy(id),
+                member.title.clone(),
+            )),
+            _ => missing.push(member.title.clone()),
+        }
+    }
+    Ok((CollectionBook::legacy(&collection), exportable, missing))
+}
+
+/// 新しい棚のコレクション。表紙は表紙に選んだ作品の表紙と同じ画像の回。
+fn collection_parts_on_shelf(
+    shelf: &crate::commands::library_v2::LibraryV2,
+    id: &str,
+) -> Result<CollectionParts, String> {
+    let library = shelf.library()?;
+    let target = crate::commands::library_v2::collection_target(&library, id)?;
+    let detail = library
+        .collection_detail(target)
+        .map_err(|e| e.to_string())?;
+    if detail.members.is_empty() {
+        return Err("コレクションに作品がありません".to_string());
+    }
+    let mut exportable = Vec::new();
+    let mut missing = Vec::new();
+    for member in &detail.members {
+        match &member.work {
+            Some(work) if member.text_length > 0 => exportable.push((
+                detail.summary.cover.is_some() && member.cover == detail.summary.cover,
+                EpubWork::Shelf(work.id),
+                member.title.clone(),
+            )),
+            _ => missing.push(member.title.clone()),
+        }
+    }
+    let book = CollectionBook {
+        id: detail
+            .summary
+            .legacy_id
+            .clone()
+            .unwrap_or_else(|| detail.summary.id.to_string()),
+        name: detail.summary.name.clone(),
+        description: detail.summary.description.clone(),
+        revision: detail.summary.revision,
+    };
+    Ok((book, exportable, missing))
+}
+
 /// コレクションの順序をそのまま一冊の reading order / 目次へ変換する。
 /// 作品ごとの出所と作者は各作品の先頭にも残し、混在取得元でも追跡できる。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn export_collection_epub(
     app: tauri::AppHandle,
     collection_id: String,
@@ -816,27 +1014,27 @@ pub async fn export_collection_epub(
     compress_options: Option<ImageCompressOptions>,
     skip_missing: Option<bool>,
     writing_mode: Option<String>,
+    shelf: Option<bool>,
 ) -> Result<String, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
+    let shelf_state = app
+        .state::<Arc<crate::commands::library_v2::LibraryV2>>()
+        .inner()
+        .clone();
     let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
     let collection_state = state.clone();
-    let collection = tokio::task::spawn_blocking(move || {
-        collection_state.db.get_work_collection(&collection_id)
+    let collection_shelf = shelf_state.clone();
+    let on_shelf = shelf.unwrap_or(false);
+    // 本の情報と、収録する回（表紙に選ばれているか・作品・題）と、収録できない回の題。
+    let (book, exportable, missing) = tokio::task::spawn_blocking(move || {
+        if on_shelf {
+            collection_parts_on_shelf(&collection_shelf, &collection_id)
+        } else {
+            collection_parts(&collection_state.db, &collection_id)
+        }
     })
     .await
     .map_err(|error| format!("コレクションの読み込みが途中で止まりました: {error}"))??;
-    if collection.members.is_empty() {
-        return Err("コレクションに作品がありません".to_string());
-    }
-    // 本文が0字の作品も「収録できない」側に数える。手元に行はあるが中身が
-    // 無い（有料記事を取り切れていない）ので、そのまま入れると空の章になる。
-    // 実測で 29 件あった。
-    let missing = collection
-        .members
-        .iter()
-        .filter(|member| member.download_id.is_none() || member.text_length == 0)
-        .map(|member| member.title.clone())
-        .collect::<Vec<_>>();
     // 欠落は既定では中止だが、利用者が承知のうえで「除外して続行」を選べる。
     // ライブラリから作品を 1 件消しただけでコレクションが永久に書き出せなく
     // なるのを避けるための分岐で、除外した件数は完了メッセージにも残す。
@@ -852,11 +1050,6 @@ pub async fn export_collection_epub(
                 .join(" / ")
         ));
     }
-    let exportable = collection
-        .members
-        .iter()
-        .filter(|member| member.download_id.is_some() && member.text_length > 0)
-        .collect::<Vec<_>>();
     if exportable.is_empty() {
         return Err("保存済みの作品がないため一冊にできません".to_string());
     }
@@ -865,35 +1058,39 @@ pub async fn export_collection_epub(
         &app,
         &ExportProgress {
             phase: "started".into(),
-            current_title: collection.summary.name.clone(),
+            current_title: book.name.clone(),
             current_index: 0,
             total_count: total,
-            message: format!("「{}」を一冊にまとめています", collection.summary.name),
+            message: format!("「{}」を一冊にまとめています", book.name),
         },
     );
     let mut manifests = Vec::with_capacity(exportable.len());
-    for (index, member) in exportable.iter().enumerate() {
-        let download_id = member.download_id.expect("filtered to saved works above");
+    // 新しい棚の作品の画像は、本を組み終えるまで一時の置き場に置いておく。
+    let mut stagings = Vec::new();
+    for (index, (chosen_cover, work, member_title)) in exportable.into_iter().enumerate() {
         emit_progress(
             &app,
             &ExportProgress {
                 phase: "converting".into(),
-                current_title: member.title.clone(),
+                current_title: member_title.clone(),
                 current_index: (index + 1) as u32,
                 total_count: total,
-                message: format!("[{}/{}] 「{}」を変換中", index + 1, total, member.title),
+                message: format!("[{}/{}] 「{}」を変換中", index + 1, total, member_title),
             },
         );
         let load_state = state.clone();
+        let load_shelf = shelf_state.clone();
         let loaded =
-            tokio::task::spawn_blocking(move || load_manifest(&load_state.db, download_id))
+            tokio::task::spawn_blocking(move || load_work_manifest(&load_state, &load_shelf, work))
                 .await
                 .map_err(|error| format!("EPUBの変換が途中で止まりました: {error}"))?;
-        let (manifest, _, _) =
-            loaded.map_err(|error| format!("「{}」を変換できません: {error}", member.title))?;
-        manifests.push((download_id, manifest));
+        let LoadedWork {
+            manifest, _staging, ..
+        } = loaded.map_err(|error| format!("「{member_title}」を変換できません: {error}"))?;
+        stagings.extend(_staging);
+        manifests.push((chosen_cover, manifest));
     }
-    let manifest = merge_collection_manifests(&collection, manifests)?;
+    let manifest = merge_collection_manifests(&book, manifests)?;
     let manager = get_template_manager(&app)?;
     // 取得元固有の情報ページは混在本に合わないため、自動時は共通テンプレート。
     let resolved_template = if template_name == "__auto__" {
@@ -905,11 +1102,12 @@ pub async fn export_collection_epub(
     let settings = manager.read_settings(&resolved_template);
     let compress = compress_options.unwrap_or_default();
     let output_base = PathBuf::from(&output_dir);
-    let destination = output_base.join(sanitize_epub_filename(&collection.summary.name));
+    let destination = output_base.join(sanitize_epub_filename(&book.name));
     let reported_destination = destination.clone();
     let app_clone = app.clone();
-    let title = collection.summary.name.clone();
+    let title = book.name.clone();
     tokio::task::spawn_blocking(move || {
+        let _stagings = stagings;
         std::fs::create_dir_all(&output_base)
             .map_err(|error| format!("出力先を作成できません: {error}"))?;
         let builder = EpubBuilder::new(manifest, contents, settings, compress)
@@ -978,7 +1176,7 @@ enum BatchItemStatus {
 
 struct BatchItemResult {
     index: u32,
-    download_id: i64,
+    download_id: EpubWork,
     status: BatchItemStatus,
     issues: Vec<EpubValidationIssue>,
 }
@@ -1031,8 +1229,9 @@ fn aggregate_batch_results(mut completed: Vec<BatchItemResult>) -> ExportBatchRe
 fn export_batch_item(
     app: tauri::AppHandle,
     state: Arc<AppState>,
+    shelf: Arc<crate::commands::library_v2::LibraryV2>,
     templates_dir: PathBuf,
-    download_id: i64,
+    download_id: EpubWork,
     index: u32,
     total: u32,
     template_name: String,
@@ -1040,11 +1239,7 @@ fn export_batch_item(
     compress: ImageCompressOptions,
     writing_mode: Option<String>,
 ) -> BatchItemResult {
-    let title = state
-        .db
-        .get_download(download_id)
-        .map(|download| download.title)
-        .unwrap_or_else(|_| format!("ID {download_id}"));
+    let title = work_title(&state, &shelf, download_id);
     emit_progress(
         &app,
         &ExportProgress {
@@ -1058,7 +1253,12 @@ fn export_batch_item(
 
     let mut issues = Vec::new();
     let result = (|| {
-        let (manifest, source, loaded_title) = load_manifest(&state.db, download_id)?;
+        let LoadedWork {
+            manifest,
+            source,
+            title: loaded_title,
+            _staging,
+        } = load_work_manifest(&state, &shelf, download_id)?;
         let manager = TemplateManager::new(templates_dir);
         let resolved = resolve_template(&manager, &template_name, &source);
         let contents = manager.load_template_contents(&resolved)?;
@@ -1144,7 +1344,7 @@ fn export_batch_item(
 pub async fn export_epub_batch(
     app: tauri::AppHandle,
     operation_id: String,
-    download_ids: Vec<i64>,
+    download_ids: Vec<EpubWork>,
     template_name: String,
     output_dir: String,
     compress_options: Option<ImageCompressOptions>,
@@ -1152,6 +1352,10 @@ pub async fn export_epub_batch(
 ) -> Result<ExportBatchResult, String> {
     let _export_guard = begin_epub_export(&EPUB_EXPORT_STATE, &operation_id)?;
     let state = app.state::<Arc<AppState>>().inner().clone();
+    let shelf = app
+        .state::<Arc<crate::commands::library_v2::LibraryV2>>()
+        .inner()
+        .clone();
     let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
     let templates_dir = get_templates_dir(&app)?;
     TemplateManager::new(templates_dir.clone()).initialize_defaults()?;
@@ -1188,6 +1392,7 @@ pub async fn export_epub_batch(
             };
             let app = app.clone();
             let state = state.clone();
+            let shelf = shelf.clone();
             let templates_dir = templates_dir.clone();
             let template_name = template_name.clone();
             let output_base = output_base.clone();
@@ -1197,6 +1402,7 @@ pub async fn export_epub_batch(
                 export_batch_item(
                     app,
                     state,
+                    shelf,
                     templates_dir,
                     download_id,
                     (index + 1) as u32,
@@ -1423,7 +1629,7 @@ pub struct TemplatePreview {
     /// プレビューに使った作品。
     pub sample_title: String,
     pub sample_source: String,
-    pub sample_download_id: Option<i64>,
+    pub sample_download_id: Option<EpubWork>,
     pub css: String,
     pub cover: Option<String>,
     pub info: Option<String>,
@@ -1459,20 +1665,27 @@ pub struct DataField {
 pub async fn preview_epub_template(
     app: tauri::AppHandle,
     template_name: String,
-    download_id: Option<i64>,
+    download_id: Option<EpubWork>,
 ) -> Result<TemplatePreview, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
+    let shelf = app
+        .state::<Arc<crate::commands::library_v2::LibraryV2>>()
+        .inner()
+        .clone();
     let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
     let tm = get_template_manager(&app)?;
 
+    // 新しい棚の作品の画像は、見本を組み終えるまで一時の置き場に置いておく。
+    let mut _staging = None;
     let (manifest, source, title, resolved_id) = match download_id {
         Some(id) => {
             let load_state = state.clone();
-            let (manifest, source, title) =
-                tokio::task::spawn_blocking(move || load_manifest(&load_state.db, id))
+            let loaded =
+                tokio::task::spawn_blocking(move || load_work_manifest(&load_state, &shelf, id))
                     .await
                     .map_err(|error| format!("EPUBのプレビューが途中で止まりました: {error}"))??;
-            (manifest, source, title, Some(id))
+            _staging = loaded._staging;
+            (loaded.manifest, loaded.source, loaded.title, Some(id))
         }
         None => {
             let manifest = sample_manifest();
@@ -1981,17 +2194,19 @@ mod tests {
     #[test]
     fn batch_filenames_keep_provider_ids_and_do_not_collide_on_equal_titles() {
         let pixiv = sample_manifest();
-        let pixiv_name = batch_output_filename("同じ/題名", "pixiv", &pixiv, 10);
+        let pixiv_name = batch_output_filename("同じ/題名", "pixiv", &pixiv, EpubWork::Legacy(10));
         assert_eq!(pixiv_name, "同じ_題名 [pixiv-0].epub");
 
         let mut fanbox = sample_manifest();
         fanbox.provider.novel_id = None;
         fanbox.provider.post_id = Some("99".into());
-        let fanbox_name = batch_output_filename("同じ/題名", "fanbox", &fanbox, 11);
+        let fanbox_name =
+            batch_output_filename("同じ/題名", "fanbox", &fanbox, EpubWork::Legacy(11));
         assert_eq!(fanbox_name, "同じ_題名 [fanbox-99].epub");
         assert_ne!(pixiv_name, fanbox_name);
 
-        let long_name = batch_output_filename(&"あ".repeat(300), "pixiv", &pixiv, 10);
+        let long_name =
+            batch_output_filename(&"あ".repeat(300), "pixiv", &pixiv, EpubWork::Legacy(10));
         assert!(long_name.ends_with(" [pixiv-0].epub"));
         assert_eq!(long_name.trim_end_matches(".epub").chars().count(), 120);
     }
@@ -1999,8 +2214,8 @@ mod tests {
     #[test]
     fn duplicate_batch_ids_are_removed_without_reordering() {
         assert_eq!(
-            deduplicate_download_ids(vec![7, 3, 7, 9, 3, 11]),
-            vec![7, 3, 9, 11]
+            deduplicate_download_ids([7, 3, 7, 9, 3, 11].map(EpubWork::Legacy).to_vec()),
+            [7, 3, 9, 11].map(EpubWork::Legacy).to_vec()
         );
     }
 
@@ -2058,8 +2273,11 @@ mod tests {
             },
             members: Vec::new(),
         };
-        let merged =
-            merge_collection_manifests(&collection, vec![(10, first), (11, second)]).unwrap();
+        let merged = merge_collection_manifests(
+            &CollectionBook::legacy(&collection),
+            vec![(false, first), (false, second)],
+        )
+        .unwrap();
         assert_eq!(merged.core.name, "前後編まとめ");
         assert_eq!(merged.core.author.name, "複数作者");
         assert_eq!(merged.content.pages.len(), 2);
@@ -2146,14 +2364,14 @@ mod tests {
 
         let result = aggregate_batch_results(vec![BatchItemResult {
             index: 1,
-            download_id: 42,
+            download_id: EpubWork::Legacy(42),
             status: BatchItemStatus::Invalid,
             issues: vec![EpubValidationIssue::error("TEST", "content.opf", "invalid")],
         }]);
         assert_eq!(result.success_count, 0);
         assert_eq!(result.failed_count, 1);
         assert_eq!(result.invalid_count, 1);
-        assert_eq!(result.invalid_ids, vec![42]);
+        assert_eq!(result.invalid_ids, vec![EpubWork::Legacy(42)]);
         assert!(result.output_files.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }

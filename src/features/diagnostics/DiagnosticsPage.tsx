@@ -50,7 +50,7 @@ import { useLibraryDiagnostics } from "./useLibraryDiagnostics";
 import { OriginalImagesCard } from "./OriginalImagesCard";
 import { MaintenanceTaskCard, MetricCard } from "./diagnosticsParts";
 import { ShelfDiagnosticsSection } from "./ShelfDiagnostics";
-import { useShelfMode } from "@/features/library/shelfV2";
+import { useShelfMode, useShelfWritable } from "@/features/library/shelfV2";
 
 export const previewDiagnostics: LibraryDiagnostics = {
   measuredAt: "2026-08-09T12:00:00.000Z", totalDownloads: 1284, totalAssets: 8241, totalVersions: 1392, totalTextLength: 31_400_000,
@@ -192,8 +192,9 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
   // for, not the reading.
   const diagnostics = useLibraryDiagnostics(runtime, previewData);
   // 新しい棚を見ているあいだは、計測・照合・手入れを新しい棚の仕組みで行う（保存フォルダーの
-  // 照合や再取り込みは旧棚だけのもの）。作者・シリーズ情報の修復と原寸画像はそのまま。
+  // 照合や再取り込みは旧棚だけのもの）。作者・シリーズ情報の修復はそのまま。原寸画像の取り直しは見ている棚で行う。
   const { shelfMode, deciding: shelfDeciding } = useShelfMode(runtime);
+  const shelfWritable = useShelfWritable(runtime && shelfMode);
   const legacyView = !shelfMode && !shelfDeciding;
   const measurePhase = diagnostics.progress;
   /**
@@ -573,7 +574,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         {repairProgress.failed > 0 && <Button size="xs" variant="subtle" mt={6} onClick={() => navigate("/operations")}>失敗の詳細</Button>}
       </Box>}
     </Card>}
-    <OriginalImagesCard runtime={runtime} disabled={maintenance.isPending || indexOptimization.isPending} />
+    {!shelfDeciding && <OriginalImagesCard key={shelfMode ? "v2" : "legacy"} runtime={runtime} disabled={maintenance.isPending || indexOptimization.isPending} shelf={shelfMode} writable={shelfWritable} />}
     {legacyView && (diagnostics.isFetching || optimizePhase) && (
       <Card p="md" mt="md">
         {diagnostics.isFetching && (

@@ -99,12 +99,12 @@ describe("collectionApi", () => {
     invoke.mockResolvedValue("C:/out/collection.epub");
     await exportCollectionEpub("collection-1", "__auto__", "C:/out");
     expect(invoke).toHaveBeenLastCalledWith("export_collection_epub", {
-      collectionId: "collection-1", templateName: "__auto__", outputDir: "C:/out", compressOptions: null, skipMissing: false, writingMode: null,
+      collectionId: "collection-1", templateName: "__auto__", outputDir: "C:/out", compressOptions: null, skipMissing: false, writingMode: null, shelf: false,
     });
 
     await exportCollectionEpub("collection-1", "__auto__", "C:/out", true);
     expect(invoke).toHaveBeenLastCalledWith("export_collection_epub", {
-      collectionId: "collection-1", templateName: "__auto__", outputDir: "C:/out", compressOptions: null, skipMissing: true, writingMode: null,
+      collectionId: "collection-1", templateName: "__auto__", outputDir: "C:/out", compressOptions: null, skipMissing: true, writingMode: null, shelf: false,
     });
   });
 
@@ -120,6 +120,13 @@ describe("collectionApi", () => {
       compressOptions: { enabled: true, webpQuality: 78 },
       skipMissing: true,
       writingMode: "vertical",
+      shelf: false,
     });
+  });
+
+  it("asks for the collection of the new shelf when the page shows the new shelf", async () => {
+    invoke.mockResolvedValue("C:/out/collection.epub");
+    await exportCollectionEpub("c-new", "__auto__", "C:/out", false, null, null, true);
+    expect(invoke).toHaveBeenLastCalledWith("export_collection_epub", expect.objectContaining({ collectionId: "c-new", shelf: true }));
   });
 });
