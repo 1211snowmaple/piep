@@ -437,16 +437,56 @@ pub(crate) fn desktop_device(library: &Library) -> LibraryId {
     uuid::Builder::from_custom_bytes(bytes).into_uuid()
 }
 
-/// 単独サーバーの棚で携帯が書いた読書位置を、この棚へ写す。サーバーの位置のほうが新しいときだけ
-/// 書き、書いた端末は携帯のまま残す（読む画面がほかの端末の位置として案内する）。この棚が書いた
-/// 位置・この棚に載っていない作品・本文に無い位置は写さない。写したら真。
+/// 前に送った写しの記録の番号（`shipped`、分からなければ 0）より後に、この棚が自分で作品の
+/// `operation` を変えたか。分からなければ `None`。
+fn changed_here(
+    library: &Library,
+    work: LibraryId,
+    operation: &str,
+    shipped: i64,
+) -> Result<Option<bool>, String> {
+    if shipped <= 0 {
+        return Ok(None);
+    }
+    library
+        .changed_here_since(work, operation, shipped)
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// 単独サーバーの棚で携帯が書いた読書位置を、この棚へ写す。前に送ってからこの棚で読み進めて
+/// いなければ携帯の位置を写し、両方で読み進めていれば書いた時刻の新しいほうにする。書いた端末は
+/// 携帯のまま残す（読む画面がほかの端末の位置として案内する）。この棚が書いた位置・この棚に
+/// 載っていない作品・本文に無い位置は写さない。写したら真。
 pub(crate) fn adopt_remote_reading(
     library: &Library,
     work: LibraryId,
     remote: &crate::library::ReadingPosition,
+    shipped: i64,
 ) -> Result<bool, String> {
+    let here = changed_here(library, work, "reading_position", shipped)?;
     library
-        .adopt_reading(work, library.id, remote, Some(desktop_device(library)))
+        .adopt_reading(
+            work,
+            library.id,
+            remote,
+            Some(desktop_device(library)),
+            here,
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// 単独サーバーの棚で携帯が付け外ししたお気に入りを、この棚へ写す。前に送ってからこの棚でも
+/// 変えていれば、この棚の値を残す（次に送るときに携帯へ届く）。写したら真。
+pub(crate) fn adopt_remote_favorite(
+    library: &Library,
+    work: LibraryId,
+    favorite: bool,
+    shipped: i64,
+) -> Result<bool, String> {
+    let here = changed_here(library, work, "user_state", shipped)?;
+    library
+        .adopt_favorite(work, library.id, favorite, here)
         .map_err(|e| e.to_string())
 }
 
@@ -471,9 +511,10 @@ pub(crate) fn follow_remote_favorite(
     if current.favorite == favorite {
         return Ok(false);
     }
+    // ほかの写しから写した変更として記録する（この棚が自分で変えたものと見分ける）。
     library
         .set_favorite(
-            LibraryId::now_v7(),
+            crate::library::adopted_request(),
             work,
             library.id,
             current.generation,

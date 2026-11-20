@@ -1,6 +1,6 @@
 //! デスクトップ版から新しい棚の写しを受け取り、次の起動で配る棚を入れ替える（単独サーバー）。
 //!
-//! 送り手は台帳（DB）の写しと、まだ持っていない実体だけを送る。台帳も 8 MiB ずつの部分に分けて
+//! 送り手は台帳（DB）の写しと、まだ持っていない実体だけを送る。台帳も 4 MiB ずつの部分に分けて
 //! 実体と同じ口で送り、前に受け取った台帳と同じ部分は送らない（写しは頁の並びを保つので、
 //! 少し変えただけなら変わった部分だけになる）。受け取りは一度に一つで、途中で
 //! 切れても同じ棚の受け取りなら続きから受ける。揃ったら、受け取った実体といま配っている棚の
@@ -178,6 +178,11 @@ impl ShelfShipments {
     /// 組み終えたあとに立ち上げ直す口（見張り役のいるサーバーだけ）。
     pub fn set_restart(&self, restart: Restart) {
         let _ = self.restart.set(restart);
+    }
+
+    /// 組み終えた棚が、次の起動で配られるのを待っているか。
+    pub fn pending(&self) -> bool {
+        self.paths.root.join(PENDING).is_file()
     }
 
     pub fn status(&self) -> ShipmentStatus {
@@ -369,10 +374,11 @@ impl ShelfShipments {
                 &destination,
                 &database,
                 &received,
-                served.as_ref().map(|library| &library.objects),
+                served.as_deref(),
                 current.library_id,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?
+            .works;
             write_atomic(
                 &paths.root.join(PENDING),
                 &serde_json::to_vec(&Pending { generation }).map_err(|error| error.to_string())?,
@@ -515,16 +521,18 @@ pub fn apply_pending(paths: &ServerPaths) {
         // ここからは切り替えたあと。読書位置を写せなくても新しい棚で起動する（前の世代は残る）。
         if let (Some(previous), Some(settings)) = (&previous, &before) {
             if previous != &next && previous.is_dir() {
-                let moved = (|| -> Result<usize, String> {
+                let moved = (|| -> Result<(usize, usize), String> {
                     let old = Library::open_matching(previous, settings.library_id.get())
                         .map_err(|error| format!("前の棚を開けません: {error}"))?;
                     let new = Library::open_matching(&next, settings.library_id.get())
                         .map_err(|error| format!("新しい棚を開けません: {error}"))?;
-                    new.adopt_newer_positions(&old)
-                        .map_err(|error| format!("読書位置を写せません: {error}"))
+                    new.adopt_from_previous(&old)
+                        .map_err(|error| format!("読書位置とお気に入りを写せません: {error}"))
                 })();
                 match moved {
-                    Ok(moved) => log::info!("前の棚から読書位置を {moved} 件写しました"),
+                    Ok((positions, favorites)) => log::info!(
+                        "前の棚から読書位置を {positions} 件、お気に入りを {favorites} 件写しました"
+                    ),
                     Err(error) => log::error!(
                         "送られた棚に切り替えましたが、前の棚の読書位置を写せませんでした: {error}"
                     ),

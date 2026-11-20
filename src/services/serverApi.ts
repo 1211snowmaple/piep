@@ -69,6 +69,8 @@ export interface RemoteServerStatus {
   serverName?: string;
   adminWeb?: "available" | "public-only" | "disabled" | "none";
   devices?: ServerDevice[];
+  /** 送った棚を組み終えて、サーバーの次の起動で配るのを待っている。新しい棚を受け取れるサーバーだけにある。 */
+  shelfPending?: boolean;
 }
 
 export interface RemoteServerUpdate {

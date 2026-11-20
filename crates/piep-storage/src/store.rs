@@ -232,6 +232,31 @@ fn publish_new(source: &Path, destination: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Windows の API へ直に渡すパスを、260 文字を超えても通る形（`\\?\` を付けた完全なパス）に
+/// する。std の関数は自分でこうするが、直に呼ぶ API には渡す側で付ける必要がある。
+/// https://learn.microsoft.com/windows/win32/fileio/maximum-file-path-limitation
+#[cfg(windows)]
+fn verbatim(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    let full = std::path::absolute(path)?;
+    let text = full.as_os_str().to_string_lossy();
+    if text.starts_with(r"\\?\") || text.starts_with(r"\\.\") {
+        return Ok(full);
+    }
+    let mut prefixed = std::ffi::OsString::new();
+    if let Some(share) = text.strip_prefix(r"\\") {
+        // UNC の共有（\\server\share）は \\?\UNC\server\share にする。
+        if text.len() != full.as_os_str().len() {
+            return Ok(full);
+        }
+        prefixed.push(r"\\?\UNC\");
+        prefixed.push(share);
+    } else {
+        prefixed.push(r"\\?\");
+        prefixed.push(full.as_os_str());
+    }
+    Ok(prefixed.into())
+}
+
 // Windows は置き換えない名前変更で公開する。hard link は exFAT・FAT32 の外付けドライブや
 // 一部のネットワーク共有で使えず、棚をそこへ置くと保存がすべて失敗していた。
 // MOVEFILE_REPLACE_EXISTING を付けないので、既存の実体があれば ERROR_ALREADY_EXISTS になる。
@@ -245,7 +270,7 @@ fn publish_new(source: &Path, destination: &Path) -> std::io::Result<()> {
     }
     const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
     let wide = |path: &Path| -> std::io::Result<Vec<u16>> {
-        let mut units: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let mut units: Vec<u16> = verbatim(path)?.as_os_str().encode_wide().collect();
         if units.contains(&0) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -354,6 +379,89 @@ fn decode_encoded(
 }
 
 /// 固定した v1 のデコーダー。出力・圧縮ウィンドウ・入力サイズを制限する。
+/// 圧縮して十分に小さくなれば圧縮した中身を、ならなければ `None` を返す（保管の判断と同じ）。
+fn compress(original: &[u8]) -> Result<Option<Vec<u8>>> {
+    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3)?;
+    encoder.include_checksum(true)?;
+    encoder.set_pledged_src_size(Some(original.len() as u64))?;
+    encoder.write_all(original)?;
+    let compressed = encoder.finish()?;
+    let saving = 1024usize.max(original.len().div_ceil(100));
+    let use_compressed = compressed
+        .len()
+        .checked_add(saving)
+        .is_some_and(|required| required <= original.len());
+    Ok(use_compressed.then_some(compressed))
+}
+
+/// 元ファイルを保管の分け方で区切り、部分ごとに `each` を呼ぶ。全体の識別子を求める。
+fn split(
+    mut source: impl Read,
+    mut each: impl FnMut(&[u8]) -> Result<FileChunk>,
+) -> Result<ContentFile> {
+    let mut initial = Vec::new();
+    source
+        .by_ref()
+        .take((SINGLE_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut initial)?;
+    let mut whole = Sha256::new();
+    let mut length = 0u64;
+    let mut chunks = Vec::new();
+    if initial.len() <= SINGLE_FILE_BYTES {
+        whole.update(&initial);
+        length = initial.len() as u64;
+        chunks.push(each(&initial)?);
+    } else {
+        let mut source = Cursor::new(initial).chain(source);
+        loop {
+            let mut block = Vec::new();
+            source
+                .by_ref()
+                .take(CHUNK_BYTES as u64)
+                .read_to_end(&mut block)?;
+            if block.is_empty() {
+                break;
+            }
+            whole.update(&block);
+            length = length
+                .checked_add(block.len() as u64)
+                .ok_or_else(|| Error::Integrity("元サイズが上限を超えました".into()))?;
+            chunks.push(each(&block)?);
+        }
+    }
+    Ok(ContentFile {
+        id: Fingerprint(whole.finalize().into()),
+        length,
+        chunks,
+    })
+}
+
+/// 元のバイト列を、保管と同じ形（ヘッダーと中身）に符号化する。`export_chunk` が返す形と
+/// 同じなので、受け手の `import_chunk` へそのまま渡せる。置き場には書かない。
+pub fn encode_chunk(original: &[u8]) -> Result<(FileChunk, Vec<u8>)> {
+    if original.len() > SINGLE_FILE_BYTES {
+        return Err(Error::Integrity("部分実体が上限を超えています".into()));
+    }
+    let chunk = FileChunk {
+        id: Fingerprint::of(original),
+        length: original.len() as u64,
+    };
+    let compressed = compress(original)?;
+    let payload = compressed.as_deref().unwrap_or(original);
+    let mut encoded = Vec::with_capacity(HEADER_BYTES as usize + payload.len());
+    encoded.extend_from_slice(MAGIC);
+    encoded.push(u8::from(compressed.is_some()));
+    encoded.extend_from_slice(&(original.len() as u64).to_le_bytes());
+    encoded.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    encoded.extend_from_slice(&chunk.id.0);
+    encoded.extend_from_slice(payload);
+    // 符号化したものが元に戻ることを確かめてから渡す。
+    if decode_chunk(&encoded, &chunk)? != original {
+        return Err(Error::Integrity("符号化した部分が元に戻りません".into()));
+    }
+    Ok((chunk, encoded))
+}
+
 pub fn decode_chunk(encoded: &[u8], expected: &FileChunk) -> Result<Vec<u8>> {
     decode_object(Cursor::new(encoded), encoded.len() as u64, expected)
 }
@@ -423,49 +531,24 @@ impl ObjectStore {
 
     /// `put` と同じ保管をして、各部分の保存表現も返す。
     /// 保管の中で全部分を読み戻して確かめるので、直後に `verify` を重ねる必要はない。
-    pub fn put_stored(&self, mut source: impl Read) -> Result<StoredFile> {
-        let mut initial = Vec::new();
-        source
-            .by_ref()
-            .take((SINGLE_FILE_BYTES + 1) as u64)
-            .read_to_end(&mut initial)?;
-        let mut whole = Sha256::new();
-        let mut length = 0u64;
-        let mut chunks = Vec::new();
+    pub fn put_stored(&self, source: impl Read) -> Result<StoredFile> {
         let mut encodings = Vec::new();
-        if initial.len() <= SINGLE_FILE_BYTES {
-            whole.update(&initial);
-            length = initial.len() as u64;
-            let (chunk, encoding) = self.put_chunk(&initial)?;
-            chunks.push(chunk);
+        let file = split(source, |block| {
+            let (chunk, encoding) = self.put_chunk(block)?;
             encodings.push(encoding);
-        } else {
-            let mut source = Cursor::new(initial).chain(source);
-            loop {
-                let mut block = Vec::new();
-                source
-                    .by_ref()
-                    .take(CHUNK_BYTES as u64)
-                    .read_to_end(&mut block)?;
-                if block.is_empty() {
-                    break;
-                }
-                whole.update(&block);
-                length = length
-                    .checked_add(block.len() as u64)
-                    .ok_or_else(|| Error::Integrity("元サイズが上限を超えました".into()))?;
-                let (chunk, encoding) = self.put_chunk(&block)?;
-                chunks.push(chunk);
-                encodings.push(encoding);
-            }
-        }
-        Ok(StoredFile {
-            file: ContentFile {
-                id: Fingerprint(whole.finalize().into()),
-                length,
-                chunks,
-            },
-            encodings,
+            Ok(chunk)
+        })?;
+        Ok(StoredFile { file, encodings })
+    }
+
+    /// 保管と同じ分け方で、元ファイルの構成（識別子と部分の並び）だけを求める。何も書かない。
+    /// 送り手が、受け手の持っていない部分だけを `encode_chunk` で送るのに使う。
+    pub fn plan(source: impl Read) -> Result<ContentFile> {
+        split(source, |block| {
+            Ok(FileChunk {
+                id: Fingerprint::of(block),
+                length: block.len() as u64,
+            })
         })
     }
 
@@ -501,21 +584,9 @@ impl ObjectStore {
             Err(error) if missing(&error) || damaged(&error) => (),
             Err(error) => return Err(error),
         }
-        let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3)?;
-        encoder.include_checksum(true)?;
-        encoder.set_pledged_src_size(Some(original.len() as u64))?;
-        encoder.write_all(original)?;
-        let compressed = encoder.finish()?;
-        let saving = 1024usize.max(original.len().div_ceil(100));
-        let use_compressed = compressed
-            .len()
-            .checked_add(saving)
-            .is_some_and(|required| required <= original.len());
-        let payload = if use_compressed {
-            compressed.as_slice()
-        } else {
-            original
-        };
+        let compressed = compress(original)?;
+        let use_compressed = compressed.is_some();
+        let payload = compressed.as_deref().unwrap_or(original);
         let temporary = dest.with_extension(format!("{}.part", uuid::Uuid::now_v7()));
         let guard = Pending(temporary.clone());
         let mut file = OpenOptions::new()

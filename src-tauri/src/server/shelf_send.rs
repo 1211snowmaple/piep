@@ -1,7 +1,7 @@
 //! デスクトップ版の側の、新しい棚の送信。棚の写しを作り、サーバーが持っていない実体と
 //! 台帳の部分だけを上げる。サーバーは受け取った写しを検査して組み、立ち上げ直して配る。
 //!
-//! 台帳は写しのたびに 8 MiB ずつに分けて実体と同じ口で送る。写しは頁の並びを保つので、
+//! 台帳は写しのたびに保管と同じ分け方（4 MiB ずつ）で分けて実体と同じ口で送る。写しは頁の並びを保つので、
 //! 前に送ったときと同じ部分は送らない。
 
 use super::standalone::shipment::{Opened, ShipmentStatus, WireChunk, MAX_QUERY_CHUNKS};
@@ -10,8 +10,9 @@ use super::sync_send::{
 };
 use crate::library::{FileChunk, Library, ObjectStore};
 use futures_util::{stream, StreamExt};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +31,8 @@ pub struct ShelfSent {
     pub works: Option<u64>,
     /// 送った実体と台帳の部分の数。
     pub sent: u64,
+    /// 送った台帳の変更の記録の最後の番号。サーバーの棚はこの番号から続けて数える。
+    pub shipped_sequence: i64,
 }
 
 struct Shipper {
@@ -94,6 +97,21 @@ impl Shipper {
     }
 }
 
+/// 台帳の写しの `offset` から一部分を読み、送る形に符号化する。
+fn read_part(snapshot: &Path, offset: u64, chunk: &FileChunk) -> piep_storage::Result<Vec<u8>> {
+    let mut file = fs::File::open(snapshot)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut original = Vec::with_capacity(chunk.length as usize);
+    file.take(chunk.length).read_to_end(&mut original)?;
+    let (encoded_as, encoded) = piep_storage::encode_chunk(&original)?;
+    if encoded_as != *chunk {
+        return Err(piep_storage::Error::Integrity(
+            "台帳の写しが分けたときと変わりました".into(),
+        ));
+    }
+    Ok(encoded)
+}
+
 fn wire(chunk: &FileChunk) -> WireChunk {
     WireChunk {
         id: chunk.id.to_string(),
@@ -116,23 +134,39 @@ pub async fn send_shelf(
     }
     fs::create_dir_all(outgoing).map_err(|error| format!("写しの置き場を作れません: {error}"))?;
     let snapshot = outgoing.join("library.db");
-    let parts_root = outgoing.join("database-parts");
     let shelf = Arc::clone(&library);
-    let (objects, database, parts) = tokio::task::spawn_blocking(move || {
+    let written = snapshot.clone();
+    let (objects, database, shipped_sequence) = tokio::task::spawn_blocking(move || {
         let objects = shelf
-            .ship_snapshot(&snapshot)
+            .ship_snapshot(&written)
             .map_err(|error| format!("棚の写しを作れません: {error}"))?;
-        let parts = ObjectStore::open(&parts_root)
-            .map_err(|error| format!("写しの置き場を作れません: {error}"))?;
-        let database = parts
-            .put_path(&snapshot)
+        let shipped_sequence = rusqlite::Connection::open_with_flags(
+            &written,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .and_then(|conn| {
+            conn.query_row("SELECT coalesce(max(sequence),0) FROM outbox", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        })
+        .map_err(|error| format!("棚の写しを読めません: {error}"))?;
+        // 分け方と識別子だけを求める。圧縮するのは、サーバーに求められた部分だけ。
+        let database = fs::File::open(&written)
+            .map_err(piep_storage::Error::from)
+            .and_then(ObjectStore::plan)
             .map_err(|error| format!("棚の写しを分けられません: {error}"))?;
-        // 分けた部分から組み直せるので、写しそのものは要らない。
-        let _ = fs::remove_file(&snapshot);
-        Ok::<_, String>((objects, database, parts))
+        Ok::<_, String>((objects, database, shipped_sequence))
     })
     .await
     .map_err(|_| "棚の写しを作れません".to_string())??;
+    // 台帳の部分の、写しの中での位置。
+    let mut offsets = HashMap::new();
+    let mut at = 0u64;
+    for chunk in &database.chunks {
+        offsets.entry(chunk.id).or_insert(at);
+        at += chunk.length;
+    }
+    let offsets = Arc::new(offsets);
 
     let shipper = Arc::new(Shipper {
         client: build_client(remote).await?,
@@ -158,7 +192,6 @@ pub async fn send_shelf(
     let shipment = opened.shipment_id;
 
     handle.update(|progress| progress.phase = "manifest".into());
-    let database_ids: HashSet<_> = database.chunks.iter().map(|chunk| chunk.id).collect();
     let mut seen = HashSet::new();
     let all: Vec<FileChunk> = objects
         .iter()
@@ -204,28 +237,30 @@ pub async fn send_shelf(
         progress.bytes_total = needed.iter().map(|chunk| chunk.length).sum();
         progress.bytes_done = 0;
     });
-    let parts = Arc::new(parts);
+    let snapshot = Arc::new(snapshot);
     let uploaded: Vec<Result<(), String>> = stream::iter(needed.iter().cloned())
         .map(|chunk| {
             let shipper = Arc::clone(&shipper);
             let library = Arc::clone(&library);
-            let parts = Arc::clone(&parts);
-            let from_parts = database_ids.contains(&chunk.id);
+            let snapshot = Arc::clone(&snapshot);
+            let offset = offsets.get(&chunk.id).copied();
             let shipment = shipment.clone();
             async move {
                 shipper.handle.check_cancel()?;
                 let read = chunk.clone();
                 let body = tokio::task::spawn_blocking(move || {
-                    let mut encoded = Vec::new();
-                    let store = if from_parts {
-                        &*parts
-                    } else {
-                        &library.objects
+                    let sent = match offset {
+                        // 台帳の部分は写しから読んで、その場で符号化する。
+                        Some(offset) => read_part(&snapshot, offset, &read),
+                        None => {
+                            let mut encoded = Vec::new();
+                            library
+                                .objects
+                                .export_chunk(&read, &mut encoded)
+                                .map(|()| encoded)
+                        }
                     };
-                    store
-                        .export_chunk(&read, &mut encoded)
-                        .map(|()| encoded)
-                        .map_err(|error| format!("送る実体を読めません: {error}"))
+                    sent.map_err(|error| format!("送る実体を読めません: {error}"))
                 })
                 .await
                 .map_err(|_| "送る実体を読めません".to_string())??;
@@ -282,6 +317,7 @@ pub async fn send_shelf(
                 return Ok(ShelfSent {
                     works: status.works,
                     sent,
+                    shipped_sequence,
                 })
             }
             "failed" => {
@@ -292,7 +328,11 @@ pub async fn send_shelf(
             }
             // 立ち上げ直したあとは、配る世代が変わっていれば届いている。
             _ if status.generation.is_some() && status.generation != before.generation => {
-                return Ok(ShelfSent { works: None, sent })
+                return Ok(ShelfSent {
+                    works: None,
+                    sent,
+                    shipped_sequence,
+                })
             }
             _ => {
                 return Err(

@@ -1948,7 +1948,7 @@ async fn phone_positions_and_favorites_on_the_served_copy_come_back_to_the_deskt
             let work: uuid::Uuid = serde_json::from_value(item["work"].clone()).unwrap();
             let position: ReadingPosition =
                 serde_json::from_value(item["position"].clone()).unwrap();
-            adopted += usize::from(adopt_remote_reading(&desktop, work, &position).unwrap());
+            adopted += usize::from(adopt_remote_reading(&desktop, work, &position, 0).unwrap());
         }
         cursor = Some(body["cursor"].as_str().unwrap().to_owned());
         if !body["more"].as_bool().unwrap() {
@@ -1979,8 +1979,8 @@ async fn phone_positions_and_favorites_on_the_served_copy_come_back_to_the_deskt
     let items = changes["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
     let position: ReadingPosition = serde_json::from_value(items[0]["position"].clone()).unwrap();
-    assert!(adopt_remote_reading(&desktop, north.entity_id, &position).unwrap());
-    assert!(!adopt_remote_reading(&desktop, north.entity_id, &position).unwrap());
+    assert!(adopt_remote_reading(&desktop, north.entity_id, &position, 0).unwrap());
+    assert!(!adopt_remote_reading(&desktop, north.entity_id, &position, 0).unwrap());
     assert_eq!(
         desktop
             .reading_position(north.entity_id, desktop.id)
@@ -2002,18 +2002,18 @@ async fn phone_positions_and_favorites_on_the_served_copy_come_back_to_the_deskt
         updated_at: Some(i64::MAX),
         generation: 9,
     };
-    assert!(!adopt_remote_reading(&desktop, south.entity_id, &own).unwrap());
+    assert!(!adopt_remote_reading(&desktop, south.entity_id, &own, 0).unwrap());
     let unknown = ReadingPosition {
         device: Some(phone),
         ..own.clone()
     };
-    assert!(!adopt_remote_reading(&desktop, uuid::Uuid::now_v7(), &unknown).unwrap());
+    assert!(!adopt_remote_reading(&desktop, uuid::Uuid::now_v7(), &unknown, 0).unwrap());
     // 本文に無いページは写さず、止めもしない。
     let beyond = ReadingPosition {
         location: Some(page(south.snapshot_id, 5)),
         ..unknown
     };
-    assert!(!adopt_remote_reading(&desktop, south.entity_id, &beyond).unwrap());
+    assert!(!adopt_remote_reading(&desktop, south.entity_id, &beyond, 0).unwrap());
 
     // お気に入りは取得元の番号で持ち主に当てる。同じ値・棚に無い作品は書かない。
     assert!(follow_remote_favorite(&desktop, "pixiv", "north", true).unwrap());

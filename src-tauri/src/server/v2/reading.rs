@@ -83,6 +83,9 @@ enum Cursor {
     Since(i64),
 }
 
+/// お気に入りの一ページ（作品と値・次の印・続きがあるか）。
+type FavoritePage = (Vec<(LibraryId, bool)>, String, bool);
+
 fn parse_cursor(value: &str, epoch: Id) -> Result<Cursor, ApiError> {
     if value.is_empty() {
         return Ok(Cursor::Full {
@@ -174,6 +177,82 @@ impl Context {
     /// 棚の持ち主（デスクトップと同じ利用者）の読書位置を、デスクトップ版が自分の棚へ取り込む
     /// ために読む。管理の口からだけ呼ぶ。印が別の写しのもの・崩れたものなら初めから返す
     /// （デスクトップ版は返った印を控え直すだけでよい）。
+    /// 管理の口：棚の持ち主のお気に入りを、読書位置と同じ印で返す（初めは全部、そのあとは
+    /// 変わった分だけ）。デスクトップ版が、携帯が付け外ししたものを自分の棚へ取り込むのに使う。
+    pub(crate) async fn owner_favorites(
+        self: Arc<Self>,
+        cursor: Option<String>,
+        limit: Option<i64>,
+    ) -> Response {
+        let epoch = self.sync_epoch;
+        let cursor = parse_cursor(cursor.as_deref().unwrap_or(""), epoch).unwrap_or(Cursor::Full {
+            mark: None,
+            after: None,
+        });
+        let limit = usize::try_from(limit.unwrap_or(PAGE).clamp(1, MAX_PAGE)).unwrap_or(1);
+        let ctx = self;
+        let result = tokio::task::spawn_blocking(move || {
+            let library = &ctx.library;
+            let owner = library.id;
+            let page = (|| -> crate::library::Result<FavoritePage> {
+                match cursor {
+                    Cursor::Full { mark, after } => {
+                        let mark = match mark {
+                            Some(mark) => mark,
+                            None => library.sequence_of("user_state")?,
+                        };
+                        let mut rows = library.user_states_after(owner, after, limit + 1)?;
+                        let more = rows.len() > limit;
+                        rows.truncate(limit);
+                        let cursor = match rows.last() {
+                            Some((work, _)) if more => format!("{}.f.{mark}.{work}", epoch.get()),
+                            _ => format!("{}.s.{mark}", epoch.get()),
+                        };
+                        Ok((rows, cursor, more))
+                    }
+                    Cursor::Since(since) => {
+                        let mut changes = library.changes_of("user_state", since, limit + 1)?;
+                        let more = changes.len() > limit;
+                        changes.truncate(limit);
+                        let next = changes.last().map_or(since, |(_, sequence)| *sequence);
+                        let mut rows = Vec::new();
+                        for (work, _) in changes {
+                            // 棚から外した作品・ほかの利用者だけが変えた作品も、持ち主の値を返す
+                            // （受け手は棚に無い作品を飛ばす）。
+                            if let Ok(state) = library.user_state(work, owner) {
+                                rows.push((work, state.favorite));
+                            }
+                        }
+                        Ok((rows, format!("{}.s.{next}", epoch.get()), more))
+                    }
+                }
+            })()
+            .map_err(|error| {
+                log::error!("新しい棚のお気に入りを読めません: {error}");
+                internal()
+            })?;
+            let (rows, cursor, more) = page;
+            let items: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|(work, favorite)| serde_json::json!({"work": work, "favorite": favorite}))
+                .collect();
+            serde_json::to_vec(&serde_json::json!({
+                "libraryId": ctx.library_id,
+                "items": items,
+                "cursor": cursor,
+                "more": more,
+            }))
+            .map_err(|_| internal())
+        })
+        .await
+        .map_err(|_| internal())
+        .and_then(|result| result);
+        match result {
+            Ok(bytes) => super::representation(bytes, "application/json", false),
+            Err(error) => error.into_response(),
+        }
+    }
+
     pub(crate) async fn owner_reading(
         self: Arc<Self>,
         cursor: Option<String>,

@@ -1670,6 +1670,14 @@ impl Library {
     /// 全ファイルを復元して確かめる。棚の大きさに比例して時間がかかるので、
     /// 書き込み用の接続をふさがず、一ファイルごとに読み取りを手放す。
     pub fn verify(&self) -> Result<u64> {
+        self.verify_except(|_| false).map(|(count, _)| count)
+    }
+
+    /// `verify` と同じ検査をする。ただし `known` が真を返したファイルは、実体を読み直して
+    /// 中身のハッシュを確かめるのを省く（台帳の検査と実体の有無は省かない）。前に検査を通した
+    /// 棚と同じ構成で、同じ実体（ハードリンクで共有した不変の実体）だけでできたファイルに使う。
+    /// 全部のファイルの数と、読み直したファイルの数を返す。
+    pub(crate) fn verify_except(&self, known: impl Fn(&ContentFile) -> bool) -> Result<(u64, u64)> {
         let _turn = self.storage_gate.lock().map_err(|_| Error::Busy)?;
         let conn = self.reader()?;
         let unsealed: i64 = conn.query_row(
@@ -1696,13 +1704,26 @@ impl Library {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(conn);
         let mut count = 0;
+        let mut read = 0;
         for id in ids {
             let id: [u8; 32] = id
                 .try_into()
                 .map_err(|_| Error::Integrity("ファイル ID が不正です".into()))?;
             // 確定済みのファイルの構成は変わらない。復元の間は DB を読み続けない。
             let file = Self::file_from_conn(&*self.reader()?, Fingerprint(id))?;
-            self.objects.verify(&file)?;
+            if known(&file) {
+                for chunk in &file.chunks {
+                    if !self.objects.has_object(chunk.id)? {
+                        return Err(Error::Integrity(format!(
+                            "ファイルの実体がありません: {}",
+                            chunk.id
+                        )));
+                    }
+                }
+            } else {
+                self.objects.verify(&file)?;
+                read += 1;
+            }
             count += 1;
         }
         let conn = self.reader()?;
@@ -1718,7 +1739,7 @@ impl Library {
         self.verify_job_history(&conn)?;
         Self::verify_maintenance_markers(&conn)?;
         super::integrity::verify_snapshots(&conn)?;
-        Ok(count)
+        Ok((count, read))
     }
 }
 

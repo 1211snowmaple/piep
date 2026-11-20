@@ -1,5 +1,5 @@
 use piep_storage::{
-    decode_chunk, ChunkState, ContentFile, FileChunk, Fingerprint, ObjectStore,
+    decode_chunk, encode_chunk, ChunkState, ContentFile, FileChunk, Fingerprint, ObjectStore,
     MAX_CHUNK_ORIGINAL_BYTES, MAX_CHUNK_STORED_BYTES, OBJECT_HEADER_BYTES,
 };
 use std::{
@@ -291,5 +291,57 @@ fn concurrent_receivers_publish_one_verified_object_without_overwriting() {
         include_bytes!("fixtures/zstd-repeat.obj")
     );
     assert_eq!(store.stats().unwrap().chunks, 1);
+    temp.assert_no_parts();
+}
+
+#[test]
+fn a_plan_matches_storage_and_an_encoded_part_is_accepted_without_storing_first() {
+    let temp = Temp::new();
+    let sender = temp.store("sender");
+    // 単独で置く上限を超える長さ（部分に分かれる）。圧縮の効く部分と効かない部分を混ぜる。
+    let mut data = vec![7u8; 9 * 1024 * 1024];
+    let mut state = 1u32;
+    for byte in data.iter_mut().skip(5 * 1024 * 1024) {
+        state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        *byte = (state >> 16) as u8;
+    }
+    let plan = ObjectStore::plan(Cursor::new(&data)).unwrap();
+    let stored = sender.put(Cursor::new(&data)).unwrap();
+    assert_eq!(plan, stored);
+    assert!(plan.chunks.len() > 1);
+    let receiver = temp.store("receiver");
+    let mut offset = 0usize;
+    for chunk in &plan.chunks {
+        let block = &data[offset..offset + chunk.length as usize];
+        offset += chunk.length as usize;
+        let (described, bytes) = encode_chunk(block).unwrap();
+        assert_eq!(&described, chunk);
+        // 置き場に入れてから出したものと同じ形。
+        assert_eq!(bytes, encoded(&sender, chunk));
+        receiver.import_chunk(chunk, Cursor::new(bytes)).unwrap();
+    }
+    let mut restored = Vec::new();
+    receiver.export(&plan, &mut restored).unwrap();
+    assert_eq!(restored, data);
+    temp.assert_no_parts();
+}
+
+#[test]
+fn a_store_deeper_than_the_old_path_limit_still_publishes_and_exports() {
+    let temp = Temp::new();
+    // 260 文字を超える置き場（深いフォルダーに置いたサーバーや一時フォルダー）。
+    let mut deep = temp.0.clone();
+    while deep.as_os_str().len() < 300 {
+        deep.push("a-rather-long-folder-name-for-the-path-limit");
+    }
+    fs::create_dir_all(&deep).unwrap();
+    let store = ObjectStore::open(&deep.join("objects")).unwrap();
+    let data = b"deep enough".repeat(1000);
+    let file = store.put(Cursor::new(&data)).unwrap();
+    let destination = deep.join("restored.bin");
+    store.export_new(&file, &destination).unwrap();
+    assert_eq!(fs::read(&destination).unwrap(), data);
+    // 既にあれば上書きしない（置き換えない名前変更のまま）。
+    assert!(store.export_new(&file, &destination).is_err());
     temp.assert_no_parts();
 }

@@ -150,14 +150,16 @@ describe("ServerSection", () => {
     await waitFor(() => expect(opener.openExternalUrl).toHaveBeenCalledWith("https://server.example/admin/#ticket=abc"));
   });
 
-  it("lets each phone read the new shelf only when the server serves one", async () => {
+  it("lets each phone read the new shelf only when the server serves one, and says when a restart is due", async () => {
     api.serverStatus.mockResolvedValue(connected());
     api.serverRemoteStatus.mockResolvedValue(remote());
     renderSection();
     await screen.findByRole("button", { name: "管理画面を開く" });
     expect(screen.queryByRole("group", { name: "新しい棚を読む携帯" })).toBeNull();
 
-    api.serverRemoteStatus.mockResolvedValue(remote({ devices: [admin, { ...phone, readsShelf: false }] }));
+    expect(screen.queryByText("送ったライブラリは、サーバーを再起動すると読めるようになります。")).toBeNull();
+
+    api.serverRemoteStatus.mockResolvedValue(remote({ devices: [admin, { ...phone, readsShelf: false }], shelfPending: true }));
     api.serverSetRemoteShelfReader.mockResolvedValue(undefined);
     cleanup();
     renderSection();
@@ -166,6 +168,7 @@ describe("ServerSection", () => {
     expect((toggle as HTMLInputElement).checked).toBe(false);
     fireEvent.click(toggle);
     await waitFor(() => expect(api.serverSetRemoteShelfReader).toHaveBeenCalledWith("b", true));
+    expect(screen.getByText("送ったライブラリは、サーバーを再起動すると読めるようになります。")).toBeTruthy();
   });
 
   it("checks for an update without applying it", async () => {

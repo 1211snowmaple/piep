@@ -516,6 +516,7 @@ fn admin_routes(ctx: Ctx) -> Router {
         .route("/api/v1/admin/favorites", get(admin_favorites))
         .route("/api/v1/admin/favorites/ack", post(admin_favorites_ack))
         .route("/api/v1/admin/shelf/reading", get(admin_shelf_reading))
+        .route("/api/v1/admin/shelf/favorites", get(admin_shelf_favorites))
         .route(
             "/api/v1/admin/shelf/shipments",
             get(shelf_admin::status).post(shelf_admin::open),
@@ -1750,6 +1751,21 @@ async fn admin_shelf_reading(
     Ok(shelf.owner_reading(query.cursor, query.limit).await)
 }
 
+/// 新しい棚の持ち主のお気に入り（携帯が付け外ししたものをデスクトップ版が取り込む）。
+async fn admin_shelf_favorites(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    Query(query): Query<ShelfReadingQuery>,
+) -> Result<Response, ApiError> {
+    require_admin(&ctx, &headers)?;
+    let shelf = ctx
+        .reader_shelf
+        .get()
+        .cloned()
+        .ok_or_else(ApiError::not_found)?;
+    Ok(shelf.owner_favorites(query.cursor, query.limit).await)
+}
+
 async fn reading_put(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
@@ -1796,6 +1812,9 @@ struct AdminStatus {
     started_at: String,
     /// `available`、`public-only`（公開の口しかない）、`disabled`（止めてある）、`none`。
     admin_web: &'static str,
+    /// 送られた棚を組み終えて、次の起動で配るのを待っているか（単独サーバーだけ）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shelf_pending: Option<bool>,
 }
 
 async fn admin_status(
@@ -1837,6 +1856,7 @@ async fn admin_status(
         server_name: ctx.store.server_name(),
         started_at: ctx.started_at.clone(),
         admin_web: admin_web_state(&ctx),
+        shelf_pending: ctx.shipments.get().map(|shipments| shipments.pending()),
     }))
 }
 

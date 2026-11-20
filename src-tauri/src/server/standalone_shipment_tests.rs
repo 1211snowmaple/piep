@@ -343,6 +343,9 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     assert_eq!(first.works, Some(2));
     assert!(first.sent > 0);
     assert!(!outgoing.exists(), "送り手の作業場所は片付ける");
+    // 見張り役がいないので、立ち上げ直すまで配るのを待っている。
+    let status = admin_get(&remote, &admin.token, "status").await.unwrap();
+    assert_eq!(status["shelfPending"], true);
     stop(serving).await;
     drop(store);
 
@@ -354,6 +357,8 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     };
     let shelf = shelf.expect("送った棚を配る");
     assert!(!shelf.reads(&phone.device_id));
+    let status = admin_get(&remote, &admin.token, "status").await.unwrap();
+    assert_eq!(status["shelfPending"], false);
     admin_put(
         &remote,
         &admin.token,
@@ -407,6 +412,53 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
         .await
         .unwrap();
     assert_eq!(reading["items"].as_array().unwrap().len(), 1);
+    // お気に入りも同じように読める。初めは全部、印のあとは変わった分だけ。
+    let liked = shelf
+        .library()
+        .user_state(paged.entity_id, desktop.id)
+        .unwrap();
+    shelf
+        .library()
+        .set_favorite(
+            LibraryId::now_v7(),
+            paged.entity_id,
+            desktop.id,
+            liked.generation,
+            true,
+        )
+        .unwrap();
+    let favorites = admin_get(&remote, &admin.token, "shelf/favorites?cursor=&limit=10")
+        .await
+        .unwrap();
+    let item = favorites["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["work"] == paged.entity_id.to_string())
+        .cloned()
+        .unwrap();
+    assert_eq!(item["favorite"], true);
+    let mut cursor = favorites["cursor"].as_str().unwrap().to_string();
+    let mut more = favorites["more"] == true;
+    while more {
+        let page = admin_get(
+            &remote,
+            &admin.token,
+            &format!("shelf/favorites?cursor={cursor}&limit=10"),
+        )
+        .await
+        .unwrap();
+        cursor = page["cursor"].as_str().unwrap().to_string();
+        more = page["more"] == true;
+    }
+    let after = admin_get(
+        &remote,
+        &admin.token,
+        &format!("shelf/favorites?cursor={cursor}&limit=10"),
+    )
+    .await
+    .unwrap();
+    assert!(after["items"].as_array().unwrap().is_empty(), "{after}");
 
     // 二回目：一作品だけ足した。送るのは新しい実体と、変わった台帳の部分だけ。
     save(&desktop, "3", "三つめ");
@@ -434,6 +486,14 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
         .unwrap();
     assert_eq!(moved.location, Some(at));
     assert_eq!(moved.device, Some(phone_device));
+    assert!(
+        shelf
+            .library()
+            .user_state(paged.entity_id, desktop.id)
+            .unwrap()
+            .favorite,
+        "携帯が前の世代で付けたお気に入りも残る"
+    );
     serving.abort();
 }
 
@@ -473,12 +533,12 @@ async fn probe_shipping_a_real_partial_shelf() {
     // 一つ目の測り：全体の台帳（実データの大きさ）で、小さな書き込みのあと変わる部分の数。
     let scratch = probe.join(format!("measure-{}", uuid::Uuid::now_v7()));
     fs::create_dir_all(&scratch).unwrap();
-    let parts = ObjectStore::open(&scratch.join("parts")).unwrap();
+    let plan = |name: &str| ObjectStore::plan(fs::File::open(scratch.join(name)).unwrap()).unwrap();
     let started = Instant::now();
     let objects = copy.ship_snapshot(&scratch.join("a.db")).unwrap();
     let snapshot_a = started.elapsed();
     let started = Instant::now();
-    let a = parts.put_path(&scratch.join("a.db")).unwrap();
+    let a = plan("a.db");
     let split_a = started.elapsed();
     let state = copy.user_state(works[0], copy.id).unwrap();
     copy.set_favorite(
@@ -490,28 +550,30 @@ async fn probe_shipping_a_real_partial_shelf() {
     )
     .unwrap();
     copy.ship_snapshot(&scratch.join("b.db")).unwrap();
-    let b = parts.put_path(&scratch.join("b.db")).unwrap();
+    let b = plan("b.db");
     let before: std::collections::HashSet<_> = a.chunks.iter().map(|chunk| chunk.id).collect();
     let changed = b
         .chunks
         .iter()
         .filter(|chunk| !before.contains(&chunk.id))
         .count();
-    let stored: u64 = parts
-        .listing()
-        .unwrap()
-        .iter()
-        .map(|listing| listing.bytes)
-        .sum();
+    let started = Instant::now();
+    let mut encoded = 0;
+    let mut offset = 0;
+    let bytes = fs::read(scratch.join("b.db")).unwrap();
+    for chunk in &b.chunks {
+        let block = &bytes[offset..offset + chunk.length as usize];
+        offset += chunk.length as usize;
+        if !before.contains(&chunk.id) {
+            encoded += piep_storage::encode_chunk(block).unwrap().1.len();
+        }
+    }
     println!(
-        "full-db bytes={} parts={} changed_after_one_favorite={} objects_referenced={} snapshot={:?} split={:?} two_copies_stored_bytes={}",
+        "full-db bytes={} parts={} changed_after_one_favorite={changed} encoded_bytes={encoded} encode={:?} objects_referenced={} snapshot={snapshot_a:?} plan={split_a:?}",
         a.length,
         a.chunks.len(),
-        changed,
+        started.elapsed(),
         objects.len(),
-        snapshot_a,
-        split_a,
-        stored
     );
     fs::remove_dir_all(&scratch).unwrap();
 

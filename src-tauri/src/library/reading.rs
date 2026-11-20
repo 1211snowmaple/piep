@@ -194,12 +194,45 @@ impl Library {
 
     /// 読書位置の変更の記録（outbox）の最後の番号。変更が無ければ 0。
     pub fn reading_sequence(&self) -> Result<i64> {
+        self.sequence_of("reading_position")
+    }
+
+    /// `operation` の変更の記録の、今の最後の番号。
+    pub fn sequence_of(&self, operation: &str) -> Result<i64> {
         let conn = self.reader()?;
         Ok(conn.query_row(
-            "SELECT coalesce(max(sequence),0) FROM outbox WHERE operation='reading_position'",
-            [],
+            "SELECT coalesce(max(sequence),0) FROM outbox WHERE operation=?1",
+            [operation],
             |r| r.get(0),
         )?)
+    }
+
+    /// 利用者のお気に入りを作品の ID の順に、`after` の次から `limit` 件（付けたものも外したものも）。
+    pub fn user_states_after(
+        &self,
+        user: LibraryId,
+        after: Option<LibraryId>,
+        limit: usize,
+    ) -> Result<Vec<(LibraryId, bool)>> {
+        let conn = self.reader()?;
+        let mut query = conn.prepare_cached(
+            "SELECT work_id,favorite FROM work_user_state WHERE user_id=?1 AND work_id>?2 ORDER BY work_id LIMIT ?3",
+        )?;
+        let after = after.map_or_else(Vec::new, |work| work.as_bytes().to_vec());
+        let rows = query.query_map(
+            params![
+                user.as_bytes().as_slice(),
+                after,
+                i64::try_from(limit).unwrap_or(i64::MAX)
+            ],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, bool>(1)?)),
+        )?;
+        let mut found = Vec::new();
+        for row in rows {
+            let (work, favorite) = row?;
+            found.push((reading_id(work)?, favorite));
+        }
+        Ok(found)
     }
 
     /// 利用者の読書位置を作品の ID の順に、`after` の次から `limit` 件。
@@ -233,12 +266,22 @@ impl Library {
     /// `since` の番号より後に読書位置が変わった作品を、最後に変わった番号の順に `limit` 件。
     /// 利用者を問わない（呼び手がその利用者の位置を引き直す）。
     pub fn reading_changes(&self, since: i64, limit: usize) -> Result<Vec<(LibraryId, i64)>> {
+        self.changes_of("reading_position", since, limit)
+    }
+
+    /// 番号 `since` より後に `operation` の変わった作品を、最後に変わった番号の順に。
+    pub fn changes_of(
+        &self,
+        operation: &str,
+        since: i64,
+        limit: usize,
+    ) -> Result<Vec<(LibraryId, i64)>> {
         let conn = self.reader()?;
         let mut query = conn.prepare_cached(
-            "SELECT entity_id,max(sequence) AS last FROM outbox WHERE operation='reading_position' AND sequence>?1 GROUP BY entity_id ORDER BY last LIMIT ?2",
+            "SELECT entity_id,max(sequence) AS last FROM outbox WHERE operation=?3 AND sequence>?1 GROUP BY entity_id ORDER BY last LIMIT ?2",
         )?;
         let rows = query.query_map(
-            params![since, i64::try_from(limit).unwrap_or(i64::MAX)],
+            params![since, i64::try_from(limit).unwrap_or(i64::MAX), operation],
             |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
         )?;
         let mut found = Vec::new();

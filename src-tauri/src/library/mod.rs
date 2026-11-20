@@ -37,6 +37,7 @@ mod saved_state;
 mod schema;
 mod searches;
 mod shipment;
+pub use shipment::adopted_request;
 pub(crate) mod source_bindings;
 mod source_state;
 mod store;

@@ -307,6 +307,7 @@ function ConnectedRemote(props: CardProps) {
     data && isNewer(data.version, APP_VERSION) ? `サーバーの方が新しいバージョンです（${data.version}）。送れないときは、このアプリを更新してください。` : null,
     connectionError && !registrationLost && !connectionError.includes("接続できません") ? connectionError : null,
     lastError,
+    data?.shelfPending && !send.running ? "送ったライブラリは、サーバーを再起動すると読めるようになります。" : null,
     update?.lastError ? `更新できませんでした: ${update.lastError}` : null,
     data?.sync?.indexError ? `検索の索引を更新できません: ${data.sync.indexError}` : null,
     last.missingReferenced ? `ライブラリが参照しているファイルのうち ${formatNumber(last.missingReferenced)} 件がサーバーにありません。この PC からも失われているかもしれません。診断で確かめてください。` : null,
