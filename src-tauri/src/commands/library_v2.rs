@@ -29,6 +29,10 @@ use tauri::State;
 
 pub const DIR_ENV: &str = "PIEP_LIBRARY_V2_DIR";
 pub const DEFAULT_DIR: &str = "library-v2";
+/// 旧棚を片付けたあとの、アプリのフォルダーの中の棚の場所。
+pub const INSIDE_DIR: &str = "library";
+/// 旧棚の台帳。これがある間は、新しい棚をアプリのフォルダーの中へ移さない。
+const OLD_DATABASE: &str = "piep.db";
 pub const URI_SCHEME: &str = "piep-library";
 
 /// 新しい棚の状態。
@@ -264,15 +268,46 @@ impl LibraryV2 {
     }
 }
 
-/// 棚の場所。環境変数があればそれ、なければアプリのフォルダーの隣の `<アプリのフォルダー名>.library-v2`。
+/// 棚の場所。環境変数があればそれ。アプリのフォルダーの中の `library` に棚があればそれ。
+/// なければアプリのフォルダーの隣の `<アプリのフォルダー名>.library-v2`。
 ///
-/// アプリのフォルダーの中には置かない。移行器は旧棚の中への移行を断り（旧棚の全件照合が
-/// 新しい棚のファイルを知らないファイルとして数える）、旧棚の書庫やバックアップにも入ってしまう。
+/// 旧棚がある間はアプリのフォルダーの中には置かない。移行器は旧棚の中への移行を断り（旧棚の
+/// 全件照合が新しい棚のファイルを知らないファイルとして数える）、旧棚の書庫やバックアップにも
+/// 入ってしまう。旧棚を片付けたら、起動のときに中へ移す（`settle_place`）。
 pub fn library_dir(app_data: &Path) -> PathBuf {
     std::env::var_os(DIR_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| default_dir(app_data))
+        .unwrap_or_else(|| place(app_data))
+}
+
+fn place(app_data: &Path) -> PathBuf {
+    let inside = app_data.join(INSIDE_DIR);
+    if inside.join("library.json").is_file() {
+        inside
+    } else {
+        default_dir(app_data)
+    }
+}
+
+/// 起動のとき、棚を開く前に呼ぶ。旧棚の台帳が無くなっていて、隣に棚があれば、アプリの
+/// フォルダーの中の `library` へ移す（同じドライブの中の名前の付け替えなので、すぐ終わる）。
+/// 移したら新しい場所を返す。
+pub(crate) fn settle_place(app_data: &Path) -> Result<Option<PathBuf>, String> {
+    if std::env::var_os(DIR_ENV).is_some_and(|value| !value.is_empty()) {
+        return Ok(None);
+    }
+    let inside = app_data.join(INSIDE_DIR);
+    let beside = default_dir(app_data);
+    let old = app_data.join(OLD_DATABASE);
+    if old.exists() || inside.exists() || !beside.join("library.json").is_file() {
+        return Ok(None);
+    }
+    std::fs::rename(&beside, &inside)
+        .map_err(|error| format!("棚をアプリのフォルダーの中へ移せません: {error}"))?;
+    piep_storage::sync_directory(app_data).map_err(|error| error.to_string())?;
+    log::info!("旧棚を片付けたので、新しい棚をアプリのフォルダーの中へ移しました");
+    Ok(Some(inside))
 }
 
 fn default_dir(app_data: &Path) -> PathBuf {
@@ -285,6 +320,9 @@ fn default_dir(app_data: &Path) -> PathBuf {
 /// 起動のときに呼ぶ。別のスレッドで開く。
 pub fn open_in_background(state: Arc<LibraryV2>, app_data: &Path) {
     super::library_health::set_settings_dir(app_data);
+    if let Err(error) = settle_place(app_data) {
+        log::error!("{error}");
+    }
     let path = library_dir(app_data);
     let spawned = std::thread::Builder::new()
         .name("piep-library-v2".into())
@@ -407,51 +445,9 @@ pub(crate) fn adopt_remote_reading(
     work: LibraryId,
     remote: &crate::library::ReadingPosition,
 ) -> Result<bool, String> {
-    let Some(device) = remote.device else {
-        return Ok(false);
-    };
-    if remote.generation == 0 || device == desktop_device(library) {
-        return Ok(false);
-    }
-    // 棚から外した作品・知らない作品には位置を置かない。
-    if library
-        .library_item_generation(work)
-        .map_err(|e| e.to_string())?
-        .is_none()
-    {
-        return Ok(false);
-    }
-    let local = library
-        .reading_position(work, library.id)
-        .map_err(|e| e.to_string())?;
-    if local.location == remote.location && local.finished == remote.finished {
-        return Ok(false);
-    }
-    // どちらが後に読んだかは書いた時刻で決める（二つの棚に共通の更新世代は無い）。
-    if remote.updated_at.unwrap_or(0) <= local.updated_at.unwrap_or(0) {
-        return Ok(false);
-    }
-    match library.set_reading_position(crate::library::ReadingUpdate {
-        request: LibraryId::now_v7(),
-        work,
-        user: library.id,
-        device,
-        expected: local.generation,
-        location: remote.location.clone(),
-        finished: remote.finished,
-    }) {
-        Ok(_) => Ok(true),
-        // 本文に無い位置（この棚では別の版）や、いま書かれた位置との食い違い。写さない。
-        Err(
-            error @ (crate::library::Error::Integrity(_)
-            | crate::library::Error::ResourceUnavailable
-            | crate::library::Error::Sql(rusqlite::Error::QueryReturnedNoRows)),
-        ) => {
-            log::warn!("サーバーの棚の読書位置を写せません（{work}）: {error}");
-            Ok(false)
-        }
-        Err(error) => Err(error.to_string()),
-    }
+    library
+        .adopt_reading(work, library.id, remote, Some(desktop_device(library)))
+        .map_err(|e| e.to_string())
 }
 
 /// 携帯で付け外ししたお気に入りを、この棚の持ち主にも当てる。棚に載っていない作品と、

@@ -13,6 +13,7 @@ pub mod install;
 #[cfg(windows)]
 mod install_acl;
 pub mod library;
+mod shelf_send;
 pub mod snapshot;
 pub mod standalone;
 pub mod store;

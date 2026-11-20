@@ -8,8 +8,8 @@ use super::library::Library;
 use super::standalone::run_listener;
 use super::store::{DeviceSummary, FavoriteChange, Role, ServerStore};
 use super::sync_send::{
-    admin_delete, admin_get, admin_get_if_present, admin_post, pair_admin, prepare_snapshot,
-    send_prepared, RemoteServer, SendHandle, SendProgress, CANCELED,
+    admin_delete, admin_get, admin_get_if_present, admin_post, admin_put, pair_admin,
+    prepare_snapshot, send_prepared, RemoteServer, SendHandle, SendProgress, CANCELED,
 };
 use super::{pairing_payload, tls, DEFAULT_PORT};
 use crate::AppState;
@@ -586,6 +586,29 @@ impl DesktopServer {
         Ok(())
     }
 
+    /// 単独サーバーの携帯に、新しい棚を読む許可を付け外しする。
+    pub async fn set_remote_shelf_reader(&self, device_id: &str, read: bool) -> Result<(), String> {
+        if device_id.is_empty()
+            || !device_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        {
+            return Err("端末を指定し直してください".into());
+        }
+        let remote = self
+            .settings()
+            .remote
+            .ok_or("単独サーバーにつないでいません")?;
+        let token = credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+        admin_put(
+            &remote,
+            &token,
+            &format!("devices/{device_id}/shelf"),
+            &serde_json::json!({ "read": read }),
+        )
+        .await
+    }
+
     pub async fn revoke_device(&self, device_id: &str) -> Result<(), String> {
         if let Some(remote) = self.settings().remote {
             let token =
@@ -806,8 +829,10 @@ impl DesktopServer {
         if let Err(error) = self.pull_favorites_locked(&state).await {
             log::warn!("携帯のお気に入りを取り込めません: {error}");
         }
+        // 切り替えた棚があれば、旧棚ではなくその棚の写しを送る。
+        let shelf = state.library_v2.writable().ok();
         // 写しを作る前に読む。この間に変わっても、次回もう一度送るだけで取りこぼさない。
-        let generation = state.db.library_generation().ok();
+        let generation = change_generation(&state);
         let remote = self
             .settings()
             .remote
@@ -821,31 +846,48 @@ impl DesktopServer {
                 ..Default::default()
             };
         }
-        let snapshot = self.dir.join("outgoing").join("piep-snapshot.db");
-        let result = async {
-            let (report, files, skipped) =
-                prepare_snapshot(&state, &self.app_data, &snapshot).await?;
-            if let Ok(mut progress) = self.send.progress.lock() {
-                progress.outside_paths = report.outside;
-                progress.skipped_names = skipped;
+        let finished_at = Some(chrono::Utc::now().to_rfc3339());
+        let result = if let Some(library) = shelf {
+            let outgoing = self.dir.join("outgoing").join("shelf");
+            super::shelf_send::send_shelf(&remote, &token, library, &outgoing, &self.send)
+                .await
+                .map(|sent| LastSend {
+                    finished_at: finished_at.clone(),
+                    works: sent.works.map(|works| works as i64),
+                    files_added: Some(sent.sent as i64),
+                    ..Default::default()
+                })
+        } else {
+            let snapshot = self.dir.join("outgoing").join("piep-snapshot.db");
+            let result = async {
+                let (report, files, skipped) =
+                    prepare_snapshot(&state, &self.app_data, &snapshot).await?;
+                if let Ok(mut progress) = self.send.progress.lock() {
+                    progress.outside_paths = report.outside;
+                    progress.skipped_names = skipped;
+                }
+                send_prepared(&remote, &token, &snapshot, files, &self.send).await
             }
-            send_prepared(&remote, &token, &snapshot, files, &self.send).await
-        }
-        .await;
-        let _ = fs::remove_file(&snapshot);
+            .await;
+            let _ = fs::remove_file(&snapshot);
+            result.map(|outcome| LastSend {
+                finished_at: finished_at.clone(),
+                generation: Some(outcome.generation),
+                works: Some(outcome.works),
+                files_added: Some(outcome.files_added),
+                files_removed: Some(outcome.files_removed),
+                missing_referenced: Some(outcome.missing_referenced),
+                unchanged: outcome.unchanged,
+                error: None,
+            })
+        };
         let finished_at = Some(chrono::Utc::now().to_rfc3339());
         let (phase, record) = match result {
-            Ok(outcome) => (
+            Ok(record) => (
                 "done",
                 LastSend {
                     finished_at,
-                    generation: Some(outcome.generation),
-                    works: Some(outcome.works),
-                    files_added: Some(outcome.files_added),
-                    files_removed: Some(outcome.files_removed),
-                    missing_referenced: Some(outcome.missing_referenced),
-                    unchanged: outcome.unchanged,
-                    error: None,
+                    ..record
                 },
             ),
             Err(error) if error == CANCELED => (
@@ -920,7 +962,7 @@ impl DesktopServer {
                     }
                 }
                 if server.settings().auto_send && server.settings().remote.is_some() {
-                    let generation = state.db.library_generation().ok();
+                    let generation = change_generation(&state);
                     if generation != seen {
                         seen = generation;
                         changed_at = Some(Instant::now());
@@ -945,6 +987,14 @@ impl DesktopServer {
                 tokio::time::sleep(AUTO_SEND_POLL).await;
             }
         });
+    }
+}
+
+/// 送るべき変更があったかを見る印。切り替えた棚があればその棚の、無ければ旧棚の印。
+fn change_generation(state: &AppState) -> Option<i64> {
+    match state.library_v2.writable() {
+        Ok(library) => library.change_marker().ok(),
+        Err(_) => state.db.library_generation().ok(),
     }
 }
 

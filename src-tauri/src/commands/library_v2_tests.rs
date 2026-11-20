@@ -92,3 +92,25 @@ fn the_default_place_is_next_to_the_app_folder_not_inside_it() {
     );
     assert!(!default_dir(app).starts_with(app));
 }
+
+#[test]
+fn the_shelf_moves_inside_the_app_folder_only_after_the_old_shelf_is_gone() {
+    let root = std::env::temp_dir().join(format!("piep-place-{}", uuid::Uuid::now_v7()));
+    let app = root.join("io.github.example.piep");
+    std::fs::create_dir_all(&app).unwrap();
+    let beside = default_dir(&app);
+    std::fs::create_dir_all(beside.join("objects")).unwrap();
+    std::fs::write(beside.join("library.json"), b"{}").unwrap();
+    std::fs::write(app.join("piep.db"), b"").unwrap();
+    // 旧棚がある間は動かさない。
+    assert_eq!(settle_place(&app).unwrap(), None);
+    assert_eq!(place(&app), beside);
+    std::fs::remove_file(app.join("piep.db")).unwrap();
+    let inside = settle_place(&app).unwrap().unwrap();
+    assert_eq!(inside, app.join(INSIDE_DIR));
+    assert!(inside.join("objects").is_dir() && !beside.exists());
+    assert_eq!(place(&app), inside);
+    // 二度目は何もしない。
+    assert_eq!(settle_place(&app).unwrap(), None);
+    std::fs::remove_dir_all(&root).unwrap();
+}

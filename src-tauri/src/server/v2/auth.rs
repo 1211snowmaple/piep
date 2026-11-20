@@ -20,6 +20,10 @@ pub trait Authority: Send + Sync {
     fn subject_of(&self, _device: &str, _library: Id) -> Option<Id> {
         None
     }
+    /// 端末に読む利用者を許す（`None` で外す）。管理者が端末ごとに付け外しする。
+    fn allow(&self, _device: &str, _library: Id, _subject: Option<Id>) -> Result<(), String> {
+        Err("この棚では許可を変えられません".into())
+    }
 }
 
 /// 既存の bearer 検証を使うアダプター。grants は管理側が明示して投入する。
@@ -72,5 +76,17 @@ impl Authority for DeviceAuthority {
             .ok()?
             .get(&(device.to_owned(), library.get()))
             .copied()
+    }
+    fn allow(&self, device: &str, library: Id, subject: Option<Id>) -> Result<(), String> {
+        match subject {
+            Some(subject) => self.grant(device.to_owned(), library, subject),
+            None => {
+                self.grants
+                    .write()
+                    .map_err(|_| "権限の状態を更新できません")?
+                    .remove(&(device.to_owned(), library.get()));
+                Ok(())
+            }
+        }
     }
 }

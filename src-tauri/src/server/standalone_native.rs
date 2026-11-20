@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::{value, DocumentMut, Item, Table};
 use uuid::Uuid;
 
-fn generations(paths: &ServerPaths) -> PathBuf {
+pub(super) fn generations(paths: &ServerPaths) -> PathBuf {
     paths.root.join("library-v2-generations")
 }
 
@@ -44,6 +44,16 @@ pub(super) fn stage(paths: &ServerPaths, source: &Path) -> Result<Id, String> {
 
 pub(super) fn activate(paths: &ServerPaths, generation: Id) -> Result<(), String> {
     let _lock = lock_server(paths)?;
+    activate_locked(paths, generation, true)
+}
+
+/// 置き場の錠を持ったまま、配る世代を選ぶ。`verify` が偽なら中身の全体の検査を省く
+/// （受け取って組んだときに検査を通した世代を、起動のときに選ぶ場合）。
+pub(super) fn activate_locked(
+    paths: &ServerPaths,
+    generation: Id,
+    verify: bool,
+) -> Result<(), String> {
     if paths
         .config_trial()
         .try_exists()
@@ -64,9 +74,11 @@ pub(super) fn activate(paths: &ServerPaths, generation: Id) -> Result<(), String
         None => Library::open(&root),
     }
     .map_err(|error| format!("選んだ棚を開けません: {error}"))?;
-    library
-        .verify()
-        .map_err(|error| format!("選んだ棚を検証できません: {error}"))?;
+    if verify {
+        library
+            .verify()
+            .map_err(|error| format!("選んだ棚を検証できません: {error}"))?;
+    }
     if config
         .library_v2
         .as_ref()
@@ -95,7 +107,7 @@ pub(super) fn activate(paths: &ServerPaths, generation: Id) -> Result<(), String
     write_config(paths, written.as_bytes())
 }
 
-fn write_config(paths: &ServerPaths, content: &[u8]) -> Result<(), String> {
+pub(super) fn write_config(paths: &ServerPaths, content: &[u8]) -> Result<(), String> {
     let temporary = paths
         .root
         .join(format!(".{CONFIG_FILE}-{}.part", Uuid::now_v7()));

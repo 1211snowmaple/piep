@@ -104,6 +104,21 @@ impl Context {
         }
     }
 
+    /// 配っている棚（受け取った写しと実体を共有するため）。
+    pub(crate) fn library(&self) -> &Arc<Library> {
+        &self.library
+    }
+
+    /// 端末がこの棚を読めるか。
+    pub(crate) fn reads(&self, device: &str) -> bool {
+        self.authority.subject_of(device, self.library_id).is_some()
+    }
+
+    /// 端末に棚を読む許可を付け外しする（読む利用者は `subject`、`None` で外す）。
+    pub(crate) fn allow_reader(&self, device: &str, subject: Option<Id>) -> Result<(), String> {
+        self.authority.allow(device, self.library_id, subject)
+    }
+
     pub(super) fn shelf_status(&self) -> crate::library::Result<ShelfStatus> {
         let conn = self.library.reader()?;
         let works: i64 =

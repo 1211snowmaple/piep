@@ -63,6 +63,18 @@ pub async fn server_revoke_device(
     Ok(server.status().await)
 }
 
+/// 単独サーバーの携帯に、新しい棚を読む許可を付け外しする。
+#[tauri::command]
+pub async fn server_set_remote_shelf_reader(
+    app: tauri::AppHandle,
+    device_id: String,
+    read: bool,
+) -> Result<(), String> {
+    controller(&app)?
+        .set_remote_shelf_reader(&device_id, read)
+        .await
+}
+
 /// 単独サーバーに登録されている端末の一覧を返す。
 #[tauri::command]
 pub async fn server_list_remote_devices(

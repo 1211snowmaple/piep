@@ -2,6 +2,8 @@
 
 #[path = "standalone_native.rs"]
 mod native;
+#[path = "standalone_shipment.rs"]
+pub mod shipment;
 
 use super::admin_assets::ADMIN_ASSETS;
 use super::admin_store::TicketKind;
@@ -881,6 +883,13 @@ fn lock_server(paths: &ServerPaths) -> Result<File, String> {
 }
 
 async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
+    // 送られた棚を組み終えていれば、設定を読む前に配る棚をそれへ切り替える。
+    {
+        let paths = paths.clone();
+        tokio::task::spawn_blocking(move || shipment::apply_pending(&paths))
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     let config = load_config(&paths)?;
     let material = tls_material(&paths, &config).await?;
     let fingerprint = material
@@ -888,15 +897,29 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
         .and_then(|material| material.fingerprint.clone());
     let tls_config = material.map(|material| material.config);
     let parts = assemble(&paths, config.public_url(), fingerprint)?;
+    let mut served = None;
     if let Some(settings) = &config.library_v2 {
-        parts
-            .context
-            .set_reader_shelf(settings.open(&paths, Arc::clone(&parts.context.store))?)?;
+        let shelf = settings.open(&paths, Arc::clone(&parts.context.store))?;
+        served = Some(Arc::clone(shelf.library()));
+        parts.context.set_reader_shelf(shelf)?;
     }
+    let shipments = Arc::new(shipment::ShelfShipments::new(paths.clone(), served));
+    parts
+        .context
+        .set_shipments(paths.clone(), Arc::clone(&shipments));
     parts.receiver.start_index_catch_up();
     note_started(&paths, &parts.context.store);
     let handle = axum_server::Handle::new();
     let restart = Arc::new(AtomicBool::new(false));
+    // 送られた棚を組み終えたら立ち上げ直して配る（見張り役がいるときだけ。いなければ手で）。
+    if update::is_managed(&paths) {
+        let stop_handle = handle.clone();
+        let requested = Arc::clone(&restart);
+        shipments.set_restart(Arc::new(move || {
+            requested.store(true, Ordering::SeqCst);
+            stop_handle.graceful_shutdown(Some(Duration::from_secs(5)));
+        }));
+    }
     // 外へ公開している口にログイン画面を置かない。
     let local = local_admin(&config);
     let web_here =

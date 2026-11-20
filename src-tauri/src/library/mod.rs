@@ -36,6 +36,7 @@ pub use save_repairs::MAX_INCOMPLETE_SAVE_REPAIRS;
 mod saved_state;
 mod schema;
 mod searches;
+mod shipment;
 pub(crate) mod source_bindings;
 mod source_state;
 mod store;

@@ -875,9 +875,36 @@ impl ObjectStore {
         Ok(found)
     }
 
+    /// 別の置き場にある実体を、この置き場にも置く。実体は不変なので、同じボリュームなら
+    /// ハードリンクで共有して容量を増やさず、できなければ圧縮したまま写す（写すときは受信と同じく
+    /// 検証してから公開する）。すでに置いてあれば何もしない。中身の検証は呼び手が棚ごと行う。
+    pub fn adopt_chunk(&self, source: &ObjectStore, chunk: &FileChunk) -> Result<()> {
+        if self.has_object(chunk.id)? {
+            return Ok(());
+        }
+        let from = source.chunk_path(chunk.id, false)?;
+        regular_file(&from)?;
+        let dest = self.chunk_path(chunk.id, true)?;
+        if fs::hard_link(&from, &dest).is_ok() {
+            if let Some(parent) = dest.parent() {
+                sync_directory(parent)?;
+            }
+            return Ok(());
+        }
+        let mut encoded = Vec::new();
+        source.export_chunk(chunk, &mut encoded)?;
+        self.import_chunk(chunk, Cursor::new(encoded))
+    }
+
     /// 公開済みの実体ファイルがあるか（中身は読まない）。
     pub fn has_object(&self, id: Fingerprint) -> Result<bool> {
-        match regular_file(&self.chunk_path(id, false)?) {
+        // 先頭 2 桁のフォルダーがまだ無いのも「無い」（一つ目の実体を置く前の置き場）。
+        let path = match self.chunk_path(id, false) {
+            Ok(path) => path,
+            Err(error) if missing(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        match regular_file(&path) {
             Ok(_) => Ok(true),
             Err(error) if missing(&error) => Ok(false),
             Err(error) => Err(error),

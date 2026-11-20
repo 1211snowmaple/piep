@@ -6,6 +6,8 @@ export interface ServerDevice {
   role: "reader" | "admin";
   createdAt: string;
   lastSeenAt: string | null;
+  /** 新しい棚を配っているサーバーだけにある。この携帯が棚を読めるか。 */
+  readsShelf?: boolean;
 }
 
 export interface EmbeddedServerSettings {
@@ -100,6 +102,9 @@ export const serverCreateReaderPairing = () => invoke<ServerPairing>("server_cre
 export const serverRevokeDevice = (deviceId: string) =>
   invoke<DesktopServerStatus>("server_revoke_device", { deviceId });
 export const serverRemoteDevices = () => invoke<ServerDevice[]>("server_list_remote_devices");
+/** 単独サーバーの携帯に、新しい棚を読む許可を付け外しする。 */
+export const serverSetRemoteShelfReader = (deviceId: string, read: boolean) =>
+  invoke<void>("server_set_remote_shelf_reader", { deviceId, read });
 export const serverRemoteStatus = () => invoke<RemoteServerStatus>("server_remote_status");
 export const serverUpdateRemote = () => invoke<void>("server_update_remote");
 export const serverCheckRemoteUpdate = () => invoke<unknown>("server_check_remote_update");
