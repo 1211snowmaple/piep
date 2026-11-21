@@ -22,10 +22,11 @@ use super::models::AssetEntry;
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
-/// 差し込んだ添付一つぶんの記録。取り込めた事実を画面や記録に出すために返す。
+/// 差し込んだ添付一つぶんの記録。呼び出し側は差し込んだ本文を読むので、ここは試験が
+/// 取り込みの経路を確かめるために読む。
 #[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct ImportedAttachment {
-    pub file_name: String,
     pub method: &'static str,
     pub page_count: usize,
     pub char_count: usize,
@@ -59,62 +60,6 @@ pub fn apply_attachment_text(
     } else {
         apply_to_files(body, assets)
     }
-}
-
-/// 保存済みの JSON を読み、添付の中の本文を差し込んだ値を返す。
-pub(crate) fn materialize(raw_json: &str, source: &str, assets: &[AssetEntry]) -> Value {
-    let mut value: Value = match serde_json::from_str(raw_json) {
-        Ok(value) => value,
-        Err(_) => return Value::Null,
-    };
-    apply_attachment_text(&mut value, source, assets);
-    value
-}
-
-/// 保存済みの JSON から、読書用の HTML と検索用の平文をまとめて作る。
-///
-/// **この二つは同じ値から作らなければならない。** 別々に読むと、片方にだけ
-/// 添付の本文が入って「読めるのに検索に出てこない」作品ができる。
-pub(crate) fn content_from_json(
-    raw_json: &str,
-    source: &str,
-    assets: &[AssetEntry],
-) -> (String, String) {
-    let valid_pixiv_assets = (source == "pixiv").then(|| {
-        assets
-            .iter()
-            .filter(|asset| {
-                !asset
-                    .original_url
-                    .as_deref()
-                    .is_some_and(crate::source_assets::is_pixiv_placeholder_image)
-            })
-            .cloned()
-            .collect::<Vec<_>>()
-    });
-    let assets = valid_pixiv_assets.as_deref().unwrap_or(assets);
-    let value = materialize(raw_json, source, assets);
-    if value.is_null() {
-        return (String::new(), String::new());
-    }
-    let html = if source == "pixiv" {
-        super::parser::parse_pixiv_value_to_html(&value, assets)
-    } else if source == "fanbox" {
-        super::parser::parse_fanbox_value_to_html(&value, assets)
-    } else {
-        String::new()
-    };
-    let plain_text = super::search::extract_search_body(&value, source);
-    (html, plain_text)
-}
-
-/// 検索用の平文だけを作る。索引を組み直すときは本文 HTML が要らない。
-pub(crate) fn search_body_from_json(raw_json: &str, source: &str, assets: &[AssetEntry]) -> String {
-    let value = materialize(raw_json, source, assets);
-    if value.is_null() {
-        return String::new();
-    }
-    super::search::extract_search_body(&value, source)
 }
 
 /// `blocks` を持つ投稿。`file` ブロックの直後へ差し込む。
@@ -293,7 +238,6 @@ fn import_one(entry: &Value, assets: &[AssetEntry]) -> Import {
     }
     Import::Imported(
         ImportedAttachment {
-            file_name,
             method: body.method,
             page_count: body.page_count,
             char_count: body.char_count,

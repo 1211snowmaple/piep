@@ -1,8 +1,7 @@
 //! 新しい棚の作者・シリーズを、作者・シリーズの画面が出す形にする（評価文書 6.21）。
 //!
-//! 画面は旧棚の作者・シリーズの画面をそのまま使い、読む先だけを差し替える。数え方・並べ方は
-//! 旧棚の問い合わせ（`get_person`・`get_series`・`list_entity_tags`・`list_entity_series_paged`）
-//! に合わせ、`piep-library compare-entities` で全員・全シリーズを突き合わせる。
+//! 数え方・並べ方は、旧棚の問い合わせ（`get_person`・`get_series`・`list_entity_tags`・
+//! `list_entity_series_paged`）と全員・全シリーズで突き合わせて合わせたもの。
 
 use crate::library::{
     EntityKind, Fingerprint, Library, LibraryId, ResourceReference, ResourceScope, Result,

@@ -83,7 +83,6 @@ pub(crate) fn schedule_semantic_sync(library: Arc<Library>) {
                 };
                 let started = std::time::Instant::now();
                 match library.sync_semantic_index(
-                    None,
                     &|| SEMANTIC_CANCEL.load(Ordering::Acquire),
                     &mut |_, _| {},
                 ) {

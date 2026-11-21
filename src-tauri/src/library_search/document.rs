@@ -2,8 +2,7 @@
 //!
 //! 索引は派生物で、関連度の重みと字句解析は旧棚の実装をそのまま使う
 //! （`crate::database::tantivy_index`）。ここは「何を索引に入れるか」だけを決める。
-//! 旧棚と食い違うと、同じ問い合わせで出る作品が棚の切り替えで変わるので、全作品の
-//! 文書を旧棚の文書と突き合わせて確かめる（`piep-library compare-search-documents`）。
+//! 切り替えの前に、全作品の文書を旧棚の文書と突き合わせて確かめてある。
 
 use crate::database::models::AssetEntry;
 use crate::library::{Error, Fingerprint, Library, LibraryId, Result, SourceBody};

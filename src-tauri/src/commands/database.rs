@@ -278,11 +278,9 @@ fn spawn_shelf_index_job(
                     .lock()
                     .map_err(|e| e.to_string())?;
                 let semantic = library
-                    .sync_semantic_index(
-                        None,
-                        &|| cancel.load(Ordering::Relaxed),
-                        &mut |done, total| emit("semantic", done, total),
-                    )
+                    .sync_semantic_index(&|| cancel.load(Ordering::Relaxed), &mut |done, total| {
+                        emit("semantic", done, total)
+                    })
                     .map_err(|e| e.to_string())?;
                 processed += semantic.indexed;
             }

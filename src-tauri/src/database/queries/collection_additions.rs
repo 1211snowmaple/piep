@@ -96,18 +96,6 @@ impl AdditionWork {
     }
 }
 
-impl Database {
-    /// この束に、あとから入れるとよさそうな作品を探す。
-    ///
-    /// 保存はしない。返すのは案だけで、入れるかどうかは利用者が決める。
-    pub fn suggest_collection_additions(
-        &self,
-        collection_id: &str,
-    ) -> Result<CollectionAdditionResult, String> {
-        collection_additions(self, validate_collection_id(collection_id)?)
-    }
-}
-
 /// 束にあとから入れるとよさそうな作品を探す（出どころは旧棚か新しい棚の作業用の表）。
 pub(crate) fn collection_additions(
     src: &dyn SuggestionSource,

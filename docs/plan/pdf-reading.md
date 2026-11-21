@@ -310,9 +310,6 @@ pdfium で描いた紙面を、読書画面の印に付けた「原本を見る�
   使う（[`src-tauri/src/pdf/fixture.rs`](../../src-tauri/src/pdf/fixture.rs)）。
   折り返した行が一つの `/P` に入っていること、段落の終わりの行が右端まで届かない
   こと、段落がページをまたぐこと。Courier を使うので行の右端が計算で決まる
-- 棚の実物での確認は `cargo run --example pdf_attachment_probe`。PDF の道を渡すと
-  取り出しを、作品の版のフォルダを渡すと差し込みまでを見る。**切り方の主張は
-  実物でしか裏が取れない**ので、単体試験だけで済ませない
 - EPUB は EPUBCheck。手元でも回せる
 - 手元が緑でも CI が緑とは限らない（[設計原則 8](../policy/02-principles.md)）
 

@@ -832,6 +832,6 @@ fn an_edit_is_laid_out_line_for_line_like_the_old_shelf() {
     }];
     assert_eq!(
         render_html(&document).unwrap(),
-        crate::database::queries::blocks_to_html(&old_blocks, &old_assets)
+        piep_reader_render::blocks::blocks_to_html(&old_blocks, &old_assets)
     );
 }

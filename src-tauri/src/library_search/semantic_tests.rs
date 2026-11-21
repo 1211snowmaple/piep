@@ -77,9 +77,7 @@ fn meaning_search_ranks_by_similarity_and_reembeds_only_what_changed() {
         library.search_works(&TextSearch::meaning("海"), &relevance()),
         Err(Error::ResourceUnavailable)
     ));
-    let first = library
-        .sync_semantic_index(None, &never, &mut |_, _| {})
-        .unwrap();
+    let first = library.sync_semantic_index(&never, &mut |_, _| {}).unwrap();
     assert_eq!((first.indexed, first.skipped, first.removed), (3, 0, 0));
     assert_eq!((first.reused_metadata, first.reused_content), (0, 0));
     assert_eq!(first.embedded_passages, 6, "説明と本文が一断片ずつ");
@@ -92,9 +90,7 @@ fn meaning_search_ranks_by_similarity_and_reembeds_only_what_changed() {
     );
     // 変わっていなければ何もしない。
     assert_eq!(
-        library
-            .sync_semantic_index(None, &never, &mut |_, _| {})
-            .unwrap(),
+        library.sync_semantic_index(&never, &mut |_, _| {}).unwrap(),
         SemanticIndexReport::default()
     );
 
@@ -156,9 +152,7 @@ fn meaning_search_ranks_by_similarity_and_reembeds_only_what_changed() {
             }],
         })
         .unwrap();
-    let retagged = library
-        .sync_semantic_index(None, &never, &mut |_, _| {})
-        .unwrap();
+    let retagged = library.sync_semantic_index(&never, &mut |_, _| {}).unwrap();
     assert_eq!(retagged.indexed, 1);
     assert_eq!((retagged.reused_content, retagged.reused_metadata), (1, 0));
     assert_eq!(retagged.embedded_passages, 1);
@@ -166,76 +160,9 @@ fn meaning_search_ranks_by_similarity_and_reembeds_only_what_changed() {
     // 止めたら、それまでの分だけ残る。
     library.capture(work("2", "山と森と川と湖", 4_000)).unwrap();
     let canceled = library
-        .sync_semantic_index(None, &|| true, &mut |_, _| {})
+        .sync_semantic_index(&|| true, &mut |_, _| {})
         .unwrap();
     assert_eq!((canceled.indexed, canceled.canceled), (0, true));
-    let resumed = library
-        .sync_semantic_index(None, &never, &mut |_, _| {})
-        .unwrap();
+    let resumed = library.sync_semantic_index(&never, &mut |_, _| {}).unwrap();
     assert_eq!((resumed.indexed, resumed.reused_metadata), (1, 1));
-}
-
-#[test]
-fn vectors_from_the_old_shelf_are_reused_when_the_text_is_the_same() {
-    let temp = temp("semantic-takeover");
-    let library = Library::create(&temp.0.join("new")).unwrap();
-    let same = library
-        .capture(work("1", "海と波と砂浜", 1_000))
-        .unwrap()
-        .entity_id;
-    let retold = library
-        .capture(work("2", "山と森と川", 2_000))
-        .unwrap()
-        .entity_id;
-    let fresh = library.capture(work("3", "空", 3_000)).unwrap().entity_id;
-    library.sync_search_index(&mut |_, _| {}).unwrap();
-
-    // 旧棚の索引を作る。1 は同じ文字列、2 は本文だけ同じ（説明が違う）、3 は旧棚にない。
-    let old = temp.0.join("old").join("downloads");
-    let doc = |work: LibraryId, id: i64| {
-        semantic_document(id, library.search_document(work).unwrap().unwrap())
-    };
-    let mut changed = doc(retold, 20);
-    changed.title = "昔の題".into();
-    semantic_index::upsert_documents(&old, &[doc(same, 10), changed]).unwrap();
-    {
-        let conn = library.conn.lock().unwrap();
-        for (work, old_id) in [(same, 10), (retold, 20)] {
-            let snapshot: Vec<u8> = conn
-                .query_row(
-                    "SELECT snapshot_id FROM work_current_projection WHERE work_id=?1",
-                    [work.as_bytes().as_slice()],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            conn.execute(
-                "INSERT INTO migration_records(source_table,source_key,target_id,status)
-                 VALUES('download_current',?1,?2,'imported')",
-                params![old_id.to_string(), snapshot],
-            )
-            .unwrap();
-        }
-    }
-    let report = library
-        .sync_semantic_index(Some(&old), &never, &mut |_, _| {})
-        .unwrap();
-    assert_eq!(report.indexed, 3);
-    assert_eq!(report.reused_content, 2);
-    assert_eq!(report.reused_metadata, 1);
-    assert_eq!(
-        report.embedded_passages,
-        1 + 2,
-        "2 の説明と、3 の説明と本文"
-    );
-
-    // 写したベクトルで、埋め込み直したときと同じ近さになる。
-    let found = library
-        .search_works(&TextSearch::meaning("海"), &relevance())
-        .unwrap();
-    let rebuilt = temp.0.join("rebuilt").join("downloads");
-    semantic_index::upsert_documents(&rebuilt, &[doc(same, 10)]).unwrap();
-    let expected = semantic_index::search(&rebuilt, "海", 10).unwrap();
-    let hit = found.matches.iter().find(|m| m.work == same).unwrap();
-    assert!((hit.score - expected[0].score).abs() < 1e-6);
-    let _ = fresh;
 }

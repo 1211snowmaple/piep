@@ -321,18 +321,3 @@ fn stale_attempts_do_not_change_the_current_counter_or_newer_result() {
     );
     library.verify().unwrap();
 }
-#[test]
-fn legacy_memos_and_expected_urls_keep_the_old_comparison_rule() {
-    assert_eq!(LegacyAssetRepairMemo::parse("fp").attempts, 0);
-    assert_eq!(LegacyAssetRepairMemo::parse("fp|3").attempts, 3);
-    assert_eq!(LegacyAssetRepairMemo::parse("fp|bad").attempts, 0);
-    assert_eq!(
-        fanbox_expected_urls(&json!({"body":{"post":data()}})),
-        fanbox_expected_urls(&data())
-    );
-    let held = vec!["https://example.invalid/a|a.txt|true".into()];
-    assert_eq!(
-        legacy_fingerprint(&["b".into(), "a".into(), "b".into()], &held),
-        legacy_fingerprint(&["a".into(), "b".into()], &held)
-    );
-}

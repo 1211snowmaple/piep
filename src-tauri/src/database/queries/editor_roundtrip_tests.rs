@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::database::parser;
+use piep_reader_render::blocks::{block_source_ref, blocks_to_html};
 
 fn no_assets() -> Vec<AssetEntry> {
     Vec::new()
@@ -260,26 +261,6 @@ fn a_caption_written_in_the_editor_reaches_the_page() {
     );
 }
 
-/// 本文内検索の畳み方。棚の検索と同じ表記ゆれを、位置を保ったまま吸収する。
-#[test]
-fn reader_search_absorbs_the_usual_spelling_differences() {
-    let fold = |value: &str| super::reader::fold_for_reader_search(value);
-    assert_eq!(fold("カタカナ"), fold("かたかな"));
-    assert_eq!(fold("ＡＢＣ"), fold("abc"));
-    assert_eq!(fold("Piep"), fold("ｐｉｅｐ"));
-    assert_eq!(fold("１２３"), fold("123"));
-    assert_eq!(fold("　"), fold(" "));
-    // 位置がずれないこと。ずれると一致箇所へ飛べなくなる。
-    for text in ["カタカナ", "ＡＢＣ", "混ざったＴＥＸＴです", "ヴァイオリン"]
-    {
-        assert_eq!(
-            fold(text).chars().count(),
-            text.chars().count(),
-            "畳んだら文字数が変わった: {text}"
-        );
-    }
-}
-
 #[test]
 fn reader_search_finds_every_occurrence_in_order() {
     let haystack = "あかさたなあかさたな".chars().collect::<Vec<_>>();
@@ -417,113 +398,4 @@ fn a_heading_keeps_its_ruby() {
         .expect("見出しが無い");
     assert_eq!(heading.text.as_deref(), Some("[[rb:序章>じょしょう]]"));
     assert!(blocks_to_html(&blocks, &no_assets()).contains("<rt>じょしょう</rt>"));
-}
-
-#[test]
-fn paged_reader_keeps_editor_images_and_refreshes_their_availability() {
-    struct TempLibrary {
-        root: PathBuf,
-        storage: PathBuf,
-    }
-    impl Drop for TempLibrary {
-        fn drop(&mut self) {
-            super::super::tantivy_index::release_runtime(&self.storage);
-            let _ = std::fs::remove_dir_all(&self.root);
-        }
-    }
-
-    let root = std::env::temp_dir().join(format!("piep_reader_edit_{}", rand::random::<u64>()));
-    let storage = root.join("downloads");
-    let _temp = TempLibrary {
-        root: root.clone(),
-        storage: storage.clone(),
-    };
-    let source_dir = storage.join("pixiv/reader-edit-image/v1");
-    std::fs::create_dir_all(&source_dir).unwrap();
-    let source_path = source_dir.join("original.json");
-    std::fs::write(
-        &source_path,
-        serde_json::json!({ "text": "原本の本文\n[uploadedimage:added-image]" }).to_string(),
-    )
-    .unwrap();
-    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
-    let id = db
-        .upsert_download(&NewDownload {
-            source: "pixiv".into(),
-            source_id: "reader-edit-image".into(),
-            title: "追加画像のある編集版".into(),
-            author_name: "作者".into(),
-            author_id: "reader-edit-author".into(),
-            content_type: "novel".into(),
-            tags: Vec::new(),
-            excerpt: None,
-            cover_path: None,
-            json_path: source_path.to_string_lossy().into_owned(),
-            original_json_path: Some(source_path.to_string_lossy().into_owned()),
-            asset_count: 0,
-            file_size_bytes: 0,
-            downloaded_at: "2026-11-07T00:00:00Z".into(),
-            source_created_at: None,
-            content_hash: Some("reader-edit-source".into()),
-            text_length: 6,
-            source_updated_at: None,
-            watch_updates: false,
-            current_version: 1,
-            favorite: false,
-        })
-        .unwrap();
-    let image_dir = storage.join("editor-assets").join(id.to_string());
-    std::fs::create_dir_all(&image_dir).unwrap();
-    let image = image_dir.join("added-image.png");
-    // The reader resolves registered paths; image decoding is tested separately.
-    std::fs::write(&image, b"reader image fixture").unwrap();
-    let asset_id = db
-        .insert_asset(&NewAsset {
-            download_id: id,
-            asset_type: EDITOR_IMAGE_ASSET_TYPE.into(),
-            filename: "added-image.png".into(),
-            local_path: image.to_string_lossy().into_owned(),
-            original_url: None,
-            mime_type: Some("image/png".into()),
-            file_size_bytes: 20,
-        })
-        .unwrap();
-    let draft = db
-        .save_work_draft(
-            id,
-            1,
-            None,
-            &[WorkBlockInput {
-                block_type: "image".into(),
-                text: None,
-                asset_id: Some(asset_id),
-                attrs_json: None,
-            }],
-        )
-        .unwrap();
-    db.activate_work_edit(draft.id).unwrap();
-
-    let full = db.get_reader_document(id, None).unwrap();
-    let page = db.get_reader_content_page(id, None, 0, false).unwrap();
-    assert!(full.html.contains("added-image.png"));
-    assert_eq!(page.html, full.html);
-    assert!(!page.html.contains("missing-image-placeholder"));
-
-    // An explicit source revision must not gain images from an editor overlay.
-    let source = db.get_reader_content_page(id, Some(1), 0, false).unwrap();
-    assert!(source.html.contains("原本の本文"));
-    assert!(!source.html.contains("data-local-path"));
-
-    // The cached page must follow the availability of the added image too.
-    std::fs::remove_file(&image).unwrap();
-    assert!(db
-        .get_reader_content_page(id, None, 0, false)
-        .unwrap()
-        .html
-        .contains("missing-image-placeholder"));
-    std::fs::write(&image, b"reader image fixture").unwrap();
-    assert_eq!(
-        db.get_reader_content_page(id, None, 0, false).unwrap().html,
-        full.html
-    );
 }

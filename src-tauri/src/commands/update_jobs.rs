@@ -3598,16 +3598,12 @@ mod tests {
         let (_temp, state, _library) = super::shelf::tests::fixture();
         let item = crate::database::UpdateJobItem {
             id: 1,
-            job_id: "job".into(),
             item_type: "work".into(),
             source: Some("pixiv".into()),
             source_id: Some("42".into()),
             target_type: None,
             title: "作品".into(),
             payload_json: "{}".into(),
-            status: "running".into(),
-            error: None,
-            result_download_id: None,
         };
         let gone = super::unavailable_saved_pixiv_work_message("作品", "42");
         let partial = "[一部保存] 本文は保存しましたが、参照先の挿絵を閲覧できません";

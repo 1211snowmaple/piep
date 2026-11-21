@@ -13,7 +13,6 @@
 //! - `work_collections`・`work_collection_members`：今あるコレクションの顔ぶれ。
 
 use crate::database::queries::{Corpus, SuggestionSource};
-use crate::database::Database;
 use crate::library::{Library, LibraryId};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
@@ -457,9 +456,5 @@ impl SuggestionSource for ShelfSuggestions<'_> {
             .ok()
             .flatten()
             .map(|doc| doc.body)
-    }
-
-    fn link_backfill(&self) -> Option<&Database> {
-        None
     }
 }

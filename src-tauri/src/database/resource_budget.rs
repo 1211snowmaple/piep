@@ -16,51 +16,10 @@ pub fn application_memory_budget_bytes() -> u64 {
         .clamp(256 * MIB, 2 * 1024 * MIB)
 }
 
-pub fn sqlite_cache_bytes() -> u64 {
-    // `cache_size` is per connection. The read pool can open up to sixteen
-    // connections in addition to the writer, so assigning the old app-wide
-    // 1/16 share to every connection could consume the whole envelope on the
-    // read caches alone. Keep the aggregate below roughly one quarter.
-    application_memory_budget_bytes()
-        .saturating_div(64)
-        .clamp(4 * MIB, 16 * MIB)
-}
-
-pub fn sqlite_mmap_bytes() -> u64 {
-    application_memory_budget_bytes()
-        .saturating_div(8)
-        .clamp(64 * MIB, 256 * MIB)
-}
-
 pub fn tantivy_writer_bytes() -> usize {
     application_memory_budget_bytes()
         .saturating_div(4)
         .clamp(64 * MIB, 384 * MIB) as usize
-}
-
-pub fn semantic_ann_bytes() -> u64 {
-    application_memory_budget_bytes()
-        .saturating_div(2)
-        .clamp(128 * MIB, 1024 * MIB)
-}
-
-/// Disk quota shared by ephemeral search snapshots. These files replace
-/// million-element in-memory vectors and are safe to discard at any time.
-pub fn search_snapshot_disk_bytes() -> u64 {
-    std::env::var("PIEP_SEARCH_SNAPSHOT_MB")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(512)
-        .clamp(64, 4 * 1024)
-        .saturating_mul(MIB)
-}
-
-/// SQLite page cache per snapshot connection. Snapshot rows are streamed and
-/// indexed on disk, so a small cache is enough even for multi-million hits.
-pub fn search_snapshot_cache_bytes() -> u64 {
-    application_memory_budget_bytes()
-        .saturating_div(64)
-        .clamp(4 * MIB, 16 * MIB)
 }
 
 #[cfg(windows)]
@@ -191,21 +150,4 @@ pub(crate) fn available_memory_bytes() -> Option<u64> {
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub(crate) fn available_memory_bytes() -> Option<u64> {
     None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn component_budgets_are_bounded_by_application_envelope() {
-        let total = application_memory_budget_bytes();
-        assert!(sqlite_cache_bytes() <= total);
-        assert!(sqlite_cache_bytes().saturating_mul(17) <= total);
-        assert!(sqlite_mmap_bytes() <= total);
-        assert!(tantivy_writer_bytes() as u64 <= total);
-        assert!(semantic_ann_bytes() <= total);
-        assert!(search_snapshot_cache_bytes() <= total);
-        assert!(search_snapshot_disk_bytes() >= 64 * MIB);
-    }
 }

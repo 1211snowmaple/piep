@@ -120,11 +120,6 @@ pub fn is_administrative_series_label(title: &str) -> bool {
     trimmed.is_empty() || administrative_series_re().is_match(&width_normalized(trimmed))
 }
 
-/// 版の呼び名を含む題名か。
-pub fn has_edition_marker(title: &str) -> bool {
-    edition_marker_re().is_match(&width_normalized(title))
-}
-
 /// 人に見せられる語幹。
 ///
 /// 括弧の注記と話数を落とし、前後の区切り記号を整えるだけ。カタカナも記号も

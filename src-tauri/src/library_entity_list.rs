@@ -3,7 +3,7 @@
 //! ライブラリの「作者・クリエイター」「シリーズ」タブは旧棚の `search_entity_facets`・
 //! `count_entity_facets` を、作者・シリーズの画面のコレクションの欄は旧棚の
 //! `list_collections_for_person`・`list_collections_for_series` を、そのまま新しい棚で読む。
-//! 数え方・並べ方は旧棚に合わせ、`piep-library compare-entities` で突き合わせる。
+//! 数え方・並べ方は、旧棚と突き合わせて合わせたもの。
 
 use crate::library::{EntityKind, Library, LibraryId, Result, WorkFilter};
 use crate::library_entity::{contains_nocase, fingerprint, id, nocase, text, SeriesSort};

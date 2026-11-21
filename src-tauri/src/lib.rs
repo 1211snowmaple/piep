@@ -2,8 +2,8 @@
 pub mod assist;
 mod auth;
 pub mod commands;
-/// 実データで規則を確かめる example から触れるように公開している。
-pub mod database;
+/// 保存した応答の解釈・索引・提案の計算。棚のコードから使う（外へは出さない）。
+pub(crate) mod database;
 mod downloader;
 pub mod epub;
 pub mod fanbox_api;

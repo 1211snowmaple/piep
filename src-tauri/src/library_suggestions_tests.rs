@@ -315,7 +315,6 @@ fn the_working_tables_see_the_shelf_text_and_have_no_old_shelf_to_backfill() {
     let id = corpus.id_of(first).unwrap();
     assert_eq!(corpus.work(id), Some(first));
     assert!(corpus.plain_text(id).unwrap().contains("本文です"));
-    assert!(corpus.link_backfill().is_none());
     let downloads: i64 = corpus
         .corpus()
         .unwrap()

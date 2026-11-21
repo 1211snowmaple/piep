@@ -322,7 +322,6 @@ impl Library {
             _process_lock: lock,
         };
         library.ensure_work_list()?;
-        library.restore_collection_times()?;
         Ok(library)
     }
 
@@ -382,7 +381,6 @@ impl Library {
             _process_lock: lock,
         };
         library.ensure_work_list()?;
-        library.restore_collection_times()?;
         Ok(library)
     }
 
@@ -492,7 +490,7 @@ impl Library {
     }
 
     /// 保管済みのファイルを DB へ登録する前に、実体を一度だけ読んで確かめる。
-    /// いま保管したばかりのものは `store_bytes`・`store_path` を使い、読み直しを重ねない。
+    /// いま保管したばかりのものは `store_bytes` を使い、読み直しを重ねない。
     pub(crate) fn prepare_file(&self, file: &ContentFile) -> Result<PreparedFile> {
         Ok(self.objects.inspect(file)?.into())
     }
@@ -500,10 +498,6 @@ impl Library {
     /// 保管の中で読み戻して確かめた結果を、そのまま登録に使う。
     pub(crate) fn store_bytes(&self, bytes: &[u8]) -> Result<PreparedFile> {
         Ok(self.objects.put_stored(Cursor::new(bytes))?.into())
-    }
-
-    pub(crate) fn store_path(&self, path: &Path) -> Result<PreparedFile> {
-        Ok(self.objects.put_path_stored(path)?.into())
     }
 
     pub(crate) fn register_file(tx: &Connection, prepared: &PreparedFile) -> Result<()> {
@@ -636,21 +630,12 @@ impl Library {
     /// オフライン入力の取り込み用。ネットワーク取得は開始記録を作ってから完了する。
     #[cfg(test)]
     pub(crate) fn capture(&self, capture: Capture) -> Result<CaptureResult> {
-        self.capture_prepared(capture, None, None)
-    }
-
-    pub(super) fn capture_with_legacy_classification(
-        &self,
-        capture: Capture,
-        legacy_kind: Option<&str>,
-    ) -> Result<CaptureResult> {
-        self.capture_prepared(capture, legacy_kind, None)
+        self.capture_prepared(capture, None)
     }
 
     pub(super) fn capture_prepared(
         &self,
         mut capture: Capture,
-        legacy_kind: Option<&str>,
         context: Option<super::acquisitions::CompletionContext>,
     ) -> Result<CaptureResult> {
         if capture
@@ -796,7 +781,8 @@ impl Library {
                 .map(|body| (&body.file, body.format, body.semantic)),
             &media,
             &attachments,
-            legacy_kind,
+            // 旧棚の取り込みが分類を入れていた欄。要求の指紋を変えないよう null のまま残す。
+            Option::<&str>::None,
         ))?;
         let request_bytes = if let Some(context) = &context {
             super::acquisitions::encode_manifest(context, request_bytes)?
@@ -977,9 +963,7 @@ impl Library {
         }
         for (key, state) in &capture.field_states {
             if !merged.contains_key(key)
-                && (legacy_kind.is_some()
-                    || state == "known"
-                    || states.get(key).is_none_or(|old| old != "known"))
+                && (state == "known" || states.get(key).is_none_or(|old| old != "known"))
             {
                 states.insert(key.clone(), state.clone());
             }
@@ -1157,14 +1141,6 @@ impl Library {
         for (slot, _, _, file) in &attachments {
             attachment_identity.insert(slot.to_string(), file.id.0.to_vec());
         }
-        let legacy_uncertain = legacy_kind.is_some_and(|kind| match kind {
-            "repair" => changed,
-            "source" => !changed,
-            _ => true,
-        });
-        if legacy_kind.is_some_and(|kind| kind != "repair") {
-            changed = true;
-        }
         if changed && previous_body.is_some() && body.is_none() {
             return Err(Error::Integrity(
                 "取得元の変更を確定する前に本文の再取得が必要です".into(),
@@ -1182,22 +1158,15 @@ impl Library {
                 [entity.as_bytes().as_slice()],
                 |r| r.get(0),
             )?;
-            // 旧棚の「修復」の版は、同じ版を取り直して欠けを埋めたもの。中身が違えば版は分けるが、
-            // 作者の改稿ではないことを残す（旧棚の改稿の絞り込みに数えない）。
-            let repair = legacy_kind == Some("repair");
+            // 旧棚から移した版には `legacy_unclassified` と `repair` が付いている。新しく
+            // 取得した版は取得元の改稿として記録する。
             tx.execute(
-                "INSERT INTO source_revisions(id,entity_id,ordinal,classification,discovered_at,repair) VALUES(?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO source_revisions(id,entity_id,ordinal,classification,discovered_at,repair) VALUES(?1,?2,?3,'source',?4,0)",
                 params![
                     id.as_bytes().as_slice(),
                     entity.as_bytes().as_slice(),
                     ordinal,
-                    if legacy_uncertain {
-                        "legacy_unclassified"
-                    } else {
-                        "source"
-                    },
                     acquired_at,
-                    repair
                 ],
             )?;
             id
@@ -1293,7 +1262,7 @@ impl Library {
             }
         }
         for next in &media {
-            if legacy_kind.is_none() && next.source_key.is_none() && next.file.is_none() {
+            if next.source_key.is_none() && next.file.is_none() {
                 let saved:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM snapshot_media WHERE snapshot_id=?1 AND slot=?2 AND role=?3 AND rendition_id IS NOT NULL)",params![snapshot.as_bytes().as_slice(),next.slot,next.role],|r|r.get(0))?;
                 if saved {
                     continue;
@@ -1343,16 +1312,12 @@ impl Library {
             } else {
                 tx.query_row("SELECT rendition_id FROM snapshot_media WHERE snapshot_id=?1 AND slot=?2 AND media_id=?3",params![snapshot.as_bytes().as_slice(),next.slot,media_id.as_bytes().as_slice()],|r|r.get::<_,Option<Vec<u8>>>(0)).optional()?.flatten()
             };
-            // 過去の保存状態の移行では、その時に選ばれていた画像を正確に復元する。
-            // 通常取得では、同じ画像の確認済み原寸を縮小版で置き換えない。
-            let preferred = if legacy_kind.is_none() {
-                super::renditions::prefer_saved_quality(&tx, media_id, rendition.as_deref())?
-            } else {
-                None
-            };
+            // 同じ画像の確認済み原寸を縮小版で置き換えない。
+            let preferred =
+                super::renditions::prefer_saved_quality(&tx, media_id, rendition.as_deref())?;
             let (rendition, name) = match preferred {
                 Some((id, name)) => (Some(id), name),
-                None if legacy_kind.is_none() && next.file.is_none() && rendition.is_some() => {
+                None if next.file.is_none() && rendition.is_some() => {
                     let name:Option<String>=tx.query_row("SELECT original_name FROM snapshot_media WHERE snapshot_id=?1 AND slot=?2 AND media_id=?3",params![snapshot.as_bytes().as_slice(),next.slot,media_id.as_bytes().as_slice()],|r|r.get(0)).optional()?;
                     (
                         rendition,
@@ -2090,16 +2055,6 @@ mod tests {
                 2
             );
         }
-        let old = library
-            .capture_with_legacy_classification(input("thumbnail", b"thumbnail"), Some("source"))
-            .unwrap();
-        assert_eq!(
-            library
-                .media_file(first.entity_id, old.snapshot_id, "cover")
-                .unwrap()
-                .id,
-            Fingerprint::of(b"thumbnail")
-        );
         let current = library.capture(input("thumbnail", b"thumbnail")).unwrap();
         assert!(!current.created_revision);
         assert_eq!(

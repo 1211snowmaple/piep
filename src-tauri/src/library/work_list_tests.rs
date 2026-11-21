@@ -627,10 +627,27 @@ fn filter_shelf(library: &Library) -> BTreeMap<&'static str, LibraryId> {
     let mut g = base("pixiv", "g", "123456", 10_000);
     g.metadata.insert("title".into(), json!(""));
     ids.insert("g", library.capture(g).unwrap().entity_id);
+    // 旧棚から移した「修復」の版は、改稿の絞り込みに数えない。
     let repaired = library
-        .capture_with_legacy_classification(base("pixiv", "g", "123456", 11_000), Some("repair"))
+        .capture(base("pixiv", "g", "123456", 11_000))
         .unwrap();
     assert!(repaired.created_revision);
+    {
+        // 版の行は書き換えられないので、移行が書いた形を試験の中だけで作る。
+        let conn = library.conn.lock().unwrap();
+        conn.execute_batch("DROP TRIGGER source_revisions_immutable").unwrap();
+        conn.execute(
+            "UPDATE source_revisions SET repair=1 WHERE entity_id=?1 AND ordinal=2",
+            [repaired.entity_id.as_bytes().as_slice()],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER source_revisions_immutable BEFORE UPDATE ON source_revisions
+             BEGIN SELECT RAISE(ABORT,'published record is immutable'); END;",
+        )
+        .unwrap();
+        library.rebuild_work_list(&conn).unwrap();
+    }
     library
         .replace_user_tags(TagUpdate {
             request_id: LibraryId::now_v7(),

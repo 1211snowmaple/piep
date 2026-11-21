@@ -149,46 +149,8 @@ impl Library {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LegacyAssetRepairMemo {
-    pub fingerprint: String,
-    pub attempts: u32,
-}
-impl LegacyAssetRepairMemo {
-    pub fn parse(raw: &str) -> Self {
-        match raw.rsplit_once('|') {
-            Some((fp, n)) => Self {
-                fingerprint: fp.into(),
-                attempts: n.parse().unwrap_or(0),
-            },
-            None => Self {
-                fingerprint: raw.into(),
-                attempts: 0,
-            },
-        }
-    }
-}
-
-pub(crate) fn legacy_fingerprint(expected: &[String], held: &[String]) -> String {
-    let mut expected = expected.to_vec();
-    expected.sort();
-    expected.dedup();
-    let mut held = held.to_vec();
-    held.sort();
-    let mut bytes = b"fanbox-assets/v1\n".to_vec();
-    for url in expected {
-        bytes.extend_from_slice(url.as_bytes());
-        bytes.push(b'\n');
-    }
-    bytes.extend_from_slice(b"--\n");
-    for row in held {
-        bytes.extend_from_slice(row.as_bytes());
-        bytes.push(b'\n');
-    }
-    Fingerprint::of(&bytes).to_string()
-}
-
-/// 旧方式の照合だけに用いる URL 群。新しい状態の指紋は保存状態の参照から作る。
+/// 試験で取得の観測を組むための URL 群。本番の観測は保存の対象から作る。
+#[cfg(test)]
 pub(crate) fn fanbox_expected_urls(data: &serde_json::Value) -> Vec<String> {
     let data = super::execution::metadata_post(data);
     let mut urls = Vec::new();

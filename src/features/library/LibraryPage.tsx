@@ -75,7 +75,6 @@ import { shelfFilterFacets, shelfSearchFilterFacets } from "@/services/shelfHeal
 import { deleteSavedSearch, listSavedSearches, upsertSavedSearch } from "@/services/savedSearchApi";
 import { forgetReadingPositions, readingKeyOf, readingKeysAdopted, readingWorkIds } from "@/features/library/readingShelf";
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
-import { useSavedSearchMigration } from "@/features/library/savedSearchMigration";
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import {
   defaultSortOrderFor,
@@ -659,7 +658,6 @@ export function rollbackWorkFlag(
 export default function LibraryPage() {
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
-  useSavedSearchMigration();
   const { pathname, search, navigationId } = useAppRouter();
   const [urlParams, setUrlParams] = useAppSearchParams();
   // Query, tab and the favourite flag live in the URL so history navigation and

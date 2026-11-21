@@ -1,11 +1,9 @@
 //! 意味検索。旧棚の意味検索の索引（`crate::database::semantic_index`、作品ごとに説明と本文の
 //! ベクトルを一つずつ持つ）をそのまま使い、`<棚>/derived/search/semantic-v2/` に置く。
 //!
-//! 埋め込みは遅い（本文まるごとで 1 秒に 1.5 作品ほど、全棚で 5 時間）。そこで二つの写しを使う。
-//! - 作り直すときは、同じ索引の前のベクトルのうち文字列が変わっていない部分を写す
-//!   （タグを付け替えただけなら、説明の一断片だけを埋め込む）。
-//! - 旧棚から移した棚では、旧棚の索引のベクトルを写せる。移行の記録で旧棚の作品の番号が
-//!   分かり、文字列が同じならベクトルも同じになるため。
+//! 埋め込みは遅い（本文まるごとで 1 秒に 1.5 作品ほど、全棚で 5 時間）。そこで作り直すときは、
+//! 同じ索引の前のベクトルのうち文字列が変わっていない部分を写す（タグを付け替えただけなら、
+//! 説明の一断片だけを埋め込む）。
 
 use super::document::SearchDocument;
 use crate::database::semantic_index::{self, ReusableVectors, SemanticIndexDocument};
@@ -56,12 +54,6 @@ pub struct SemanticEvidence {
     pub score: f64,
 }
 
-/// 旧棚の文書の番号。旧棚の今の版（`download_current`）を移した保存版から引く。
-const PREVIOUS_ID_SQL: &str = "SELECT CAST(m.source_key AS INTEGER) FROM migration_records m
-    JOIN revision_snapshots s ON s.id=m.target_id
-    WHERE m.source_table='download_current' AND m.status='imported' AND s.entity_id=?1
-    LIMIT 1";
-
 impl Library {
     /// 意味検索の索引の置き場（旧棚の関数に渡す `storage_dir`）。索引そのものはこの親の
     /// `search/semantic-v2/` にできるので、`derived/search/semantic-v2/` になる。
@@ -70,11 +62,9 @@ impl Library {
     }
 
     /// 意味検索の索引を棚に合わせる。状態の違う作品のベクトルを作り直し、棚にない作品の
-    /// ベクトルを消す。`previous` に旧棚の索引の置き場を渡すと、移行した作品は文字列が
-    /// 同じ部分のベクトルを写す。モデルを読み込むので、意味検索を有効にしたときだけ呼ぶ。
+    /// ベクトルを消す。モデルを読み込むので、意味検索を有効にしたときだけ呼ぶ。
     pub fn sync_semantic_index(
         &self,
-        previous: Option<&Path>,
         should_cancel: &(dyn Fn() -> bool + Sync),
         progress: &mut dyn FnMut(usize, usize),
     ) -> Result<SemanticIndexReport> {
@@ -136,17 +126,10 @@ impl Library {
                         (tx.last_insert_rowid(), false)
                     }
                 };
-                let previous_id = match (own, previous) {
-                    (true, _) => Some(key),
-                    (false, Some(_)) => tx
-                        .query_row(PREVIOUS_ID_SQL, [work.as_bytes().as_slice()], |r| r.get(0))
-                        .optional()?,
-                    (false, None) => None,
-                };
                 units.push(Unit {
                     work: *work,
                     key,
-                    previous: previous_id.map(|id| (own, id)),
+                    reuse: own,
                 });
             }
             tx.commit()?;
@@ -206,7 +189,7 @@ impl Library {
                     if batch.is_empty() {
                         return Ok(());
                     }
-                    let result = self.embed_batch(&storage, previous, batch, report);
+                    let result = self.embed_batch(&storage, batch, report);
                     batch.clear();
                     result
                 };
@@ -306,43 +289,35 @@ impl Library {
             }))
     }
 
-    /// 一まとまりを埋め込んで入れ、入った作品の状態を書く。写す元は二つ（この索引・旧棚の
-    /// 索引）あるので、元ごとに分けて渡す。
+    /// 一まとまりを埋め込んで入れ、入った作品の状態を書く。前のベクトルはこの索引から写す。
     fn embed_batch(
         &self,
         storage: &Path,
-        previous: Option<&Path>,
         batch: &[(Unit, Built)],
         report: &mut SemanticIndexReport,
     ) -> Result<()> {
-        let mut groups: [(Vec<SemanticIndexDocument>, HashMap<i64, i64>); 2] = Default::default();
-        for (unit, built) in batch {
-            let group = match unit.previous {
-                Some((false, _)) => 1,
-                _ => 0,
-            };
-            groups[group].0.push(built.document.clone());
-            if let Some((_, id)) = unit.previous {
-                groups[group].1.insert(unit.key, id);
-            }
-        }
-        let mut indexed = HashSet::new();
-        for (index, (docs, previous_ids)) in groups.iter().enumerate() {
-            if docs.is_empty() {
-                continue;
-            }
-            let source = if index == 0 { Some(storage) } else { previous };
-            let reuse = source.map(|storage_dir| ReusableVectors {
-                storage_dir,
-                previous_ids,
-            });
-            let result = semantic_index::upsert_documents_reusing(storage, docs, reuse)
-                .map_err(Error::Integrity)?;
-            report.reused_metadata += result.reused_metadata;
-            report.reused_content += result.reused_content;
-            report.embedded_passages += result.embedded_passages;
-            indexed.extend(result.indexed);
-        }
+        let docs: Vec<SemanticIndexDocument> = batch
+            .iter()
+            .map(|(_, built)| built.document.clone())
+            .collect();
+        let previous_ids: HashMap<i64, i64> = batch
+            .iter()
+            .filter(|(unit, _)| unit.reuse)
+            .map(|(unit, _)| (unit.key, unit.key))
+            .collect();
+        let result = semantic_index::upsert_documents_reusing(
+            storage,
+            &docs,
+            Some(ReusableVectors {
+                storage_dir: storage,
+                previous_ids: &previous_ids,
+            }),
+        )
+        .map_err(Error::Integrity)?;
+        report.reused_metadata += result.reused_metadata;
+        report.reused_content += result.reused_content;
+        report.embedded_passages += result.embedded_passages;
+        let indexed: HashSet<i64> = result.indexed.into_iter().collect();
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         {
@@ -439,8 +414,8 @@ mod tests;
 struct Unit {
     work: LibraryId,
     key: i64,
-    /// 写す元の文書の番号と、それがこの索引のもの（`true`）か旧棚のもの（`false`）か。
-    previous: Option<(bool, i64)>,
+    /// この索引に前のベクトルがあり、変わっていない部分を写せるか。
+    reuse: bool,
 }
 
 struct Built {

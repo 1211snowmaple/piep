@@ -412,7 +412,6 @@ describe("LibraryPage search", () => {
 
   it("normalizes unsupported URL and persisted values instead of entering an invalid view", async () => {
     window.localStorage.setItem("piep.library-view", JSON.stringify("future-view"));
-    window.localStorage.setItem("piep.saved-searches.v2", JSON.stringify({ malformed: true }));
     window.location.hash = "#/library?tab=unknown&watch=yes&sort=not-a-sort";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);

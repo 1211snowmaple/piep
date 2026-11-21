@@ -11,6 +11,8 @@ mod query;
 mod results;
 mod semantic;
 
+/// 意味検索のモデルの置き場（`<置き場>/models`）。棚の道具からも同じ場所を使う。
+pub use crate::database::semantic_index::set_model_cache_dir;
 pub use document::{source_url, SearchDocument};
 pub use index::{HistoryIndexReport, SearchHit, SearchIndexReport};
 pub use query::{parse_query, work_from_url, QueryParts, SeriesRef, WorkRef};
