@@ -254,7 +254,7 @@ describe("WorkCard", () => {
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ work: shelfId, foundAt: "2026-09-01T00:00:00Z" }]);
     const { id: _legacy, ...rest } = demoWorks[0];
-    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: null, coverPath: null, legacyId: null } });
+    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: null, coverPath: null } });
 
     fireEvent.click(await screen.findByRole("button", { name: /未保存の改稿を比較/ }));
     expect(window.location.hash).toBe(`#/works/${shelfId}?tab=history&compare=pending`);
@@ -273,7 +273,7 @@ describe("WorkCard", () => {
     window.location.hash = "#/library";
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     const { id: _legacy, ...rest } = demoWorks[0];
-    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: "http://piep-library.localhost/abc", coverPath: null, legacyId: null } });
+    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: "http://piep-library.localhost/abc", coverPath: null } });
 
     expect(screen.getByAltText("雨上がりの図書室での表紙")).toHaveAttribute("src", "http://piep-library.localhost/abc");
     // 改稿の印は棚の作品 ID で照らすので、旧棚の番号の改稿は出さない。EPUB のキューには棚の作品の ID で積む。
@@ -295,7 +295,7 @@ describe("WorkCard", () => {
     shelfApi.shelfSetUserState.mockResolvedValue({ favorite: true, watching: false, generation: 2 });
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     const { id: _legacy, ...rest } = demoWorks[0];
-    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: null, coverPath: null, legacyId: null, favorite: false, watchUpdates: false } });
+    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: null, coverPath: null, favorite: false, watchUpdates: false } });
 
     fireEvent.click(await screen.findByRole("button", { name: /雨上がりの図書室で：お気に入りに追加/ }));
     expect(shelfApi.shelfSetUserState).toHaveBeenCalledWith(shelfId, { favorite: true });

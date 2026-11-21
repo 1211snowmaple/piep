@@ -55,9 +55,9 @@ export function shelfDashboard(): Promise<DashboardSummary> {
   return invoke<DashboardSummary>("shelf_dashboard");
 }
 
-/** 横の欄の件数。`legacyReading` は端末に旧棚の番号で残る読みかけ（棚へ引き取る前だけ渡す）。 */
-export function shelfCounts(legacyReading: number[] | null): Promise<LibraryShelfCounts> {
-  return invoke<LibraryShelfCounts>("shelf_counts", { legacyReading });
+/** 横の欄の件数。 */
+export function shelfCounts(): Promise<LibraryShelfCounts> {
+  return invoke<LibraryShelfCounts>("shelf_counts");
 }
 
 export function shelfDiagnostics(): Promise<ShelfDiagnostics> {

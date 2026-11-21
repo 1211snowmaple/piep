@@ -127,8 +127,6 @@ export interface ShelfCard {
   coverFile: string | null;
   /** 作者のアイコンのファイルの識別子（16 進）。 */
   authorIconFile?: string | null;
-  /** 旧棚から移した作品の、旧棚での番号。端末の読書位置・しおりはこの番号で引く（旧棚と共有）。 */
-  legacyId: number | null;
 }
 
 export interface ShelfSemanticEvidence {
@@ -205,11 +203,6 @@ export function shelfSetReadingPosition(work: string, snapshot: string | null, p
   return invoke<void>("shelf_set_reading_position", { request: crypto.randomUUID(), work, snapshot, page, ratio, finished });
 }
 
-/** 端末に旧棚の番号で残した読書位置（番号・ページ）を棚へ引き取り、番号に当たる作品の ID を返す。 */
-export function shelfAdoptDevicePositions(positions: [number, number][]): Promise<[number, string][]> {
-  return invoke<[number, string][]>("shelf_adopt_device_positions", { positions });
-}
-
 /** 読みかけから外す（読書位置を消す。正本に切り替えた棚だけ）。外した数を返す。 */
 export function shelfClearReadingPositions(works: string[]): Promise<number> {
   return invoke<number>("shelf_clear_reading_positions", { works });
@@ -220,15 +213,14 @@ export function shelfRemoveWork(work: string): Promise<void> {
   return invoke<void>("shelf_remove_work", { request: crypto.randomUUID(), work });
 }
 
-/** `legacyWorks` を渡すと、旧棚の番号でその作品だけに絞る（読みかけの棚。読書位置の鍵が旧棚の番号なので）。 */
 /** 取得元の作者・シリーズの指名。 */
 export interface ShelfEntityKey {
   provider: string | null;
   key: string;
 }
 
-export function shelfSearch(search: ShelfTextSearch, query: ShelfListQuery, legacyWorks: number[] | null = null, person: ShelfEntityKey | null = null): Promise<ShelfSearchView> {
-  return invoke<ShelfSearchView>("shelf_search", { search, query, legacyWorks, person });
+export function shelfSearch(search: ShelfTextSearch, query: ShelfListQuery, person: ShelfEntityKey | null = null): Promise<ShelfSearchView> {
+  return invoke<ShelfSearchView>("shelf_search", { search, query, person });
 }
 
 /** 検索欄の候補（旧棚の `search_suggest` と同じ形）。題の候補の `sourceKey` は新しい棚の作品の ID。 */
@@ -510,7 +502,7 @@ export interface ShelfEntityListScope {
 }
 
 /**
- * ライブラリの「作者・クリエイター」「シリーズ」タブの一ページ。`filter`・`legacyWorks` は作品の
+ * ライブラリの「作者・クリエイター」「シリーズ」タブの一ページ。`filter` は作品の
  * 一覧と同じ絞り込みで、当てはまる作品を持つものだけを、その作品の数で出す。
  */
 export function shelfEntities(
@@ -518,7 +510,6 @@ export function shelfEntities(
   options: {
     query?: string | null;
     filter: ShelfFilter;
-    legacyWorks?: number[] | null;
     series?: ShelfEntityKey | null;
     scope?: ShelfEntityListScope | null;
     sort?: ShelfSeriesSort | null;
@@ -531,7 +522,6 @@ export function shelfEntities(
     kind,
     query: options.query ?? null,
     filter: options.filter,
-    legacyWorks: options.legacyWorks ?? null,
     series: options.series ?? null,
     scope: options.scope ?? null,
     sort: options.sort ?? null,
@@ -553,8 +543,6 @@ export interface ShelfCollectionTile {
 /** 作者・シリーズに関わるコレクションの一件（`CollectionSummary`）。日時はミリ秒。 */
 export interface ShelfCollectionSummary {
   id: string;
-  /** 旧棚での ID。コレクションの画面はまだ旧棚で開く。 */
-  legacy_id: string | null;
   name: string;
   description: string | null;
   ordered: boolean;

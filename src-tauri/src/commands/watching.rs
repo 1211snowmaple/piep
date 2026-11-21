@@ -1,6 +1,6 @@
 //! 監視の画面とジョブが使う口。切り替えた棚では旧 DB の監視表を読まず、書かない。
 
-use crate::database::{UpdateTarget, WatchGroup, WatchId};
+use crate::database::{UpdateTarget, WatchGroup};
 use crate::library::{
     EntityKind, Library, LibraryId, ResourceReference, ResourceScope, WatchEdit, WatchResult,
 };
@@ -79,7 +79,7 @@ pub(super) fn targets(
             .map(|target| {
                 let icon_path = icon(library, &target)?;
                 Ok(UpdateTarget {
-                    id: WatchId::Shelf(target.id),
+                    id: Some(target.id),
                     watch_generation: Some(generation),
                     target_type: target.kind,
                     source: target.provider,
@@ -125,14 +125,13 @@ pub(super) fn groups(library: &Library) -> Result<Vec<WatchGroup>, String> {
             .into_iter()
             .map(|g| {
                 Ok(WatchGroup {
-                    id: WatchId::Shelf(g.id),
-                    legacy_id: g.legacy_id,
+                    id: g.id,
                     watch_generation: Some(generation),
                     name: g.name,
                     sort_order: g.position,
                     created_at: date(g.created_at)?,
                     updated_at: date(g.updated_at)?,
-                    target_ids: g.targets.into_iter().map(WatchId::Shelf).collect(),
+                    target_ids: g.targets,
                 })
             })
             .collect();
@@ -140,29 +139,15 @@ pub(super) fn groups(library: &Library) -> Result<Vec<WatchGroup>, String> {
     Err("監視グループが変更されています。読み直してください".into())
 }
 
-pub(super) fn target_id(library: &Library, key: WatchId) -> Result<LibraryId, String> {
+/// 棚にある監視対象か。
+pub(super) fn target_id(library: &Library, key: LibraryId) -> Result<LibraryId, String> {
     library
         .watch_targets()
         .map_err(|e| e.to_string())?
         .into_iter()
-        .find(|t| match key {
-            WatchId::Shelf(id) => t.id == id,
-            WatchId::Legacy(id) => t.legacy_id == Some(id),
-        })
-        .map(|t| t.id)
+        .any(|t| t.id == key)
+        .then_some(key)
         .ok_or("監視対象が見つかりません".into())
-}
-pub(super) fn group_id(library: &Library, key: WatchId) -> Result<LibraryId, String> {
-    library
-        .watch_groups()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|t| match key {
-            WatchId::Shelf(id) => t.id == id,
-            WatchId::Legacy(id) => t.legacy_id == Some(id),
-        })
-        .map(|t| t.id)
-        .ok_or("監視グループが見つかりません".into())
 }
 
 pub(super) fn edit(
@@ -185,7 +170,7 @@ pub(super) fn edit(
 
 pub(super) fn selected_targets(
     library: &Library,
-    ids: Option<&[WatchId]>,
+    ids: Option<&[LibraryId]>,
 ) -> Result<Vec<UpdateTarget>, String> {
     let selected = ids
         .map(|ids| {
@@ -199,7 +184,7 @@ pub(super) fn selected_targets(
         .filter(|t| {
             selected
                 .as_ref()
-                .is_none_or(|ids| matches!(t.id,WatchId::Shelf(id) if ids.contains(&id)))
+                .is_none_or(|ids| t.id.is_some_and(|id| ids.contains(&id)))
         })
         .collect())
 }
@@ -262,13 +247,7 @@ pub(super) fn record(
     else {
         return Ok(());
     };
-    let matches = match target.id {
-        WatchId::Shelf(id) => current.id == WatchId::Shelf(id),
-        WatchId::Legacy(id) => target_id(library, WatchId::Legacy(id))
-            .ok()
-            .is_some_and(|id| current.id == WatchId::Shelf(id)),
-    };
-    if !matches {
+    if target.id.is_none() || target.id != current.id {
         return Ok(());
     }
     let updated = updated
@@ -278,7 +257,7 @@ pub(super) fn record(
                 .map_err(|e| e.to_string())
         })
         .transpose()?;
-    if let WatchId::Shelf(id) = current.id {
+    if let Some(id) = current.id {
         library
             .record_watch_check(id, seen, updated, found, failed)
             .map_err(|e| e.to_string())?;

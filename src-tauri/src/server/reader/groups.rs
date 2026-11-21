@@ -547,16 +547,9 @@ pub(super) struct CollectionLocation {
     collection: String,
 }
 
-/// 画面の ID からコレクションを引く。旧棚から移したものは旧棚の ID でも開ける（端末に保存した
-/// 作品が旧 API から受け取った ID を持っている）。ほかは棚の UUID。
-fn collection_target(library: &crate::library::Library, id: &str) -> Result<LibraryId, ApiError> {
-    if id.is_empty() || id.len() > 128 {
-        return Err(not_found());
-    }
-    match library.collection_by_legacy_id(id).map_err(library_error)? {
-        Some(found) => Ok(found),
-        None => id.parse::<LibraryId>().map_err(|_| not_found()),
-    }
+/// 画面の ID（棚の UUID）からコレクションを引く。
+fn collection_target(id: &str) -> Result<LibraryId, ApiError> {
+    id.parse::<LibraryId>().map_err(|_| not_found())
 }
 
 /// コレクションの画面。回は並べた順で、棚にある回は一覧と同じ作品の形。
@@ -574,7 +567,7 @@ pub(super) async fn collection(
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let library = &ctx.library;
-        let target = collection_target(library, &location.collection)?;
+        let target = collection_target(&location.collection)?;
         let detail = library.collection_detail(target).map_err(library_error)?;
         let cards: Vec<_> = detail
             .members

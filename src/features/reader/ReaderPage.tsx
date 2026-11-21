@@ -326,7 +326,7 @@ function Reader({ source }: { source: ReaderSource }) {
   });
   // 読書位置・しおりの鍵。新しい棚の作品でも、旧棚から移したものは旧棚の番号で引く（両方の棚で
   // 同じ記録）。頭が届くまでは分からないので、位置を戻すのも書くのも頭が届いてから。
-  const readingId = metadataQuery.data?.head.readingKey ?? null;
+  const readingId = metadataQuery.data?.head.id ?? null;
   // 読書位置を棚にも書く（携帯と同じ形：ページとその中の割合）。端末の記録（何行目か）は
   // この端末で開き直すための控えとして残す。
   const shelfReading = runtime && source.shelf ? source.shelfReading ?? null : null;

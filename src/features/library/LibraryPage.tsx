@@ -73,7 +73,7 @@ import {
 import { shelfClearReadingPositions, shelfRemoveWork, shelfSearchSuggest, shelfSetUserState, SHELF_WORK_ID } from "@/services/shelfApi";
 import { shelfFilterFacets, shelfSearchFilterFacets } from "@/services/shelfHealthApi";
 import { deleteSavedSearch, listSavedSearches, upsertSavedSearch } from "@/services/savedSearchApi";
-import { forgetReadingPositions, readingKeyOf, readingKeysAdopted, readingWorkIds } from "@/features/library/readingShelf";
+import { forgetReadingPositions, readingWorkIds } from "@/features/library/readingShelf";
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import {
@@ -1410,21 +1410,19 @@ export default function LibraryPage() {
     confirmProps: DANGER_CONFIRM, labels: { confirm: "外す", cancel: "キャンセル" },
     onConfirm: () => shelfRemoveMutation.mutate(shelfSelected),
   });
-  // 読みかけから外す。端末の記録を消し、棚へ引き取ったあとは棚の読書位置も消す。
+  // 読みかけから外す。端末の記録と棚の読書位置を消す。
   const forgetSelectedReading = async () => {
     if (!shelfMode) {
       selected.forEach((id) => forgetReadingPositions(id));
     } else {
-      shelfSelected.forEach((work) => forgetReadingPositions(readingKeyOf(work)));
-      if (readingKeysAdopted()) {
-        try {
-          await shelfClearReadingPositions(shelfSelected.map((work) => work.id));
-        } catch (error) {
-          notifications.show({ color: "red", title: "読みかけから外せません", message: errorMessage(error) });
-          return;
-        } finally {
-          void invalidateShelf(queryClient);
-        }
+      shelfSelected.forEach((work) => forgetReadingPositions(work.id));
+      try {
+        await shelfClearReadingPositions(shelfSelected.map((work) => work.id));
+      } catch (error) {
+        notifications.show({ color: "red", title: "読みかけから外せません", message: errorMessage(error) });
+        return;
+      } finally {
+        void invalidateShelf(queryClient);
       }
     }
     notifications.show({ color: "piep", message: `${formatNumber(workSelectionCount)}件を読みかけから外しました` });

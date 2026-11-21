@@ -1,5 +1,5 @@
 use super::*;
-use crate::library::{UserStateChange, WorkSave};
+use crate::library::{LibraryId, UserStateChange, WorkSave};
 
 struct Temp(std::path::PathBuf);
 impl Drop for Temp {
@@ -55,11 +55,11 @@ fn favorite(library: &Library, work: LibraryId) {
 fn counts_and_the_dashboard_follow_the_current_versions() {
     let (_temp, library) = shelf();
     let a = save(&library, "1", "甲", &["雨", "夏"], "一行目");
-    let b = save(&library, "2", "甲", &["雨"], "二行目です");
+    save(&library, "2", "甲", &["雨"], "二行目です");
     save(&library, "3", "乙", &[], "三");
     favorite(&library, a);
 
-    let counts = library.shelf_counts(ReadingSet::Legacy(vec![b])).unwrap();
+    let counts = library.shelf_counts().unwrap();
     assert_eq!(
         (
             counts.total,
@@ -68,9 +68,8 @@ fn counts_and_the_dashboard_follow_the_current_versions() {
             counts.reading,
             counts.revised
         ),
-        (3, 1, 0, 1, 0)
+        (3, 1, 0, 0, 0)
     );
-    assert_eq!(library.shelf_counts(ReadingSet::Shelf).unwrap().reading, 0);
 
     let stats = library.shelf_stats().unwrap();
     assert_eq!(

@@ -730,7 +730,7 @@ fn build_initial_items(
             &adhoc.source_key,
         )?;
         let target = registered.unwrap_or_else(|| crate::database::UpdateTarget {
-            id: 0.into(),
+            id: None,
             watch_generation: None,
             target_type: adhoc.target_type.clone(),
             source: adhoc.source.clone(),
@@ -3764,7 +3764,7 @@ mod tests {
         source_key: &str,
     ) -> crate::database::UpdateTarget {
         crate::database::UpdateTarget {
-            id: 1.into(),
+            id: None,
             watch_generation: None,
             target_type: target_type.into(),
             source: source.into(),

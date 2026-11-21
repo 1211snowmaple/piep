@@ -1153,30 +1153,6 @@ impl Library {
         found.map(id).transpose()
     }
 
-    /// 旧棚から移した作品の、旧棚での番号（`downloads.id`）。移行の記録から引く。
-    ///
-    /// 旧棚が正本で、新しい棚がその写しのあいだ、端末に残る作品ごとの記録（読書位置・しおり）は
-    /// 旧棚の番号で引く。両方の棚から同じ記録を読み書きすれば、どちらで読んでも続きから読める。
-    pub fn legacy_work_numbers(&self) -> Result<std::collections::HashMap<LibraryId, i64>> {
-        let conn = self.reader()?;
-        // 記録が指すのは移した時点の今の版（保存状態）なので、その版の作品へたどる。
-        let mut statement = conn.prepare(
-            "SELECT v.entity_id,m.source_key FROM migration_records m JOIN revision_snapshots v ON v.id=m.target_id WHERE m.source_table='download_current' AND m.status='imported'",
-        )?;
-        let rows = statement.query_map([], |r| {
-            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
-        })?;
-        let mut numbers = std::collections::HashMap::new();
-        for row in rows {
-            let (work, number) = row?;
-            let number = number
-                .parse::<i64>()
-                .map_err(|_| Error::Integrity("旧棚の作品の番号が不正です".into()))?;
-            numbers.insert(id(work)?, number);
-        }
-        Ok(numbers)
-    }
-
     /// 棚の一覧を一ページ返す。続きは `next` を `after` に渡す。
     pub fn list_works(&self, query: &WorkListQuery) -> Result<WorkListPage> {
         let conn = self.reader()?;

@@ -22,7 +22,6 @@ pub struct WatchTarget {
     pub created_at: i64,
     pub updated_at: i64,
     pub groups: Vec<String>,
-    pub legacy_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,7 +32,6 @@ pub struct WatchGroup {
     pub created_at: i64,
     pub updated_at: i64,
     pub targets: Vec<LibraryId>,
-    pub legacy_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,8 +142,7 @@ impl Library {
     pub fn watch_targets(&self) -> Result<Vec<WatchTarget>> {
         let conn = self.reader()?;
         let mut stmt = conn.prepare("SELECT t.id,e.kind,x.provider,x.external_key,t.display_name,t.enabled,t.last_checked_at,
-            t.last_seen_external_key,t.last_seen_source_updated_at,t.last_hit_at,t.consecutive_errors,t.options_json,t.created_at,t.updated_at,
-            (SELECT source_key FROM migration_records WHERE source_table='update_targets' AND target_id=t.id AND status='imported' LIMIT 1)
+            t.last_seen_external_key,t.last_seen_source_updated_at,t.last_hit_at,t.consecutive_errors,t.options_json,t.created_at,t.updated_at
             FROM watch_targets t JOIN entities e ON e.id=t.entity_id
             JOIN external_identities x ON x.entity_id=e.id AND x.kind=e.kind
             WHERE e.deleted_at IS NULL ORDER BY e.kind,x.provider,t.display_name COLLATE NOCASE,t.id")?;
@@ -165,7 +162,6 @@ impl Library {
                 r.get(11)?,
                 r.get(12)?,
                 r.get(13)?,
-                r.get::<_, Option<String>>(14)?,
             ))
         })?;
         let mut result = Vec::new();
@@ -185,7 +181,6 @@ impl Library {
                 options,
                 created_at,
                 updated_at,
-                legacy,
             ) = row?;
             let key = id(key)?;
             let groups=conn.prepare("SELECT g.name FROM watch_group_members m JOIN watch_groups g ON g.id=m.group_id WHERE m.target_id=?1 ORDER BY g.sort_order,g.id")?
@@ -210,7 +205,6 @@ impl Library {
                 created_at,
                 updated_at,
                 groups,
-                legacy_id: legacy.and_then(|v| v.parse().ok()),
             });
         }
         Ok(result)
@@ -218,9 +212,10 @@ impl Library {
 
     pub fn watch_groups(&self) -> Result<Vec<WatchGroup>> {
         let conn = self.reader()?;
-        let mut stmt=conn.prepare("SELECT g.id,g.name,g.sort_order,g.created_at,g.updated_at,
-            (SELECT source_key FROM migration_records WHERE source_table='watch_groups' AND target_id=g.id AND status='imported' LIMIT 1)
-            FROM watch_groups g ORDER BY g.sort_order,g.id")?;
+        let mut stmt = conn.prepare(
+            "SELECT g.id,g.name,g.sort_order,g.created_at,g.updated_at
+            FROM watch_groups g ORDER BY g.sort_order,g.id",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, Vec<u8>>(0)?,
@@ -228,12 +223,11 @@ impl Library {
                 r.get(2)?,
                 r.get(3)?,
                 r.get(4)?,
-                r.get::<_, Option<String>>(5)?,
             ))
         })?;
         let mut result = Vec::new();
         for row in rows {
-            let (key, name, position, created_at, updated_at, legacy) = row?;
+            let (key, name, position, created_at, updated_at) = row?;
             let key = id(key)?;
             let targets=conn.prepare("SELECT target_id FROM watch_group_members WHERE group_id=?1 ORDER BY target_id")?
                 .query_map([key.as_bytes().as_slice()],|r|r.get::<_,Vec<u8>>(0))?.map(|v|id(v?)).collect::<Result<_>>()?;
@@ -244,7 +238,6 @@ impl Library {
                 created_at,
                 updated_at,
                 targets,
-                legacy_id: legacy.and_then(|v| v.parse().ok()),
             });
         }
         Ok(result)

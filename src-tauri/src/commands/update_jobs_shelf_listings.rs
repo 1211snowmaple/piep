@@ -331,7 +331,7 @@ mod tests {
 
     fn target(source: &str, author: &str) -> crate::database::UpdateTarget {
         crate::database::UpdateTarget {
-            id: 0.into(),
+            id: None,
             watch_generation: None,
             target_type: "author".into(),
             source: source.into(),

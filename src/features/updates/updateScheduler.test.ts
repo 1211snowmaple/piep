@@ -69,15 +69,14 @@ describe("automatic update checks", () => {
     expect(startUpdateJobCommand).toHaveBeenCalledWith(expect.objectContaining({ scope: "all" }));
   });
 
-  it("adopts the migrated group UUID and sends only its enabled targets", async () => {
+  it("sends only the enabled targets of the chosen group", async () => {
     const id = "019ad000-0000-7000-8000-000000000001";
     const member = "019ad000-0000-7000-8000-000000000002";
-    storeValues.set("update_schedule", { onStartup: true, groupId: 7 });
-    listWatchGroups.mockResolvedValue([{ id, legacyId: 7, name: "毎日", targetIds: [member] }]);
+    storeValues.set("update_schedule", { onStartup: true, groupId: id });
+    listWatchGroups.mockResolvedValue([{ id, name: "毎日", targetIds: [member] }]);
     listUpdateTargets.mockResolvedValue([{ id: member }]);
     await runStartupTick();
     expect(startUpdateJobCommand).toHaveBeenCalledWith(expect.objectContaining({ scope: "targets", targetIds: [member] }));
-    expect(storeValues.get("update_schedule")).toMatchObject({ groupId: id });
   });
 
   it("waits for the authoritative shelf to open before scheduling a job", async () => {

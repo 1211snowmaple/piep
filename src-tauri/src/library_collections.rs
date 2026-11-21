@@ -9,7 +9,7 @@ use crate::database::search::normalize_search_text;
 use crate::library::{Error, Library, LibraryId, Result, WorkCard};
 use crate::library_entity::fingerprint;
 use crate::library_entity_list::{collection_summaries, CollectionSummary};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -69,20 +69,6 @@ impl Library {
                 .into_iter()
                 .next(),
         )
-    }
-
-    /// 旧棚から移したコレクションを旧棚の ID から引く。移していなければ None。
-    pub fn collection_by_legacy_id(&self, legacy: &str) -> Result<Option<LibraryId>> {
-        let conn = self.reader()?;
-        let target: Option<Vec<u8>> = conn
-            .prepare_cached(
-                "SELECT target_id FROM migration_records
-                 WHERE source_table='work_collections' AND status='imported' AND source_key=?1",
-            )?
-            .query_row([legacy], |r| r.get(0))
-            .optional()?
-            .flatten();
-        target.map(crate::library_entity::id).transpose()
     }
 
     /// コレクションとその回（旧棚の `get_work_collection`）。回は並べた順、同じ位置は入れた順。
@@ -283,24 +269,13 @@ impl Library {
                 (owner, cards)
             })
             .collect();
-        // 長い本文が先。同じ長さは旧棚の番号の順（旧棚は行の番号の順）で、移していない作品は
-        // 後ろ。番号は全作品ぶんなので、同じ長さがあるときだけ引く。
-        let tied = found.iter().any(|(_, cards)| {
-            let lengths: HashSet<u64> = cards.iter().map(|card| card.text_length).collect();
-            lengths.len() < cards.len()
-        });
-        let numbers = if tied {
-            self.legacy_work_numbers()?
-        } else {
-            HashMap::new()
-        };
-        let number = |card: &WorkCard| numbers.get(&card.id).copied().unwrap_or(i64::MAX);
+        // 長い本文が先。同じ長さは先に保存した作品が先。
         for (_, cards) in &mut found {
             cards.sort_by(|left, right| {
                 right
                     .text_length
                     .cmp(&left.text_length)
-                    .then_with(|| number(left).cmp(&number(right)))
+                    .then_with(|| left.saved_at.cmp(&right.saved_at))
                     .then_with(|| left.id.as_bytes().cmp(right.id.as_bytes()))
             });
         }

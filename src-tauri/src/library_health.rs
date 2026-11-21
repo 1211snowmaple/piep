@@ -10,7 +10,7 @@ use crate::database::models::{
     SearchIndexOptimizationResult, SearchIndexStatus, SourceBreakdown,
 };
 use crate::library::{
-    Error, Library, LibraryId, ReclaimOptions, ReclaimReport, Result, RevisionFilter, WorkFilter,
+    Error, Library, ReclaimOptions, ReclaimReport, Result, RevisionFilter, WorkFilter,
     WorkListQuery,
 };
 use serde::Serialize;
@@ -45,14 +45,6 @@ pub struct ShelfDiagnostics {
     pub search_index: SearchIndexStatus,
 }
 
-/// 横の欄の「読みかけ」をどう数えるか。
-pub enum ReadingSet {
-    /// 棚の読書位置（端末の記録を棚へ移したあと）。
-    Shelf,
-    /// 端末に残る旧棚の番号。棚の作品に対応するものだけを数える。
-    Legacy(Vec<LibraryId>),
-}
-
 fn file_size(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
@@ -77,23 +69,16 @@ impl Library {
     }
 
     /// 横の欄の件数（すべて・お気に入り・読みかけ・更新監視・改稿あり）。
-    pub fn shelf_counts(&self, reading: ReadingSet) -> Result<LibraryShelfCounts> {
+    pub fn shelf_counts(&self) -> Result<LibraryShelfCounts> {
         let (total, favorite, watched): (i64, i64, i64) = self.reader()?.query_row(
             "SELECT count(*),coalesce(sum(favorite),0),coalesce(sum(watching),0) FROM work_current_projection",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        let reading = match reading {
-            ReadingSet::Shelf => self.count_works(WorkFilter {
-                reading: Some(true),
-                ..WorkFilter::default()
-            })?,
-            ReadingSet::Legacy(works) if works.is_empty() => 0,
-            ReadingSet::Legacy(works) => self.count_works(WorkFilter {
-                works: Some(works),
-                ..WorkFilter::default()
-            })?,
-        };
+        let reading = self.count_works(WorkFilter {
+            reading: Some(true),
+            ..WorkFilter::default()
+        })?;
         let revised = self.count_works(WorkFilter {
             revision: Some(RevisionFilter::Revised),
             ..WorkFilter::default()

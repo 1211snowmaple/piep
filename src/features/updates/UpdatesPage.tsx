@@ -49,7 +49,6 @@ import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
 import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
 import { TargetsPanel, type GroupAction, type TargetAction } from "./WatchTargetsPanel";
 import type { UpdateTarget, WatchGroup, WatchId } from "@/types/library";
-import { watchGroupMatches } from "@/lib/watchIdentity";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 export { TargetHealthBadge } from "./WatchTargetsPanel";
@@ -359,7 +358,7 @@ export default function UpdatesPage() {
         // 自動確認の範囲だったなら、すべてへ戻す。消えたグループを指したままだと、
         // 自動確認が黙って止まる。
         const current = await loadSchedule();
-        if (watchGroupMatches(input.group, current.groupId)) {
+        if (input.group.id === current.groupId) {
           await saveSchedule({ ...current, groupId: null });
           setScheduleRevision((value) => value + 1);
         }
@@ -992,7 +991,7 @@ function describeSchedule(schedule: UpdateScheduleSettings | undefined, groups: 
   if (!when.length) return "オフ";
   if (schedule.groupId === null) return `${when.join(" · ")}・${mode}`;
   if (!groups) return "…";
-  const group = groups.find((item) => watchGroupMatches(item, schedule.groupId));
+  const group = groups.find((item) => item.id === schedule.groupId);
   return group ? `${when.join(" · ")}・「${group.name}」を${mode}` : "グループが見つからず停止中";
 }
 

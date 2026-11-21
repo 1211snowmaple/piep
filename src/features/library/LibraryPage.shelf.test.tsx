@@ -59,7 +59,6 @@ function card(index: number): ShelfCard {
     series_title: null,
     series_position: null,
     coverFile: null,
-    legacyId: null,
   } as unknown as ShelfCard;
 }
 

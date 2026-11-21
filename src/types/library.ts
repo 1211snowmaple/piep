@@ -52,8 +52,6 @@ export interface ShelfEntry extends Omit<DownloadEntry, "id"> {
   id: string;
   shelf: true;
   coverUrl: string | null;
-  /** 旧棚から移した作品の、旧棚での番号。端末の読書位置・しおりはこの番号で引く。 */
-  legacyId: number | null;
 }
 
 /** 一覧に並ぶ作品。旧棚か新しい棚か。 */
@@ -452,7 +450,6 @@ export interface UpdateTarget {
 /** 利用者が作った監視グループ。監視対象を束ねて、その束だけを確認する。 */
 export interface WatchGroup {
   id: WatchId;
-  legacyId?: number;
   watchGeneration?: number;
   name: string;
   sortOrder: number;

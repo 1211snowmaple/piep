@@ -53,7 +53,6 @@ const card: ShelfCard = {
   series_title: null,
   series_position: null,
   coverFile: null,
-  legacyId: null,
 } as unknown as ShelfCard;
 
 const summary: DashboardSummary = {

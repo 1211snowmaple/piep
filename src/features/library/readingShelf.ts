@@ -53,22 +53,7 @@ export interface ReadingPosition {
 }
 
 /**
- * 端末の記録を新しい棚の ID で引くようにしたか（棚を正本に切り替えたあと、一度だけ書き直す）。
- * 書き直したあとは旧棚の番号を使わない。
- */
-const ADOPTED_KEY = "piep.reading-keys-adopted";
-
-export function readingKeysAdopted(): boolean {
-  try {
-    return storage()?.getItem(ADOPTED_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 読書位置を憶える作品。旧棚は番号、新しい棚（試験中）は UUID。旧棚から移した作品は
- * 新しい棚でも旧棚の番号で憶える（`readingKeyOf`）。UUID の鍵は読みかけの棚に数えない。
+ * 読書位置を憶える作品。棚の作品は UUID、ブラウザーのプレビューの見本は番号。
  */
 export type ReadingWorkKey = number | string;
 
@@ -127,19 +112,6 @@ function announcePositionChange(): void {
  * Loads a reader position. A session-only value from the previous schema is
  * migrated once so an in-progress read is not lost during the upgrade.
  */
-/**
- * 端末に作品ごとに残す記録（読書位置・しおり）を引く鍵。
- *
- * 旧棚が正本で、新しい棚がその写しのあいだは、新しい棚の作品でも旧棚から移したものは旧棚の
- * 番号で引く。両方の棚で同じ記録を読み書きするので、どちらで読んでも続きから読め、読みかけの
- * 棚にも載る。旧棚に無い作品だけが新しい棚の ID（小文字の UUID）で憶える。
- */
-export function readingKeyOf(work: { id: ReadingWorkKey; legacyId?: number | null }): ReadingWorkKey {
-  // 棚を正本に切り替えて端末の記録を書き直したあとは、新しい棚の ID だけで引く。
-  if (typeof work.id === "string" && readingKeysAdopted()) return work.id;
-  return work.legacyId ?? work.id;
-}
-
 export function readReadingPosition(workId: ReadingWorkKey, version: number | null): ReadingPosition | null {
   if (!validKey(workId)) return null;
   const key = keyFor(workId, version);
@@ -225,44 +197,6 @@ export function clearReadingPosition(workId: ReadingWorkKey, version: number | n
   } catch {
     // 消せなくても読書は続く。
   }
-}
-
-/**
- * 棚を正本に切り替えたあと、端末に旧棚の番号で残した読書位置を一度だけ棚の ID へ書き直す。
- * `adopt` は読みかけの番号とページを棚へ渡し、番号に当たる作品の ID を返す（棚は位置の
- * ない作品にだけ、そのページの頭として書く）。棚に無い作品の記録は番号のまま残す。
- */
-export async function adoptDeviceReadingKeys(
-  adopt: (positions: [number, number][]) => Promise<[number, string][]>,
-  rekeyBookmarks: (ids: Map<number, string>) => void,
-): Promise<void> {
-  const store = storage();
-  if (!store || readingKeysAdopted()) return;
-  const numbered: { key: string; id: number; rest: string }[] = [];
-  const pages = new Map<number, number>();
-  for (let index = 0; index < store.length; index += 1) {
-    const key = store.key(index);
-    if (!key || !key.startsWith(POSITION_PREFIX)) continue;
-    const [segment = "", ...rest] = key.slice(POSITION_PREFIX.length).split(".");
-    if (!/^\d+$/.test(segment)) continue;
-    const id = Number(segment);
-    numbered.push({ key, id, rest: rest.join(".") });
-    // 棚へは今の本文の位置だけを渡す（ほかの版の位置は端末の記録のまま）。
-    const position = parsePosition(store.getItem(key));
-    if (rest.join(".") === "current" && isPartRead(position)) pages.set(id, position!.page);
-  }
-  const ids = new Map(await adopt([...pages.entries()]));
-  for (const { key, id, rest } of numbered) {
-    const work = ids.get(id);
-    if (!work) continue;
-    const value = store.getItem(key);
-    const target = `${POSITION_PREFIX}${work}.${rest}`;
-    if (value !== null && store.getItem(target) === null) store.setItem(target, value);
-    store.removeItem(key);
-  }
-  rekeyBookmarks(ids);
-  store.setItem(ADOPTED_KEY, "1");
-  announcePositionChange();
 }
 
 /** Drops the recorded position for a work, used when it leaves the library. */

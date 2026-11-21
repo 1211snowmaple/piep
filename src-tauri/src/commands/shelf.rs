@@ -18,7 +18,7 @@ use crate::library_entity_list::{CollectionSummary, EntityListPage, EntityRow, E
 use crate::library_search::{parse_query, SearchDecoration, SearchMatch, SearchPage, TextSearch};
 use crate::library_view::{MediaView, RenderedDocument, VersionView};
 use serde::Serialize;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::State;
@@ -55,8 +55,6 @@ pub struct Shelf {
     library: OnceLock<Arc<Library>>,
     /// 最近ページに分けた本文。ページをめくるたびに本文全体を組み直さない。
     documents: Mutex<VecDeque<CachedDocument>>,
-    /// 作品の旧棚での番号。読むだけの棚は開いているあいだ変わらないので、一度だけ引く。
-    legacy_numbers: Mutex<Option<Arc<HashMap<LibraryId, i64>>>>,
     /// 最近集計した作者・シリーズの一覧（条件・棚の世代・行）。ページをめくる・並べ替える・
     /// 件数を聞くたびに全作品を集め直さない（旧棚の一覧も同じく覚えている）。
     entity_rows: Mutex<VecDeque<CachedEntityRows>>,
@@ -80,7 +78,6 @@ impl Default for Shelf {
             status: Mutex::new(ShelfState::Starting),
             library: OnceLock::new(),
             documents: Mutex::new(VecDeque::new()),
-            legacy_numbers: Mutex::new(None),
             entity_rows: Mutex::new(VecDeque::new()),
             suggestions: Default::default(),
         }
@@ -105,30 +102,6 @@ impl Shelf {
             .lock()
             .map(|slot| slot.clone())
             .unwrap_or(ShelfState::Starting)
-    }
-
-    /// 作品の旧棚での番号（移行の記録）。棚にある作品は約 3 万件なので、全部を一度に持つ。
-    pub(crate) fn legacy_numbers(
-        &self,
-        library: &Library,
-    ) -> Result<Arc<HashMap<LibraryId, i64>>, String> {
-        let mut slot = self.legacy_numbers.lock().map_err(|e| e.to_string())?;
-        if let Some(numbers) = slot.as_ref() {
-            return Ok(Arc::clone(numbers));
-        }
-        let numbers = Arc::new(library.legacy_work_numbers().map_err(|e| e.to_string())?);
-        *slot = Some(Arc::clone(&numbers));
-        Ok(numbers)
-    }
-
-    /// 一覧の一件を、画面が読む形にする。
-    fn card_view(&self, library: &Library, card: &WorkCard) -> Result<CardView, String> {
-        Ok(CardView {
-            card: card.clone(),
-            cover_file: card.cover.map(|cover| cover.to_string()),
-            author_icon_file: card.author_icon.map(|icon| icon.to_string()),
-            legacy_id: self.legacy_numbers(library)?.get(&card.id).copied(),
-        })
     }
 
     /// 開いた棚。開いていなければ誤り。
@@ -566,69 +539,6 @@ pub async fn shelf_clear_reading_positions(
     .map_err(|e| e.to_string())?
 }
 
-/// 端末に旧棚の番号で残した読書位置を、切り替えた棚へ引き取る。番号に当たる作品の ID を返し、
-/// 画面は端末の記録をその ID で書き直す。棚に位置がない作品だけ、そのページの頭として書く
-/// （端末の細かい位置は px なので割合にできない。この端末では端末の記録のほうを使う）。
-#[tauri::command]
-pub async fn shelf_adopt_device_positions(
-    state: State<'_, Arc<Shelf>>,
-    positions: Vec<(i64, u64)>,
-) -> Result<Vec<(i64, LibraryId)>, String> {
-    let state = Arc::clone(&state);
-    tauri::async_runtime::spawn_blocking(move || {
-        let library = state.library()?;
-        let numbers: HashMap<i64, LibraryId> = library
-            .legacy_work_numbers()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|(work, number)| (number, work))
-            .collect();
-        let device = desktop_device(&library);
-        let mut adopted = Vec::new();
-        for (number, page) in positions {
-            let Some(&work) = numbers.get(&number) else {
-                continue;
-            };
-            adopted.push((number, work));
-            let Ok(card) = library.work_card(work) else {
-                continue;
-            };
-            let current = library
-                .reading_position(work, library.id)
-                .map_err(|e| e.to_string())?;
-            if current.generation != 0 {
-                continue;
-            }
-            let anchor = crate::library::ReadingAnchor::Page {
-                page: page.saturating_sub(1),
-                ratio_ppm: 0,
-            };
-            let location = match scope_of(&card, None) {
-                ResourceScope::Snapshot(snapshot) => {
-                    crate::library::ReadingLocation::Source { snapshot, anchor }
-                }
-                ResourceScope::Edit(edit) => crate::library::ReadingLocation::Edit { edit, anchor },
-            };
-            // 本文に無いページ（版が変わった）は引き取らない。端末の記録は残る。
-            if let Err(error) = library.set_reading_position(crate::library::ReadingUpdate {
-                request: LibraryId::now_v7(),
-                work,
-                user: library.id,
-                device,
-                expected: 0,
-                location: Some(location),
-                finished: false,
-            }) {
-                log::warn!("端末の読書位置を棚へ引き取れません（{number}）: {error}");
-            }
-        }
-        state.forget_derived();
-        Ok(adopted)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
 /// 作品を棚から外す（正本に切り替えた棚だけ）。保存版・編集・コレクションの行は残る。
 /// 本文の検索の索引からは、続けて同期して消す。
 #[tauri::command]
@@ -669,8 +579,17 @@ pub struct CardView {
     pub cover_file: Option<String>,
     /// 作者のアイコンのファイルの識別子（16 進）。表紙と同じく URL にする。
     pub author_icon_file: Option<String>,
-    /// 旧棚から移した作品の、旧棚での番号。端末の読書位置・しおりはこの番号で引く（旧棚と共有）。
-    pub legacy_id: Option<i64>,
+}
+
+impl CardView {
+    /// 一覧の一件を、画面が読む形にする。
+    fn of(card: &WorkCard) -> Self {
+        Self {
+            card: card.clone(),
+            cover_file: card.cover.map(|cover| cover.to_string()),
+            author_icon_file: card.author_icon.map(|icon| icon.to_string()),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -682,44 +601,13 @@ pub struct SearchView {
     pub cards: Vec<CardView>,
 }
 
-/// 読みかけの棚は端末の読書位置の鍵（旧棚の番号）で来る。棚の作品の ID に読み替えて絞る。
-fn narrow_to_legacy_works(
-    state: &Shelf,
-    library: &Library,
-    filter: &mut WorkFilter,
-    legacy_works: Option<Vec<i64>>,
-) -> Result<(), String> {
-    let Some(numbers) = legacy_works else {
-        return Ok(());
-    };
-    let wanted: std::collections::HashSet<i64> = numbers.into_iter().collect();
-    let known = state.legacy_numbers(library)?;
-    let works = known
-        .iter()
-        .filter(|(_, number)| wanted.contains(number))
-        .map(|(work, _)| *work);
-    filter.works = Some(match filter.works.take() {
-        Some(existing) => {
-            let allowed: std::collections::HashSet<LibraryId> = works.collect();
-            existing
-                .into_iter()
-                .filter(|work| allowed.contains(work))
-                .collect()
-        }
-        None => works.collect(),
-    });
-    Ok(())
-}
-
 /// 一覧・本文の検索。語がなければ一覧（`tag:` などの書き方だけでもよい）で、索引の同期中でも読める。
-/// `legacy_works` を渡すと、旧棚の番号でその作品だけに絞る（読みかけの棚）。`person` は取得元の
-/// 作者の指名（ライブラリの絞り込みの `personSource`・`personKey`）。
+/// `person` は取得元の作者の指名（ライブラリの絞り込みの `personSource`・`personKey`）。
 #[tauri::command]
 pub async fn shelf_search(
     state: State<'_, Arc<Shelf>>,
     search: TextSearch,
     mut query: WorkListQuery,
-    legacy_works: Option<Vec<i64>>,
     person: Option<SeriesKey>,
 ) -> Result<SearchView, String> {
     let state = Arc::clone(&state);
@@ -730,7 +618,6 @@ pub async fn shelf_search(
         } else {
             state.searchable()?
         };
-        narrow_to_legacy_works(&state, &library, &mut query.filter, legacy_works)?;
         if let Some(person) = person {
             let provider = person
                 .provider
@@ -749,12 +636,7 @@ pub async fn shelf_search(
         let page = library
             .search_works(&search, &query)
             .map_err(|e| e.to_string())?;
-        let cards = page
-            .page
-            .items
-            .iter()
-            .map(|card| state.card_view(&library, card))
-            .collect::<Result<_, _>>()?;
+        let cards = page.page.items.iter().map(CardView::of).collect();
         Ok(SearchView { page, cards })
     })
     .await
@@ -810,7 +692,7 @@ pub async fn shelf_work(state: State<'_, Arc<Shelf>>, work: LibraryId) -> Result
             caption: head.caption,
             author_key: head.author_key,
             series_key: head.series_key,
-            card: state.card_view(&library, &head.card)?,
+            card: CardView::of(&head.card),
             versions: head.versions,
         })
     })
@@ -938,27 +820,21 @@ pub async fn shelf_neighbors(
     tauri::async_runtime::spawn_blocking(move || {
         let library = state.library()?;
         let found = library.work_neighbors(work).map_err(|e| e.to_string())?;
-        let view = |card: &Option<WorkCard>| {
-            card.as_ref()
-                .map(|card| state.card_view(&library, card))
-                .transpose()
-        };
-        found
+        let view = |card: &Option<WorkCard>| card.as_ref().map(CardView::of);
+        Ok(found
             .iter()
-            .map(|row| {
-                Ok(NeighborsView {
-                    kind: row.kind,
-                    id: row.id,
-                    title: row.title.clone(),
-                    ordered: row.ordered,
-                    position: row.position,
-                    total: row.total,
-                    missing: row.missing,
-                    previous: view(&row.previous)?,
-                    next: view(&row.next)?,
-                })
+            .map(|row| NeighborsView {
+                kind: row.kind,
+                id: row.id,
+                title: row.title.clone(),
+                ordered: row.ordered,
+                position: row.position,
+                total: row.total,
+                missing: row.missing,
+                previous: view(&row.previous),
+                next: view(&row.next),
             })
-            .collect()
+            .collect())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1188,7 +1064,7 @@ pub struct SeriesKey {
     pub key: String,
 }
 
-/// ライブラリの「作者・クリエイター」「シリーズ」タブの一ページ。`filter`・`legacy_works` は
+/// ライブラリの「作者・クリエイター」「シリーズ」タブの一ページ。`filter` は
 /// 作品の一覧と同じ絞り込みで、当てはまる作品を持つものだけを、その作品の数で出す。`order` は
 /// `asc`・`desc`（省くと鍵ごとの既定）、`sort` を省くと作品の多い順。
 #[tauri::command]
@@ -1198,7 +1074,6 @@ pub async fn shelf_entities(
     kind: String,
     query: Option<String>,
     mut filter: WorkFilter,
-    legacy_works: Option<Vec<i64>>,
     series: Option<SeriesKey>,
     scope: Option<EntityScope>,
     sort: Option<SeriesSort>,
@@ -1220,7 +1095,6 @@ pub async fn shelf_entities(
     }
     tauri::async_runtime::spawn_blocking(move || {
         let library = state.library()?;
-        narrow_to_legacy_works(&state, &library, &mut filter, legacy_works)?;
         if let Some(series) = series {
             // 検索語の `series:` と同じ関数で引く。見つからなければ作品はなく、一つに決まらな
             // ければ、どれかに入っている作品に絞る。
@@ -1349,31 +1223,20 @@ pub async fn shelf_collection(
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let library = state.library()?;
-        let target = collection_target(&library, &id)?;
-        collection_view(&state, &library, target)
+        let target = collection_target(&id)?;
+        collection_view(&library, target)
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// 画面の ID（旧棚から移したものは旧棚の ID、ほかは新しい棚の ID）からコレクションを引く。
-pub(crate) fn collection_target(library: &Library, id: &str) -> Result<LibraryId, String> {
-    match library
-        .collection_by_legacy_id(id)
-        .map_err(|e| e.to_string())?
-    {
-        Some(found) => Ok(found),
-        None => id
-            .parse::<LibraryId>()
-            .map_err(|_| "コレクションが見つかりません".to_string()),
-    }
+/// 画面の ID（棚の UUID）からコレクションを引く。
+pub(crate) fn collection_target(id: &str) -> Result<LibraryId, String> {
+    id.parse::<LibraryId>()
+        .map_err(|_| "コレクションが見つかりません".to_string())
 }
 
-fn collection_view(
-    state: &Shelf,
-    library: &Library,
-    target: LibraryId,
-) -> Result<CollectionView, String> {
+fn collection_view(library: &Library, target: LibraryId) -> Result<CollectionView, String> {
     let detail = library
         .collection_detail(target)
         .map_err(|error| match error {
@@ -1384,15 +1247,11 @@ fn collection_view(
         })?;
     let mut members = Vec::with_capacity(detail.members.len());
     for mut member in detail.members {
-        let work = member
-            .work
-            .take()
-            .map(|card| state.card_view(library, &card))
-            .transpose()?;
+        let work = member.work.take().map(|card| CardView::of(&card));
         let editions = std::mem::take(&mut member.editions)
             .iter()
-            .map(|card| state.card_view(library, card))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(CardView::of)
+            .collect::<Vec<_>>();
         members.push(CollectionMemberView {
             member,
             work,
@@ -1520,7 +1379,7 @@ pub async fn shelf_edit_collection(
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let library = state.library()?;
-        let target = collection_target(&library, &id)?;
+        let target = collection_target(&id)?;
         let change = collection_change(&library, change)?;
         let deleting = matches!(
             change,
@@ -1538,7 +1397,7 @@ pub async fn shelf_edit_collection(
         if deleting {
             return Ok(None);
         }
-        collection_view(&state, &library, target).map(Some)
+        collection_view(&library, target).map(Some)
     })
     .await
     .map_err(|e| e.to_string())?

@@ -410,7 +410,7 @@ pub async fn db_propose_collection_names(
 ) -> Result<Vec<CollectionNameCandidate>, String> {
     run_db_blocking(app, move |state| {
         let library = state.shelf.library()?;
-        let target = super::shelf::collection_target(&library, &collection_id)?;
+        let target = super::shelf::collection_target(&collection_id)?;
         library.collection_name_proposals_on_shelf(target)
     })
     .await
@@ -429,7 +429,7 @@ pub async fn db_name_collection_with_model(
     let state = app.state::<Arc<AppState>>().inner().clone();
     let works = tokio::task::spawn_blocking(move || {
         let library = state.shelf.library()?;
-        let target = super::shelf::collection_target(&library, &collection_id)?;
+        let target = super::shelf::collection_target(&collection_id)?;
         library.collection_naming_works_on_shelf(target)
     })
     .await
@@ -458,8 +458,9 @@ pub async fn db_try_naming_engine(
     let works = tokio::task::spawn_blocking(move || {
         let library = state.shelf.library()?;
         match collection_id {
-            Some(id) => library
-                .collection_naming_works_on_shelf(super::shelf::collection_target(&library, &id)?),
+            Some(id) => {
+                library.collection_naming_works_on_shelf(super::shelf::collection_target(&id)?)
+            }
             None => library.sample_naming_works_on_shelf(),
         }
     })
@@ -539,7 +540,7 @@ pub async fn db_suggest_collection_additions(
 ) -> Result<CollectionAdditionResult, String> {
     run_db_blocking(app, move |state| {
         let library = state.shelf.library()?;
-        let target = super::shelf::collection_target(&library, &collection_id)?;
+        let target = super::shelf::collection_target(&collection_id)?;
         library.collection_additions_on_shelf(target)
     })
     .await
@@ -765,18 +766,17 @@ pub async fn db_set_update_target_enabled(
     source: String,
     source_key: String,
     enabled: bool,
-    target_id: Option<crate::database::WatchId>,
+    target_id: Option<crate::library::LibraryId>,
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<(), String> {
     let library = super::watching::active(&app)?;
     super::watching::blocking(move || {
-        let key = target_id
-            .or(super::watching::find(&library, &target_type, &source, &source_key)?.map(|v| v.id))
-            .ok_or("監視対象が見つかりません")?;
-        let id = match key {
-            crate::database::WatchId::Shelf(id) => id,
-            key => super::watching::target_id(&library, key)?,
+        let id = match target_id {
+            Some(id) => id,
+            None => super::watching::find(&library, &target_type, &source, &source_key)?
+                .and_then(|v| v.id)
+                .ok_or("監視対象が見つかりません")?,
         };
         super::watching::edit(
             &library,
@@ -801,18 +801,17 @@ pub async fn db_delete_update_target(
     target_type: String,
     source: String,
     source_key: String,
-    target_id: Option<crate::database::WatchId>,
+    target_id: Option<crate::library::LibraryId>,
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<(), String> {
     let library = super::watching::active(&app)?;
     super::watching::blocking(move || {
-        let key = target_id
-            .or(super::watching::find(&library, &target_type, &source, &source_key)?.map(|v| v.id))
-            .ok_or("監視対象が見つかりません")?;
-        let id = match key {
-            crate::database::WatchId::Shelf(id) => id,
-            key => super::watching::target_id(&library, key)?,
+        let id = match target_id {
+            Some(id) => id,
+            None => super::watching::find(&library, &target_type, &source, &source_key)?
+                .and_then(|v| v.id)
+                .ok_or("監視対象が見つかりません")?,
         };
         super::watching::edit(
             &library,
@@ -841,7 +840,7 @@ pub async fn db_create_watch_group(
     name: String,
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
-) -> Result<crate::database::WatchId, String> {
+) -> Result<crate::library::LibraryId, String> {
     let library = super::watching::active(&app)?;
     super::watching::blocking(move || {
         super::watching::edit(
@@ -850,7 +849,7 @@ pub async fn db_create_watch_group(
             expected_generation,
             crate::library::WatchEdit::CreateGroup { name },
         )
-        .map(|v| crate::database::WatchId::Shelf(v.id))
+        .map(|v| v.id)
     })
     .await
 }
@@ -859,17 +858,14 @@ pub async fn db_create_watch_group(
 #[tauri::command]
 pub async fn db_rename_watch_group(
     app: tauri::AppHandle,
-    group_id: crate::database::WatchId,
+    group_id: crate::library::LibraryId,
     name: String,
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<(), String> {
     let library = super::watching::active(&app)?;
     super::watching::blocking(move || {
-        let id = match group_id {
-            crate::database::WatchId::Shelf(id) => id,
-            key => super::watching::group_id(&library, key)?,
-        };
+        let id = group_id;
         super::watching::edit(
             &library,
             request_id,
@@ -885,16 +881,13 @@ pub async fn db_rename_watch_group(
 #[tauri::command]
 pub async fn db_delete_watch_group(
     app: tauri::AppHandle,
-    group_id: crate::database::WatchId,
+    group_id: crate::library::LibraryId,
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<(), String> {
     let library = super::watching::active(&app)?;
     super::watching::blocking(move || {
-        let id = match group_id {
-            crate::database::WatchId::Shelf(id) => id,
-            key => super::watching::group_id(&library, key)?,
-        };
+        let id = group_id;
         super::watching::edit(
             &library,
             request_id,
@@ -910,25 +903,16 @@ pub async fn db_delete_watch_group(
 #[tauri::command]
 pub async fn db_set_watch_group_members(
     app: tauri::AppHandle,
-    group_id: crate::database::WatchId,
-    target_ids: Vec<crate::database::WatchId>,
+    group_id: crate::library::LibraryId,
+    target_ids: Vec<crate::library::LibraryId>,
     add: bool,
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<usize, String> {
     let library = super::watching::active(&app)?;
     super::watching::blocking(move || {
-        let group = match group_id {
-            crate::database::WatchId::Shelf(id) => id,
-            key => super::watching::group_id(&library, key)?,
-        };
-        let targets = target_ids
-            .into_iter()
-            .map(|v| match v {
-                crate::database::WatchId::Shelf(id) => Ok(id),
-                key => super::watching::target_id(&library, key),
-            })
-            .collect::<Result<_, _>>()?;
+        let group = group_id;
+        let targets = target_ids;
         super::watching::edit(
             &library,
             request_id,

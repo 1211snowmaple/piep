@@ -136,8 +136,7 @@ impl<'a> ShelfSuggestions<'a> {
         let mut by_work = HashMap::new();
         {
             let tx = conn.unchecked_transaction()?;
-            // 作品。番号は旧棚から移した作品は旧棚の番号の順、そのあとに保存した作品は保存した順
-            // （旧棚と同じく古いものほど小さい。強さが同じ候補は番号で並ぶので、旧棚と同じ順にする）。
+            // 作品。番号は保存した順（古いものほど小さい。強さが同じ候補は番号で並ぶ）。
             let mut stmt = shelf.prepare(
                 "SELECT p.work_id,p.provider,p.external_key,p.title,p.author_name,
                         CAST(coalesce(json_extract(s.metadata_json,'$.author_key'),'') AS TEXT),
@@ -148,11 +147,7 @@ impl<'a> ShelfSuggestions<'a> {
                  FROM work_current_projection p
                  JOIN library_items li ON li.work_id=p.work_id
                  JOIN revision_snapshots s ON s.id=p.snapshot_id
-                 LEFT JOIN (SELECT rs.entity_id AS work_id,min(CAST(r.source_key AS INTEGER)) AS legacy
-                              FROM migration_records r JOIN revision_snapshots rs ON rs.id=r.target_id
-                             WHERE r.source_table='download_current' AND r.status='imported'
-                             GROUP BY rs.entity_id) m ON m.work_id=p.work_id
-                 ORDER BY m.legacy IS NULL,m.legacy,p.saved_at,p.work_id",
+                 ORDER BY p.saved_at,p.work_id",
             )?;
             let mut rows = stmt.query([])?;
             let mut insert = tx.prepare(

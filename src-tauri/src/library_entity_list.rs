@@ -104,8 +104,6 @@ pub struct CollectionTile {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct CollectionSummary {
     pub id: LibraryId,
-    /// 旧棚から移したコレクションの、旧棚での ID。画面の URL はこの ID（旧棚と同じ場所に開く）。
-    pub legacy_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub ordered: bool,
@@ -510,14 +508,6 @@ pub(crate) fn collection_summaries(
     condition: &str,
     values: &[Vec<u8>],
 ) -> Result<Vec<CollectionSummary>> {
-    let mut legacy: HashMap<Vec<u8>, String> = HashMap::new();
-    for row in conn
-            .prepare_cached("SELECT target_id,source_key FROM migration_records WHERE source_table='work_collections' AND status='imported' AND target_id IS NOT NULL")?
-            .query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)))?
-        {
-            let (target, key) = row?;
-            legacy.insert(target, key);
-        }
     type Row = (
         Vec<u8>,
         String,
@@ -619,7 +609,6 @@ pub(crate) fn collection_summaries(
                 })
                 .collect::<Result<Vec<_>>>()?;
         collections.push(CollectionSummary {
-            legacy_id: legacy.get(&collection).cloned(),
             id: id(collection)?,
             name,
             description,

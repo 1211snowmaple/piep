@@ -440,59 +440,12 @@ pub struct FilterFacets {
     pub asset_types: Vec<FacetCount>,
 }
 
-/// 切り替え前は旧番号、切り替え後は棚の UUID。別の棚の番号に読み替えて書かない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum WatchId {
-    Legacy(i64),
-    Shelf(crate::library::LibraryId),
-}
-
-/// 作品の明示的な範囲。切り替え後は UUID、移行前の画面は旧番号で指定する。
-pub type WorkId = WatchId;
-
-impl From<i64> for WatchId {
-    fn from(value: i64) -> Self {
-        Self::Legacy(value)
-    }
-}
-impl std::fmt::Display for WatchId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Legacy(v) => v.fmt(f),
-            Self::Shelf(v) => v.fmt(f),
-        }
-    }
-}
-impl rusqlite::types::FromSql for WatchId {
-    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
-        Ok(Self::Legacy(value.as_i64()?))
-    }
-}
-impl rusqlite::types::ToSql for WatchId {
-    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-        match self {
-            Self::Legacy(value) => Ok(rusqlite::types::ToSqlOutput::Owned((*value).into())),
-            Self::Shelf(_) => Err(rusqlite::Error::InvalidParameterName(
-                "新しい棚の UUID を旧棚の番号に使えません".into(),
-            )),
-        }
-    }
-}
-impl WatchId {
-    pub fn legacy(self) -> Result<i64, String> {
-        match self {
-            Self::Legacy(v) => Ok(v),
-            Self::Shelf(_) => Err("新しい棚の UUID は旧棚では使えません".into()),
-        }
-    }
-}
-
 /// 更新チェック対象（作品・著者・シリーズ）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateTarget {
-    pub id: WatchId,
+    /// 棚の監視対象の ID。登録していない対象を一度だけ確かめるときは空。
+    pub id: Option<crate::library::LibraryId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_generation: Option<i64>,
     pub target_type: String,
@@ -525,9 +478,7 @@ pub struct UpdateTarget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchGroup {
-    pub id: WatchId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub legacy_id: Option<i64>,
+    pub id: crate::library::LibraryId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_generation: Option<i64>,
     pub name: String,
@@ -535,7 +486,7 @@ pub struct WatchGroup {
     pub created_at: String,
     pub updated_at: String,
     /// 中の監視対象（`update_targets.id`）。
-    pub target_ids: Vec<WatchId>,
+    pub target_ids: Vec<crate::library::LibraryId>,
 }
 
 /// 更新チェック対象の作成・更新入力
@@ -578,8 +529,8 @@ pub struct UpdateCredentials {
 pub struct StartUpdateJobRequest {
     pub scope: String,
     pub mode: String,
-    pub work_ids: Option<Vec<WorkId>>,
-    pub target_ids: Option<Vec<WatchId>>,
+    pub work_ids: Option<Vec<crate::library::LibraryId>>,
+    pub target_ids: Option<Vec<crate::library::LibraryId>>,
     pub credentials: Option<UpdateCredentials>,
     /// このジョブが保存した作品を、そのまま更新監視に載せるか。
     /// 設定の「保存した作品を自動で監視する」から渡ってくる。

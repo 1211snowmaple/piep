@@ -3,9 +3,8 @@ import { isPermissionGranted, requestPermission, sendNotification } from "@tauri
 import { isTauriRuntime, listUpdateTargets, listWatchGroups } from "@/services/dbApi";
 import { listUpdateJobsCommand, startUpdateJobCommand, type StartUpdateJobRequest } from "@/services/updateJobApi";
 import { isUpdateJobActive, isUpdateJobTerminal, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
-import { isRunDue, loadSchedule, saveSchedule, readLastRun, writeLastRun } from "@/features/updates/updateSchedule";
+import { isRunDue, loadSchedule, readLastRun, writeLastRun } from "@/features/updates/updateSchedule";
 import { shelfSearch, shelfStatus } from "@/services/shelfApi";
-import { watchGroupMatches } from "@/lib/watchIdentity";
 import type { WatchId } from "@/types/library";
 
 /** How often the app re-checks whether a scheduled run has come due. */
@@ -84,7 +83,7 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
             listWatchGroups(),
             listUpdateTargets<{ id: WatchId }>(null, true),
           ]);
-          const group = groups.find((item) => watchGroupMatches(item, settings.groupId));
+          const group = groups.find((item) => item.id === settings.groupId);
           if (!group) {
             console.error("自動確認の範囲にした監視グループが見つかりません", settings.groupId);
             return;
@@ -92,7 +91,6 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
           const members = new Set(group.targetIds);
           const targetIds = targets.filter((target) => members.has(target.id)).map((target) => target.id);
           if (!targetIds.length) return;
-          if (group.id !== settings.groupId) await saveSchedule({ ...settings, groupId: group.id });
           request = { scope: "targets", mode: settings.mode, targetIds, watchSaved: settings.watchSaved, newWorksOnly: settings.newWorksOnly };
         } else {
           // 監視対象も監視作品も無いなら、確認する意味がない。作品ごとの監視は

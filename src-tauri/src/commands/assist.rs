@@ -334,7 +334,7 @@ pub async fn shelf_assist_propose_splits(
 ) -> Result<GeneratedAssist<Vec<BundleSplit>>, String> {
     let works = blocking(&state, move |state| {
         let library = state.library()?;
-        let id = collection_target(&library, &collection)?;
+        let id = collection_target(&collection)?;
         library
             .assist_collection_facts(id)
             .map_err(|e| e.to_string())

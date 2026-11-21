@@ -2,7 +2,6 @@ import { getAssetUrl } from "@/services/dbApi";
 import { shelfContent, shelfOutline, shelfReadingPosition, shelfSearchContent, shelfSetReadingPosition, shelfWork, shelfBodyUrl, staleEditBaseOf, type ShelfReading, type ShelfWork } from "@/services/shelfApi";
 export { SHELF_WORK_ID } from "@/services/shelfApi";
 import { getDemoReader } from "@/mocks/demoData";
-import { readingKeyOf } from "@/features/library/readingShelf";
 import type { ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit } from "@/types/library";
 
 /**
@@ -12,10 +11,8 @@ import type { ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearc
 
 /** 読む画面の頭に出す作品の情報。 */
 export interface ReaderHead {
-  /** 作品の画面の ID（棚は UUID、プレビューの見本は番号）。 */
+  /** 作品の画面の ID（棚は UUID、プレビューの見本は番号）。読書位置・しおりもこれで引く。 */
   id: number | string;
-  /** 読書位置・しおりを引く鍵（`readingKeyOf`）。旧棚から移した作品は、まだ旧棚の番号のことがある。 */
-  readingKey: number | string;
   title: string;
   authorName: string;
   source: string;
@@ -53,7 +50,7 @@ export interface ReaderHeadQuery {
 }
 
 export interface ReaderSource {
-  /** 問い合わせの鍵。棚は UUID、見本は番号。読書位置・しおりは頭の `readingKey` で引く。 */
+  /** 問い合わせの鍵。棚は UUID、見本は番号。読書位置・しおりは頭の `id` で引く。 */
   key: number | string;
   /** 棚の作品（見本でない）。 */
   shelf: boolean;
@@ -79,7 +76,6 @@ function demoHead(doc: ReaderMetadata): ReaderHead {
   const edit = doc.activeEditRevision;
   return {
     id: work.id,
-    readingKey: work.id,
     title: work.title,
     authorName: work.authorName,
     source: work.source,
@@ -117,7 +113,6 @@ export function previewReaderSource(id: number): ReaderSource {
 function shelfHead(work: ShelfWork): ReaderHead {
   return {
     id: work.id,
-    readingKey: readingKeyOf(work),
     title: work.title,
     authorName: work.author_name,
     source: work.provider,

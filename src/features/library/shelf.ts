@@ -1,9 +1,5 @@
-import { useEffect } from "react";
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { adoptDeviceReadingKeys, readingKeysAdopted } from "@/features/library/readingShelf";
-import { rekeyBookmarks } from "@/features/reader/bookmarks";
+import { useQuery, type QueryClient } from "@tanstack/react-query";
 import {
-  shelfAdoptDevicePositions,
   shelfDecorations,
   shelfEntities,
   shelfCollection as fetchShelfCollection,
@@ -75,28 +71,6 @@ export function invalidateShelf(queryClient: QueryClient, keep?: readonly unknow
     predicate: (query) => query.queryKey[0] !== "shelf-status"
       && !(keep && keep.length === query.queryKey.length && keep.every((part, index) => part === query.queryKey[index])),
   });
-}
-
-/** 読みかけの棚を旧棚の番号で渡すか（端末の記録を棚の ID へ書き直す前だけ）。 */
-function legacyReadingWorks(params: SearchParams): number[] | null {
-  return readingKeysAdopted() ? null : params.idsInclude ?? null;
-}
-
-/**
- * 棚を正本に切り替えたら、端末に旧棚の番号で残した読書位置としおりを一度だけ棚の ID へ
- * 書き直し、読みかけを棚へ引き取る。アプリの頭で一度だけ使う。
- */
-export function useAdoptReadingKeys(runtime: boolean) {
-  const queryClient = useQueryClient();
-  const pending = runtime && !readingKeysAdopted();
-  const status = useShelfStatus(pending);
-  const ready = pending && shelfListable(status.data);
-  useEffect(() => {
-    if (!ready) return;
-    adoptDeviceReadingKeys(shelfAdoptDevicePositions, rekeyBookmarks)
-      .then(() => invalidateShelf(queryClient))
-      .catch((error: unknown) => console.error("端末の読書位置を棚へ引き取れません", error));
-  }, [ready, queryClient]);
 }
 
 /** 棚ではまだ使えない条件。画面はこれを出して、黙って外さない。 */
@@ -178,8 +152,8 @@ export function shelfFilter(params: SearchParams, scope: ShelfEntityScope = {}):
     content_type: params.contentType ?? null,
     favorite: params.favorite ?? null,
     watching: params.watchFilter ? params.watchFilter === "watched" : null,
-    // 読みかけの棚。端末の記録を棚の ID へ書き直したあとは、棚の読書位置で絞る。
-    reading: params.idsInclude && readingKeysAdopted() ? true : null,
+    // 読みかけの棚。棚の読書位置で絞る。
+    reading: params.idsInclude ? true : null,
     edited: params.editFilter ? params.editFilter === "edited" : null,
     has_cover: params.coverFilter ? params.coverFilter === "has_cover" : null,
     in_series: params.seriesFilter ? params.seriesFilter === "in_series" : null,
@@ -213,7 +187,7 @@ export function shelfFilter(params: SearchParams, scope: ShelfEntityScope = {}):
  * シリーズを自分の ID で指すので、取得元のキーは書き方の側で引く。作者・シリーズの画面は
  * 頭を引いた棚の ID を `scope` で渡す。
  */
-export function shelfRequest(params: SearchParams, scope: ShelfEntityScope = {}): { search: ShelfTextSearch; query: ShelfListQuery; legacyWorks: number[] | null; person: ShelfEntityKey | null } {
+export function shelfRequest(params: SearchParams, scope: ShelfEntityScope = {}): { search: ShelfTextSearch; query: ShelfListQuery; person: ShelfEntityKey | null } {
   const unsupported: string[] = [];
   if (params.personKey && !params.personSource) unsupported.push("取得元のない作者の指名");
   const sortBy = params.sortBy ?? "downloaded_at";
@@ -244,8 +218,6 @@ export function shelfRequest(params: SearchParams, scope: ShelfEntityScope = {})
       filter,
       count: !params.cursor || Boolean(params.offset),
     },
-    // 読みかけの棚。読書位置を旧棚の番号で憶えているあいだは、番号のまま渡して棚の側で読み替える。
-    legacyWorks: legacyReadingWorks(params),
     // 作者の指名（前後の作品・作者からの一覧）。棚の側で取得元の ID から引く。
     person: params.personKey ? { provider: params.personSource ?? null, key: params.personKey } : null,
   };
@@ -261,7 +233,6 @@ export function shelfEntry(card: ShelfCard, match?: ShelfMatch, decoration?: She
     id: card.id,
     shelf: true,
     coverUrl: shelfFileUrl(card.coverFile),
-    legacyId: card.legacyId,
     source: card.provider,
     sourceId: card.external_key,
     title: card.title,
@@ -319,8 +290,8 @@ export async function shelfEntriesByIds(ids: string[]): Promise<ShelfEntry[]> {
 }
 
 export async function searchShelf(params: SearchParams, scope: ShelfEntityScope = {}): Promise<ShelfSearchResult> {
-  const { search, query, legacyWorks, person } = shelfRequest(params, scope);
-  const view = await shelfSearch(search, query, legacyWorks, person);
+  const { search, query, person } = shelfRequest(params, scope);
+  const view = await shelfSearch(search, query, person);
   const decorations = search.text && view.matches.length
     ? await shelfDecorations(search.text, view.matches)
     : [];
@@ -450,7 +421,6 @@ export async function searchShelfEntities(
   const page = await shelfEntities(kind, {
     query: searchText,
     filter: shelfFilter(params),
-    legacyWorks: legacyReadingWorks(params),
     series: params.seriesKey ? { provider: params.seriesSource ?? null, key: params.seriesKey } : null,
     scope: scope
       ? { watch: scope.watch ?? null, min_work_count: scope.minWorkCount ?? null, concluded: scope.concluded ?? null }
@@ -505,7 +475,7 @@ export async function shelfWorkCollections(work: string): Promise<WorkCollection
 export function shelfCollectionSummary(item: ShelfCollectionSummary): WorkCollectionSummary {
   return {
     shelf: true,
-    id: item.legacy_id ?? item.id,
+    id: item.id,
     name: item.name,
     description: item.description,
     collectionKind: item.ordered ? "ordered" : "unordered",
@@ -560,7 +530,7 @@ function shelfCollectionView(item: ShelfCollection): WorkCollection {
       collectionId: summary.id,
       source: member.provider as SourceKind,
       sourceId: member.external_key,
-      downloadId: member.work?.legacyId ?? null,
+      downloadId: null,
       title: member.title,
       authorName: member.author_name,
       coverPath: member.cover,

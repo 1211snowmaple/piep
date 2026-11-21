@@ -36,7 +36,6 @@ const card: ShelfCard = {
   series_title: "シリーズ",
   series_position: 4,
   coverFile: "ab".repeat(32),
-  legacyId: null,
 };
 
 describe("shelfRequest", () => {
@@ -136,9 +135,9 @@ describe("shelfRequest", () => {
     expect(shelfRequest({}, { series: "s-1" }).query.filter).toMatchObject({ person: null, series: "s-1" });
   });
 
-  it("passes the reading shelf as the old shelf's numbers, which reading positions are kept under", () => {
-    expect(shelfRequest({ idsInclude: [3, 1] }).legacyWorks).toEqual([3, 1]);
-    expect(shelfRequest({}).legacyWorks).toBeNull();
+  it("narrows the reading shelf by the shelf's reading positions", () => {
+    expect(shelfRequest({ idsInclude: [3, 1] }).query.filter.reading).toBe(true);
+    expect(shelfRequest({}).query.filter.reading).toBeNull();
   });
 });
 
@@ -204,8 +203,7 @@ describe("searchShelfEntities", () => {
     expect(args).toMatchObject({
       kind: "person",
       query: "作",
-      filter: shelfFilter({ favorite: true, tagsInclude: ["雨"] }),
-      legacyWorks: [3],
+      filter: shelfFilter({ favorite: true, tagsInclude: ["雨"], idsInclude: [3] }),
       series: null,
       scope: { watch: "paused", min_work_count: 2, concluded: null },
       sort: "name",
@@ -231,10 +229,9 @@ describe("searchShelfEntities", () => {
 });
 
 describe("shelfCollectionSummary", () => {
-  it("opens the collection by its old id and serves its covers by fingerprint", () => {
+  it("opens the collection by its shelf id and serves its covers by fingerprint", () => {
     const item: ShelfCollectionSummary = {
       id: "0195f1c2-0000-7000-8000-0000000000d1",
-      legacy_id: "c1",
       name: "束",
       description: null,
       ordered: false,
@@ -254,7 +251,7 @@ describe("shelfCollectionSummary", () => {
     const summary = shelfCollectionSummary(item);
     expect(summary).toMatchObject({
       shelf: true,
-      id: "c1",
+      id: item.id,
       collectionKind: "unordered",
       coverMode: "file",
       coverImagePath: "12".repeat(32),
@@ -263,8 +260,6 @@ describe("shelfCollectionSummary", () => {
       updatedAt: "2026-01-05T00:00:00.000Z",
     });
     expect(summary.coverTiles[0]).toEqual({ source: "pixiv", sourceId: "1", title: "題", authorName: "作者", coverPath: null });
-    // 旧棚に無い（新しい棚で作った）コレクションは新しい棚の ID のまま。
-    expect(shelfCollectionSummary({ ...item, legacy_id: null }).id).toBe(item.id);
   });
 });
 

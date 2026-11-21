@@ -842,7 +842,7 @@ fn collection_parts_on_shelf(
     id: &str,
 ) -> Result<CollectionParts, String> {
     let library = shelf.library()?;
-    let target = crate::commands::shelf::collection_target(&library, id)?;
+    let target = crate::commands::shelf::collection_target(id)?;
     let detail = library
         .collection_detail(target)
         .map_err(|e| e.to_string())?;
@@ -862,11 +862,7 @@ fn collection_parts_on_shelf(
         }
     }
     let book = CollectionBook {
-        id: detail
-            .summary
-            .legacy_id
-            .clone()
-            .unwrap_or_else(|| detail.summary.id.to_string()),
+        id: detail.summary.id.to_string(),
         name: detail.summary.name.clone(),
         description: detail.summary.description.clone(),
         revision: detail.summary.revision,

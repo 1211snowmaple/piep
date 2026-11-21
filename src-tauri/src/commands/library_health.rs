@@ -10,7 +10,7 @@ use crate::database::models::{
 };
 use crate::library::{Library, LibraryId, ReclaimReport};
 use crate::library_facets::FacetKind;
-use crate::library_health::{ReadingSet, ShelfDiagnostics};
+use crate::library_health::ShelfDiagnostics;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -150,31 +150,12 @@ pub async fn shelf_dashboard(state: State<'_, Arc<Shelf>>) -> Result<DashboardSu
     .await
 }
 
-/// 横の欄の件数。読みかけは、端末の記録を棚へ移したあとは棚の読書位置で、移す前は
-/// 端末に残る旧棚の番号（`legacyReading`）で数える。
+/// 横の欄の件数。
 #[tauri::command]
-pub async fn shelf_counts(
-    state: State<'_, Arc<Shelf>>,
-    legacy_reading: Option<Vec<i64>>,
-) -> Result<LibraryShelfCounts, String> {
+pub async fn shelf_counts(state: State<'_, Arc<Shelf>>) -> Result<LibraryShelfCounts, String> {
     let state = Arc::clone(&state);
-    let numbers_state = Arc::clone(&state);
     on_library(&state, move |library| {
-        let reading = match legacy_reading {
-            None => ReadingSet::Shelf,
-            Some(numbers) => {
-                let known = numbers_state.legacy_numbers(&library)?;
-                let wanted: std::collections::HashSet<i64> = numbers.into_iter().collect();
-                ReadingSet::Legacy(
-                    known
-                        .iter()
-                        .filter(|(_, number)| wanted.contains(number))
-                        .map(|(work, _)| *work)
-                        .collect::<Vec<LibraryId>>(),
-                )
-            }
-        };
-        library.shelf_counts(reading).map_err(|e| e.to_string())
+        library.shelf_counts().map_err(|e| e.to_string())
     })
     .await
 }

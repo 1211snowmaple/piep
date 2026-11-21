@@ -3,7 +3,7 @@ import { WorkCover } from "@/components/WorkCover";
 import { Icons, IconSize } from "@/lib/icons";
 import { formatNumber } from "@/lib/format";
 import { summaryText } from "@/lib/content";
-import { readingKeyOf, readReadingPosition } from "@/features/library/readingShelf";
+import { readReadingPosition } from "@/features/library/readingShelf";
 import type { DownloadEntry, ShelfEntry } from "@/types/library";
 
 /**
@@ -45,7 +45,7 @@ export function NeighborTile({ role, ordered, label, title, work, emphasized, on
   emphasized: boolean;
   onOpen: () => void;
 }) {
-  const reading = work ? readReadingPosition(readingKeyOf(work), null) !== null : false;
+  const reading = work ? readReadingPosition(work.id, null) !== null : false;
   // 取得元の説明は HTML のことがある。一覧のカードと同じく地の文にして見せる。
   const excerpt = work?.excerpt ? summaryText(work.excerpt) : "";
   return (

@@ -142,19 +142,19 @@ export async function createWatchGroup(name: string): Promise<WatchId> {
 }
 
 export async function renameWatchGroup(groupId: WatchId, name: string): Promise<void> {
-  const group = (await listWatchGroups()).find((item) => item.id === groupId || item.legacyId === groupId);
+  const group = (await listWatchGroups()).find((item) => item.id === groupId);
   return invoke<void>("db_rename_watch_group", { groupId: group?.id ?? groupId, name, requestId: crypto.randomUUID(), expectedGeneration: group?.watchGeneration ?? null });
 }
 
 /** グループだけを消す。中の監視対象は残る。 */
 export async function deleteWatchGroup(groupId: WatchId): Promise<void> {
-  const group = (await listWatchGroups()).find((item) => item.id === groupId || item.legacyId === groupId);
+  const group = (await listWatchGroups()).find((item) => item.id === groupId);
   return invoke<void>("db_delete_watch_group", { groupId: group?.id ?? groupId, requestId: crypto.randomUUID(), expectedGeneration: group?.watchGeneration ?? null });
 }
 
 /** 監視対象をグループに入れる（add）か外す。変わった件数を返す。 */
 export async function setWatchGroupMembers(groupId: WatchId, targetIds: WatchId[], add: boolean): Promise<number> {
-  const group = (await listWatchGroups()).find((item) => item.id === groupId || item.legacyId === groupId);
+  const group = (await listWatchGroups()).find((item) => item.id === groupId);
   return invoke<number>("db_set_watch_group_members", { groupId: group?.id ?? groupId, targetIds, add, requestId: crypto.randomUUID(), expectedGeneration: group?.watchGeneration ?? null });
 }
 

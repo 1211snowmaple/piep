@@ -303,7 +303,6 @@ pub fn run() -> tauri::Result<()> {
             commands::shelf::shelf_reading_position,
             commands::shelf::shelf_set_reading_position,
             commands::shelf::shelf_clear_reading_positions,
-            commands::shelf::shelf_adopt_device_positions,
             commands::shelf::shelf_search,
             commands::shelf::shelf_decorations,
             commands::shelf::shelf_work,

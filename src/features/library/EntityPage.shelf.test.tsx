@@ -123,7 +123,6 @@ const card: ShelfCard = {
   series_title: null,
   series_position: null,
   coverFile: null,
-  legacyId: null,
 };
 
 function renderEntity(kind: "person" | "series", hash: string, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
@@ -244,10 +243,9 @@ describe("author and series pages on the new shelf", () => {
     await waitFor(() => expect(api.shelfEntityOriginal.mock.calls.length).toBeGreaterThan(1));
   });
 
-  it("lists the collections holding the author's works and opens them by their old id", async () => {
+  it("lists the collections holding the author's works and opens them by their shelf id", async () => {
     api.shelfEntityCollections.mockResolvedValue([{
       id: "0195f1c2-0000-7000-8000-0000000000d1",
-      legacy_id: "c-old",
       name: "雨の束",
       description: null,
       ordered: true,
@@ -269,7 +267,7 @@ describe("author and series pages on the new shelf", () => {
     expect(within(tab).getByText("1")).toBeInTheDocument();
     expect(await screen.findByText("雨の束")).toBeInTheDocument();
     expect(screen.getByText("未保存 1")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /雨の束/ })).toHaveAttribute("href", "#/collections/c-old");
+    expect(screen.getByRole("link", { name: /雨の束/ })).toHaveAttribute("href", "#/collections/0195f1c2-0000-7000-8000-0000000000d1");
     // 表紙のマスは棚のファイルの識別子から。
     expect(document.querySelector(`img[src="http://piep-library.localhost/${ICON}"]`)).not.toBeNull();
   });
