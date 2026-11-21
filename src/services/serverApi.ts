@@ -10,13 +10,6 @@ export interface ServerDevice {
   readsShelf?: boolean;
 }
 
-export interface EmbeddedServerSettings {
-  enabled: boolean;
-  ip: string | null;
-  behindProxy: boolean;
-  publicUrl: string | null;
-}
-
 export interface RemoteServerInfo {
   url: string;
   fingerprint: string | null;
@@ -40,11 +33,6 @@ export interface ServerLastSend {
 }
 
 export interface DesktopServerStatus {
-  embeddedRunning: boolean;
-  embeddedUrl: string | null;
-  embeddedFingerprint: string | null;
-  embedded: EmbeddedServerSettings;
-  devices: ServerDevice[];
   remote: RemoteServerInfo | null;
   autoSend: boolean;
   send: ServerSendProgress;
@@ -84,19 +72,8 @@ export interface ServerPairing {
   expiresInSeconds: number;
 }
 
-export interface ServerInterface {
-  name: string;
-  ip: string;
-}
-
 export const serverStatus = () => invoke<DesktopServerStatus>("server_status");
-export const serverInterfaces = () => invoke<ServerInterface[]>("server_list_interfaces");
-export const serverEmbeddedStart = (settings: EmbeddedServerSettings) =>
-  invoke<DesktopServerStatus>("server_embedded_start", { settings });
-export const serverEmbeddedStop = () => invoke<DesktopServerStatus>("server_embedded_stop");
 export const serverCreateReaderPairing = () => invoke<ServerPairing>("server_create_reader_pairing");
-export const serverRevokeDevice = (deviceId: string) =>
-  invoke<DesktopServerStatus>("server_revoke_device", { deviceId });
 export const serverRemoteDevices = () => invoke<ServerDevice[]>("server_list_remote_devices");
 /** 単独サーバーの携帯に、新しい棚を読む許可を付け外しする。 */
 export const serverSetRemoteShelfReader = (deviceId: string, read: boolean) =>

@@ -288,18 +288,3 @@ pub async fn admin_put(
     check_status(response).await?;
     Ok(())
 }
-
-pub async fn admin_delete(remote: &RemoteServer, token: &str, path: &str) -> Result<(), String> {
-    let client = build_client(remote).await?;
-    let response = client
-        .delete(format!(
-            "{}/api/v2/admin/{path}",
-            normalized_base(&remote.url)
-        ))
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(net_error)?;
-    check_status(response).await?;
-    Ok(())
-}

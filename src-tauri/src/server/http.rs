@@ -42,10 +42,8 @@ const CAPABILITIES: &[&str] = &["read"];
 
 pub struct ServerContext {
     pub store: Arc<ServerStore>,
-    /// アプリデータに当たる置き場（単独サーバーの置き場の根、内蔵サーバーはアプリのデータ）。
+    /// 単独サーバーの置き場の根。
     pub root: PathBuf,
-    /// 単独サーバーか（棚の写しを受け取り、管理の口を持つ）。
-    pub standalone: bool,
     /// 携帯の登録文字列に載せる URL。空なら頼んだ管理者の URL を使う。
     pub public_url: Option<String>,
     /// 自己署名で待ち受けているときの証明書の指紋。
@@ -63,20 +61,16 @@ pub struct ServerContext {
     paths: OnceLock<super::standalone::ServerPaths>,
 }
 
-pub type FavoritesListener = Arc<dyn Fn() + Send + Sync>;
-
 impl ServerContext {
     pub fn new(
         store: Arc<ServerStore>,
         root: PathBuf,
-        standalone: bool,
         public_url: Option<String>,
         fingerprint: Option<String>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
             root,
-            standalone,
             public_url,
             fingerprint,
             reader_shelf: OnceLock::new(),
@@ -574,7 +568,7 @@ async fn admin_status(
 
 fn admin_web_state(ctx: &ServerContext) -> &'static str {
     if ctx.web.get().is_none() {
-        if ctx.public_url.is_some() && ctx.standalone {
+        if ctx.public_url.is_some() {
             "public-only"
         } else {
             "none"

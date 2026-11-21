@@ -1,6 +1,6 @@
 # サーバーモード（β）
 
-> 旧 API（`/api/v1`）は無くした。いまの口は `/api/v2/hello`・`/api/v2/pair`・`/api/v2/about`・`/api/v2/admin/*` と、棚の読取 API（[新ライブラリの認証付き資産 API](./library-api-v2.md)）だけ。携帯の契約は `android/PROTOCOL.md`。下の `/api/v1` の読み手の口・読書位置・お気に入りの節は、作ったときの記録として残す。
+> 旧 API（`/api/v1`）は無くした。いまの口は `/api/v2/hello`・`/api/v2/pair`・`/api/v2/about`・`/api/v2/admin/*` と、棚の読取 API（[新ライブラリの認証付き資産 API](./library-api-v2.md)）だけ。携帯の契約は `android/PROTOCOL.md`。デスクトップ版の内蔵サーバー（「この PC をサーバーにする」）も 0.41 で無くし、サーバーは単独サーバーだけにした。下の `/api/v1` の読み手の口・読書位置・お気に入りの節と内蔵サーバーの記述は、作ったときの記録として残す。
 
 ## 目的
 
@@ -349,12 +349,11 @@ public_url = ""              # 携帯の登録文字列に載せる URL。空な
 <dir>\
   server.toml
   versions\       本体の実行ファイル（版ごと。直前の版を残す。段階 2）
-  library\        本文・画像（downloads\pixiv など、デスクトップ版と同じ形）と、使っている DB（piep.db）。
-                  直前の DB を piep.db.previous に 1 つ残す
-    downloads\search-index\   サーバーが作る全文索引
-  library-trash\  本棚から外したファイル（段階 1 では 7 日、段階 2 からは最も古いスナップショットまで残す）
-  incoming\       送信中のかたまりと DB（送信ごと）
-  snapshots\      バックアップのスナップショット（段階 2）
+  shelf\                   手で置いた棚（世代を選んでいないとき）
+  shelf-generations\       デスクトップ版から送られた棚の世代（<UUID>\。server.toml の shelf.generation が選ぶ）
+  shelf-incoming\          受け取り中の棚の実体と台帳
+  shelf-database-parts\    前に受け取った台帳の部分
+  shelf-pending.json      組み終えて、次の起動で切り替える世代
   state\          端末・ファイルの記録・読書位置・携帯のお気に入りの記録（state.db）、証明書、実行の記録、
                   操作の記録と取得元の認証情報（暗号化。段階 4）
 ```

@@ -605,7 +605,7 @@ pub fn assemble(
 ) -> Result<StandaloneParts, String> {
     fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
     let store = Arc::new(ServerStore::open(&paths.store())?);
-    let context = ServerContext::new(store, paths.root.clone(), true, public_url, fingerprint);
+    let context = ServerContext::new(store, paths.root.clone(), public_url, fingerprint);
     Ok(StandaloneParts { context })
 }
 

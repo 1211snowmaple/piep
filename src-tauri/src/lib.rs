@@ -348,10 +348,7 @@ pub fn run() -> tauri::Result<()> {
             commands::library_v2::library_v2_original,
             // サーバーモード (commands::server)
             commands::server::server_status,
-            commands::server::server_embedded_start,
-            commands::server::server_embedded_stop,
             commands::server::server_create_reader_pairing,
-            commands::server::server_revoke_device,
             commands::server::server_list_remote_devices,
             commands::server::server_set_remote_shelf_reader,
             commands::server::server_remote_status,
@@ -363,7 +360,6 @@ pub fn run() -> tauri::Result<()> {
             commands::server::server_set_auto_send,
             commands::server::server_send_now,
             commands::server::server_send_stop,
-            commands::server::server_list_interfaces,
             // 認証 (commands::auth)
             commands::auth::verify_pixiv_token,
             commands::auth::verify_fanbox_session,

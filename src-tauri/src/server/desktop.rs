@@ -1,27 +1,22 @@
-//! デスクトップ版の側。内蔵サーバーの開始と停止、単独サーバーへの接続と送信。
+//! デスクトップ版の側。単独サーバーへの接続と送信。
 //!
 //! 設定は Rust の側で持つ。画面を開いていないときの自動送信が読むからである。
 //! 管理者の鍵は Windows の資格情報マネージャーに置き、設定ファイルには書かない。
 
-use super::http::{combined_router, FavoritesListener, ServerContext};
-use super::standalone::run_listener;
-use super::store::{DeviceSummary, Role, ServerStore};
+use super::store::Role;
 use super::sync_send::{
-    admin_delete, admin_get, admin_get_if_present, admin_post, admin_put, pair_admin, RemoteServer,
-    SendHandle, SendProgress, CANCELED,
+    admin_get, admin_get_if_present, admin_post, admin_put, pair_admin, RemoteServer, SendHandle,
+    SendProgress, CANCELED,
 };
-use super::{pairing_payload, tls, DEFAULT_PORT};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
-const READER_PAIRING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 /// ダウンロードの途中で何度も送らないよう、変わってからこれだけ静かになるのを待つ。
 const AUTO_SEND_QUIET: Duration = Duration::from_secs(5 * 60);
 const AUTO_SEND_POLL: Duration = Duration::from_secs(30);
@@ -35,17 +30,6 @@ const FAVORITES_POLL: Duration = Duration::from_secs(60);
 /// サーバーの棚の読書位置を一度に読む数（サーバーの上限）。
 const SHELF_READING_PAGE: usize = 500;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct EmbeddedSettings {
-    pub enabled: bool,
-    /// 待ち受けるアドレス。`behind_proxy` なら 127.0.0.1 の平文。
-    pub ip: Option<String>,
-    pub behind_proxy: bool,
-    /// リバースプロキシで外へ出すときの URL。
-    pub public_url: Option<String>,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LastSend {
@@ -58,7 +42,6 @@ pub struct LastSend {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DesktopServerSettings {
-    pub embedded: EmbeddedSettings,
     pub remote: Option<RemoteServer>,
     pub auto_send: bool,
     pub last_send: LastSend,
@@ -106,14 +89,6 @@ struct ShelfReadingPage {
 struct ShelfReadingItem {
     work: crate::library::LibraryId,
     position: crate::library::ReadingPosition,
-}
-
-struct ActiveEmbedded {
-    address: SocketAddr,
-    url: String,
-    fingerprint: Option<String>,
-    handle: axum_server::Handle<SocketAddr>,
-    task: tokio::task::JoinHandle<()>,
 }
 
 /// 送信を頼んだ結果。
@@ -169,12 +144,12 @@ impl AutoSendProgress {
     }
 }
 
+/// 携帯がお気に入りを変えたと画面へ知らせる係。
+pub type FavoritesListener = Arc<dyn Fn() + Send + Sync>;
+
 pub struct DesktopServer {
     dir: PathBuf,
-    app_data: PathBuf,
-    store: Arc<ServerStore>,
     settings: Mutex<DesktopServerSettings>,
-    active: AsyncMutex<Option<ActiveEmbedded>>,
     send: SendHandle,
     send_lock: AsyncMutex<()>,
     /// 携帯がお気に入りを変えたと画面へ知らせる係。起動の途中で付ける。
@@ -185,11 +160,6 @@ pub struct DesktopServer {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopServerStatus {
-    pub embedded_running: bool,
-    pub embedded_url: Option<String>,
-    pub embedded_fingerprint: Option<String>,
-    pub embedded: EmbeddedSettings,
-    pub devices: Vec<DeviceSummary>,
     pub remote: Option<RemoteServer>,
     pub auto_send: bool,
     pub send: SendProgress,
@@ -201,13 +171,6 @@ pub struct DesktopServerStatus {
 pub struct PairingDetails {
     pub payload: String,
     pub expires_in_seconds: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocalInterface {
-    pub name: String,
-    pub ip: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -324,24 +287,21 @@ impl DesktopServer {
         let dir = app_data.join("server");
         fs::create_dir_all(&dir)
             .map_err(|error| format!("サーバーの置き場を作れません: {error}"))?;
-        let store = Arc::new(ServerStore::open(&dir.join("state.db"))?);
+        forget_embedded_server(&dir);
         let settings = fs::read(dir.join("settings.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         Ok(Self {
             dir,
-            app_data: app_data.to_path_buf(),
-            store,
             settings: Mutex::new(settings),
-            active: AsyncMutex::new(None),
             send: SendHandle::new(),
             send_lock: AsyncMutex::new(()),
             favorites_listener: OnceLock::new(),
         })
     }
 
-    /// 画面へ知らせる係を付ける。内蔵サーバーを始める前に呼ぶ。
+    /// 画面へ知らせる係を付ける。
     pub fn set_favorites_listener(&self, listener: FavoritesListener) {
         let _ = self.favorites_listener.set(listener);
     }
@@ -370,14 +330,7 @@ impl DesktopServer {
 
     pub async fn status(&self) -> DesktopServerStatus {
         let settings = self.settings();
-        let active = self.active.lock().await;
-        let running = active.as_ref().filter(|server| !server.task.is_finished());
         DesktopServerStatus {
-            embedded_running: running.is_some(),
-            embedded_url: running.map(|server| server.url.clone()),
-            embedded_fingerprint: running.and_then(|server| server.fingerprint.clone()),
-            embedded: settings.embedded,
-            devices: self.store.list_devices().unwrap_or_default(),
             remote: settings.remote,
             auto_send: settings.auto_send,
             send: self
@@ -390,165 +343,35 @@ impl DesktopServer {
         }
     }
 
-    /// 内蔵サーバーを始める。
-    pub async fn start_embedded(
-        &self,
-        settings: EmbeddedSettings,
-        port: u16,
-    ) -> Result<(), String> {
-        let mut active = self.active.lock().await;
-        if active
-            .as_ref()
-            .is_some_and(|server| !server.task.is_finished())
-        {
-            return Err("サーバーはすでに動いています".into());
-        }
-        *active = None;
-        let public_url = settings
-            .public_url
-            .clone()
-            .filter(|url| !url.trim().is_empty());
-        if public_url
-            .as_ref()
-            .is_some_and(|url| !url.starts_with("https://"))
-        {
-            return Err("公開 URL は https:// で始めてください".into());
-        }
-        let (address, material) = if settings.behind_proxy {
-            (SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port), None)
-        } else {
-            let ip: Ipv4Addr = settings
-                .ip
-                .as_deref()
-                .and_then(|ip| ip.parse().ok())
-                .ok_or("待ち受ける IPv4 アドレスを選んでください")?;
-            if !ip.is_private() && !ip.is_loopback() {
-                return Err("この PC のプライベート IPv4 アドレスを選んでください".into());
-            }
-            (
-                SocketAddr::new(IpAddr::V4(ip), port),
-                Some(tls::self_signed(&self.dir.join("tls")).await?),
-            )
-        };
-        let fingerprint = material
-            .as_ref()
-            .and_then(|material| material.fingerprint.clone());
-        let tls_config = material.map(|material| material.config);
-        let url = public_url.clone().unwrap_or_else(|| {
-            if tls_config.is_some() {
-                format!("https://{address}/")
-            } else {
-                format!("http://{address}/")
-            }
-        });
-        let context = ServerContext::new(
-            Arc::clone(&self.store),
-            self.app_data.clone(),
-            false,
-            public_url,
-            fingerprint.clone(),
-        );
-        let router = combined_router(context);
-        let handle = axum_server::Handle::new();
-        // 実際のポートと、待ち受けの失敗をここで確かめる。
-        let probe = std::net::TcpListener::bind(address)
-            .map_err(|error| format!("{address} で待ち受けられません: {error}"))?;
-        let address = probe
-            .local_addr()
-            .map_err(|error| format!("{address} を確認できません: {error}"))?;
-        drop(probe);
-        let run_handle = handle.clone();
-        let task = tokio::spawn(async move {
-            if let Err(error) = run_listener(address, tls_config, router, run_handle).await {
-                log::error!("内蔵サーバーが止まりました: {error}");
-            }
-        });
-        let url = if port == 0 {
-            url.replace(":0/", &format!(":{}/", address.port()))
-        } else {
-            url
-        };
-        *active = Some(ActiveEmbedded {
-            address,
-            url,
-            fingerprint,
-            handle,
-            task,
-        });
-        drop(active);
-        self.change_settings(|current| {
-            current.embedded = EmbeddedSettings {
-                enabled: true,
-                ..settings
-            };
-        })
-    }
-
-    pub async fn stop_embedded(&self) -> Result<(), String> {
-        let mut active = self.active.lock().await;
-        if let Some(server) = active.take() {
-            log::info!("内蔵サーバーを止めます: {}", server.address);
-            server.handle.shutdown();
-            let mut task = server.task;
-            if tokio::time::timeout(Duration::from_secs(2), &mut task)
-                .await
-                .is_err()
-            {
-                task.abort();
-            }
-        }
-        drop(active);
-        self.change_settings(|current| current.embedded.enabled = false)
-    }
-
-    /// 携帯の登録文字列。単独サーバーにつないでいればそちらで、無ければ内蔵サーバーで発行する。
+    /// 携帯の登録文字列を、つないでいる単独サーバーで発行する。
     pub async fn create_reader_pairing(&self) -> Result<PairingDetails, String> {
-        if let Some(remote) = self.settings().remote {
-            let token = credential::load(&remote.url)?
-                .ok_or("サーバーの鍵がありません。登録し直してください")?;
-            let body = admin_post(
-                &remote,
-                &token,
-                "pairings",
-                &serde_json::json!({ "url": remote.url }),
-            )
-            .await?;
-            let payload = body
-                .get("payload")
-                .and_then(|value| value.as_str())
-                .ok_or("サーバーの応答を読み取れません")?
-                .to_string();
-            let expires_in_seconds = body
-                .get("expiresInSeconds")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(600);
-            return Ok(PairingDetails {
-                payload,
-                expires_in_seconds,
-            });
-        }
-        let active = self.active.lock().await;
-        let server = active
-            .as_ref()
-            .filter(|server| !server.task.is_finished())
-            .ok_or("サーバーを動かしてから追加してください")?;
-        if !server.url.starts_with("https://") {
-            return Err("リバースプロキシの裏で動かすときは、公開 URL を設定してください".into());
-        }
-        let secret = self
-            .store
-            .issue_pairing(Role::Reader, READER_PAIRING_LIFETIME)?;
+        let remote = self
+            .settings()
+            .remote
+            .ok_or("単独サーバーにつないでいません")?;
+        let token = credential::load(&remote.url)?
+            .ok_or("サーバーの鍵がありません。登録し直してください")?;
+        let body = admin_post(
+            &remote,
+            &token,
+            "pairings",
+            &serde_json::json!({ "url": remote.url }),
+        )
+        .await?;
+        let payload = body
+            .get("payload")
+            .and_then(|value| value.as_str())
+            .ok_or("サーバーの応答を読み取れません")?
+            .to_string();
+        let expires_in_seconds = body
+            .get("expiresInSeconds")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(600);
         Ok(PairingDetails {
-            payload: pairing_payload(
-                Role::Reader,
-                &server.url,
-                server.fingerprint.as_deref(),
-                &secret,
-            ),
-            expires_in_seconds: READER_PAIRING_LIFETIME.as_secs(),
+            payload,
+            expires_in_seconds,
         })
     }
-
     pub async fn list_remote_devices(&self) -> Result<Vec<serde_json::Value>, String> {
         let remote = self
             .settings()
@@ -645,19 +468,6 @@ impl DesktopServer {
             &serde_json::json!({ "read": read }),
         )
         .await
-    }
-
-    pub async fn revoke_device(&self, device_id: &str) -> Result<(), String> {
-        if let Some(remote) = self.settings().remote {
-            let token = credential::load(&remote.url)?
-                .ok_or("サーバーの鍵がありません。登録し直してください")?;
-            return admin_delete(&remote, &token, &format!("devices/{device_id}")).await;
-        }
-        if self.store.revoke_device(device_id)? {
-            Ok(())
-        } else {
-            Err("端末が見つかりません".into())
-        }
     }
 
     pub async fn connect_remote(&self, pairing: &str, device_name: &str) -> Result<(), String> {
@@ -994,13 +804,6 @@ impl DesktopServer {
     pub fn start_background(self: &Arc<Self>, state: Arc<AppState>) {
         let server = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
-            let settings = server.settings();
-            if settings.embedded.enabled {
-                let port = DEFAULT_PORT;
-                if let Err(error) = server.start_embedded(settings.embedded, port).await {
-                    log::warn!("内蔵サーバーを始められません: {error}");
-                }
-            }
             tokio::time::sleep(AUTO_SEND_STARTUP_DELAY).await;
             // 送るものがなくても、デスクトップ版が新しくなったらサーバーを追いつかせる。
             if server.settings().remote.is_some() {
@@ -1051,37 +854,17 @@ impl DesktopServer {
     }
 }
 
+/// 0.40 まであった内蔵サーバーの登録・証明書を消す。設定の `embedded` は読むときに捨てる。
+fn forget_embedded_server(dir: &Path) {
+    for name in ["state.db", "state.db-wal", "state.db-shm"] {
+        let _ = fs::remove_file(dir.join(name));
+    }
+    let _ = fs::remove_dir_all(dir.join("tls"));
+}
+
 /// 送るべき変更があったかを見る印。
 fn change_generation(state: &AppState) -> Option<i64> {
     state.library_v2.library().ok()?.change_marker().ok()
-}
-
-pub fn list_local_interfaces() -> Result<Vec<LocalInterface>, String> {
-    let preferred = local_ip_address::local_ip().ok();
-    let mut interfaces = local_ip_address::list_afinet_netifas()
-        .map_err(|error| format!("PC のネットワークを確認できません: {error}"))?
-        .into_iter()
-        .filter_map(|(name, address)| match address {
-            IpAddr::V4(ip) if ip.is_private() || ip.is_loopback() => Some(LocalInterface {
-                name,
-                ip: ip.to_string(),
-            }),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    interfaces.push(LocalInterface {
-        name: "この PC のみ（Android エミュレーター）".into(),
-        ip: Ipv4Addr::LOCALHOST.to_string(),
-    });
-    interfaces.sort_by(|left, right| {
-        let left_preferred = preferred.is_some_and(|ip| ip.to_string() == left.ip);
-        let right_preferred = preferred.is_some_and(|ip| ip.to_string() == right.ip);
-        right_preferred
-            .cmp(&left_preferred)
-            .then_with(|| left.ip.cmp(&right.ip))
-    });
-    interfaces.dedup_by(|left, right| left.ip == right.ip);
-    Ok(interfaces)
 }
 
 #[cfg(test)]

@@ -2778,5 +2778,14 @@ web 詳細で確認した空欄・通常の空欄の変更を試験した。同�
   旧同期の表を捨てる。番号で保存した `work-{番号}` の置き場は読まない（残っていれば保存し直す）。
   サーバーに棚が無いときは `no_library` と出す。
 
-残り: Maple への反映と `C:\ServerData\piep\library` の削除（4、了承が要る）、内蔵サーバーを残すか（5）、
-単独サーバーの棚の置き場の名前（`library-v2/`）と設定の `[library_v2]` を棚の名前へ直すか。
+- 単独サーバー: 置き場の `library-v2…` を `shelf…`（`shelf/`・`shelf-generations/`・`shelf-incoming/`・
+  `shelf-database-parts/`・`shelf-pending.json`）に、設定の `[library_v2]` を `[shelf]` にした。0.41 の
+  起動時に一度だけ移す（`server.toml.previous` も）。旧棚の置き場（`library/`）を作るのと、当てる前に
+  `piep.db` を写すのもやめた（0.40 が作った写しの目録に載っていても戻さない）。
+
+- 内蔵サーバー（5）: 消した。棚を配らない（`set_reader_shelf` を呼ぶのは単独サーバーだけ）ので、v1 が
+  消えた今は携帯を登録できても `no_library` になるだけだった。設定画面は単独サーバーへの接続だけにし、
+  命令 `server_embedded_start`・`server_embedded_stop`・`server_list_interfaces`・`server_revoke_device` を消した。
+  アプリデータの `server\state.db` と `server	ls\` は起動時に消し、設定の `embedded` は読むときに捨てる。
+
+残り: Maple への反映と `C:\ServerData\piep\library` の削除（4、了承が要る）。

@@ -1,11 +1,12 @@
 //! サーバーモードを通しで確かめる。本物の HTTP で話し、本物のファイルと DB を動かす。
 //! 棚を読む口（`/api/v2/libraries/...`）の試験は `v2/tests.rs`、棚の送信は `standalone_shipment_tests.rs`。
 
-use super::desktop::{DesktopServer, EmbeddedSettings};
 use super::http::{
     admin_router, combined_router, reader_router, AdminAsset, AdminWeb, ConnectionInfo,
 };
-use super::standalone::{assemble, command_admin_pair, command_init, ServerPaths, StandaloneParts};
+use super::standalone::{
+    assemble, command_admin_pair, command_init, run_listener, ServerPaths, StandaloneParts,
+};
 use super::store::{random_token, Role, ServerStore};
 use super::sync_send::{pair_admin, RemoteServer};
 use super::API_VERSION;
@@ -54,28 +55,26 @@ async fn pair_with(client: &reqwest::Client, url: &str, secret: &str) -> serde_j
 }
 
 #[tokio::test]
-async fn embedded_https_requires_pairing_and_revocation_takes_effect() {
-    let root = TestRoot::created("embedded");
-    let app_data = root.0.join("app-data");
-    fs::create_dir_all(&app_data).expect("app data");
-    let server = DesktopServer::new(&app_data).expect("server");
-    server
-        .start_embedded(
-            EmbeddedSettings {
-                ip: Some("127.0.0.1".into()),
-                ..Default::default()
-            },
-            0,
-        )
+async fn self_signed_https_requires_pairing_and_revocation_takes_effect() {
+    let root = TestRoot::created("self_signed");
+    let (parts, _paths) = standalone(&root.0);
+    let material = super::tls::self_signed(&root.0.join("tls"))
         .await
-        .expect("start");
-    let status = server.status().await;
-    let url = status
-        .embedded_url
-        .clone()
-        .expect("url")
-        .trim_end_matches('/')
-        .to_string();
+        .expect("tls");
+    let address = TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("address");
+    let handle = axum_server::Handle::new();
+    let router = combined_router(Arc::clone(&parts.context));
+    let served = handle.clone();
+    tokio::spawn(async move {
+        run_listener(address, Some(material.config), router, served)
+            .await
+            .expect("serve");
+    });
+    let expected_fingerprint = material.fingerprint;
+    let url = format!("https://{address}");
 
     let probe = reqwest::Client::builder()
         .tls_backend_rustls()
@@ -105,7 +104,7 @@ async fn embedded_https_requires_pairing_and_revocation_takes_effect() {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    assert_eq!(Some(fingerprint), status.embedded_fingerprint);
+    assert_eq!(Some(fingerprint), expected_fingerprint);
     let body: serde_json::Value = hello.json().await.expect("hello JSON");
     assert_eq!(body["apiVersion"], API_VERSION);
     assert_eq!(body["serverName"], "piep");
@@ -126,18 +125,19 @@ async fn embedded_https_requires_pairing_and_revocation_takes_effect() {
         .expect("request");
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
-    let pairing = server.create_reader_pairing().await.expect("pairing");
-    let payload: serde_json::Value = serde_json::from_str(&pairing.payload).expect("payload");
-    assert_eq!(payload["version"], 2);
-    assert_eq!(payload["role"], "reader");
-    let credentials = pair_with(&client, &url, payload["secret"].as_str().expect("secret")).await;
+    let secret = parts
+        .context
+        .store
+        .issue_pairing(Role::Reader, Duration::from_secs(600))
+        .expect("pairing");
+    let credentials = pair_with(&client, &url, &secret).await;
     let token = credentials["token"].as_str().expect("token");
     let device_id = credentials["deviceId"].as_str().expect("device id");
 
     // 一回限りの鍵は、使ったら終わり。
     let again = client
         .post(format!("{url}/api/v2/pair"))
-        .json(&serde_json::json!({ "secret": payload["secret"], "deviceName": "another" }))
+        .json(&serde_json::json!({ "secret": secret, "deviceName": "another" }))
         .send()
         .await
         .expect("second pair");
@@ -160,7 +160,11 @@ async fn embedded_https_requires_pairing_and_revocation_takes_effect() {
         .expect("admin");
     assert_eq!(admin.status(), StatusCode::FORBIDDEN);
 
-    server.revoke_device(device_id).await.expect("revoke");
+    assert!(parts
+        .context
+        .store
+        .revoke_device(device_id)
+        .expect("revoke"));
     let revoked = client
         .get(format!("{url}/api/v2/about"))
         .bearer_auth(token)
@@ -169,13 +173,7 @@ async fn embedded_https_requires_pairing_and_revocation_takes_effect() {
         .expect("revoked");
     assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
 
-    server.stop_embedded().await.expect("stop");
-    assert!(probe
-        .get(format!("{url}/api/v2/hello"))
-        .send()
-        .await
-        .is_err());
-    assert!(!server.status().await.embedded.enabled);
+    handle.shutdown();
 }
 
 fn spawn_plain(router: axum::Router) -> String {
