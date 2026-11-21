@@ -1,6 +1,7 @@
 # 進め方の取り決め
 
 コミット・タグ・push の判断をその都度考え直さずに済むよう、決めたことを書き残す。
+作業の流れの全体と、どの AI にも効く決まりは [AGENTS.md](AGENTS.md) にある。ここはその細目。
 
 ## コミットの粒度
 
@@ -36,67 +37,78 @@
 - 箇条書きは「領域: 内容」の形で揃える
 - 直した不具合は、症状・原因・対処の順で書く。原因が推測なら推測と書く
 
-書かないこと: 作業ログ、試した順番、AI が書いたという注記。
+書かないこと: 作業ログ、試した順番、AI が書いたという注記（道具が決まって付ける署名行 `Co-Authored-By:` は付けてよい）。
 
 ## いつコミットするか
 
 - ひとつの機能または目的が**動く状態で**完結したとき
-- ローカルのゲート（下記）が緑になってから
+- ローカルのゲート（下記の `tools/check.ps1`）が緑になってから
 - 途中で別の作業に移る必要が出たときは、中途半端な状態をコミットせず、まず
   まとまりのある単位まで進めるか、切り分けて先に片付ける
 
 ## ローカルのゲート
 
-CI とローカルで同じ結果を再現できるよう、Node.js 24.x と Rust 1.99.1 を使う。
-コミット前に通すもの。CI と同じ内容を先に手元で確認する。
+コミット前に通す。入口は一つで、CI も同じスクリプトを呼ぶ。
 
-```bash
-npm run check
-npm run lint
-npx vitest run src
-cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-cargo test --manifest-path tools/ipc-extract/Cargo.toml
-npm --prefix docs-tools run docs:check
+```powershell
+pwsh tools/check.ps1
 ```
 
-`npm run check` は `src/` と `e2e/` の両方を見る。`e2e/` を含めるまで、視覚回帰
-の spec と `playwright.config.ts` は誰にも型検査されていなかった（Playwright は
-型を剥がすだけなので、走らせても誤りは出ない）。含めた時点で、**ずっと効いて
-いなかった設定**が一つ見つかっている。
+既定で流れる段は `frontend`（型検査・lint・画面の単体試験）、`rust`（nextest・clippy・rustfmt・
+EPUBCheck）、`docs`（画面と Rust の境界の突き合わせ・方針書の数・文書サイト）。変えた物に応じて足す。
 
-最後の1本はフロントと Rust の境界を突き合わせる。`invoke("名前")` に対応する
-コマンドが無い、`generate_handler!` への登録を忘れた、といった**実行するまで
-気付かない食い違い**をここで捕まえる。
+| 変えた物 | 足す段 |
+|---|---|
+| 画面 | `-Stage frontend,rust,docs,visual` |
+| 携帯の画面 | `android` |
+| 携帯の Rust・署名・Gradle | `apk`（重い。鍵なしで組めることだけを見る） |
+
+版は `rust-toolchain.toml`（Rust）と Node.js 24.x にそろえる。`cargo-nextest` と、`docs-tools` の
+依存（`npm --prefix docs-tools ci`）が要る。
+
+`docs` の段はフロントと Rust の境界を突き合わせる。`invoke("名前")` に対応するコマンドが無い、
+`generate_handler!` への登録を忘れた、といった**実行するまで気付かない食い違い**をここで捕まえる。
 
 コマンドや画面を足したときは、方針書（`docs/policy/`）が古くなっていないかも見る。
-**方針書はソースの変更と同じコミットで直す。** 別のコミットに回すと、だいたい
-そのまま忘れられる。
+**方針書はソースの変更と同じコミットで直す。** 別のコミットに回すと、だいたいそのまま忘れられる。
 
-画面を変えたときは、加えて実際に動かして確認する。視覚回帰は CI と同条件で:
+画面を変えたときは、加えて実際に動かして確認する。視覚の基準（`e2e/__screenshots__/`）は手元で
+撮り直してよい（CI と画素まで一致する）。撮り直すときは spec を指定する。丸ごと走らせると
+`readme-shots` も動いて `docs/screenshots/*` を書き換える。
 
-```bash
-npm run build && CI=1 npx playwright test
+```powershell
+npx playwright test e2e/visual-regression.spec.ts --update-snapshots
 ```
 
 ## いつ main へ push するか
 
-作業ブランチから Pull Request を作り、`main` は **CI が緑であることを確認した
-状態だけ**を指す。廃止済みの `develop` ブランチを中継しない。
+作業ブランチから Pull Request を作り、`main` は **CI が緑であることを確認した状態だけ**を指す。
+`main` へ直接 push しない。廃止済みの `develop` ブランチを中継しない。
 
-1. 作業ブランチを push して Pull Request を作る
-2. Pull Request の CI が**4ジョブとも**緑になるのを**実際に確認する**（`gh run watch`）。
-   Quality の3つ（`checks` / `visual-regression` / `native-window-smoke`）に
-   加えて、Docs の `contract`（境界のドリフト検査）も同じ push で走る
-3. 緑を確認してから `main` へマージする
-4. `main` の同じ4ジョブが、そのマージコミットで緑になったことを確認する
+1. 作業ブランチを push して Pull Request を作る。本文は `.github/pull_request_template.md` に沿う
+2. Pull Request の CI が**全部**緑になるのを**実際に確認する**。いつも走るのは Quality の3つ
+   （`checks` / `visual-regression` / `native-window-smoke`）と Docs の `contract`。触った場所に
+   応じて Storage と Android も走る
+3. 緑を確認し、利用者の了承を得てから `main` へマージする
+4. `main` の同じジョブが、そのマージコミットで緑になったことを確認する
 
-手元が緑でも CI が緑とは限らない。Node のバージョン差、並列度、ランナーの
-コア数で結果は変わる。**手元の結果だけを根拠に「CI も通る」と言わない。**
+手元が緑でも CI が緑とは限らない。Node のバージョン差、並列度、実行環境で結果は変わる。
+**手元の結果だけを根拠に「CI も通る」と言わない。**
 
 緑を1回見ただけで「直った」と判断しない。断続的な失敗を疑うときは、同じ条件で
 複数回確認してから結論を出す。
+
+### CI の実行役
+
+重いジョブ（Quality の `checks`・`visual-regression`、Android の APK、リリースの組み立て）は利用者の PC の
+self-hosted runner（ラベル `snow`、2台）で動く。組み立ての途中経過が
+残るので、キャッシュの復元なしで数分で終わる。
+
+- よそのフォークからの PR は GitHub のランナーで動く。外部の人の PR のワークフローは承認が要る設定にしてある
+- PC を長く止めるときは、リポジトリの変数 `CI_RUNNER` を `hosted` にすると全部 GitHub のランナーへ戻る
+  （戻すときは `self`）。止まっている間に積まれたジョブは、PC が起きるまで待つ
+- 窓を開く `native-window-smoke` は、使っている画面に割り込むのでいつも GitHub のランナー
+- 実行役の上では利用者の rustup・npm・SDK がそのまま使われる。workflow から既定の版を変えない
 
 ## リリース
 
