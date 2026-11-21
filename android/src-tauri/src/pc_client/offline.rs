@@ -7,10 +7,8 @@ use super::native_reader;
 use super::*;
 use piep_library_protocol::{Id, ResourceScope, WorkReadingView};
 use piep_reader_render::pages::reader_outline;
-use regex::Regex;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -25,109 +23,46 @@ const MAX_COLLECTION_COVER_BYTES: usize = 16 * 1024 * 1024;
 #[path = "offline_index.rs"]
 mod index;
 
-/// 保存した作品の鍵。旧 API の作品はサーバーの番号、新しい棚の作品は作品の UUID。
-/// 画面とは数（旧）と文字列（新）でやり取りし、置き場は `work-{番号}` と `shelf-{UUID}`。
+/// 保存した作品の鍵。棚の作品の UUID で、置き場は `shelf-{UUID}`。
+/// 画面とは UUID の文字列でやり取りする。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "RawKey", into = "RawKey")]
-pub enum OfflineKey {
-    Legacy(i64),
-    Shelf(Uuid),
-}
+#[serde(try_from = "String", into = "String")]
+pub struct OfflineKey(pub(super) Uuid);
 
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-enum RawKey {
-    Number(i64),
-    Text(String),
-}
-
-impl TryFrom<RawKey> for OfflineKey {
+impl TryFrom<String> for OfflineKey {
     type Error = &'static str;
-    fn try_from(raw: RawKey) -> Result<Self, Self::Error> {
-        match raw {
-            RawKey::Number(id) if id > 0 => Ok(Self::Legacy(id)),
-            RawKey::Text(text) => Self::shelf(&text).ok_or("invalid shelf work"),
-            RawKey::Number(_) => Err("invalid work"),
-        }
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::parse(&text).ok_or("invalid shelf work")
     }
 }
 
-impl From<OfflineKey> for RawKey {
+impl From<OfflineKey> for String {
     fn from(key: OfflineKey) -> Self {
-        match key {
-            OfflineKey::Legacy(id) => Self::Number(id),
-            OfflineKey::Shelf(id) => Self::Text(id.to_string()),
-        }
+        key.0.to_string()
     }
 }
 
 impl OfflineKey {
     /// 小文字・ハイフン区切りの UUID だけ（同じ作品に別の置き場を作らない）。
-    fn shelf(text: &str) -> Option<Self> {
+    pub(super) fn parse(text: &str) -> Option<Self> {
         let id = Uuid::parse_str(text).ok()?;
-        (!id.is_nil() && id.to_string() == text).then_some(Self::Shelf(id))
+        (!id.is_nil() && id.to_string() == text).then_some(Self(id))
     }
 
-    /// 経路や置き場の名前に出る形（旧は正の番号、新は UUID）から。
-    pub(super) fn parse(text: &str) -> Option<Self> {
-        if let Ok(id) = text.parse::<i64>() {
-            return (id > 0 && id.to_string() == text).then_some(Self::Legacy(id));
-        }
-        Self::shelf(text)
+    fn of(work: &piep_mobile_api::MobileShelfWork) -> Option<Self> {
+        Self::parse(&work.id)
     }
 
     pub(super) fn dir_name(&self) -> String {
-        match self {
-            Self::Legacy(id) => format!("work-{id}"),
-            Self::Shelf(id) => format!("shelf-{id}"),
-        }
+        format!("shelf-{}", self.0)
     }
 
     fn from_dir_name(name: &str) -> Option<Self> {
-        let key = if let Some(id) = name.strip_prefix("work-") {
-            Self::Legacy(id.parse::<i64>().ok()?)
-        } else {
-            Self::shelf(name.strip_prefix("shelf-")?)?
-        };
-        (key.valid() && key.dir_name() == name).then_some(key)
+        Self::parse(name.strip_prefix("shelf-")?)
     }
 
     fn valid(&self) -> bool {
-        match self {
-            Self::Legacy(id) => *id > 0,
-            Self::Shelf(id) => !id.is_nil(),
-        }
-    }
-}
-
-/// 保存した作品の一覧の行。新しい棚の作品は棚の一覧と同じ形で残す。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum SavedWork {
-    Shelf(piep_mobile_api::MobileShelfWork),
-    Legacy(MobileWork),
-}
-
-impl SavedWork {
-    fn key(&self) -> Option<OfflineKey> {
-        match self {
-            Self::Shelf(work) => OfflineKey::shelf(&work.id),
-            Self::Legacy(work) => Some(OfflineKey::Legacy(work.id)),
-        }
-    }
-
-    fn source(&self) -> &str {
-        match self {
-            Self::Shelf(work) => &work.source,
-            Self::Legacy(work) => &work.source,
-        }
-    }
-
-    fn source_id(&self) -> &str {
-        match self {
-            Self::Shelf(work) => &work.source_id,
-            Self::Legacy(work) => &work.source_id,
-        }
+        !self.0.is_nil()
     }
 }
 
@@ -235,8 +170,9 @@ impl OfflineState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OfflineWork {
-    pub work: SavedWork,
-    /// 新しい棚の作品なら、その棚の UUID。
+    /// 棚の一覧と同じ形で残す。
+    pub work: piep_mobile_api::MobileShelfWork,
+    /// 保存した棚の UUID。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shelf_library: Option<String>,
     #[serde(default)]
@@ -477,7 +413,7 @@ fn read_manifest(
     let manifest: Manifest =
         serde_json::from_slice(&fs::read(snapshot.join("manifest.json")).map_err(|_| storage())?)
             .map_err(|_| storage())?;
-    if manifest.summary.work.key().as_ref() != Some(work_id)
+    if OfflineKey::of(&manifest.summary.work).as_ref() != Some(work_id)
         || manifest.pages.len() != manifest.summary.page_count
         || manifest.summary.page_count == 0
         || manifest.summary.page_count > MAX_PAGES
@@ -485,26 +421,6 @@ fn read_manifest(
         return Err(storage());
     }
     Ok((manifest, snapshot))
-}
-
-fn asset_ids(html: &str) -> BTreeSet<i64> {
-    static PATTERN: OnceLock<Regex> = OnceLock::new();
-    let pattern = PATTERN.get_or_init(|| {
-        Regex::new(r#"data-asset-id\s*=\s*["']([0-9]+)["']"#).expect("valid asset pattern")
-    });
-    pattern
-        .captures_iter(html)
-        .filter_map(|capture| capture[1].parse::<i64>().ok())
-        .filter(|id| *id > 0)
-        .collect()
-}
-
-async fn get_pc(
-    client: &reqwest::Client,
-    saved: &SavedConnection,
-    endpoint: &str,
-) -> Result<reqwest::Response, ClientError> {
-    get_pc_with_timeout(client, saved, endpoint, REQUEST_TIMEOUT).await
 }
 
 async fn get_pc_with_timeout(
@@ -534,12 +450,12 @@ async fn validated_image_response(
     Ok(image)
 }
 
-/// 作者・シリーズの画像を残す。`shelf` があれば新しい棚の画像、なければ旧 API の画像。
+/// 作者・シリーズの画像を棚から取って残す。取れなければ残さない。
 #[allow(clippy::too_many_arguments)]
 async fn save_entity_cover(
     client: &reqwest::Client,
     saved: &SavedConnection,
-    shelf: Option<Id>,
+    library: Id,
     source: &str,
     kind: &str,
     key: &str,
@@ -549,17 +465,14 @@ async fn save_entity_cover(
     if key.is_empty() {
         return Ok(None);
     }
-    let (path, source_name) = match shelf {
-        Some(library) => (
-            format!("/api/v2/libraries/{}/{kind}/cover", library.get()),
-            "provider",
-        ),
-        None => (format!("/api/v1/entities/{kind}/cover"), "source"),
-    };
-    let mut url = reqwest::Url::parse(&format!("{}{path}", saved.url))
-        .map_err(|_| ClientError::protocol())?;
+    let mut url = reqwest::Url::parse(&format!(
+        "{}/api/v2/libraries/{}/{kind}/cover",
+        saved.url,
+        library.get()
+    ))
+    .map_err(|_| ClientError::protocol())?;
     url.query_pairs_mut()
-        .append_pair(source_name, source)
+        .append_pair("provider", source)
         .append_pair("key", key);
     let response = match client
         .get(url)
@@ -592,11 +505,11 @@ async fn save_entity_cover(
     }))
 }
 
-/// 選んだ画像を表紙にしたコレクションの表紙を残す。`shelf` があれば新しい棚の表紙。
+/// 選んだ画像を表紙にしたコレクションの表紙を棚から取って残す。
 async fn save_collection_covers(
     client: &reqwest::Client,
     saved: &SavedConnection,
-    shelf: Option<Id>,
+    library: Id,
     collections: &[MobileCollection],
     staging: &Path,
     total_bytes: &mut usize,
@@ -621,14 +534,11 @@ async fn save_collection_covers(
         {
             continue;
         }
-        let endpoint = match shelf {
-            Some(library) => format!(
-                "/api/v2/libraries/{}/collections/{}/cover/file",
-                library.get(),
-                collection.id
-            ),
-            None => format!("/api/v1/collections/{}/cover/file", collection.id),
-        };
+        let endpoint = format!(
+            "/api/v2/libraries/{}/collections/{}/cover/file",
+            library.get(),
+            collection.id
+        );
         let response = match tokio::time::timeout_at(
             deadline,
             get_pc_with_timeout(client, saved, &endpoint, ASSET_TIMEOUT),
@@ -758,42 +668,6 @@ pub async fn offline_list_issues(
     Ok(scan_works(&state)?.1)
 }
 
-#[tauri::command]
-pub async fn offline_save_work(
-    pc: State<'_, PcClientState>,
-    state: State<'_, OfflineState>,
-    work_id: i64,
-) -> Result<OfflineWork, ClientError> {
-    // 通信と検証の間も、既存のスナップショットを読めるようにする。
-    let _save_guard = state.save_lock.lock().await;
-    let key = OfflineKey::Legacy(work_id);
-    state.work_dir(&key)?;
-    let saved = pc.load()?.ok_or_else(ClientError::invalid_pairing)?;
-    let client = pc.client(&saved)?;
-    let metadata: MobileMetadata = get_pc(&client, &saved, &format!("/api/v1/works/{work_id}"))
-        .await?
-        .bounded_json()
-        .await?;
-    if metadata.work.id != work_id {
-        return Err(ClientError::protocol());
-    }
-    // DB の数値 ID はサーバーごとに異なる。別のサーバーへ登録し直しても、同じ ID の
-    // 別作品で持ち歩き中の作品を置き換えない。
-    if let Ok((existing, _)) = read_manifest(&state, &key)
-        && (existing.summary.work.source() != metadata.work.source
-            || existing.summary.work.source_id() != metadata.work.source_id)
-    {
-        return Err(ClientError {
-            code: "offline_work_conflict",
-            message: "別のサーバーから保存した作品と番号が重なっています。保存済み作品を確認してください",
-        });
-    }
-    save_snapshot(&state, &key, |staging| async move {
-        save_into(&client, &saved, &metadata, &staging).await
-    })
-    .await
-}
-
 /// 作業領域に一式を組ませ、組み終えたら公開中の版と切り替える。
 async fn save_snapshot<F, Fut>(
     state: &OfflineState,
@@ -853,247 +727,6 @@ fn publish_snapshot(
     Ok(pointer)
 }
 
-async fn save_into(
-    client: &reqwest::Client,
-    saved: &SavedConnection,
-    metadata: &MobileMetadata,
-    staging: &Path,
-) -> Result<Manifest, ClientError> {
-    fs::create_dir(staging.join("pages")).map_err(|_| storage())?;
-    fs::create_dir(staging.join("assets")).map_err(|_| storage())?;
-    let work_id = metadata.work.id;
-    let first: MobilePage = get_pc(client, saved, &format!("/api/v1/works/{work_id}/pages/0"))
-        .await?
-        .bounded_json()
-        .await?;
-    if first.page != 0 || first.page_count == 0 || first.page_count > MAX_PAGES {
-        return Err(ClientError::protocol());
-    }
-    let mut pages = Vec::with_capacity(first.page_count);
-    let mut assets = BTreeSet::new();
-    let mut total_bytes = 0_usize;
-    for index in 0..first.page_count {
-        let page: MobilePage = if index == 0 {
-            first.clone()
-        } else {
-            get_pc(
-                client,
-                saved,
-                &format!("/api/v1/works/{work_id}/pages/{index}"),
-            )
-            .await?
-            .bounded_json()
-            .await?
-        };
-        if page.page != index || page.page_count != first.page_count {
-            return Err(ClientError::protocol());
-        }
-        // 最後のメタデータ比較だけでは、途中で A → B → A と戻った変更を見逃す。
-        // 版を返さない旧サーバーも、安全に混在を判別できないため新規保存はしない。
-        let revision = page.revision.as_ref().ok_or_else(ClientError::protocol)?;
-        if revision.current_version != metadata.work.current_version
-            || revision.content_hash != metadata.work.content_hash
-            || revision.active_edit_hash != metadata.active_edit_hash
-        {
-            return Err(ClientError::remote());
-        }
-        assets.extend(asset_ids(&page.html));
-        if assets.len() > MAX_ASSETS {
-            return Err(ClientError::remote());
-        }
-        let bytes = serde_json::to_vec(&page).map_err(|_| storage())?;
-        if bytes.len() > MAX_PAGE_BYTES {
-            return Err(ClientError::remote());
-        }
-        total_bytes = total_bytes
-            .checked_add(bytes.len())
-            .ok_or_else(ClientError::remote)?;
-        if total_bytes > MAX_SNAPSHOT_BYTES {
-            return Err(ClientError::remote());
-        }
-        fs::write(staging.join("pages").join(format!("{index}.json")), &bytes)
-            .map_err(|_| storage())?;
-        pages.push(PageRecord {
-            page: index,
-            sha256: digest(&bytes),
-        });
-    }
-    let mut asset_records = Vec::with_capacity(assets.len());
-    for id in assets {
-        let response = get_pc_with_timeout(
-            client,
-            saved,
-            &format!("/api/v1/works/{work_id}/assets/{id}"),
-            ASSET_TIMEOUT,
-        )
-        .await?;
-        let mime_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(ClientError::protocol)?
-            .to_string();
-        if !matches!(
-            mime_type.as_str(),
-            "image/jpeg" | "image/png" | "image/webp" | "image/gif" | "image/avif"
-        ) {
-            return Err(ClientError::protocol());
-        }
-        let bytes = bounded_response_bytes(response, MAX_ASSET_BYTES).await?;
-        validate_saved_image(&bytes, &mime_type)?;
-        total_bytes = total_bytes
-            .checked_add(bytes.len())
-            .ok_or_else(ClientError::remote)?;
-        if total_bytes > MAX_SNAPSHOT_BYTES {
-            return Err(ClientError::remote());
-        }
-        fs::write(staging.join("assets").join(format!("{id}.bin")), &bytes)
-            .map_err(|_| storage())?;
-        asset_records.push(AssetRecord {
-            id,
-            mime_type,
-            sha256: digest(&bytes),
-        });
-    }
-    // 表紙は本文の画像一覧とは別に保管する。取得できなくても本文の保存は続ける。
-    let mut cover = None;
-    if metadata.work.has_cover
-        && let Ok(response) = get_pc_with_timeout(
-            client,
-            saved,
-            &format!("/api/v1/works/{work_id}/cover"),
-            ASSET_TIMEOUT,
-        )
-        .await
-        && let Ok(image) = validated_image_response(response).await
-        && let Ok(bytes) = STANDARD.decode(&image.base64)
-        && total_bytes.saturating_add(bytes.len()) <= MAX_SNAPSHOT_BYTES
-    {
-        fs::write(staging.join("cover.bin"), &bytes).map_err(|_| storage())?;
-        total_bytes += bytes.len();
-        cover = Some(CoverRecord {
-            mime_type: image.mime_type,
-            sha256: digest(&bytes),
-        });
-    }
-    let author_cover = save_entity_cover(
-        client,
-        saved,
-        None,
-        &metadata.work.source,
-        "people",
-        &metadata.work.author_id,
-        staging,
-        &mut total_bytes,
-    )
-    .await?;
-    let series_cover = if let Some(series_id) = metadata.work.series_id.as_deref() {
-        save_entity_cover(
-            client,
-            saved,
-            None,
-            &metadata.work.source,
-            "series",
-            series_id,
-            staging,
-            &mut total_bytes,
-        )
-        .await?
-    } else {
-        None
-    };
-    let mut outline_sha256 = None;
-    if let Ok(response) = get_pc(client, saved, &format!("/api/v1/works/{work_id}/outline")).await
-        && let Ok(entries) = response.bounded_json::<Vec<MobileOutlineEntry>>().await
-        && entries.len() <= 2_000
-    {
-        let bytes = serde_json::to_vec(&entries).map_err(|_| storage())?;
-        if bytes.len() <= 1_000_000 {
-            fs::write(staging.join("outline.json"), &bytes).map_err(|_| storage())?;
-            outline_sha256 = Some(digest(&bytes));
-        }
-    }
-    let collections: Vec<MobileCollection> = get_pc(
-        client,
-        saved,
-        &format!("/api/v1/works/{work_id}/collections"),
-    )
-    .await?
-    .bounded_json()
-    .await?;
-    let collection_positions = collections
-        .iter()
-        .filter_map(|collection| {
-            collection
-                .position
-                .map(|position| (collection.id.clone(), position))
-        })
-        .collect::<BTreeMap<_, _>>();
-    let collection_covers =
-        save_collection_covers(client, saved, None, &collections, staging, &mut total_bytes)
-            .await?;
-    let collection_cover_ids = collection_covers
-        .iter()
-        .map(|record| record.collection_id.clone())
-        .collect();
-    // 読み込み中にサーバー側が更新された場合、混在した版を保存しない。
-    let latest: MobileMetadata = get_pc(client, saved, &format!("/api/v1/works/{work_id}"))
-        .await?
-        .bounded_json()
-        .await?;
-    if latest.work.current_version != metadata.work.current_version
-        || latest.work.content_hash != metadata.work.content_hash
-        || latest.active_edit_hash != metadata.active_edit_hash
-    {
-        return Err(ClientError::remote());
-    }
-    let summary = OfflineWork {
-        work: SavedWork::Legacy(metadata.work.clone()),
-        shelf_library: None,
-        people: metadata.people.clone(),
-        series: metadata.series.clone(),
-        saved_at_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| storage())?
-            .as_millis() as u64,
-        saved_version: metadata.work.current_version,
-        saved_content_hash: metadata.work.content_hash.clone(),
-        saved_edit_hash: metadata.active_edit_hash.clone(),
-        page_count: pages.len(),
-        collections,
-        collection_positions,
-        collection_cover_ids,
-        has_author_cover: author_cover.is_some(),
-        has_series_cover: series_cover.is_some(),
-        author_cover_entity: author_cover.as_ref().map(|_| OfflineEntityKey {
-            source: metadata.work.source.clone(),
-            key: metadata.work.author_id.clone(),
-        }),
-        series_cover_entity: series_cover.as_ref().and_then(|_| {
-            metadata
-                .work
-                .series_id
-                .as_ref()
-                .map(|key| OfflineEntityKey {
-                    source: metadata.work.source.clone(),
-                    key: key.clone(),
-                })
-        }),
-    };
-    let manifest = Manifest {
-        summary,
-        pages,
-        assets: asset_records,
-        cover,
-        author_cover,
-        series_cover,
-        collection_covers,
-        outline_sha256,
-    };
-    write_json(&staging.join("manifest.json"), &manifest)?;
-    Ok(manifest)
-}
-
 /// 新しい棚の作品を保存する。読む画面と同じ一式から同じ組み立てでページを作るので、
 /// 保存版のページの切れ目と読書位置は、オンラインで読むときと同じ場所を指す。
 #[tauri::command]
@@ -1104,12 +737,12 @@ pub async fn offline_save_shelf_work(
     work: Id,
 ) -> Result<OfflineWork, ClientError> {
     let _save_guard = state.save_lock.lock().await;
-    let key = OfflineKey::Shelf(work.get());
+    let key = OfflineKey(work.get());
     state.work_dir(&key)?;
     let detail = native_library::work_detail(&pc, library, work).await?;
     if let Ok((existing, _)) = read_manifest(&state, &key)
-        && (existing.summary.work.source() != detail.work.source
-            || existing.summary.work.source_id() != detail.work.source_id)
+        && (existing.summary.work.source != detail.work.source
+            || existing.summary.work.source_id != detail.work.source_id)
     {
         return Err(ClientError {
             code: "offline_work_conflict",
@@ -1231,7 +864,7 @@ async fn save_shelf_into(
             sha256: digest(&bytes),
         });
     }
-    let shelf = Some(library.library_id());
+    let shelf = library.library_id();
     let author_cover = save_entity_cover(
         client,
         saved,
@@ -1307,7 +940,7 @@ async fn save_shelf_into(
         return Err(ClientError::remote());
     }
     let summary = OfflineWork {
-        work: SavedWork::Shelf(work.clone()),
+        work: work.clone(),
         shelf_library: Some(library.library_id().get().to_string()),
         people: detail.people.clone(),
         series: detail.series.clone(),
@@ -1316,7 +949,7 @@ async fn save_shelf_into(
             .map_err(|_| storage())?
             .as_millis() as u64,
         saved_version: work.current_version,
-        // 新しい棚の版は、残した作品の版と編集の UUID で見分ける（本文のハッシュは持たない）。
+        // 版は、残した作品の版と編集の UUID で見分ける（本文のハッシュは持たない）。
         saved_content_hash: None,
         saved_edit_hash: work.edit_id.as_ref().map(|id| format!("edit:{id}")),
         page_count,
@@ -1476,7 +1109,7 @@ fn delete_saved_work(
         return Ok(());
     }
     let (existing, _) = read_manifest(state, work_id)?;
-    if existing.summary.work.source() != source || existing.summary.work.source_id() != source_id {
+    if existing.summary.work.source != source || existing.summary.work.source_id != source_id {
         return Err(ClientError {
             code: "offline_work_conflict",
             message: "保存済みの作品とは別の作品です。端末内の保存は消していません。",
@@ -1520,146 +1153,57 @@ pub async fn offline_delete_corrupt_work(
     delete_corrupt_work(&state, &work_id)
 }
 
-/// 試験用。旧 API の作品を、その番号の置き場へ保存する。
 #[cfg(test)]
-async fn save_legacy_snapshot(
-    state: &OfflineState,
-    client: &reqwest::Client,
-    saved: &SavedConnection,
-    metadata: &MobileMetadata,
-) -> Result<OfflineWork, ClientError> {
-    save_snapshot(
-        state,
-        &OfflineKey::Legacy(metadata.work.id),
-        |staging| async move { save_into(client, saved, metadata, &staging).await },
-    )
-    .await
-}
-
-#[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    #[test]
-    fn invalid_required_http_image_never_replaces_the_saved_snapshot() {
-        use std::io::{Cursor, Read, Write};
-        let mut encoded = Cursor::new(Vec::new());
-        image::DynamicImage::new_rgb8(3, 4)
-            .write_to(&mut encoded, image::ImageFormat::Png)
-            .unwrap();
-        let png = encoded.into_inner();
-        tauri::async_runtime::block_on(async {
-            for (mime, bytes, expected) in [
-                ("image/png", Vec::new(), "invalid_offline_image"),
-                (
-                    "image/png",
-                    png[..png.len() / 2].to_vec(),
-                    "invalid_offline_image",
-                ),
-                ("image/jpeg", png.clone(), "invalid_offline_image"),
-                ("image/avif", png.clone(), "unsupported_offline_image"),
-            ] {
-                let root =
-                    std::env::temp_dir().join(format!("piep-offline-test-{}", Uuid::new_v4()));
-                let state = OfflineState::new(root.clone());
-                let metadata: MobileMetadata = serde_json::from_value(serde_json::json!({
-                    "work": {"id": 3, "source": "pixiv", "sourceId": "3", "title": "作品",
-                        "authorName": "作者", "contentType": "novel", "tags": [], "excerpt": null,
-                        "textLength": 1, "assetCount": 1, "hasCover": false, "currentVersion": 1,
-                        "contentHash": null, "favorite": false, "seriesTitle": null, "seriesId": null},
-                    "versions": [], "isEdited": false, "activeEditId": null, "activeEditHash": null
-                })).unwrap();
-                let work_dir = state.work_dir(&OfflineKey::Legacy(3)).unwrap();
-                let old_name = format!("snapshot-{}", Uuid::new_v4());
-                let old = work_dir.join(&old_name);
-                fs::create_dir_all(old.join("assets")).unwrap();
-                fs::write(old.join("assets/42.bin"), &png).unwrap();
-                write_json(
-                    &old.join("manifest.json"),
-                    &serde_json::json!({
-                        "summary": {"work": metadata.work, "savedAtMs": 1, "savedVersion": 1,
-                            "savedContentHash": null, "savedEditHash": null, "pageCount": 1},
-                        "pages": [{"page": 0, "sha256": "test"}], "assets": []
-                    }),
-                )
-                .unwrap();
-                write_json(
-                    &work_dir.join("current.json"),
-                    &CurrentPointer {
-                        snapshot: old_name.clone(),
-                    },
-                )
-                .unwrap();
-                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                let address = listener.local_addr().unwrap();
-                let server = std::thread::spawn(move || {
-                    for _ in 0..2 {
-                        let (mut stream, _) = listener.accept().unwrap();
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(3)))
-                            .unwrap();
-                        let mut request = [0; 4096];
-                        let length = stream.read(&mut request).unwrap();
-                        let request = String::from_utf8_lossy(&request[..length]);
-                        let (response_mime, body) = if request
-                            .starts_with("GET /api/v1/works/3/pages/0 ")
-                        {
-                            ("application/json", serde_json::to_vec(&serde_json::json!({
-                                "page": 0, "pageCount": 1, "html": "<img data-asset-id=\"42\">",
-                                "totalPlainTextChars": 0, "sourcePageStarts": [0],
-                                "revision": {"currentVersion": 1, "contentHash": null, "activeEditHash": null}
-                            })).unwrap())
-                        } else {
-                            assert!(request.starts_with("GET /api/v1/works/3/assets/42 "));
-                            (mime, bytes.clone())
-                        };
-                        write!(stream, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: {response_mime}\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
-                        stream.write_all(&body).unwrap();
-                    }
-                });
-                let saved = SavedConnection {
-                    url: format!("http://{address}"),
-                    fingerprint: None,
-                    certificate_der: None,
-                    token: "test-token".into(),
-                    device_id: "test".into(),
-                    device_name: "test".into(),
-                    capabilities: Vec::new(),
-                };
-                let client = reqwest::Client::builder()
-                    .no_proxy()
-                    .timeout(Duration::from_secs(3))
-                    .build()
-                    .unwrap();
-                let error = save_legacy_snapshot(&state, &client, &saved, &metadata)
-                    .await
-                    .unwrap_err();
-                assert_eq!(error.code, expected);
-                server.join().unwrap();
-                let (_, current) = read_manifest(&state, &OfflineKey::Legacy(3)).unwrap();
-                assert_eq!(current, old);
-                assert_eq!(fs::read(current.join("assets/42.bin")).unwrap(), png);
-                assert_eq!(
-                    fs::read_dir(&work_dir).unwrap().count(),
-                    2,
-                    "failed staging must be removed"
-                );
-                fs::remove_dir_all(root).unwrap();
-            }
-        });
+    /// 試験用の鍵。番号から決まった UUID を作る。
+    pub(in super::super) fn key(number: u128) -> OfflineKey {
+        OfflineKey(Uuid::from_u128(number))
+    }
+
+    /// 棚の一覧の行（保存した作品の `work`）。
+    pub(in super::super) fn work_json(
+        key: &OfflineKey,
+        source_id: &str,
+        title: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": key.0.to_string(), "snapshotId": Uuid::from_u128(1).to_string(),
+            "source": "pixiv", "sourceId": source_id, "title": title,
+            "authorName": "作者", "authorId": "1", "contentType": "novel", "tags": [],
+            "excerpt": null, "textLength": 1, "assetCount": 0, "hasCover": false,
+            "currentVersion": 1, "edited": false, "editId": null, "favorite": false,
+            "favoriteGeneration": "0", "seriesTitle": null, "seriesId": null,
+            "sourceCreatedAt": null, "downloadedAt": "2026-11-19T00:00:00Z"
+        })
+    }
+
+    /// 保存版の目録の要約。
+    pub(in super::super) fn summary_json(
+        key: &OfflineKey,
+        source_id: &str,
+        title: &str,
+        pages: usize,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "work": work_json(key, source_id, title), "shelfLibrary": Uuid::from_u128(2).to_string(),
+            "savedAtMs": 1, "savedVersion": 1, "savedContentHash": null,
+            "savedEditHash": null, "pageCount": pages
+        })
     }
 
     #[test]
     fn restart_reclaims_interrupted_saves_but_preserves_current_and_unrecoverable_snapshots() {
         let root = std::env::temp_dir().join(format!("piep-offline-test-{}", Uuid::new_v4()));
-        let work_dir = root.join("work-3");
+        let work_dir = root.join(key(3).dir_name());
         let current_name = format!("snapshot-{}", Uuid::new_v4());
         let current = work_dir.join(&current_name);
         let old = work_dir.join(format!("snapshot-{}", Uuid::new_v4()));
         let staging = root
-            .join("work-4")
+            .join(key(4).dir_name())
             .join(format!("staging-{}", Uuid::new_v4()));
-        let damaged = root.join("work-5");
+        let damaged = root.join(key(5).dir_name());
         let retained = damaged.join(format!("snapshot-{}", Uuid::new_v4()));
         for path in [&current, &old, &staging, &retained] {
             fs::create_dir_all(path).unwrap();
@@ -1667,16 +1211,14 @@ mod tests {
         fs::write(staging.join("download.bin"), b"interrupted download").unwrap();
         fs::write(old.join("old.bin"), b"superseded snapshot").unwrap();
         fs::write(retained.join("body.bin"), b"possibly recoverable").unwrap();
-        write_json(&current.join("manifest.json"), &serde_json::json!({
-            "summary": {
-                "work": {"id": 3, "source": "pixiv", "sourceId": "3", "title": "保存作品",
-                    "authorName": "作者", "contentType": "novel", "tags": [], "excerpt": null,
-                    "textLength": 1, "assetCount": 0, "hasCover": false, "currentVersion": 1,
-                    "contentHash": null, "favorite": false, "seriesTitle": null, "seriesId": null},
-                "savedAtMs": 1, "savedVersion": 1, "savedContentHash": null,
-                "savedEditHash": null, "pageCount": 1
-            }, "pages": [{"page": 0, "sha256": "test"}], "assets": []
-        })).unwrap();
+        write_json(
+            &current.join("manifest.json"),
+            &serde_json::json!({
+                "summary": summary_json(&key(3), "3", "保存作品", 1),
+                "pages": [{"page": 0, "sha256": "test"}], "assets": []
+            }),
+        )
+        .unwrap();
         write_json(
             &work_dir.join("current.json"),
             &CurrentPointer {
@@ -1698,7 +1240,7 @@ mod tests {
             "crash after publication should not retain the superseded snapshot"
         );
         assert!(
-            read_manifest(&state, &OfflineKey::Legacy(3)).is_ok(),
+            read_manifest(&state, &key(3)).is_ok(),
             "the active snapshot must remain readable"
         );
         assert!(
@@ -1710,21 +1252,16 @@ mod tests {
             "only known generated names may be removed"
         );
         let (_, issues) = scan_works(&state).unwrap();
-        assert!(
-            issues
-                .iter()
-                .any(|issue| issue.work_id == OfflineKey::Legacy(5))
-        );
-        // 別のサーバーの同じ番号の作品を消そうとしても、保存版は残る。
-        let refused =
-            delete_saved_work(&state, &OfflineKey::Legacy(3), "pixiv", "other").unwrap_err();
+        assert!(issues.iter().any(|issue| issue.work_id == key(5)));
+        // 別の作品として消そうとしても、保存版は残る。
+        let refused = delete_saved_work(&state, &key(3), "pixiv", "other").unwrap_err();
         assert_eq!(refused.code, "offline_work_conflict");
-        assert!(read_manifest(&state, &OfflineKey::Legacy(3)).is_ok());
-        assert!(delete_saved_work(&state, &OfflineKey::Legacy(3), "fanbox", "3").is_err());
-        assert!(read_manifest(&state, &OfflineKey::Legacy(3)).is_ok());
-        delete_saved_work(&state, &OfflineKey::Legacy(3), "pixiv", "3").unwrap();
-        assert!(!state.work_dir(&OfflineKey::Legacy(3)).unwrap().exists());
-        delete_saved_work(&state, &OfflineKey::Legacy(3), "pixiv", "3").unwrap();
+        assert!(read_manifest(&state, &key(3)).is_ok());
+        assert!(delete_saved_work(&state, &key(3), "fanbox", "3").is_err());
+        assert!(read_manifest(&state, &key(3)).is_ok());
+        delete_saved_work(&state, &key(3), "pixiv", "3").unwrap();
+        assert!(!state.work_dir(&key(3)).unwrap().exists());
+        delete_saved_work(&state, &key(3), "pixiv", "3").unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1767,19 +1304,12 @@ mod tests {
     fn corrupt_entries_do_not_hide_healthy_works_and_cannot_delete_repaired_works() {
         let root = std::env::temp_dir().join(format!("piep-offline-test-{}", Uuid::new_v4()));
         let state = OfflineState::new(root.clone());
-        let work_dir = state.work_dir(&OfflineKey::Legacy(3)).unwrap();
+        let work_dir = state.work_dir(&key(3)).unwrap();
         let snapshot_name = format!("snapshot-{}", Uuid::new_v4());
         let snapshot = work_dir.join(&snapshot_name);
         fs::create_dir_all(&snapshot).unwrap();
         let manifest = serde_json::json!({
-            "summary": {
-                "work": {"id": 3, "source": "pixiv", "sourceId": "3", "title": "健全な作品",
-                    "authorName": "作者", "contentType": "novel", "tags": [], "excerpt": null,
-                    "textLength": 1, "assetCount": 0, "hasCover": false, "currentVersion": 1,
-                    "contentHash": null, "favorite": false, "seriesTitle": null, "seriesId": null},
-                "savedAtMs": 1, "savedVersion": 1, "savedContentHash": null,
-                "savedEditHash": null, "pageCount": 1
-            },
+            "summary": summary_json(&key(3), "3", "健全な作品", 1),
             "pages": [{"page": 0, "sha256": "test"}], "assets": []
         });
         write_json(&snapshot.join("manifest.json"), &manifest).unwrap();
@@ -1790,52 +1320,48 @@ mod tests {
             },
         )
         .unwrap();
+        // 置き場の名前として正しくないもの（旧 API の番号の置き場を含む）は見ない。
         for name in [
-            "work-4",
-            "work-0",
-            "work-03",
-            "work--2",
-            "work-999999999999999999999",
+            key(4).dir_name(),
+            format!("shelf-{}", Uuid::nil()),
+            format!("shelf-{}", key(8).0.simple()),
+            key(9).dir_name().to_uppercase(),
+            "work-4".to_string(),
         ] {
-            fs::create_dir(root.join(name)).unwrap();
-            fs::write(root.join(name).join("current.json"), b"broken").unwrap();
+            fs::create_dir(root.join(&name)).unwrap();
+            fs::write(root.join(&name).join("current.json"), b"broken").unwrap();
         }
-        fs::create_dir_all(root.join("work-5").join("staging-unfinished")).unwrap();
+        fs::create_dir_all(root.join(key(5).dir_name()).join("staging-unfinished")).unwrap();
         fs::create_dir_all(
-            root.join("work-6")
+            root.join(key(6).dir_name())
                 .join(format!("snapshot-{}", Uuid::new_v4())),
         )
         .unwrap();
         let (works, issues) = scan_works(&state).unwrap();
         assert_eq!(works.len(), 1);
-        assert_eq!(works[0].work.key(), Some(OfflineKey::Legacy(3)));
+        assert_eq!(OfflineKey::of(&works[0].work), Some(key(3)));
         assert_eq!(
             issues.iter().map(|issue| issue.work_id).collect::<Vec<_>>(),
-            vec![OfflineKey::Legacy(4), OfflineKey::Legacy(6)]
+            vec![key(4), key(6)]
         );
         assert_eq!(
-            delete_corrupt_work(&state, &OfflineKey::Legacy(3))
-                .unwrap_err()
-                .code,
+            delete_corrupt_work(&state, &key(3)).unwrap_err().code,
             "offline_work_recovered"
         );
-        assert!(read_manifest(&state, &OfflineKey::Legacy(3)).is_ok());
-        delete_corrupt_work(&state, &OfflineKey::Legacy(4)).unwrap();
-        assert!(!root.join("work-4").exists());
-        assert!(read_manifest(&state, &OfflineKey::Legacy(3)).is_ok());
+        assert!(read_manifest(&state, &key(3)).is_ok());
+        delete_corrupt_work(&state, &key(4)).unwrap();
+        assert!(!root.join(key(4).dir_name()).exists());
+        assert!(read_manifest(&state, &key(3)).is_ok());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn memberships_survive_snapshot_and_legacy_snapshot_defaults_to_singular_fields() {
-        let work = serde_json::json!({
-            "id": 7, "source": "pixiv", "sourceId": "work-7", "title": "作品",
-            "authorName": "主作者", "authorId": "main-author", "contentType": "novel",
-            "tags": [], "excerpt": null, "textLength": 10, "assetCount": 0,
-            "hasCover": false, "currentVersion": 1, "contentHash": null,
-            "favorite": false, "seriesTitle": "主シリーズ", "seriesId": "main-series",
-            "downloadedAt": "2026-10-10T00:00:00Z"
-        });
+    fn memberships_survive_snapshot_and_missing_fields_default_to_empty() {
+        let mut work = work_json(&key(7), "work-7", "作品");
+        work["authorName"] = "主作者".into();
+        work["authorId"] = "main-author".into();
+        work["seriesTitle"] = "主シリーズ".into();
+        work["seriesId"] = "main-series".into();
         let people = serde_json::json!([
             {"source": "pixiv", "key": "main-author", "role": "author", "displayName": "主作者"},
             {"source": "pixiv", "key": "co-author", "role": "author", "displayName": "共作者"}
@@ -1844,22 +1370,8 @@ mod tests {
             {"source": "pixiv", "key": "main-series", "title": "主シリーズ", "contentOrder": 1},
             {"source": "pixiv", "key": "anthology", "title": "短編集", "contentOrder": null}
         ]);
-        let metadata_json = serde_json::json!({
-            "work": work, "people": people, "series": series,
-            "versions": [], "isEdited": false, "activeEditId": null, "activeEditHash": null
-        });
-        let metadata: MobileMetadata = serde_json::from_value(metadata_json.clone()).unwrap();
-        assert_eq!(metadata.people.len(), 2);
-        assert_eq!(metadata.series.len(), 2);
-        let mut old_response = metadata_json;
-        old_response.as_object_mut().unwrap().remove("people");
-        old_response.as_object_mut().unwrap().remove("series");
-        let old_metadata: MobileMetadata = serde_json::from_value(old_response).unwrap();
-        assert!(old_metadata.people.is_empty());
-        assert!(old_metadata.series.is_empty());
-
         let snapshot = serde_json::json!({
-            "work": metadata.work, "people": metadata.people, "series": metadata.series,
+            "work": work, "people": people, "series": series,
             "savedAtMs": 1, "savedVersion": 1, "savedContentHash": null,
             "savedEditHash": null, "pageCount": 1,
             "hasAuthorCover": true, "hasSeriesCover": true,
@@ -1881,29 +1393,17 @@ mod tests {
             "pixiv"
         );
 
-        let mut legacy = snapshot;
-        legacy.as_object_mut().unwrap().remove("people");
-        legacy.as_object_mut().unwrap().remove("series");
-        legacy.as_object_mut().unwrap().remove("authorCoverEntity");
-        legacy.as_object_mut().unwrap().remove("seriesCoverEntity");
-        let old_saved: OfflineWork = serde_json::from_value(legacy).unwrap();
-        assert!(old_saved.people.is_empty());
-        assert!(old_saved.series.is_empty());
-        assert!(old_saved.author_cover_entity.is_none());
-        assert!(old_saved.series_cover_entity.is_none());
-        let SavedWork::Legacy(work) = &old_saved.work else {
-            panic!("旧 API の作品として読めること");
-        };
-        assert_eq!(work.author_id, "main-author");
-        assert_eq!(work.series_id.as_deref(), Some("main-series"));
-    }
-
-    #[test]
-    fn extracts_only_numeric_image_references() {
-        let ids = asset_ids(
-            r#"<img data-asset-id="42"><img data-asset-id='7'><img src="file://private"><img data-asset-id="42">"#,
-        );
-        assert_eq!(ids, BTreeSet::from([7, 42]));
+        let mut bare = snapshot;
+        for field in ["people", "series", "authorCoverEntity", "seriesCoverEntity"] {
+            bare.as_object_mut().unwrap().remove(field);
+        }
+        let bare: OfflineWork = serde_json::from_value(bare).unwrap();
+        assert!(bare.people.is_empty());
+        assert!(bare.series.is_empty());
+        assert!(bare.author_cover_entity.is_none());
+        assert!(bare.series_cover_entity.is_none());
+        assert_eq!(bare.work.author_id, "main-author");
+        assert_eq!(bare.work.series_id.as_deref(), Some("main-series"));
     }
 
     #[test]
@@ -1921,14 +1421,7 @@ mod tests {
             write_json(
                 &snapshot.join("manifest.json"),
                 &serde_json::json!({
-                    "summary": {"work": {
-                        "id": 3, "source": "pixiv", "sourceId": "3", "title": "作品",
-                        "authorName": "作者", "authorId": "1", "contentType": "novel", "tags": [],
-                        "excerpt": null, "textLength": 1, "assetCount": 1, "hasCover": false,
-                        "currentVersion": 1, "contentHash": null, "favorite": false,
-                        "seriesTitle": null, "seriesId": null
-                    }, "savedAtMs": 1, "savedVersion": 1, "savedContentHash": null,
-                        "savedEditHash": null, "pageCount": 1},
+                    "summary": summary_json(&key(3), "3", "作品", 1),
                     "pages": [{"page": 0, "sha256": digest(&page)}],
                     "assets": [{"id": 42, "mimeType": "image/png", "sha256": digest(image)}]
                 }),
@@ -1938,7 +1431,7 @@ mod tests {
 
         let root = std::env::temp_dir().join(format!("piep-offline-test-{}", Uuid::new_v4()));
         let state = OfflineState::new(root.clone());
-        let work_dir = state.work_dir(&OfflineKey::Legacy(3)).unwrap();
+        let work_dir = state.work_dir(&key(3)).unwrap();
         let generation_a = format!("snapshot-{}", Uuid::new_v4());
         let generation_b = format!("snapshot-{}", Uuid::new_v4());
         let image_a = b"image from generation A";
@@ -1953,7 +1446,7 @@ mod tests {
         .unwrap();
 
         // The reader has obtained A's HTML and will request its referenced asset later.
-        let page_a = read_offline_page(&state, &OfflineKey::Legacy(3), 0).unwrap();
+        let page_a = read_offline_page(&state, &key(3), 0).unwrap();
         assert!(page_a.page.html.contains("generation-A"));
         write_fixture_snapshot(&work_dir, &generation_b, "generation-B", image_b);
         write_json(
@@ -1965,43 +1458,37 @@ mod tests {
         .unwrap();
         cleanup_superseded_snapshots(&work_dir, &generation_b);
 
-        let stale =
-            read_offline_asset(&state, &OfflineKey::Legacy(3), 42, &page_a.generation).unwrap_err();
+        let stale = read_offline_asset(&state, &key(3), 42, &page_a.generation).unwrap_err();
         assert_eq!(stale.code, "offline_snapshot_changed");
         assert!(!work_dir.join(&generation_a).exists());
 
         // Reloading the page selects B, and B's matching image remains readable.
-        let page_b = read_offline_page(&state, &OfflineKey::Legacy(3), 0).unwrap();
+        let page_b = read_offline_page(&state, &key(3), 0).unwrap();
         assert!(page_b.page.html.contains("generation-B"));
         assert_eq!(
             page_b.generation,
             generation_b.trim_start_matches("snapshot-")
         );
-        let asset_b =
-            read_offline_asset(&state, &OfflineKey::Legacy(3), 42, &page_b.generation).unwrap();
+        let asset_b = read_offline_asset(&state, &key(3), 42, &page_b.generation).unwrap();
         assert_eq!(STANDARD.decode(asset_b.base64).unwrap(), image_b);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn offline_keys_are_numbers_or_canonical_uuids_and_name_their_own_folder() {
+    fn offline_keys_are_canonical_uuids_and_name_their_own_folder() {
         let id = Uuid::now_v7();
-        let shelf = OfflineKey::Shelf(id);
+        let shelf = OfflineKey(id);
         assert_eq!(
             serde_json::to_value(shelf).unwrap(),
             serde_json::json!(id.to_string())
-        );
-        assert_eq!(
-            serde_json::to_value(OfflineKey::Legacy(7)).unwrap(),
-            serde_json::json!(7)
         );
         assert_eq!(
             serde_json::from_value::<OfflineKey>(serde_json::json!(id.to_string())).unwrap(),
             shelf
         );
         for bad in [
-            serde_json::json!(0),
-            serde_json::json!(-3),
+            serde_json::json!(7),
+            serde_json::json!("7"),
             serde_json::json!(id.to_string().to_uppercase()),
             serde_json::json!(id.simple().to_string()),
             serde_json::json!(Uuid::nil().to_string()),
@@ -2013,13 +1500,8 @@ mod tests {
             );
         }
         assert_eq!(OfflineKey::from_dir_name(&shelf.dir_name()), Some(shelf));
-        assert_eq!(
-            OfflineKey::from_dir_name("work-7"),
-            Some(OfflineKey::Legacy(7))
-        );
         for bad in [
-            "work-07",
-            "work-0",
+            "work-7",
             "shelf-",
             &format!("shelf-{}", id.simple()),
             &format!("work-{id}"),
@@ -2027,8 +1509,7 @@ mod tests {
             assert_eq!(OfflineKey::from_dir_name(bad), None, "{bad}");
         }
         assert_eq!(OfflineKey::parse(&id.to_string()), Some(shelf));
-        assert_eq!(OfflineKey::parse("7"), Some(OfflineKey::Legacy(7)));
-        assert_eq!(OfflineKey::parse("07"), None);
+        assert_eq!(OfflineKey::parse("7"), None);
     }
 
     #[test]
@@ -2036,7 +1517,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("piep-offline-test-{}", Uuid::new_v4()));
         let state = OfflineState::new(root.clone());
         let id = Uuid::now_v7();
-        let key = OfflineKey::Shelf(id);
+        let key = OfflineKey(id);
         let work_dir = state.work_dir(&key).unwrap();
         assert_eq!(work_dir, root.join(format!("shelf-{id}")));
         let snapshot_name = format!("snapshot-{}", Uuid::new_v4());
@@ -2083,8 +1564,7 @@ mod tests {
         let (works, issues) = scan_works(&state).unwrap();
         assert!(issues.is_empty());
         assert_eq!(works.len(), 1);
-        assert!(matches!(works[0].work, SavedWork::Shelf(_)));
-        assert_eq!(works[0].work.key(), Some(key));
+        assert_eq!(OfflineKey::of(&works[0].work), Some(key));
         // 画面へは棚の一覧と同じ形（id は UUID の文字列）で出る。
         let listed = serde_json::to_value(&works[0]).unwrap();
         assert_eq!(listed["work"]["id"], serde_json::json!(id.to_string()));
@@ -2113,7 +1593,7 @@ mod tests {
     fn corrupt_snapshot_is_rejected_without_pc_connection() {
         let root = std::env::temp_dir().join(format!("piep-offline-test-{}", Uuid::new_v4()));
         let state = OfflineState::new(root.clone());
-        let dir = state.work_dir(&OfflineKey::Legacy(3)).unwrap();
+        let dir = state.work_dir(&key(3)).unwrap();
         fs::create_dir_all(&dir).unwrap();
         write_json(
             &dir.join("current.json"),
@@ -2122,14 +1602,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(read_manifest(&state, &OfflineKey::Legacy(3)).is_err());
+        assert!(read_manifest(&state, &key(3)).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn pointer_write_failure_preserves_old_snapshot_and_removes_new_one() {
         let root = std::env::temp_dir().join(format!("piep-offline-test-{}", Uuid::new_v4()));
-        let work_dir = root.join("work-3");
+        let work_dir = root.join(key(3).dir_name());
         let old_name = format!("snapshot-{}", Uuid::new_v4());
         let new_name = format!("snapshot-{}", Uuid::new_v4());
         let staging = work_dir.join(format!("staging-{}", Uuid::new_v4()));

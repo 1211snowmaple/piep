@@ -4,8 +4,8 @@
 //! 版の切り替えと戻しは見張り役（`watchdog.rs`）が行う。動いている実行ファイルは
 //! 自分では置き換えられないからである。
 
+use super::standalone::shipment::ShelfShipments;
 use super::standalone::{ServerPaths, UpdateConfig};
-use super::sync_receive::SyncReceiver;
 use chrono::{DateTime, Local, NaiveTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -756,13 +756,13 @@ impl UpdateController {
         record.save(&self.paths);
     }
 
-    /// 送信が区切りに来るのを待つ。来なければ false。
-    async fn wait_until_quiet(&self, receiver: Option<&SyncReceiver>) -> bool {
-        let Some(receiver) = receiver else {
+    /// 棚の受け取りが区切りに来るのを待つ。来なければ false。
+    async fn wait_until_quiet(&self, shipments: Option<&ShelfShipments>) -> bool {
+        let Some(shipments) = shipments else {
             return true;
         };
         let deadline = tokio::time::Instant::now() + QUIET_LIMIT;
-        while receiver.status().session_open {
+        while shipments.busy() {
             if tokio::time::Instant::now() >= deadline {
                 return false;
             }
@@ -790,7 +790,7 @@ impl UpdateController {
     }
 
     /// 1 回分。当てることになったら true を返し、本体を止める。
-    async fn run_once(&self, now: bool, receiver: Option<&SyncReceiver>) -> bool {
+    async fn run_once(&self, now: bool, shipments: Option<&ShelfShipments>) -> bool {
         self.set_phase(UpdatePhase::Checking);
         if !now && !self.live().auto {
             // 自動を切っていても、新しいバージョンがあることは知らせる。取ってはこない。
@@ -821,7 +821,7 @@ impl UpdateController {
             self.set_phase(UpdatePhase::Idle);
             return false;
         }
-        if !self.wait_until_quiet(receiver).await {
+        if !self.wait_until_quiet(shipments).await {
             self.record_error("送信が終わらないので、更新を次に延ばします");
             self.set_phase(UpdatePhase::Idle);
             return false;
@@ -831,14 +831,14 @@ impl UpdateController {
     }
 
     /// 本体が動いている間、回り続ける。自動を切っていても、確認だけは続ける。
-    pub async fn run(self: Arc<Self>, receiver: Option<Arc<SyncReceiver>>) {
+    pub async fn run(self: Arc<Self>, shipments: Option<Arc<ShelfShipments>>) {
         let mut delay = FIRST_CHECK_DELAY;
         loop {
             let now = tokio::select! {
                 _ = self.requested.notified() => true,
                 _ = tokio::time::sleep(delay) => false,
             };
-            if self.run_once(now, receiver.as_deref()).await {
+            if self.run_once(now, shipments.as_deref()).await {
                 return;
             }
             delay = CHECK_INTERVAL;
@@ -909,6 +909,10 @@ pub fn restore_databases(paths: &ServerPaths) -> Result<(), String> {
         let names: Vec<String> = serde_json::from_slice(&bytes)
             .map_err(|error| format!("写しの目録を読めません: {error}"))?;
         // どれかの写しが欠けていれば、いずれの DB にも手を付けない。
+        let names: Vec<String> = names
+            .into_iter()
+            .filter(|name| name != OLD_SHELF_DATABASE)
+            .collect();
         for name in &names {
             if !database_pairs(paths)
                 .iter()
@@ -957,9 +961,12 @@ pub fn restore_databases(paths: &ServerPaths) -> Result<(), String> {
     Ok(())
 }
 
-fn database_pairs(paths: &ServerPaths) -> [(PathBuf, &'static str); 2] {
-    [(paths.database(), "piep.db"), (paths.store(), "state.db")]
+fn database_pairs(paths: &ServerPaths) -> [(PathBuf, &'static str); 1] {
+    [(paths.store(), "state.db")]
 }
+
+/// 0.40 までの版が当てる前に写した旧棚の DB。目録に載っていても戻さない。
+const OLD_SHELF_DATABASE: &str = "piep.db";
 
 #[cfg(test)]
 mod tests {
@@ -1217,9 +1224,8 @@ mod tests {
     fn databases_are_backed_up_and_restored() {
         let dir = crate::server::tests::TestRoot::created("update");
         let paths = ServerPaths::new(&dir.0).expect("paths");
-        fs::create_dir_all(paths.library()).expect("library");
         fs::create_dir_all(paths.state()).expect("state");
-        let database = rusqlite::Connection::open(paths.database()).expect("db");
+        let database = rusqlite::Connection::open(paths.store()).expect("db");
         database
             .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(v); INSERT INTO t VALUES (1);")
             .expect("seed");
@@ -1228,7 +1234,7 @@ mod tests {
         drop(database);
 
         restore_databases(&paths).expect("restore");
-        let database = rusqlite::Connection::open(paths.database()).expect("db");
+        let database = rusqlite::Connection::open(paths.store()).expect("db");
         let value: i64 = database
             .query_row("SELECT v FROM t", [], |row| row.get(0))
             .expect("value");
@@ -1238,7 +1244,6 @@ mod tests {
     fn rollback_removes_databases_that_did_not_exist_before_the_update() {
         let dir = crate::server::tests::TestRoot::created("update_absent_db");
         let paths = ServerPaths::new(&dir.0).unwrap();
-        fs::create_dir_all(paths.library()).unwrap();
         fs::create_dir_all(paths.state()).unwrap();
         back_up_databases(&paths).unwrap();
 
@@ -1266,7 +1271,6 @@ mod tests {
     fn a_missing_snapshot_is_refused_before_any_database_is_restored() {
         let dir = crate::server::tests::TestRoot::created("update_missing_snapshot");
         let paths = ServerPaths::new(&dir.0).unwrap();
-        fs::create_dir_all(paths.library()).unwrap();
         fs::create_dir_all(paths.state()).unwrap();
         for (path, _) in database_pairs(&paths) {
             rusqlite::Connection::open(path)
@@ -1275,26 +1279,43 @@ mod tests {
                 .unwrap();
         }
         back_up_databases(&paths).unwrap();
-        fs::write(paths.database(), b"current database").unwrap();
+        fs::write(paths.store(), b"current database").unwrap();
         fs::remove_file(paths.update_backup().join("state.db")).unwrap();
 
         assert!(restore_databases(&paths).is_err());
-        assert_eq!(fs::read(paths.database()).unwrap(), b"current database");
+        assert_eq!(fs::read(paths.store()).unwrap(), b"current database");
+    }
+
+    #[test]
+    fn the_old_shelf_database_in_an_older_snapshot_is_not_restored() {
+        let dir = crate::server::tests::TestRoot::created("update_old_shelf_snapshot");
+        let paths = ServerPaths::new(&dir.0).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        fs::create_dir_all(paths.update_backup()).unwrap();
+        fs::write(paths.update_backup().join("state.db"), b"previous").unwrap();
+        fs::write(paths.update_backup().join("piep.db"), b"old shelf").unwrap();
+        fs::write(
+            paths.update_backup().join("databases.json"),
+            br#"["piep.db","state.db"]"#,
+        )
+        .unwrap();
+        fs::write(paths.store(), b"current").unwrap();
+
+        restore_databases(&paths).unwrap();
+        assert_eq!(fs::read(paths.store()).unwrap(), b"previous");
+        assert!(!paths.root.join("library").exists());
     }
 
     #[test]
     fn older_database_snapshots_without_a_manifest_can_still_be_restored() {
         let dir = crate::server::tests::TestRoot::created("update_legacy_snapshot");
         let paths = ServerPaths::new(&dir.0).unwrap();
-        fs::create_dir_all(paths.library()).unwrap();
         fs::create_dir_all(paths.state()).unwrap();
         fs::create_dir_all(paths.update_backup()).unwrap();
-        fs::write(paths.update_backup().join("piep.db"), b"previous").unwrap();
-        fs::write(paths.database(), b"current").unwrap();
-        fs::write(paths.store(), b"unchanged").unwrap();
+        fs::write(paths.update_backup().join("state.db"), b"previous").unwrap();
+        fs::write(paths.store(), b"current").unwrap();
 
         restore_databases(&paths).unwrap();
-        assert_eq!(fs::read(paths.database()).unwrap(), b"previous");
-        assert_eq!(fs::read(paths.store()).unwrap(), b"unchanged");
+        assert_eq!(fs::read(paths.store()).unwrap(), b"previous");
     }
 }

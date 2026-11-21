@@ -5,9 +5,8 @@ import { adminPlace, bytes, connectionWarnings, draftConnection, findIssues, isN
 const status = (overrides: Partial<AdminStatus> = {}): AdminStatus => ({
   version: "0.36.0",
   apiVersion: 2,
-  works: 10,
+  shelf: { libraryId: "0190", syncEpoch: "0191", works: "10" },
   devices: [],
-  sync: null,
   publicUrl: null,
   update: null,
   serverName: "Maple",
@@ -47,10 +46,10 @@ describe("format", () => {
     expect(findIssues(status(), undefined)).toEqual([]);
     const issues = findIssues(
       status({
-        sync: { generation: 1, committedAt: null, sessionOpen: false, indexPending: 0, indexError: "x" },
+        shipment: { state: "failed", shipmentId: null, generation: null, works: null, restarting: null, error: "x" },
         update: { auto: true, window: "03:00-06:00", phase: { state: "idle" }, latest: null, lastCheckedAt: null, lastError: "失敗", lastAppliedAt: null, skipped: ["0.36.1"], previous: null },
       }),
-      { contentBytes: 0, databaseBytes: 0, indexBytes: 0, trashBytes: 0, freeBytes: 1024 },
+      { contentBytes: 0, databaseBytes: 0, indexBytes: 0, freeBytes: 1024 },
     );
     expect(issues.map((issue) => issue.page)).toEqual(["library", "updates", "updates", "library"]);
     expect(issues[2]?.message).toBe("0.36.1 は起動に失敗したため飛ばしています");

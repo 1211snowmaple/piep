@@ -11,7 +11,7 @@
 - 新しいバージョンがあれば通知を出す。押すとアプリの更新画面を開き、ダウンロードの進み具合を出して、インストールの確認まで進める
 - 署名は OS が確かめる。今の固定の URL と `latest-android.json` は変えない
 - Android 12 以降の `PackageInstaller` では確認なしの更新ができる場合がある。**実機とエミュレーターで確かめてから決める**
-- サーバーのバージョンは、登録済みの端末なら `GET /api/v1/about` で読む（`version`、`apiVersion`、`serverName`、`capabilities`）
+- サーバーのバージョンは、登録済みの端末なら `GET /api/v2/about` で読む（`version`、`apiVersion`、`serverName`、`capabilities`）
 - `latest-android.json` に `minServerApi` を足し、携帯の新しいバージョンが要るサーバーを示す
 
 最初の 1 回の APK のインストールと、インストールの許可は OS の決まりで省けない。

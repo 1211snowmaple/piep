@@ -228,7 +228,6 @@ async fn identity_requires_bearer_and_offers_the_reader_bundle_but_no_mutation()
     }
     let response = server.get("/api/v2/identity").send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["x-piep-works-list"], "1");
     let identity = protocol::LibraryIdentity::parse(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(identity.library_id.get(), server.library.id);
     assert_eq!(identity.subject_id, server.authority.subject);
@@ -942,18 +941,6 @@ impl Server {
 async fn a_favorite_from_the_phone_counts_once_and_refuses_a_stale_generation() {
     let server = Server::start().await;
     let north = save(&server.library, capture("north", None));
-    let mirrored = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let seen = Arc::clone(&mirrored);
-    server
-        .context
-        .set_favorite_mirror(Box::new(move |source, key, device, favorite| {
-            seen.lock().unwrap().push((
-                source.to_owned(),
-                key.to_owned(),
-                device.to_owned(),
-                favorite,
-            ));
-        }));
     let request = uuid::Uuid::now_v7().to_string();
     let body = json!({"requestId": request, "expected": "0", "favorite": true});
 
@@ -971,12 +958,6 @@ async fn a_favorite_from_the_phone_counts_once_and_refuses_a_stale_generation() 
             .unwrap();
         assert_eq!((stored.favorite, stored.generation.as_str()), (true, "1"));
     }
-    // 旧 API の記録へも写す（デスクトップ版が取り込む）。
-    assert_eq!(
-        mirrored.lock().unwrap().first().cloned(),
-        Some(("pixiv".into(), "north".into(), "phone".into(), true))
-    );
-
     // 一覧と作品の画面は、この利用者の値と世代を出す。別の利用者の値は別。
     let page = shelf_page(server.search(json!({})).send().await.unwrap()).await;
     assert!(page.items[0].favorite);
@@ -1051,33 +1032,7 @@ async fn a_favorite_from_the_phone_counts_once_and_refuses_a_stale_generation() 
         StatusCode::UNAUTHORIZED
     );
 
-    // 旧 API で変えた値は、この棚の持ち主にも当たる。同じ値なら世代を進めない。
-    assert!(server
-        .context
-        .follow_favorite(None, "pixiv", "north", true)
-        .unwrap());
-    assert_eq!(
-        server
-            .library
-            .user_state(north.entity_id, server.library.id)
-            .unwrap()
-            .generation,
-        1
-    );
-    assert!(server
-        .context
-        .follow_favorite(None, "pixiv", "north", false)
-        .unwrap());
-    let state = server
-        .library
-        .user_state(north.entity_id, server.library.id)
-        .unwrap();
-    assert_eq!((state.favorite, state.generation), (false, 2));
-    assert!(!server
-        .context
-        .follow_favorite(None, "pixiv", "nowhere", true)
-        .unwrap());
-
+    // 外した作品には書けない。
     server
         .library
         .remove_work(uuid::Uuid::now_v7(), north.entity_id, 1)
@@ -1343,10 +1298,6 @@ async fn people_series_and_collections_come_from_the_shelf_in_the_v1_shapes() {
         })
         .unwrap();
 
-    // 接続情報が、この口を出せることを知らせる。
-    let identity = server.get("/api/v2/identity").send().await.unwrap();
-    assert_eq!(identity.headers()["x-piep-groups"], "1");
-
     // 作者の一覧。作品の多い順で、続きは何件目からか。
     let people: piep_mobile_api::MobileEntityPage = server.read("/people?limit=1", "fixture").await;
     assert_eq!(people.total, 2);
@@ -1541,9 +1492,6 @@ async fn people_series_and_collections_come_from_the_shelf_in_the_v1_shapes() {
 async fn search_suggestions_come_from_the_shelf_in_the_v1_shape() {
     let server = Server::start().await;
     let works = grouped_shelf(&server.library);
-    let identity = server.get("/api/v2/identity").send().await.unwrap();
-    assert_eq!(identity.headers()["x-piep-suggest"], "1");
-    assert_eq!(identity.headers()["x-piep-reading"], "1");
 
     // 作者は取得元と ID、作品の多い順。一致した名前は先に出る。
     let found: piep_mobile_api::MobileSearchSuggestions =
@@ -1871,7 +1819,7 @@ async fn owner_page(context: &Arc<Context>, cursor: Option<&str>) -> serde_json:
 
 #[tokio::test]
 async fn phone_positions_and_favorites_on_the_served_copy_come_back_to_the_desktop_shelf() {
-    use crate::commands::library_v2::{adopt_remote_reading, follow_remote_favorite};
+    use crate::commands::library_v2::adopt_remote_reading;
     use crate::library::{ReadingAnchor, ReadingLocation, ReadingPosition, ReadingUpdate};
     // デスクトップの棚と、その写しを配るサーバーの棚（同じ棚の ID・同じ作品の ID）。
     let desktop_dir = Temp::new();
@@ -2015,15 +1963,5 @@ async fn phone_positions_and_favorites_on_the_served_copy_come_back_to_the_deskt
     };
     assert!(!adopt_remote_reading(&desktop, south.entity_id, &beyond, 0).unwrap());
 
-    // お気に入りは取得元の番号で持ち主に当てる。同じ値・棚に無い作品は書かない。
-    assert!(follow_remote_favorite(&desktop, "pixiv", "north", true).unwrap());
-    assert!(!follow_remote_favorite(&desktop, "pixiv", "north", true).unwrap());
-    assert!(
-        desktop
-            .user_state(north.entity_id, desktop.id)
-            .unwrap()
-            .favorite
-    );
-    assert!(!follow_remote_favorite(&desktop, "pixiv", "missing", true).unwrap());
     desktop.verify().unwrap();
 }

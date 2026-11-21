@@ -1,7 +1,7 @@
 import { Button, Group, Skeleton, Text } from "@mantine/core";
 import { useQuery } from "@tanstack/react-query";
 import { adminApi } from "../api";
-import { bytes, findIssues, relativeTime, type AdminPage } from "../format";
+import { bytes, findIssues, relativeTime, shipmentLabel, type AdminPage } from "../format";
 import { Card, PageHead, useStatus } from "../shared";
 
 function NumberTile({ label, value }: { label: string; value: string | undefined }) {
@@ -44,9 +44,9 @@ export function OverviewPage({ go }: { go: (page: AdminPage) => void }) {
       </section>
       <div className="adm-numbers">
         <NumberTile label="バージョン" value={data?.version} />
-        <NumberTile label="ライブラリ" value={data ? (data.works === null ? "未受信" : `${data.works.toLocaleString("ja-JP")} 作品`) : undefined} />
+        <NumberTile label="ライブラリ" value={data ? (data.shelf ? `${Number(data.shelf.works).toLocaleString("ja-JP")} 作品` : "未受信") : undefined} />
         <NumberTile label="空き容量" value={storage.data ? bytes(storage.data.freeBytes) : storage.isError ? "不明" : undefined} />
-        <NumberTile label="最後に受け取った" value={data ? (data.sync?.committedAt ? relativeTime(data.sync.committedAt) : "なし") : undefined} />
+        <NumberTile label="受け取り" value={data ? shipmentLabel(data.shipment) : undefined} />
       </div>
       <Card title="最近の出来事" side={<Button variant="default" onClick={() => go("records")}>記録を開く</Button>} flush>
         {recent.isPending ? <div className="adm-card-pad"><Skeleton height={100} /></div> : (recent.data ?? []).length === 0 ? <Text className="adm-card-pad" c="dimmed">まだ何もありません。</Text> : (

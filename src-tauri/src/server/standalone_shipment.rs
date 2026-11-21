@@ -8,7 +8,7 @@
 //! （見張り役のいるサーバーは自分で立ち上げ直す）。起動のときは、送ったあとに携帯が前の世代に
 //! 書いた読書位置を新しい世代へ写してから配る。
 //!
-//! 携帯が棚を読む許可（`library_v2.readers`）は、管理者が端末ごとに付け外しする。
+//! 携帯が棚を読む許可（`shelf.readers`）は、管理者が端末ごとに付け外しする。
 
 use super::native::{activate_locked, generation_path, generations, write_config};
 use super::{load_config, ServerConfig, ServerPaths};
@@ -24,11 +24,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use toml_edit::{value, DocumentMut, Item, Table};
 
-const INCOMING: &str = "library-v2-incoming";
+const INCOMING: &str = "shelf-incoming";
 /// 前に受け取った台帳の部分（次の受け取りで同じ部分を送らずに済ませる）。
-const DATABASE_PARTS: &str = "library-v2-database-parts";
+const DATABASE_PARTS: &str = "shelf-database-parts";
 const CURRENT: &str = "current.json";
-const PENDING: &str = "library-v2-pending.json";
+const PENDING: &str = "shelf-pending.json";
 const DATABASE: &str = "library.db";
 /// 一度に問い合わせる実体の数の上限。
 pub const MAX_QUERY_CHUNKS: usize = 4096;
@@ -149,7 +149,7 @@ impl ShelfShipments {
         // 世代が変わったことで届いたと分かる。
         let generation = load_config(&paths)
             .ok()
-            .and_then(|config| config.library_v2)
+            .and_then(|config| config.shelf)
             .and_then(|settings| settings.generation);
         let status = match read_current(&paths) {
             Some(current) => ShipmentStatus {
@@ -190,6 +190,11 @@ impl ShelfShipments {
             .unwrap_or_default()
     }
 
+    /// 受け取りか組み立ての途中か。自己更新はこれが済むのを待つ。
+    pub fn busy(&self) -> bool {
+        matches!(self.status().state.as_str(), "receiving" | "assembling")
+    }
+
     fn assembling(&self) -> bool {
         self.status().state == "assembling"
     }
@@ -220,7 +225,7 @@ impl ShelfShipments {
         }
         let config = load_config(&self.paths).map_err(ShipError::Internal)?;
         if config
-            .library_v2
+            .shelf
             .as_ref()
             .is_some_and(|settings| settings.library_id.get() != library_id)
         {
@@ -506,11 +511,11 @@ pub fn apply_pending(paths: &ServerPaths) {
     };
     let result = (|| -> Result<(), String> {
         let pending: Pending = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-        let before = load_config(paths)?.library_v2;
+        let before = load_config(paths)?.shelf;
         let previous = match &before {
             Some(settings) => Some(match settings.generation {
                 Some(generation) => generation_path(paths, generation)?,
-                None => paths.native_library(),
+                None => paths.shelf(),
             }),
             None => None,
         };
@@ -566,7 +571,7 @@ fn prune_generations(paths: &ServerPaths, current: Id, previous: Option<&Path>) 
     }
 }
 
-/// 端末に棚を読む許可を付け外しする（設定の `library_v2.readers` に書く）。読む利用者は棚の
+/// 端末に棚を読む許可を付け外しする（設定の `shelf.readers` に書く）。読む利用者は棚の
 /// 持ち主（デスクトップと同じ利用者）。
 pub fn set_reader(paths: &ServerPaths, device: &str, read: bool) -> Result<Id, String> {
     static EDIT: Mutex<()> = Mutex::new(());
@@ -575,7 +580,7 @@ pub fn set_reader(paths: &ServerPaths, device: &str, read: bool) -> Result<Id, S
     let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
     let config: ServerConfig = toml::from_str(&text).map_err(|error| error.to_string())?;
     let owner = config
-        .library_v2
+        .shelf
         .as_ref()
         .map(|settings| settings.library_id)
         .ok_or("このサーバーはまだ新しい棚を配っていません")?;
@@ -583,7 +588,7 @@ pub fn set_reader(paths: &ServerPaths, device: &str, read: bool) -> Result<Id, S
         .parse()
         .map_err(|error: toml_edit::TomlError| error.to_string())?;
     let settings = document
-        .entry("library_v2")
+        .entry("shelf")
         .or_insert(Item::Table(Table::new()))
         .as_table_like_mut()
         .ok_or("棚の配信設定が不正です")?;

@@ -1,11 +1,10 @@
-//! 新ライブラリ用の認証付き読取 API。旧 API の意味や本番の保存先を変更しない。
+//! 携帯が棚を読む認証付きの API（`/api/v2/identity`・`/api/v2/libraries/...`）。
 mod auth;
 mod favorite;
 mod groups;
 mod list;
 mod reading;
 pub use auth::{Authority, DeviceAuthority, Grant};
-pub use favorite::FavoriteMirror;
 
 use crate::library::{
     protocol::{self, Decimal, Hash, Id},
@@ -26,7 +25,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Mutex,
     },
     time::Duration,
 };
@@ -52,8 +51,6 @@ pub struct Context {
     entity_rows: Mutex<groups::EntityRows>,
     /// 検索欄の候補の、正規化で足す名前の束（棚の世代ごと）。
     suggestions: crate::library_suggest::SuggestionPool,
-    /// 携帯のお気に入りを旧 API の変更の記録へ写す口（単独サーバーだけ）。
-    favorite_mirror: OnceLock<FavoriteMirror>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -83,7 +80,6 @@ impl Context {
             covers: Mutex::new(list::Covers::default()),
             entity_rows: Mutex::new(groups::EntityRows::default()),
             suggestions: Default::default(),
-            favorite_mirror: OnceLock::new(),
         })
     }
 
@@ -353,30 +349,6 @@ async fn identity(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
     );
-    response
-        .headers_mut()
-        .insert("x-piep-works-list", header::HeaderValue::from_static("1"));
-    // 携帯の一覧（絞り込み・並べ替え・語の検索）・作品の画面・表紙を新しい棚から出せる。
-    response
-        .headers_mut()
-        .insert("x-piep-works-search", header::HeaderValue::from_static("1"));
-    // 新しい棚の作品のお気に入りを、要求 UUID と更新世代で付け外しできる。
-    response.headers_mut().insert(
-        "x-piep-favorite-write",
-        header::HeaderValue::from_static("1"),
-    );
-    // 作者・シリーズ・コレクションの画面を新しい棚から出せる。
-    response
-        .headers_mut()
-        .insert("x-piep-groups", header::HeaderValue::from_static("1"));
-    // 検索欄の候補と、作品の以前の版（版ごとの写しの本）を新しい棚から出せる。
-    response
-        .headers_mut()
-        .insert("x-piep-suggest", header::HeaderValue::from_static("1"));
-    // 読書位置を新しい棚と受け渡せる（要求 UUID と更新世代で書き、変わった分を受け取る）。
-    response
-        .headers_mut()
-        .insert("x-piep-reading", header::HeaderValue::from_static("1"));
     response
 }
 

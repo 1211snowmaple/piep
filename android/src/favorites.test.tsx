@@ -6,23 +6,26 @@ import type { PcWork } from "./pcApi";
 import { forgetFavoriteChanges, useFavorite, useFavoriteNotice } from "./favorites";
 import { markFavoriteRead, nextFavoriteRevision } from "./favoriteFreshness";
 
-const api = vi.hoisted(() => ({ setPcFavorite: vi.fn(), setShelfFavorite: vi.fn(), shelf: null as object | null }));
-vi.mock("./pcApi", () => ({ setPcFavorite: api.setPcFavorite, pcErrorMessage: () => "前のサーバーのエラー", isShelfWork: (work: { id: unknown }) => typeof work.id === "string" }));
-vi.mock("./nativeReading", () => ({ favoriteShelf: () => api.shelf, setShelfFavorite: api.setShelfFavorite }));
-vi.mock("./appHistory", () => ({ useAppNavigation: () => ({ canWriteFavorite: true }) }));
+const api = vi.hoisted(() => ({ setShelfFavorite: vi.fn(), shelf: { libraryId: "shelf" } as object | null }));
+vi.mock("./pcApi", () => ({ pcErrorMessage: () => "前のサーバーのエラー" }));
+vi.mock("./nativeReading", () => ({ nativeShelf: () => api.shelf, setShelfFavorite: api.setShelfFavorite }));
+vi.mock("./appHistory", () => ({ useAppNavigation: () => ({ canBrowseServer: true }) }));
 
-const work = { source: "pixiv", sourceId: "1", favorite: false } as PcWork;
+const work = {
+  id: "0197a000-0000-7000-8000-000000000009", source: "pixiv", sourceId: "1", favorite: false,
+  shelf: { snapshotId: "0197a000-0000-7000-8000-000000000008", edited: false, editId: null, favoriteGeneration: "0" },
+} as PcWork;
 const clients: QueryClient[] = [];
 function wrapper({ children }: PropsWithChildren) {
   const client = new QueryClient();
   clients.push(client);
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }
-beforeEach(() => { api.setPcFavorite.mockReset(); api.setShelfFavorite.mockReset(); api.shelf = null; forgetFavoriteChanges(); });
+beforeEach(() => { api.setShelfFavorite.mockReset(); api.shelf = { libraryId: "shelf" }; forgetFavoriteChanges(); });
 afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.clear()); });
 
 it("サーバーを変えたら、同じ作品にも前のサーバーのお気に入りを出さない", async () => {
-  api.setPcFavorite.mockResolvedValue({ favorite: true });
+  api.setShelfFavorite.mockResolvedValue({ favorite: true, generation: "1" });
   const view = renderHook(() => useFavorite(work), { wrapper });
   await act(async () => { view.result.current.onToggle?.(true); });
   expect(view.result.current.favorite).toBe(true);
@@ -32,12 +35,12 @@ it("サーバーを変えたら、同じ作品にも前のサーバーのお気�
 
 it.each([false, true])("接続変更後に届いた古い応答を捨てる（失敗=%s）", async (reject) => {
   let finish!: (value: unknown) => void;
-  api.setPcFavorite.mockImplementationOnce(() => new Promise((resolve, fail) => { finish = reject ? fail : resolve; }));
+  api.setShelfFavorite.mockImplementationOnce(() => new Promise((resolve, fail) => { finish = reject ? fail : resolve; }));
   const view = renderHook(() => ({ ...useFavorite(work), notice: useFavoriteNotice() }), { wrapper });
   act(() => { view.result.current.onToggle?.(true); });
   expect(view.result.current.busy).toBe(true);
   act(() => { forgetFavoriteChanges(); });
-  await act(async () => { finish(reject ? new Error("古い失敗") : { favorite: true }); });
+  await act(async () => { finish(reject ? new Error("古い失敗") : { favorite: true, generation: "1" }); });
   expect(view.result.current).toMatchObject({ favorite: false, busy: false, notice: null });
 });
 
@@ -46,7 +49,7 @@ it("書き込み後の新しいサーバー値を採用し、書き込み前に�
   clients.push(client);
   const provider = ({ children }: PropsWithChildren) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
   const readBeforeWrite = nextFavoriteRevision();
-  api.setPcFavorite.mockResolvedValue({ favorite: true });
+  api.setShelfFavorite.mockResolvedValue({ favorite: true, generation: "1" });
   client.setQueryData(["works", { favorite: true }], { pages: [] });
   client.setQueryData(["works-page", { favorite: true }, null, 1], { items: [] });
   client.setQueryData(["collection", "one"], { members: [] });
@@ -69,8 +72,7 @@ const shelfWork = {
   shelf: { snapshotId: "0197a000-0000-7000-8000-000000000002", edited: false, editId: null, favoriteGeneration: "4" },
 } as PcWork;
 
-it("新しい棚の作品は、知っている世代を添えて付け外しし、次は返った世代を使う", async () => {
-  api.shelf = { libraryId: "shelf" };
+it("知っている世代を添えて付け外しし、次は返った世代を使う", async () => {
   api.setShelfFavorite.mockResolvedValueOnce({ favorite: true, generation: "5", conflict: false });
   api.setShelfFavorite.mockResolvedValueOnce({ favorite: false, generation: "6", conflict: false });
   const view = renderHook(() => useFavorite(shelfWork), { wrapper });
@@ -80,11 +82,9 @@ it("新しい棚の作品は、知っている世代を添えて付け外しし�
   await act(async () => { view.result.current.onToggle?.(false); });
   expect(api.setShelfFavorite).toHaveBeenLastCalledWith(api.shelf, shelfWork.id, "5", false);
   expect(view.result.current.favorite).toBe(false);
-  expect(api.setPcFavorite).not.toHaveBeenCalled();
 });
 
-it("先に変わっていたら今の値に合わせて知らせ、付け外しできない接続では押せない", async () => {
-  api.shelf = { libraryId: "shelf" };
+it("先に変わっていたら今の値に合わせて知らせ、棚に届かない接続では押せない", async () => {
   api.setShelfFavorite.mockResolvedValueOnce({ favorite: false, generation: "7", conflict: true });
   const view = renderHook(() => ({ ...useFavorite(shelfWork), notice: useFavoriteNotice() }), { wrapper });
   await act(async () => { view.result.current.onToggle?.(true); });

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { isShelfWork, pcErrorMessage, setPcFavorite, type PcWork } from "./pcApi";
-import { favoriteShelf, setShelfFavorite } from "./nativeReading";
+import { pcErrorMessage, type PcWork } from "./pcApi";
+import { nativeShelf, setShelfFavorite } from "./nativeReading";
 import { useAppNavigation } from "./appHistory";
 import { favoriteReadRevision, nextFavoriteRevision } from "./favoriteFreshness";
 
@@ -13,9 +13,6 @@ import { favoriteReadRevision, nextFavoriteRevision } from "./favoriteFreshness"
  * 新しい棚の作品は更新世代（`generation`）も覚え、次の付け外しの `expected` に使う。
  */
 type Entry = { favorite: boolean; busy: boolean; revision: number; generation?: string };
-
-/** 送り直しても一度だけ効く書き込み。古い世代からなら、今の値と `conflict` が返る。 */
-type Stored = { favorite: boolean; generation?: string; conflict?: boolean };
 
 const CONFLICT_NOTICE = "ほかの端末かデスクトップで先に変わっていたので、今の値に合わせました";
 
@@ -87,22 +84,19 @@ export function useFavorite(work: PcWork): { favorite: boolean; busy: boolean; o
     }
   }, [queryClient]);
 
-  // 新しい棚の作品は、棚が付け外しを受け付ける接続のときだけ押せる。
-  const shelf = isShelfWork(work) ? favoriteShelf() : null;
-  const writable = isShelfWork(work) ? shelf !== null && work.shelf !== undefined : navigation.canWriteFavorite;
+  // 棚に届いているときだけ押せる。
+  const shelf = navigation.canBrowseServer ? nativeShelf() : null;
+  const writable = shelf !== null && work.shelf !== undefined;
   const generation = (refreshed ? undefined : entry?.generation) ?? remoteGeneration ?? "0";
 
   const toggle = useCallback((next: boolean) => {
     const before = entries.get(key);
     const previous = { favorite, generation: before?.generation };
-    if (before?.busy) return;
+    if (before?.busy || !shelf) return;
     const pending: Entry = { favorite: next, busy: true, revision: nextFavoriteRevision(), generation: previous.generation };
     entries.set(key, pending);
     emit();
-    const request: Promise<Stored> = shelf
-      ? setShelfFavorite(shelf, String(work.id), generation, next)
-      : setPcFavorite(work.source, work.sourceId, next);
-    request
+    setShelfFavorite(shelf, work.id, generation, next)
       .then((stored) => {
         // 接続変更後に届いた古いサーバーの返事は、新しい本棚へ当てない。
         if (entries.get(key) !== pending) return;
@@ -119,7 +113,7 @@ export function useFavorite(work: PcWork): { favorite: boolean; busy: boolean; o
         showNotice(pcErrorMessage(error));
         refreshQueries();
       });
-  }, [favorite, generation, key, refreshQueries, shelf, work.id, work.source, work.sourceId]);
+  }, [favorite, generation, key, refreshQueries, shelf, work.id]);
 
   return { favorite, busy, onToggle: writable ? toggle : undefined };
 }

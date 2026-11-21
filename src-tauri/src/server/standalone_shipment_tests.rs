@@ -106,7 +106,7 @@ fn a_shipped_shelf_is_served_after_restart_and_keeps_what_the_phone_wrote_on_the
     let sent = ship(&first, &desktop, &temp.0);
     assert!(sent > 0);
     apply_pending(&paths);
-    let config = load_config(&paths).unwrap().library_v2.unwrap();
+    let config = load_config(&paths).unwrap().shelf.unwrap();
     assert_eq!(config.library_id.get(), desktop.id);
     let first_generation = config.generation.unwrap();
     assert!(fs::read_to_string(paths.config())
@@ -147,7 +147,7 @@ fn a_shipped_shelf_is_served_after_restart_and_keeps_what_the_phone_wrote_on_the
     drop(second);
     drop(served);
     apply_pending(&paths);
-    let config = load_config(&paths).unwrap().library_v2.unwrap();
+    let config = load_config(&paths).unwrap().shelf.unwrap();
     assert_ne!(config.generation, Some(first_generation));
     let served = config.open(&paths, Arc::clone(&store)).unwrap();
     assert_eq!(
@@ -219,7 +219,7 @@ fn a_shelf_holding_an_empty_file_ships() {
     let shipments = ShelfShipments::new(paths.clone(), None);
     ship(&shipments, &desktop, &temp.0);
     apply_pending(&paths);
-    let config = load_config(&paths).unwrap().library_v2.unwrap();
+    let config = load_config(&paths).unwrap().shelf.unwrap();
     let store = Arc::new(ServerStore::open(&paths.store()).unwrap());
     let served = config.open(&paths, store).unwrap();
     assert_eq!(
@@ -287,7 +287,7 @@ fn reading_permission_is_written_per_device_and_keeps_the_rest_of_the_settings()
     set_reader(&paths, "tablet", true).unwrap();
     set_reader(&paths, "tablet", false).unwrap();
     let config = load_config(&paths).unwrap();
-    let readers = &config.library_v2.unwrap().readers;
+    let readers = &config.shelf.unwrap().readers;
     assert_eq!(readers.get("phone"), Some(&owner));
     assert!(!readers.contains_key("tablet"));
     assert!(!config.update.auto);
@@ -308,7 +308,7 @@ async fn serve(
     let store = Arc::clone(&parts.context.store);
     let mut served = None;
     let mut shelf = None;
-    if let Some(settings) = &config.library_v2 {
+    if let Some(settings) = &config.shelf {
         let opened = settings.open(paths, Arc::clone(&store)).unwrap();
         served = Some(Arc::clone(opened.library()));
         shelf = Some(Arc::clone(&opened));

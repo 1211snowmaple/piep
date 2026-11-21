@@ -1,20 +1,8 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { MobileShelfReading, MobileShelfReadingLocation } from "@shared/mobileApi";
-import { readingShelf, type NativeOpened } from "./nativeReading";
+import { nativeShelf, type NativeOpened } from "./nativeReading";
 
-export interface ReadingPosition {
-  source: string;
-  sourceId: string;
-  version: number | null;
-  editHash: string | null;
-  page: number;
-  position: number;
-  finished: boolean;
-  deviceId: string;
-  deviceTime: number;
-  cursor: number;
-}
-
+/** 読む画面が溜めておく、次に書く位置。 */
 export interface ReadingWrite {
   source: string;
   sourceId: string;
@@ -55,9 +43,8 @@ function run(): Promise<void> {
   const current = (async () => {
     do {
       sendAgain = false;
-      await invoke<void>("reading_sync").catch(() => {});
-      // 新しい棚と受け渡せる接続では、棚の作品の位置も送り、変わった分を受け取る。
-      const shelf = readingShelf();
+      // 棚の作品の位置を送り、変わった分を受け取る。
+      const shelf = nativeShelf();
       if (shelf) await invoke<void>("pc_native_reading_sync", { scope: shelf }).catch(() => {});
       // 同時に届いた保存・画面終了の知らせは一回にまとめる。別々の
       // .then(run) を積むと、同じ同期の直後に何本も起動してしまう。
@@ -91,33 +78,23 @@ export function refreshReadingWithin(limitMs: number): Promise<void> {
   return Promise.race([refreshReading(), new Promise<void>((resolve) => { window.setTimeout(resolve, limitMs); })]);
 }
 
-export async function recordReading(write: ReadingWrite): Promise<void> {
-  if (!active()) return;
-  try { await invoke<void>("reading_record", { write }); } catch { /* 読書を止めない */ }
-}
-
-export async function readRemotePosition(source: string, sourceId: string): Promise<ReadingPosition | null> {
-  if (!active()) return null;
-  try { return await invoke<ReadingPosition | null>("reading_get", { source, sourceId }); } catch { return null; }
-}
-
-/** 読んだ位置を、新しい棚の作品の位置として端末に置く。通信はしない（次の同期で送る）。 */
+/** 読んだ位置を、棚の作品の位置として端末に置く。通信はしない（次の同期で送る）。 */
 export async function recordShelfReading(work: string, location: MobileShelfReadingLocation, finished: boolean): Promise<void> {
-  const scope = readingShelf();
+  const scope = nativeShelf();
   if (!active() || !scope) return;
   try { await invoke<void>("pc_native_reading_record", { scope, work, location, finished }); } catch { /* 読書を止めない */ }
 }
 
-/** 最後に受け取った、新しい棚のこの作品の位置。 */
+/** 最後に受け取った、棚のこの作品の位置。 */
 export async function readShelfPosition(work: string): Promise<MobileShelfReading | null> {
-  const scope = readingShelf();
+  const scope = nativeShelf();
   if (!active() || !scope) return null;
   try { return await invoke<MobileShelfReading | null>("pc_native_reading_get", { scope, work }); } catch { return null; }
 }
 
-/** 新しい棚と位置を受け渡す本か（読む画面で棚から開いた今の版の本）。 */
+/** 棚と位置を受け渡す本か（読む画面で棚から開いた今の版の本）。 */
 export function shelfReadingFor(document: NativeOpened | null): NativeOpened | null {
-  return document && active() && readingShelf() ? document : null;
+  return document && active() && nativeShelf() ? document : null;
 }
 
 /** 読む画面のページ（0 から）とその中の割合を、開いた本の版に結んだ棚の位置にする。 */
@@ -135,11 +112,4 @@ export function shelfStart(remote: MobileShelfReading | null, localTime: number,
   if (remote.mine ? localTime > 0 : remote.updatedAt <= localTime) return null;
   const sameText = remote.location.viewKind === document.view.kind && remote.location.viewId === document.view.id;
   return { page: remote.location.page, ratio: sameText ? remote.location.ratioPpm / 1_000_000 : 0, guide: !sameText, deviceTime: remote.updatedAt };
-}
-
-/** サーバーの位置を、手元より新しいときだけ開始位置にする。 */
-export function remoteStart(remote: ReadingPosition | null, localTime: number, version: number, editHash: string | null): RemoteStart | null {
-  if (!remote || remote.deviceTime <= localTime) return null;
-  const sameText = remote.version === version && (remote.editHash ?? null) === editHash;
-  return { page: remote.page, ratio: sameText ? remote.position : 0, guide: !sameText, deviceTime: remote.deviceTime };
 }

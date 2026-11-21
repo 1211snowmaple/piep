@@ -200,7 +200,6 @@ export type AppNavigation = {
   /** サーバーの本棚へ移動できるときだけ、作者やシリーズへの導線を出す。 */
   canBrowseServer: boolean;
   /** サーバーが `favorite-write` を持ち、つながっているときだけお気に入りを押せる。 */
-  canWriteFavorite: boolean;
 };
 
 const NavigationContext = createContext<AppNavigation | null>(null);

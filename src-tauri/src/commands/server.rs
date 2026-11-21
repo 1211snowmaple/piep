@@ -1,10 +1,6 @@
 //! サーバーモードのコマンド。実体は `crate::server::desktop` にある。
 
-use crate::server::desktop::{
-    list_local_interfaces, DesktopServer, DesktopServerStatus, EmbeddedSettings, LocalInterface,
-    PairingDetails,
-};
-use crate::server::DEFAULT_PORT;
+use crate::server::desktop::{DesktopServer, DesktopServerStatus, PairingDetails};
 use crate::AppState;
 use std::sync::Arc;
 use tauri::Manager;
@@ -19,52 +15,16 @@ fn library(app: &tauri::AppHandle) -> Arc<AppState> {
     app.state::<Arc<AppState>>().inner().clone()
 }
 
-/// 内蔵サーバーと単独サーバーへの接続の、今の状態を返す。
+/// 単独サーバーへの接続の、今の状態を返す。
 #[tauri::command]
 pub async fn server_status(app: tauri::AppHandle) -> Result<DesktopServerStatus, String> {
     Ok(controller(&app)?.status().await)
 }
 
-/// この PC をサーバーにする。設定を記録するので、次の起動でも動き出す。
-#[tauri::command]
-pub async fn server_embedded_start(
-    app: tauri::AppHandle,
-    settings: EmbeddedSettings,
-) -> Result<DesktopServerStatus, String> {
-    let server = controller(&app)?;
-    server
-        .start_embedded(
-            crate::server::library::Library::none(),
-            settings,
-            DEFAULT_PORT,
-        )
-        .await?;
-    Ok(server.status().await)
-}
-
-/// 内蔵サーバーを止める。次の起動でも動かさない。
-#[tauri::command]
-pub async fn server_embedded_stop(app: tauri::AppHandle) -> Result<DesktopServerStatus, String> {
-    let server = controller(&app)?;
-    server.stop_embedded().await?;
-    Ok(server.status().await)
-}
-
-/// 携帯の登録文字列を発行する。単独サーバーにつないでいれば、そちらで発行する。
+/// 携帯の登録文字列を、つないでいる単独サーバーで発行する。
 #[tauri::command]
 pub async fn server_create_reader_pairing(app: tauri::AppHandle) -> Result<PairingDetails, String> {
     controller(&app)?.create_reader_pairing().await
-}
-
-/// 端末の登録を解除する。すぐに効く。
-#[tauri::command]
-pub async fn server_revoke_device(
-    app: tauri::AppHandle,
-    device_id: String,
-) -> Result<DesktopServerStatus, String> {
-    let server = controller(&app)?;
-    server.revoke_device(&device_id).await?;
-    Ok(server.status().await)
 }
 
 /// 単独サーバーの携帯に、新しい棚を読む許可を付け外しする。
@@ -166,10 +126,4 @@ pub async fn server_send_stop(app: tauri::AppHandle) -> Result<DesktopServerStat
     let server = controller(&app)?;
     server.stop_send();
     Ok(server.status().await)
-}
-
-/// 内蔵サーバーが待ち受けられる、この PC のアドレスを返す。
-#[tauri::command]
-pub fn server_list_interfaces() -> Result<Vec<LocalInterface>, String> {
-    list_local_interfaces()
 }

@@ -19,7 +19,6 @@ import { OfflineLibrary } from "./OfflineLibrary";
 import { WorkDetail } from "./WorkDetail";
 import { EntityPage } from "./EntityPage";
 import { homePage, NavigationProvider, useAppHistory, type LibraryPage } from "./appHistory";
-import { forgetAllPages } from "./pageCache";
 import { forgetServerImages } from "./images";
 import { flushLocalReading } from "./localReading";
 import { setReadingServer, useLocalReadingsReady } from "./recentReading";
@@ -155,7 +154,6 @@ function App() {
     const previous = shownServer.current;
     shownServer.current = serverUrl;
     if (previous === undefined || previous === serverUrl) return;
-    forgetAllPages();
     forgetServerImages();
     forgetFavoriteChanges();
     restart();
@@ -558,8 +556,7 @@ function App() {
   }, [section, pcConnection?.paired]);
 
   const canBrowseServer = Boolean(pcConnection?.reachable);
-  const canWriteFavorite = canBrowseServer && Boolean(pcConnection?.capabilities.includes("favorite-write"));
-  const navigation = useMemo(() => ({ entry, depth, push, replace, back, canBrowseServer, canWriteFavorite }), [entry, depth, push, replace, back, canBrowseServer, canWriteFavorite]);
+  const navigation = useMemo(() => ({ entry, depth, push, replace, back, canBrowseServer }), [entry, depth, push, replace, back, canBrowseServer]);
   const favoriteNotice = useFavoriteNotice();
 
   const readerProps = { type: readerType, behavior: readerBehavior, onBack: closeReader, onTypeChange: changeReaderType, onBehaviorChange: changeReaderBehavior, backLabel: selectedWork ? "作品詳細に戻る" : "作品一覧に戻る" };

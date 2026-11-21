@@ -2724,3 +2724,68 @@ web 詳細で確認した空欄・通常の空欄の変更を試験した。同�
 8. 開発者向けの `docs/policy/04-data.md` は、まだ旧棚の `piep.db` の持ち方と移行を説明している。
    棚の台帳・実体・移行の決まりに書き直す。（生成するスキーマの資料は、棚の台帳の SQL を順に当てた
    結果から作るよう `tools/ipc-extract` を変えた。）
+
+#### 6.90.1 携帯とサーバーが旧 API（v1）に頼っているところ（2026-11-21 の洗い出し）
+
+**旧棚を読んでいるのは単独サーバーの v1 だけ。** デスクトップの内蔵サーバーは v1 に本棚を渡していない
+（`Library::none`）ので、v1 のデータの口は「準備中」を返すだけで、携帯は棚（v2）からしか読めない。
+単独サーバー（Maple）は v1 の口で `C:\ServerData\piep\library\piep.db` を出し続けている。棚の許可
+（`/api/v1/admin/devices/{id}/shelf`）を出していない端末は、Maple ではここを読む。
+
+携帯（`android/`）の側:
+
+| 頼っているもの | 棚の代わり | 扱い |
+| --- | --- | --- |
+| 登録と接続確認（`/api/v1/pair`・`/api/v1/hello`、`pc_client.rs`） | 無い。v2 は登録で出た鍵を使う | 旧棚とは関係ない。消さない。名前を v2 へ移すかは別に決める |
+| 一覧・作品・ページ・目次・検索・候補・作者・シリーズ・コレクション（`pc_get_page`・`pc_get_outline`・`pc_get_metadata`・`pc_get_collection`・`pc_get_entity_detail`・`pc_get_work_collections`・`pc_list_entities`・`pc_list_entity_series`・`pc_list_collections`・`pc_search_works`・`pc_search_suggest`・`pc_lookup_work`） | `/api/v2/libraries/{id}/…` と読む束（`readerBundle`）。`nativeReading.ts` が能力の札（`worksSearch`・`groups`・`suggest`）を見て選ぶ | 札が無い接続のときだけ使う予備。消せる |
+| お気に入り（`pc_set_favorite` → `/api/v1/favorites/…`） | `…/works/{work}/favorite`（札 `favoriteWrite`） | 同上 |
+| 読書位置の同期（`reading_sync`・`reading_get`・`reading_record` → `/api/v1/reading`） | `…/reading`・`…/works/{work}/reading`（札 `reading`） | 同上 |
+| 表紙と挿絵の URL（`cover_protocol.rs`、`OnlineReader.tsx` の `illustrationUrl(v1WorkId(…))`） | `…/cover`・束の資源 | 同上 |
+| 番号の ID で端末に保存した作品（`offline_save_work` と、その読み出し） | 束で保存した作品（棚の ID） | 番号で保存した作品が端末に残っている間は読み出しを残す。保存し直してもらってから消す |
+
+サーバー（`src-tauri/src/server/`）の側:
+
+| 口 | 使っている者 | 扱い |
+| --- | --- | --- |
+| v1 のデータの口（`read_routes` の `works/*`・`collections/*`・`entities/*`・`favorites`・`reading`・`search/suggest`、`with_db`） | 棚の許可の無い端末（Maple） | 携帯の予備と一緒に消す |
+| `hello`・`pair`・`about` | 登録 | 残す |
+| `/api/v1/admin/sync/sessions*`（旧棚の送信の受け取り）と `sync_receive.rs`・`SwappableDb` | デスクトップからはもう呼ばない。`sync_send_v1.rs` の試験だけ | 消せる。Maple に旧棚を送り直す道もここで無くなる |
+| `/api/v1/admin/favorites`・`…/ack` | デスクトップからはもう呼ばない（`admin/shelf/favorites` を使う） | 消せる。`reapply_shelf_favorites` が読む旧 API の記録（`favorite_changes_since`）も、v1 のお気に入りの口と一緒に消す |
+| `admin/status`・`update`・`pairings`・`devices*`・`shelf/*`・管理画面の口 | 管理 | 残す（名前に v1 が付いているだけ） |
+
+消す順:
+
+1. Maple で、使っている携帯すべてに棚の許可を出す（管理画面の操作。利用者が行うか、了承を得てから）。
+   出したあとは、携帯が棚から読めることを実機で確かめる。
+2. 携帯の予備の道（上の表の「消せる」）と、能力の札が無い接続への分岐を消し、携帯の版を出す。
+   番号で保存した作品が端末に残っていれば、束で保存し直すよう画面で知らせる。
+3. サーバーの v1 のデータの口・旧棚の送信の受け取り・旧 API のお気に入りの記録を消し、`ServerPaths` の
+   `library/piep.db` と `downloads` を開かないようにする。ここで `database/` を借りている物も減る（6.90 の 3）。
+4. Maple の `C:\ServerData\piep\library` を消す（了承を得てから。6.90 の 2）。
+5. 内蔵サーバーを残すかを決める（6.90 の 4）。v1 のデータの口が消えれば、内蔵サーバーの `Library::none` も要らなくなる。
+
+**2026-11-21 に済ませたこと（`claude/drop-api-v1`）。** 携帯は試用だけだったので、上の 1 と番号で
+保存した作品の移し替えを待たずに、2 と 3 を一度に済ませた。
+
+- サーバー: v1 のデータの口・旧棚の送信の受け取り（`sync_receive.rs`・`SwappableDb`・`snapshot.rs`・
+  `library.rs`）・旧 API のお気に入りと読書位置の記録（`state.db` の `reading`・`favorite_changes`・
+  `files`・`session_files` は起動時に捨てる）を消した。残る口は `/api/v2/hello`・`/api/v2/pair`・
+  `/api/v2/about`・`/api/v2/admin/*` に移した。管理の状態は `shelf`（配っている棚）と `shipment`
+  （受け取りの状態）を返す。`identity` の口ごとの知らせ（`x-piep-groups` など）も無くした。
+- 管理画面: 「ライブラリ」は配っている棚と受け取りの状態、容量は棚の中身で数える。索引の作り直しは消した。
+- 携帯: v1 のコマンド・予備の道・番号の鍵（`OfflineKey::Legacy`）・旧 API の読書同期（`reading_sync`）・
+  0.5 までの localStorage からの移行を消した。作品は棚の UUID だけで指す。端末の記録は版 6 で
+  旧同期の表を捨てる。番号で保存した `work-{番号}` の置き場は読まない（残っていれば保存し直す）。
+  サーバーに棚が無いときは `no_library` と出す。
+
+- 単独サーバー: 置き場の `library-v2…` を `shelf…`（`shelf/`・`shelf-generations/`・`shelf-incoming/`・
+  `shelf-database-parts/`・`shelf-pending.json`）に、設定の `[library_v2]` を `[shelf]` にした。0.41 の
+  起動時に一度だけ移す（`server.toml.previous` も）。旧棚の置き場（`library/`）を作るのと、当てる前に
+  `piep.db` を写すのもやめた（0.40 が作った写しの目録に載っていても戻さない）。
+
+- 内蔵サーバー（5）: 消した。棚を配らない（`set_reader_shelf` を呼ぶのは単独サーバーだけ）ので、v1 が
+  消えた今は携帯を登録できても `no_library` になるだけだった。設定画面は単独サーバーへの接続だけにし、
+  命令 `server_embedded_start`・`server_embedded_stop`・`server_list_interfaces`・`server_revoke_device` を消した。
+  アプリデータの `server\state.db` と `server	ls\` は起動時に消し、設定の `embedded` は読むときに捨てる。
+
+残り: Maple への反映と `C:\ServerData\piep\library` の削除（4、了承が要る）。

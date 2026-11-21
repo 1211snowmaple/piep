@@ -1,4 +1,4 @@
-/** 管理画面が話す API。同じ口の `/api/v1/admin/*` だけを読む。 */
+/** 管理画面が話す API。同じ口の `/api/v2/admin/*` だけを読む。 */
 
 export class ApiFailure extends Error {
   constructor(
@@ -71,21 +71,24 @@ export interface Device {
   lastSeenAt: string | null;
 }
 
-export interface SyncStatus {
-  generation: number;
-  committedAt: string | null;
-  sessionOpen: boolean;
-  indexPending: number | null;
-  indexError: string | null;
+/** 棚の受け取りの進み具合。 */
+export interface ShipmentStatus {
+  state: "idle" | "receiving" | "assembling" | "ready" | "failed";
+  shipmentId: string | null;
+  generation: string | null;
+  works: number | null;
+  /** 組み終えて立ち上げ直しを頼んだか（偽なら手で立ち上げ直すと切り替わる）。 */
+  restarting: boolean | null;
+  error: string | null;
 }
 
 export interface AdminStatus {
   version: string;
   apiVersion: number;
-  works: number | null;
-  libraryV2?: { libraryId: string; syncEpoch: string; works: string };
+  /** 配っている棚。まだ受け取っていなければ null。 */
+  shelf: { libraryId: string; syncEpoch: string; works: string } | null;
   devices: Device[];
-  sync: SyncStatus | null;
+  shipment?: ShipmentStatus;
   publicUrl: string | null;
   update: UpdateStatus | null;
   serverName: string;
@@ -133,7 +136,6 @@ export interface Storage {
   contentBytes: number;
   databaseBytes: number;
   indexBytes: number;
-  trashBytes: number;
   freeBytes: number | null;
 }
 
@@ -174,40 +176,39 @@ export interface Pairing {
 export type TicketKind = "login" | "setup";
 
 export const adminApi = {
-  webState: () => get<WebState>("/api/v1/admin/web/state"),
-  login: (username: string, password: string) => post<unknown>("/api/v1/admin/web/login", { username, password }),
-  ticketInfo: (ticket: string) => post<{ kind: TicketKind; username: string | null }>("/api/v1/admin/web/ticket-info", { ticket }),
-  useTicket: (ticket: string) => post<unknown>("/api/v1/admin/web/ticket", { ticket }),
-  setup: (ticket: string, username: string | null, password: string) => post<unknown>("/api/v1/admin/web/setup", { ticket, username, password }),
-  logout: () => post<void>("/api/v1/admin/web/logout"),
-  reauth: (password: string) => post<void>("/api/v1/admin/web/reauth", { password }),
-  disableWeb: () => post<void>("/api/v1/admin/web/disable"),
-  status: () => get<AdminStatus>("/api/v1/admin/status"),
-  checkUpdate: () => post<UpdateStatus>("/api/v1/admin/update/check"),
-  applyUpdate: () => post<unknown>("/api/v1/admin/update"),
-  retrySkipped: () => post<void>("/api/v1/admin/update/retry"),
-  rollback: () => post<{ version: string }>("/api/v1/admin/update/rollback"),
-  updateHistory: () => get<UpdateHistoryEntry[]>("/api/v1/admin/update/history"),
-  setUpdateSettings: (auto: boolean, window: string) => put<unknown>("/api/v1/admin/settings/update", { auto, window }),
-  setServerName: (name: string) => put<void>("/api/v1/admin/settings/server-name", { name }),
-  changePassword: (password: string) => put<void>("/api/v1/admin/password", { password }),
-  sessions: () => get<{ sessions: AdminSession[]; currentId: string | null }>("/api/v1/admin/sessions"),
-  endSession: (id: string) => request<void>("DELETE", `/api/v1/admin/sessions/${encodeURIComponent(id)}`),
-  revokeDevice: (id: string) => request<void>("DELETE", `/api/v1/admin/devices/${encodeURIComponent(id)}`),
-  addReader: (url: string) => post<Pairing>("/api/v1/admin/pairings", { url }),
-  replaceAdmin: (url: string) => post<Pairing>("/api/v1/admin/pairings", { url, role: "admin" }),
-  storage: () => get<Storage>("/api/v1/admin/storage"),
-  connection: () => get<ConnectionState>("/api/v1/admin/connection"),
-  saveConnection: (change: ConnectionChange) => put<ConnectionState>("/api/v1/admin/connection", change),
-  restart: () => post<void>("/api/v1/admin/restart"),
-  reindex: () => post<void>("/api/v1/admin/library/reindex"),
+  webState: () => get<WebState>("/api/v2/admin/web/state"),
+  login: (username: string, password: string) => post<unknown>("/api/v2/admin/web/login", { username, password }),
+  ticketInfo: (ticket: string) => post<{ kind: TicketKind; username: string | null }>("/api/v2/admin/web/ticket-info", { ticket }),
+  useTicket: (ticket: string) => post<unknown>("/api/v2/admin/web/ticket", { ticket }),
+  setup: (ticket: string, username: string | null, password: string) => post<unknown>("/api/v2/admin/web/setup", { ticket, username, password }),
+  logout: () => post<void>("/api/v2/admin/web/logout"),
+  reauth: (password: string) => post<void>("/api/v2/admin/web/reauth", { password }),
+  disableWeb: () => post<void>("/api/v2/admin/web/disable"),
+  status: () => get<AdminStatus>("/api/v2/admin/status"),
+  checkUpdate: () => post<UpdateStatus>("/api/v2/admin/update/check"),
+  applyUpdate: () => post<unknown>("/api/v2/admin/update"),
+  retrySkipped: () => post<void>("/api/v2/admin/update/retry"),
+  rollback: () => post<{ version: string }>("/api/v2/admin/update/rollback"),
+  updateHistory: () => get<UpdateHistoryEntry[]>("/api/v2/admin/update/history"),
+  setUpdateSettings: (auto: boolean, window: string) => put<unknown>("/api/v2/admin/settings/update", { auto, window }),
+  setServerName: (name: string) => put<void>("/api/v2/admin/settings/server-name", { name }),
+  changePassword: (password: string) => put<void>("/api/v2/admin/password", { password }),
+  sessions: () => get<{ sessions: AdminSession[]; currentId: string | null }>("/api/v2/admin/sessions"),
+  endSession: (id: string) => request<void>("DELETE", `/api/v2/admin/sessions/${encodeURIComponent(id)}`),
+  revokeDevice: (id: string) => request<void>("DELETE", `/api/v2/admin/devices/${encodeURIComponent(id)}`),
+  addReader: (url: string) => post<Pairing>("/api/v2/admin/pairings", { url }),
+  replaceAdmin: (url: string) => post<Pairing>("/api/v2/admin/pairings", { url, role: "admin" }),
+  storage: () => get<Storage>("/api/v2/admin/storage"),
+  connection: () => get<ConnectionState>("/api/v2/admin/connection"),
+  saveConnection: (change: ConnectionChange) => put<ConnectionState>("/api/v2/admin/connection", change),
+  restart: () => post<void>("/api/v2/admin/restart"),
   audit: (kind: string | null, onlyFailures: boolean, before: number | null) => {
     const query = new URLSearchParams();
     if (kind) query.set("kind", kind);
     if (onlyFailures) query.set("ok", "false");
     if (before !== null) query.set("before", String(before));
     const text = query.toString();
-    return get<AuditEntry[]>(`/api/v1/admin/audit${text ? `?${text}` : ""}`);
+    return get<AuditEntry[]>(`/api/v2/admin/audit${text ? `?${text}` : ""}`);
   },
 };
 

@@ -9,7 +9,7 @@ use toml_edit::{value, DocumentMut, Item, Table};
 use uuid::Uuid;
 
 pub(super) fn generations(paths: &ServerPaths) -> PathBuf {
-    paths.root.join("library-v2-generations")
+    paths.root.join("shelf-generations")
 }
 
 pub(super) fn generation_path(paths: &ServerPaths, generation: Id) -> Result<PathBuf, String> {
@@ -69,7 +69,7 @@ pub(super) fn activate_locked(
     let config: ServerConfig = toml::from_str(&text).map_err(|error| error.to_string())?;
     config.validate()?;
     let root = generation_path(paths, generation)?;
-    let library = match &config.library_v2 {
+    let library = match &config.shelf {
         Some(settings) => Library::open_matching(&root, settings.library_id.get()),
         None => Library::open(&root),
     }
@@ -80,7 +80,7 @@ pub(super) fn activate_locked(
             .map_err(|error| format!("選んだ棚を検証できません: {error}"))?;
     }
     if config
-        .library_v2
+        .shelf
         .as_ref()
         .is_some_and(|settings| settings.generation == Some(generation))
     {
@@ -90,7 +90,7 @@ pub(super) fn activate_locked(
         .parse()
         .map_err(|error: toml_edit::TomlError| error.to_string())?;
     let settings = document
-        .entry("library_v2")
+        .entry("shelf")
         .or_insert(Item::Table(Table::new()))
         .as_table_like_mut()
         .ok_or("棚の配信設定が不正です")?;
@@ -105,6 +105,61 @@ pub(super) fn activate_locked(
         return Err("確認中に設定が変更されました。配信する棚の指定をやり直してください".into());
     }
     write_config(paths, written.as_bytes())
+}
+
+/// 0.40 までの置き場の名前と、そのとき棚の名前に変える。
+const OLD_NAMES: [(&str, &str); 5] = [
+    ("library-v2", "shelf"),
+    ("library-v2-generations", "shelf-generations"),
+    ("library-v2-incoming", "shelf-incoming"),
+    ("library-v2-database-parts", "shelf-database-parts"),
+    ("library-v2-pending.json", "shelf-pending.json"),
+];
+const OLD_TABLE: &str = "library_v2";
+
+/// 0.40 までの置き場の名前と設定の `[library_v2]` を、棚の名前へ一度だけ移す。
+/// 途中で止まっても、次の起動で残りを移す。両方の名前があれば、どちらも動かさずに止める。
+pub(super) fn rename_old_layout(paths: &ServerPaths) -> Result<(), String> {
+    for (old, new) in OLD_NAMES {
+        let (from, to) = (paths.root.join(old), paths.root.join(new));
+        if fs::symlink_metadata(&from).is_err() {
+            continue;
+        }
+        if fs::symlink_metadata(&to).is_ok() {
+            return Err(format!(
+                "{old} と {new} が両方あります。どちらを使うか決めて、片方を置き場の外へ移してください"
+            ));
+        }
+        fs::rename(&from, &to).map_err(|error| format!("{old} を {new} へ移せません: {error}"))?;
+        sync_directory(&paths.root).map_err(|error| error.to_string())?;
+    }
+    for path in [paths.config(), paths.config_previous()] {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(renamed) = renamed_table(&text)? else {
+            continue;
+        };
+        super::update::write_atomic(&path, renamed.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// 設定の `[library_v2]` を `[shelf]` へ移した文。移すものが無ければ `None`。
+fn renamed_table(text: &str) -> Result<Option<String>, String> {
+    let mut document: DocumentMut = text.parse().map_err(|error: toml_edit::TomlError| {
+        format!("{CONFIG_FILE} を読み取れません: {error}")
+    })?;
+    let Some(item) = document.remove(OLD_TABLE) else {
+        return Ok(None);
+    };
+    if document.contains_key("shelf") {
+        return Err(format!(
+            "{CONFIG_FILE} に [library_v2] と [shelf] が両方あります。[library_v2] を消してください"
+        ));
+    }
+    document.insert("shelf", item);
+    Ok(Some(document.to_string()))
 }
 
 pub(super) fn write_config(paths: &ServerPaths, content: &[u8]) -> Result<(), String> {
@@ -161,19 +216,63 @@ mod tests {
     }
 
     #[test]
+    fn the_old_v2_names_move_to_the_shelf_names_once() {
+        let (_temp, paths, source) = fixture();
+        let generation = stage(&paths, &source).unwrap();
+        activate(&paths, generation).unwrap();
+        let library = load_config(&paths).unwrap().shelf.unwrap().library_id;
+        // 0.40 までの名前に戻す。
+        fs::rename(
+            paths.root.join("shelf-generations"),
+            paths.root.join("library-v2-generations"),
+        )
+        .unwrap();
+        fs::write(paths.root.join("library-v2-pending.json"), b"{}").unwrap();
+        let old = fs::read_to_string(paths.config())
+            .unwrap()
+            .replace("[shelf", "[library_v2");
+        fs::write(paths.config(), &old).unwrap();
+        fs::write(paths.config_previous(), &old).unwrap();
+        assert!(load_config(&paths).is_err());
+
+        rename_old_layout(&paths).unwrap();
+        rename_old_layout(&paths).unwrap();
+        let config = load_config(&paths).unwrap().shelf.unwrap();
+        assert_eq!(config.library_id, library);
+        assert_eq!(config.generation, Some(generation));
+        assert!(fs::read_to_string(paths.config())
+            .unwrap()
+            .contains("# 設定を保つ"));
+        assert!(!fs::read_to_string(paths.config_previous())
+            .unwrap()
+            .contains("library_v2"));
+        assert!(generation_path(&paths, generation).unwrap().is_dir());
+        assert!(paths.root.join("shelf-pending.json").is_file());
+        for (old, _) in OLD_NAMES {
+            assert!(!paths.root.join(old).exists(), "{old}");
+        }
+
+        // 両方の名前があれば、どちらも動かさない。
+        fs::create_dir(paths.root.join("library-v2-generations")).unwrap();
+        assert!(rename_old_layout(&paths).is_err());
+        assert!(paths.root.join("shelf-generations").is_dir());
+        assert!(paths.root.join("library-v2-generations").is_dir());
+    }
+
+    #[test]
     fn publication_selects_a_verified_copy_and_rollback_uses_a_fresh_sync_epoch() {
         let (_temp, paths, source) = fixture();
         let first = stage(&paths, &source).unwrap();
-        assert!(load_config(&paths).unwrap().library_v2.is_none());
+        assert!(load_config(&paths).unwrap().shelf.is_none());
         add_work(&source);
         let second = stage(&paths, &source).unwrap();
         assert_ne!(first, second);
         activate(&paths, first).unwrap();
-        let original = load_config(&paths).unwrap().library_v2.unwrap();
+        let original = load_config(&paths).unwrap().shelf.unwrap();
         assert_eq!(original.generation, Some(first));
         let text = fs::read_to_string(paths.config()).unwrap();
         let text = format!(
-            "{text}\n[library_v2.readers]\nphone = \"{}\"\n",
+            "{text}\n[shelf.readers]\nphone = \"{}\"\n",
             original.library_id.get()
         );
         fs::write(paths.config(), text).unwrap();
@@ -186,7 +285,7 @@ mod tests {
         assert!(fs::read_to_string(paths.config())
             .unwrap()
             .contains("# 設定を保つ"));
-        let next = next.library_v2.unwrap();
+        let next = next.shelf.unwrap();
         assert_eq!(next.generation, Some(second));
         assert_eq!(next.readers.get("phone"), Some(&original.library_id));
         assert_ne!(next.sync_epoch, original.sync_epoch);
@@ -199,11 +298,11 @@ mod tests {
         drop(opened);
         activate(&paths, second).unwrap();
         assert_eq!(
-            load_config(&paths).unwrap().library_v2.unwrap().sync_epoch,
+            load_config(&paths).unwrap().shelf.unwrap().sync_epoch,
             next.sync_epoch
         );
         activate(&paths, first).unwrap();
-        let restored = load_config(&paths).unwrap().library_v2.unwrap();
+        let restored = load_config(&paths).unwrap().shelf.unwrap();
         assert_eq!(restored.generation, Some(first));
         assert_ne!(restored.sync_epoch, next.sync_epoch);
         assert_ne!(restored.sync_epoch, original.sync_epoch);

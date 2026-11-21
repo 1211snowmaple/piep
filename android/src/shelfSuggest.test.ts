@@ -20,12 +20,12 @@ const shelfItem = {
 
 const opened = { key: "k", entityId: work, view: { kind: "snapshot", id: older }, edited: false, pageCount: 1, sourcePageStarts: [0], totalPlainTextChars: 5, outline: [] };
 
-function status(suggest: boolean) {
+function status(reachable = true) {
   return {
-    url: "https://server", reachable: true,
+    url: "https://server", reachable,
     nativeLibrary: {
       scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
-      worksList: true, worksSearch: true, favoriteWrite: true, groups: true, suggest, readerBundle: true,
+      readerBundle: true,
     },
   } as never;
 }
@@ -40,7 +40,7 @@ beforeEach(() => {
 it("候補と以前の版を出せる接続では、候補・作品の引き当て・以前の版を新しい棚から", async () => {
   const native = await import("./nativeReading");
   const pc = await import("./pcApi");
-  native.adoptNativeLibrary(status(true));
+  native.adoptNativeLibrary(status());
   api.invoke.mockImplementation(async (command: string) => {
     if (command === "pc_native_suggest") return { items: [{ kind: "title", label: "題", value: "42", count: 1, exactMatch: true, source: "pixiv", sourceKey: work }] };
     if (command === "pc_native_lookup_work") return shelfItem;
@@ -71,18 +71,12 @@ it("候補と以前の版を出せる接続では、候補・作品の引き当�
   expect(api.invoke.mock.calls.filter(([command]) => command === "pc_native_open_snapshot")).toHaveLength(2);
 });
 
-it("候補と以前の版を出せない接続では、候補は旧 API、版の一覧は渡さない", async () => {
+it("棚に届かない接続では、候補を出さず以前の版も開かない", async () => {
   const native = await import("./nativeReading");
   const pc = await import("./pcApi");
   native.adoptNativeLibrary(status(false));
-  api.invoke.mockImplementation(async (command: string) => {
-    if (command === "pc_search_suggest") return { items: [] };
-    if (command === "pc_native_work") return { work: shelfItem, people: [], series: [], editBaseVersion: null, versions: [{ snapshotId: older, version: 1, textLength: 8, savedAt: "" }] };
-    throw new Error(command);
-  });
-  await pc.searchPcSuggestions("題");
-  expect(last()?.[0]).toBe("pc_search_suggest");
-  expect((await pc.getPcMetadata(work)).versions).toEqual([]);
+  expect(await pc.searchPcSuggestions("題")).toEqual([]);
+  expect(await pc.lookupPcWork("pixiv", "42")).toBeNull();
   expect(await native.openNativeSnapshot(work, older)).toBeNull();
-  expect(native.suggestShelf()).toBeNull();
+  expect(api.invoke).not.toHaveBeenCalled();
 });

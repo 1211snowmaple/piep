@@ -23,12 +23,12 @@ const summary = {
   coverWorkId: null, coverMode: "single", coverRevision: 4, hasSingleCover: true, hasFileCover: false, coverTiles: [],
 };
 
-function status(groups: boolean) {
+function status(reachable = true) {
   return {
-    url: "https://server", reachable: true,
+    url: "https://server", reachable,
     nativeLibrary: {
       scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
-      worksList: true, worksSearch: true, favoriteWrite: true, groups, readerBundle: true,
+      readerBundle: true,
     },
   } as never;
 }
@@ -40,11 +40,11 @@ beforeEach(() => {
   api.invoke.mockReset();
 });
 
-it("棚のコレクションを出せる接続では、作者・シリーズ・コレクションの画面と画像を新しい棚から引く", async () => {
+it("作者・シリーズ・コレクションの画面と画像を棚から引く", async () => {
   const native = await import("./nativeReading");
   const pc = await import("./pcApi");
   const images = await import("./images");
-  native.adoptNativeLibrary(status(true));
+  native.adoptNativeLibrary(status());
   api.invoke.mockImplementation(async (command: string) => {
     if (command === "pc_native_entities") return { items: [], nextOffset: null, total: 0 };
     if (command === "pc_native_entity_detail") return { source: "pixiv", sourceKey: "7", displayName: "作者", description: null, workCount: 1, hasCover: true, hasBanner: false, isConcluded: null, publishedCount: null, links: [], tags: [], seriesCount: 0, collections: [summary] };
@@ -63,7 +63,7 @@ it("棚のコレクションを出せる接続では、作者・シリーズ・�
   expect(last()?.[1]).toMatchObject({ source: "pixiv", key: "7", cursor: "30" });
   const listed = await pc.listPcCollections();
   expect(listed[0].shelfLibrary).toBe(library);
-  // 新しい棚の作品のコレクションも出る（旧 API の番号の作品は旧 API へ）。
+  // 作品の入ったコレクションも出る。
   const memberships = await pc.getPcWorkCollections(work);
   expect(memberships[0].position).toBe(0);
   expect(last()).toEqual(["pc_native_work_collections", { library: expect.objectContaining({ libraryId: library }), work }]);
@@ -75,20 +75,18 @@ it("棚のコレクションを出せる接続では、作者・シリーズ・�
   // 画像も棚から。単独の表紙は作品の番号ではなく `single` で引く。
   expect(images.entityCoverUrl("people", "pixiv", "a b", true)?.startsWith(`http://pcimg.localhost/shelf-entity/${library}/people/pixiv/a%20b/banner?connection=`)).toBe(true);
   expect(images.collectionCoverUrl(opened, "single", 4)?.startsWith(`http://pcimg.localhost/shelf-collection/${library}/${collection}/single/4?connection=`)).toBe(true);
-  expect(native.groupShelfKey()).toContain(library);
+  expect(native.nativeShelfKey()).toContain(library);
 });
 
-it("棚のコレクションを出せない接続では、旧 API の画面と画像のまま", async () => {
+it("棚に届かない接続では、画面も画像も出さない", async () => {
   const native = await import("./nativeReading");
   const pc = await import("./pcApi");
   const images = await import("./images");
   native.adoptNativeLibrary(status(false));
-  api.invoke.mockImplementation(async () => []);
-  await pc.listPcCollections();
-  expect(last()?.[0]).toBe("pc_list_collections");
+  await expect(pc.listPcCollections()).rejects.toMatchObject({ code: "library_changed" });
   expect(await pc.getPcWorkCollections(work)).toEqual([]);
-  expect(api.invoke).toHaveBeenCalledTimes(1);
-  expect(images.entityCoverUrl("series", "pixiv", "9")?.startsWith("http://pcimg.localhost/entity/series/pixiv/9?connection=")).toBe(true);
-  expect(images.collectionCoverUrl({ id: "legacy" }, "tile-0", 1)?.startsWith("http://pcimg.localhost/collection/legacy/tile-0/1?connection=")).toBe(true);
-  expect(native.groupShelfKey()).toBeNull();
+  expect(api.invoke).not.toHaveBeenCalled();
+  expect(images.entityCoverUrl("series", "pixiv", "9")).toBeNull();
+  expect(images.collectionCoverUrl({ id: "other" }, "tile-0", 1)).toBeNull();
+  expect(native.nativeShelfKey()).toBeNull();
 });

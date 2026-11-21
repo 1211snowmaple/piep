@@ -14,7 +14,6 @@ use rusqlite::OptionalExtension;
 const MAX_WORK_JSON: usize = 64 * 1024;
 const MAX_POSITION_JSON: usize = 4 * 1024;
 const MAX_SHELF: i64 = 200;
-const MAX_IMPORT: usize = 5_000;
 
 /// 1 作品の、端末での読書の記録。位置は `version`・`content_hash`・`edit_hash` の本文のもの。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -216,36 +215,6 @@ pub async fn reading_local_shelf(
     db.transaction(|tx| shelf_by_status(tx, &server_url, limit, finished.unwrap_or(false)))
 }
 
-/// localStorage に残っていた記録を移す。すでにある記録より古いものは捨てる。
-/// 全件を一つの transaction で移すので、途中で失敗すれば何も変わらない。
-#[tauri::command]
-pub async fn reading_local_import(
-    db: State<'_, Arc<DeviceDb>>,
-    readings: Vec<LocalReading>,
-) -> Result<usize, ClientError> {
-    import(&db, readings)
-}
-
-pub(super) fn import(db: &DeviceDb, readings: Vec<LocalReading>) -> Result<usize, ClientError> {
-    if readings.len() > MAX_IMPORT {
-        return Err(ClientError::remote());
-    }
-    for reading in &readings {
-        validate(reading)?;
-    }
-    db.transaction(|tx| {
-        let mut imported = 0;
-        for reading in &readings {
-            let existing = get(tx, &reading.source, &reading.source_id)?;
-            if existing.is_none_or(|old| old.read_at < reading.read_at) {
-                put(tx, reading)?;
-                imported += 1;
-            }
-        }
-        Ok(imported)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,27 +281,6 @@ mod tests {
             .unwrap();
         assert_eq!(finished.len(), 1);
         assert_eq!(finished[0].source_id, "3");
-    }
-
-    #[test]
-    fn import_keeps_the_newer_record_and_rolls_back_on_a_bad_entry() {
-        let dir = TempDir::new("local-import");
-        let db = DeviceDb::new(&dir.0);
-        db.transaction(|tx| put(tx, &reading("1", 100))).unwrap();
-        let mut older = reading("1", 50);
-        older.page = 9;
-        assert_eq!(import(&db, vec![older, reading("2", 60)]).unwrap(), 1);
-        assert_eq!(
-            db.transaction(|tx| get(tx, "pixiv", "1"))
-                .unwrap()
-                .unwrap()
-                .page,
-            2
-        );
-        let mut bad = reading("3", 70);
-        bad.progress = 2.0;
-        assert!(import(&db, vec![reading("4", 80), bad]).is_err());
-        assert_eq!(db.transaction(|tx| get(tx, "pixiv", "4")).unwrap(), None);
     }
 
     #[test]

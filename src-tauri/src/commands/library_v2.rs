@@ -423,40 +423,6 @@ pub(crate) fn adopt_remote_favorite(
         .map_err(|e| e.to_string())
 }
 
-/// 携帯で付け外ししたお気に入りを、この棚の持ち主にも当てる。棚に載っていない作品と、
-/// 値が同じときは書かない。書いたら真。
-pub(crate) fn follow_remote_favorite(
-    library: &Library,
-    provider: &str,
-    key: &str,
-    favorite: bool,
-) -> Result<bool, String> {
-    let Some(view) = library
-        .reader_work_by_key(library.id, provider, key)
-        .map_err(|e| e.to_string())?
-    else {
-        return Ok(false);
-    };
-    let work = view.entity_id.get();
-    let current = library
-        .user_state(work, library.id)
-        .map_err(|e| e.to_string())?;
-    if current.favorite == favorite {
-        return Ok(false);
-    }
-    // ほかの写しから写した変更として記録する（この棚が自分で変えたものと見分ける）。
-    library
-        .set_favorite(
-            crate::library::adopted_request(),
-            work,
-            library.id,
-            current.generation,
-            favorite,
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(true)
-}
-
 /// 棚の読書位置を、読む画面の形（ページは 1 から、ページの中の割合は 0〜1）で。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
