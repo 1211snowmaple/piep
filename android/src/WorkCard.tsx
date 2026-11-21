@@ -5,7 +5,7 @@ import { pcErrorMessage, saveOfflineWork, type PcWork } from "./pcApi";
 import { WorkThumbnail } from "./WorkThumbnail";
 import { ProviderMark } from "./ProviderMark";
 import { MobileTagRow } from "./MobileTagRow";
-import { entityCoverUrl, imageRecentlyFailed, savedEntityCoverUrl, SmoothImage } from "./images";
+import { entityCoverUrl, hasProfileImages, imageRecentlyFailed, NoProfileImage, savedEntityCoverUrl, SmoothImage } from "./images";
 import { useAppNavigation } from "./appHistory";
 import { displayDate } from "./workText";
 import { useLongPress } from "./longPress";
@@ -16,7 +16,9 @@ export function AuthorAvatar({ work, offline, offlineAuthorCover, snapshotGenera
     : work.authorId ? entityCoverUrl("people", work.source, work.authorId) : null;
   const [failed, setFailed] = useState(() => imageRecentlyFailed(src));
   useEffect(() => { setFailed(imageRecentlyFailed(src)); }, [src]);
-  return <span className="work-author-avatar" aria-hidden="true"><Icons.person />{src && !failed && <SmoothImage src={src} alt="" onFailed={() => setFailed(true)} />}</span>;
+  // 作者が分かっていて画像が無い（引けなかった）ときだけ「画像なし」の絵。読み込み中は人型のまま。
+  const noImage = Boolean(work.authorId) && hasProfileImages(work.source) && (!src || failed);
+  return <span className="work-author-avatar" aria-hidden="true">{noImage ? <NoProfileImage /> : <Icons.person />}{src && !failed && <SmoothImage src={src} alt="" onFailed={() => setFailed(true)} />}</span>;
 }
 
 export type SavedState = { changed: boolean };

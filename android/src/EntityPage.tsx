@@ -7,7 +7,7 @@ import { ProviderMark } from "./ProviderMark";
 import { ChoiceMenu, relevanceLabel } from "./SortMenu";
 import { CollectionCard, EntityCard, GroupSkeleton } from "./LibraryGroups";
 import { VirtualWorkList } from "./VirtualWorkList";
-import { entityCoverUrl, imageRecentlyFailed, SmoothImage } from "./images";
+import { entityCoverUrl, hasProfileImages, imageRecentlyFailed, NoProfileImage, SmoothImage } from "./images";
 import { defaultPcSearch, getPcEntityDetail, listPcEntitySeries, pcErrorMessage, type PcCollection, type PcConnectionStatus, type PcEntityDetail, type PcWork, type PcWorkSort } from "./pcApi";
 import { nativeShelfKey } from "./nativeReading";
 import { activeFilterCount, FilterSheet } from "./FilterSheet";
@@ -65,7 +65,7 @@ function Hero({ page, detail }: { page: EntityPageState; detail: PcEntityDetail 
   return <header className="entity-hero" data-kind={page.kind} data-banner={banner && !bannerFailed ? "true" : undefined}>
     {banner && !bannerFailed && <div className="entity-banner"><SmoothImage src={banner} alt="" onFailed={() => setBannerFailed(true)} /></div>}
     <div className="entity-hero-main">
-      <span className="entity-art" aria-hidden="true">{isPerson ? <Icons.person /> : <Icons.series />}{cover && !coverFailed && <SmoothImage src={cover} alt="" onFailed={() => setCoverFailed(true)} />}</span>
+      <span className="entity-art" aria-hidden="true">{isPerson && detail && hasProfileImages(page.source) && (!cover || coverFailed) ? <NoProfileImage /> : isPerson ? <Icons.person /> : <Icons.series />}{cover && !coverFailed && <SmoothImage src={cover} alt="" onFailed={() => setCoverFailed(true)} />}</span>
       <div className="entity-hero-text">
         <div className="entity-labels"><ProviderMark source={page.source} />{detail?.isConcluded != null && <span className={detail.isConcluded ? "entity-badge entity-badge--done" : "entity-badge"}>{detail.isConcluded ? <><Icons.confirm aria-hidden="true" />完結</> : "連載中"}</span>}</div>
         <h1>{detail?.displayName ?? page.displayName}</h1>

@@ -119,7 +119,11 @@ export interface ShelfCard {
   cover: string | null;
   series_title: string | null;
   series_position: number | null;
+  /** 取得元の作者の ID。作者の画面へ移るのに使う。 */
+  author_key?: string | null;
   coverFile: string | null;
+  /** 作者のアイコンのファイルの識別子（16 進）。 */
+  authorIconFile?: string | null;
   /** 旧棚から移した作品の、旧棚での番号。端末の読書位置・しおりはこの番号で引く（旧棚と共有）。 */
   legacyId: number | null;
 }

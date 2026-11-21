@@ -161,6 +161,15 @@ describe("shelfEntry", () => {
     expect(entry.matchedVersion).toBe(2);
     expect(entry.historicalMatchCount).toBe(3);
   });
+
+  it("names the author so the card links to the author and shows the author icon", () => {
+    const plain = shelfEntry(card);
+    expect(plain.authorId).toBe("");
+    expect(plain.personIconPath).toBeNull();
+    const entry = shelfEntry({ ...card, author_key: "77", authorIconFile: "cd".repeat(32) });
+    expect(entry.authorId).toBe("77");
+    expect(entry.personIconPath).toBe(`shelf:${"cd".repeat(32)}`);
+  });
 });
 
 const row: ShelfEntityRow = {

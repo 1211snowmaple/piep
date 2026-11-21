@@ -316,6 +316,12 @@ pub struct WorkCard {
     pub cover: Option<Fingerprint>,
     pub series_title: Option<String>,
     pub series_position: Option<i64>,
+    /// 取得元の作者の ID。カードの作者名から作者の画面へ移るのに使う。
+    #[serde(default)]
+    pub author_key: Option<String>,
+    /// 作者のアイコンのファイル。カードの作者名の横に出す。
+    #[serde(default)]
+    pub author_icon: Option<Fingerprint>,
 }
 
 /// 前後の作品を引いた並びの種類。
@@ -447,6 +453,8 @@ fn card(row: Row) -> Result<WorkCard> {
         cover: None,
         series_title: None,
         series_position: None,
+        author_key: None,
+        author_icon: None,
     })
 }
 
@@ -1245,7 +1253,8 @@ impl Library {
         Ok(WorkListPage { items, next, total })
     }
 
-    /// カードに出す、一覧の表に持たない値（抜粋・タグ・表紙・シリーズ）を、ページの行だけ引く。
+    /// カードに出す、一覧の表に持たない値（抜粋・タグ・表紙・シリーズ・作者の ID とアイコン）を、
+    /// ページの行だけ引く。
     fn work_card_from_conn(
         conn: &Connection,
         owner: LibraryId,
@@ -1253,9 +1262,26 @@ impl Library {
     ) -> Result<WorkCard> {
         let work = card.id.as_bytes().to_vec();
         let snapshot = card.snapshot_id.as_bytes().to_vec();
-        card.excerpt = conn
-            .prepare_cached("SELECT CAST(coalesce(json_extract(metadata_json,'$.caption'),json_extract(metadata_json,'$.excerpt')) AS TEXT) FROM revision_snapshots WHERE id=?1")?
-            .query_row([&snapshot], |r| r.get(0))?;
+        let (excerpt, author_key): (Option<String>, Option<String>) = conn
+            .prepare_cached("SELECT CAST(coalesce(json_extract(metadata_json,'$.caption'),json_extract(metadata_json,'$.excerpt')) AS TEXT),
+                CAST(json_extract(metadata_json,'$.author_key') AS TEXT) FROM revision_snapshots WHERE id=?1")?
+            .query_row([&snapshot], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        card.excerpt = excerpt;
+        card.author_key = author_key.filter(|key| !key.is_empty() && key != "0");
+        // 作者の今の版のアイコン。作者の一覧と同じ引き方（`media(…, "icon")`）。
+        card.author_icon = conn
+            .prepare_cached("SELECT r.file_id FROM snapshot_people p JOIN entity_current c ON c.entity_id=p.person_id
+                JOIN snapshot_media m ON m.snapshot_id=c.snapshot_id JOIN media_renditions r ON r.id=m.rendition_id
+                WHERE p.snapshot_id=?1 AND m.role='icon' ORDER BY p.role<>'author',p.person_id,m.slot LIMIT 1")?
+            .query_row([&snapshot], |r| r.get::<_, Vec<u8>>(0))
+            .optional()?
+            .map(|bytes| {
+                bytes
+                    .try_into()
+                    .map(Fingerprint)
+                    .map_err(|_| Error::Integrity("作者のアイコンのハッシュが不正です".into()))
+            })
+            .transpose()?;
         let mut tags: Vec<String> = conn
             .prepare_cached("SELECT t.name FROM snapshot_tags st JOIN tags t ON t.id=st.tag_id WHERE st.snapshot_id=?1
                 UNION SELECT u.name FROM work_user_tags wt JOIN user_tags u ON u.user_id=wt.user_id AND u.id=wt.tag_id WHERE wt.work_id=?2 AND wt.user_id=?3
