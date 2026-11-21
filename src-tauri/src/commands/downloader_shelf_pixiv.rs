@@ -219,7 +219,6 @@ mod tests {
         let temp =
             Temp(std::env::temp_dir().join(format!("piep-pixiv-gate-{}", LibraryId::now_v7())));
         let library = Arc::new(Library::create(&temp.0.join("shelf")).unwrap());
-        library.switch_over().unwrap();
         let shelf = Arc::new(Shelf::with_test_library(Arc::clone(&library)));
         let cover = format!("http://{address}/cover.png");
         let image = format!("http://{address}/one.png");
@@ -359,7 +358,6 @@ mod tests {
         let temp =
             Temp(std::env::temp_dir().join(format!("piep-edited-save-{}", LibraryId::now_v7())));
         let library = Arc::new(Library::create(&temp.0.join("shelf")).unwrap());
-        library.switch_over().unwrap();
         let shelf = Arc::new(Shelf::with_test_library(Arc::clone(&library)));
         let original = json!({"detail":{"title":"題", "caption":"説明", "tags":["a","b"]}, "text":"本文[uploadedimage:1]"});
         let first = library
@@ -542,7 +540,6 @@ mod tests {
             std::env::temp_dir().join(format!("piep-pixiv-originals-{}", LibraryId::now_v7())),
         );
         let library = Arc::new(Library::create(&temp.0.join("shelf")).unwrap());
-        library.switch_over().unwrap();
         let shelf = Arc::new(Shelf::with_test_library(Arc::clone(&library)));
         let cover = format!("http://{address}/cover_master.png");
         let image = format!("http://{address}/one.png");

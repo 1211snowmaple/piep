@@ -441,38 +441,6 @@ impl Library {
         })
     }
 
-    /// 棚を正本へ切り替えた時刻（ミリ秒）。切り替える前（旧棚から移した写し）は `None`。
-    pub fn switched_at(&self) -> Result<Option<i64>> {
-        let conn = self.reader()?;
-        Ok(conn.query_row(
-            "SELECT switched_at FROM library_meta WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )?)
-    }
-
-    /// 棚を正本に切り替える。これより後はアプリがこの棚へ書き込み、旧棚からは移さない。
-    /// 移行の未解決が残っていれば断る。二度目は前の時刻を返す。
-    pub fn switch_over(&self) -> Result<i64> {
-        let problems = self.activation_problems()?;
-        if !problems.is_empty() {
-            return Err(Error::Integrity(format!(
-                "移行の未解決が {} 件あるので切り替えません",
-                problems.len()
-            )));
-        }
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
-        conn.execute(
-            "UPDATE library_meta SET switched_at=?1 WHERE singleton=1 AND switched_at IS NULL",
-            [chrono::Utc::now().timestamp_millis().max(1)],
-        )?;
-        Ok(conn.query_row(
-            "SELECT switched_at FROM library_meta WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )?)
-    }
-
     /// 未解決の移行記録を、再起動後も確認できる。本番への切り替え前に必ず検査する。
     pub fn activation_problems(&self) -> Result<Vec<String>> {
         let conn = self.reader()?;

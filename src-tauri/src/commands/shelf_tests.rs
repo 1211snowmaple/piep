@@ -14,7 +14,7 @@ fn temp(name: &str) -> Temp {
 }
 
 #[test]
-fn a_missing_library_is_created_switched_over_and_serves_nothing_until_asked() {
+fn a_missing_library_is_created_and_serves_nothing_until_asked() {
     let dir = temp("absent");
     let state = Shelf::default();
     assert_eq!(state.status(), ShelfState::Starting);
@@ -28,8 +28,7 @@ fn a_missing_library_is_created_switched_over_and_serves_nothing_until_asked() {
             path: dir.0.clone()
         }
     );
-    let library = state.library().unwrap();
-    assert!(library.switched_at().unwrap().is_some());
+    assert!(state.library().is_ok());
     assert_eq!(respond(&state, &"0".repeat(64)).status(), 404);
 }
 
@@ -39,7 +38,6 @@ fn an_existing_library_opens_indexes_and_serves_files_by_their_fingerprint() {
     let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
     let stored = {
         let library = Library::create(&dir.0).unwrap();
-        library.switch_over().unwrap();
         let file = library
             .store_original(&crate::library::CaptureSource::Bytes(png.to_vec()))
             .unwrap();
@@ -61,19 +59,6 @@ fn an_existing_library_opens_indexes_and_serves_files_by_their_fingerprint() {
     assert_eq!(respond(&state, &"0".repeat(64)).status(), 404);
     // 開いている棚は、ほかから開けない（移行器も止まる）。
     assert!(Library::open(&dir.0).is_err());
-}
-
-#[test]
-fn a_shelf_that_was_never_switched_over_is_not_opened() {
-    let dir = temp("switch");
-    {
-        let library = Library::create(&dir.0).unwrap();
-        assert_eq!(library.switched_at().unwrap(), None);
-    }
-    let state = Shelf::default();
-    assert!(state.open(&dir.0).is_err());
-    assert!(matches!(state.status(), ShelfState::Failed { .. }));
-    assert!(state.library().is_err());
 }
 
 #[test]

@@ -635,7 +635,8 @@ fn filter_shelf(library: &Library) -> BTreeMap<&'static str, LibraryId> {
     {
         // 版の行は書き換えられないので、移行が書いた形を試験の中だけで作る。
         let conn = library.conn.lock().unwrap();
-        conn.execute_batch("DROP TRIGGER source_revisions_immutable").unwrap();
+        conn.execute_batch("DROP TRIGGER source_revisions_immutable")
+            .unwrap();
         conn.execute(
             "UPDATE source_revisions SET repair=1 WHERE entity_id=?1 AND ordinal=2",
             [repaired.entity_id.as_bytes().as_slice()],

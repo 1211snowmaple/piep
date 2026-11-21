@@ -77,11 +77,10 @@ fn params(force: bool) -> RefreshEntityProfileParams {
 }
 
 #[tokio::test]
-async fn the_refresh_coordinator_saves_only_to_the_switched_shelf_and_uses_its_freshness_cache() {
+async fn the_refresh_coordinator_saves_to_the_shelf_and_uses_its_freshness_cache() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let fixture = Fixture::new();
     let library = Arc::new(Library::create(&fixture.0.join("shelf")).unwrap());
-    library.switch_over().unwrap();
     let state = state(&fixture.0, library.clone());
     let mut png = std::io::Cursor::new(Vec::new());
     image::DynamicImage::new_rgb8(1, 1)
@@ -171,24 +170,5 @@ async fn the_refresh_coordinator_saves_only_to_the_switched_shelf_and_uses_its_f
         .unwrap();
     assert_eq!(unchanged.snapshot, old_snapshot);
     assert_eq!(unchanged.last_checked_at, person.last_checked_at);
-    library.verify().unwrap();
-}
-
-#[tokio::test]
-async fn an_uncommitted_copy_is_rejected_before_fetching_or_starting_an_acquisition() {
-    let fixture = Fixture::new();
-    let library = Arc::new(Library::create(&fixture.0.join("shelf")).unwrap());
-    let state = state(&fixture.0, library.clone());
-    assert!(
-        refresh_with(state, library.clone(), params(true), |_, _, _| async {
-            panic!("must not fetch")
-        })
-        .await
-        .is_err()
-    );
-    assert!(library
-        .entity_by_key(EntityKind::Person, "pixiv", "77")
-        .unwrap()
-        .is_none());
     library.verify().unwrap();
 }

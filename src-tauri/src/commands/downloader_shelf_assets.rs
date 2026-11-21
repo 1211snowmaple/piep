@@ -857,7 +857,6 @@ mod tests {
         let fixture =
             Fixture(std::env::temp_dir().join(format!("piep-app-save-{}", LibraryId::now_v7())));
         let library = Arc::new(Library::create(&fixture.0.join("shelf")).unwrap());
-        library.switch_over().unwrap();
         let shelf = Arc::new(Shelf::with_test_library(Arc::clone(&library)));
         let mut data = json!({"title":"投稿","type":"file","body":{"files":[{"id":"a","name":"alpha","url":format!("http://{address}/a.txt")}]}});
         let saved = save_to_shelf(
@@ -955,7 +954,6 @@ mod tests {
             Fixture(std::env::temp_dir().join(format!("piep-app-reader-{}", LibraryId::now_v7())));
         std::fs::create_dir_all(&fixture.0).unwrap();
         let library = Arc::new(Library::create(&fixture.0.join("shelf")).unwrap());
-        library.switch_over().unwrap();
         let data = json!({"title":"投稿","type":"file","body":{"files":[{"id":"a","name":"alpha","url":format!("http://{address}/a.txt")},{"id":"b","name":"beta","url":format!("http://{address}/b.txt")}]}});
         let path = fixture.0.join("alpha.txt");
         std::fs::write(&path, b"held").unwrap();

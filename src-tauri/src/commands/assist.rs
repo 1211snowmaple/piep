@@ -387,9 +387,6 @@ async fn save_note(
 ) -> Result<(), String> {
     blocking(state, move |state| {
         let library = state.library()?;
-        if !matches!(library.switched_at(), Ok(Some(_))) {
-            return Ok(());
-        }
         library
             .save_ai_note(subject_type, &subject_key, note_kind, &note, &provenance)
             .map_err(|e| e.to_string())

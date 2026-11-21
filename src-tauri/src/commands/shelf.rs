@@ -185,14 +185,14 @@ impl Shelf {
         Ok(document)
     }
 
-    /// 棚を開く。無ければ空の棚を作る。正本に切り替えていない棚（移行で作った写し）は開かない。
+    /// 棚を開く。無ければ空の棚を作る。
     pub fn open(&self, path: &Path) -> Result<(), String> {
         self.set(ShelfState::Opening { path: path.into() });
         let opened = if path.join("library.json").is_file() {
             Library::open(path)
         } else {
             log::info!("棚が無いので、空の棚を作ります: {}", path.display());
-            Library::create(path).and_then(|library| library.switch_over().map(|_| library))
+            Library::create(path)
         };
         let library = match opened {
             Ok(library) => Arc::new(library),
@@ -205,14 +205,6 @@ impl Shelf {
                 return Err(message);
             }
         };
-        if !matches!(library.switched_at(), Ok(Some(_))) {
-            let message = "正本に切り替えていない棚は開けません".to_string();
-            self.set(ShelfState::Failed {
-                path: path.into(),
-                message: message.clone(),
-            });
-            return Err(message);
-        }
         let _ = self.library.set(library);
         self.set(ShelfState::Indexing { path: path.into() });
         Ok(())

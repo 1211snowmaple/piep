@@ -36,7 +36,7 @@ it("makes a backup as a new folder inside the chosen one", async () => {
 
 it("inspects a backup, says what it holds, and schedules the swap only on confirm", async () => {
   dialog.open.mockResolvedValue("D:/old-shelf");
-  api.inspect.mockResolvedValue({ path: "D:/old-shelf", works: 1200, files: 30000, bytes: 1024, sameLibrary: false, switched: true });
+  api.inspect.mockResolvedValue({ path: "D:/old-shelf", works: 1200, files: 30000, bytes: 1024, sameLibrary: false });
   api.schedule.mockResolvedValue({});
   renderCard();
   fireEvent.click(await screen.findByRole("button", { name: "バックアップから復元" }));
@@ -61,7 +61,7 @@ it("tells where the previous shelf was kept after a restore", async () => {
 
 it("takes in an author archive instead of swapping the shelf, and tells what it added", async () => {
   dialog.open.mockResolvedValue("D:/archives/作者");
-  api.inspect.mockResolvedValue({ path: "D:/archives/作者", works: 12, files: 40, bytes: 2048, sameLibrary: true, switched: false, partial: true });
+  api.inspect.mockResolvedValue({ path: "D:/archives/作者", works: 12, files: 40, bytes: 2048, sameLibrary: true, partial: true });
   api.importArchive.mockResolvedValue({ added: 2, restored: 9, already: 1, conflicts: 0 });
   const show = vi.spyOn(notifications, "show");
   renderCard();
@@ -76,23 +76,10 @@ it("takes in an author archive instead of swapping the shelf, and tells what it 
 
 it("does not take in an archive made from another shelf", async () => {
   dialog.open.mockResolvedValue("D:/archives/作者");
-  api.inspect.mockResolvedValue({ path: "D:/archives/作者", works: 12, files: 40, bytes: 2048, sameLibrary: false, switched: false, partial: true });
+  api.inspect.mockResolvedValue({ path: "D:/archives/作者", works: 12, files: 40, bytes: 2048, sameLibrary: false, partial: true });
   renderCard();
   fireEvent.click(await screen.findByRole("button", { name: "バックアップから復元" }));
   expect(await screen.findByText(/別の棚から作ったアーカイブなので、取り込めません/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "この棚に取り込む" })).toBeDisabled();
   expect(api.importArchive).not.toHaveBeenCalled();
-});
-
-// 棚は切り替えた棚しか開かないので、切り替える前の写しでは入れ替えない。
-it("does not swap the shelf for a copy made before switching over", async () => {
-  dialog.open.mockResolvedValue("D:/old-shelf");
-  api.inspect.mockResolvedValue({ path: "D:/old-shelf", works: 1200, files: 30000, bytes: 1024, sameLibrary: true, switched: false });
-  renderCard();
-  fireEvent.click(await screen.findByRole("button", { name: "バックアップから復元" }));
-  expect(await screen.findByText(/正本に切り替える前の写しです/)).toBeInTheDocument();
-  const swap = screen.getByRole("button", { name: "次の起動で入れ替える" });
-  expect(swap).toBeDisabled();
-  fireEvent.click(swap);
-  expect(api.schedule).not.toHaveBeenCalled();
 });

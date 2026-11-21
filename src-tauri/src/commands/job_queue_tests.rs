@@ -13,7 +13,6 @@ fn fixture() -> (Temp, AppState, Arc<Library>) {
     let root = std::env::temp_dir().join(format!("piep-execution-{}", LibraryId::now_v7()));
     std::fs::create_dir_all(&root).unwrap();
     let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
-    library.switch_over().unwrap();
     let state = AppState::new(Arc::new(crate::commands::shelf::Shelf::with_test_library(
         library.clone(),
     )));

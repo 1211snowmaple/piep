@@ -350,9 +350,6 @@ where
             params.source_key.clone(),
         );
         blocking(move || {
-            if lib.switched_at().map_err(|e| e.to_string())?.is_none() {
-                return Err("新しい棚はまだ旧棚の写しなので変えられません".into());
-            }
             lib.entity_head(kind, &provider, &key)
                 .map_err(|e| e.to_string())
         })

@@ -45,8 +45,6 @@ pub struct ShelfBackupInspection {
     pub bytes: u64,
     /// 今の棚と同じ棚の写しか（違う棚の写しでも復元はできる）。
     pub same_library: bool,
-    /// 正本に切り替えた棚の写しか。
-    pub switched: bool,
     /// 作者・シリーズのアーカイブ（棚の部分写し）か。入れ替えには使えず、取り込みに使う。
     pub partial: bool,
 }
@@ -128,14 +126,12 @@ pub(crate) fn inspect(
     let works = count("SELECT count(*) FROM library_items")?;
     let files = count("SELECT count(*) FROM content_files")?;
     let bytes = count("SELECT coalesce(sum(original_size),0) FROM content_files")?;
-    let switched = !partial && matches!(library.switched_at(), Ok(Some(_)));
     Ok(ShelfBackupInspection {
         path: path.to_string_lossy().into_owned(),
         works,
         files,
         bytes,
         same_library: current == Some(library.id),
-        switched,
         partial,
     })
 }
@@ -312,10 +308,6 @@ pub async fn shelf_schedule_restore(
             "作者・シリーズのアーカイブは、棚の入れ替えには使えません。取り込みを使ってください"
                 .into(),
         );
-    }
-    // 切り替える前の写しは、もう開けない（棚は切り替えた棚しか開かない）。
-    if !inspection.switched {
-        return Err("正本に切り替える前の写しは、棚の入れ替えに使えません".into());
     }
     write_json(
         &request_path(&live),

@@ -10,7 +10,6 @@ fn fixture() -> (Temp, AppState, Arc<Library>) {
     let root = std::env::temp_dir().join(format!("piep-candidate-adapter-{}", LibraryId::now_v7()));
     std::fs::create_dir_all(&root).unwrap();
     let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
-    library.switch_over().unwrap();
     let state = AppState::new(Arc::new(super::super::shelf::Shelf::with_test_library(
         library.clone(),
     )));
@@ -179,7 +178,6 @@ fn stale_recheck_cannot_reverse_a_choice_made_during_the_request() {
 fn native_fixture() {
     let root = std::env::temp_dir().join(format!("piep-candidate-native-{}", LibraryId::now_v7()));
     let library = Library::create(&root).unwrap();
-    library.switch_over().unwrap();
     save(&library, "11");
     for (key, kind) in [("11", "incomplete"), ("22", "restricted")] {
         let value = candidate(key, kind);

@@ -181,11 +181,10 @@ export function ShelfBackupCard({ runtime, busy }: { runtime: boolean; busy: boo
               <Text size="sm">{formatBytes(review.bytes)}</Text>
             </Group>
             {!review.sameLibrary && <Alert color="yellow">今の棚とは別の棚の写しです。入れ替えると、今の棚にある作品・編集・読書位置は、この写しの内容になります。</Alert>}
-            {!review.switched && <Alert color="yellow">正本に切り替える前の写しです。この写しでは棚を入れ替えられません。</Alert>}
             <Text size="xs" c="dimmed">今の棚は消さずに隣へ退けます。選んだ写しもそのまま残ります。</Text>
             <ActionRow>
               <Button variant="default" disabled={schedule.isPending} onClick={() => setReview(null)}>キャンセル</Button>
-              <DangerButton disabled={!review.switched} loading={schedule.isPending} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => schedule.mutate(review.path)}>次の起動で入れ替える</DangerButton>
+              <DangerButton loading={schedule.isPending} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => schedule.mutate(review.path)}>次の起動で入れ替える</DangerButton>
             </ActionRow>
           </Stack>
         )}

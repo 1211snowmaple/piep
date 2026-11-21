@@ -9,8 +9,6 @@ export interface ShelfBackupInspection {
   bytes: number;
   /** 今の棚と同じ棚の写しか。 */
   sameLibrary: boolean;
-  /** 正本に切り替えた棚の写しか。 */
-  switched: boolean;
   /** 作者・シリーズのアーカイブ（棚の部分写し）か。入れ替えには使えず、取り込みに使う。 */
   partial: boolean;
 }

@@ -157,10 +157,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             receiver.verify(manifest.file())?;
             println!("{}",serde_json::json!({"manifest":manifest.id().to_string(),"file":manifest.file().id.to_string(),"length":manifest.file().length.to_string(),"verified":true}));
         },
-        Some("switch-over") if args.len()==3=>{
-            let library=Library::open(Path::new(&args[2]))?;
-            println!("{}",serde_json::json!({"switched_at":library.switch_over()?}));
-        },
         Some("reclaim") if args.len()==3=>{
             let library=Library::open(Path::new(&args[2]))?;
             let before=library.objects.stats()?;
@@ -209,7 +205,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "list_total":list.page.total,"list_items":list.page.items.len(),"list_ms":list_ms,
             }))?);
         },
-        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / source-state <新棚> <対象UUID> / maintenance <新棚> <作品UUID> <保存状態UUID> / saved-searches <新棚> <利用者UUID> / job-history <新棚> [前のページ末尾のジョブUUID] / job-history-items|job-history-logs <新棚> <ジョブUUID> [前のページ末尾のsequence] / job-history-payload <新棚> <ジョブUUID> <項目UUID> / resources|reader <新棚> <対象UUID> snapshot|edit <保存状態UUID> / export-resource <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] <新規出力先> / transfer-manifest <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] / verify-transfer <新棚> <転送記録JSON> <検証用の実体領域> / backup <新棚> <新規出力先> / reclaim <新棚> / switch-over <新棚> / export-original <新棚> <ファイルSHA-256> <新規ファイル>".into()),
+        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / source-state <新棚> <対象UUID> / maintenance <新棚> <作品UUID> <保存状態UUID> / saved-searches <新棚> <利用者UUID> / job-history <新棚> [前のページ末尾のジョブUUID] / job-history-items|job-history-logs <新棚> <ジョブUUID> [前のページ末尾のsequence] / job-history-payload <新棚> <ジョブUUID> <項目UUID> / resources|reader <新棚> <対象UUID> snapshot|edit <保存状態UUID> / export-resource <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] <新規出力先> / transfer-manifest <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] / verify-transfer <新棚> <転送記録JSON> <検証用の実体領域> / backup <新棚> <新規出力先> / reclaim <新棚> / export-original <新棚> <ファイルSHA-256> <新規ファイル>".into()),
     }
     Ok(())
 }

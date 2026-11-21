@@ -595,7 +595,6 @@ pub(super) mod tests {
         let root = std::env::temp_dir().join(format!("piep-update-shelf-{}", LibraryId::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
         let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
-        library.switch_over().unwrap();
         let state = AppState::new(Arc::new(
             super::super::super::shelf::Shelf::with_test_library(library.clone()),
         ));
