@@ -1,3 +1,5 @@
+import { NoImageMark } from "@/components/NoImageMark";
+import { getProvider } from "@/lib/providers";
 import { useMemo, useRef, useState } from "react";
 import { WorkAssist } from "@/features/assist/WorkAssist";
 import {
@@ -393,7 +395,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
                     color="gray"
                     px={0}
                     className="work-hero__author-link button-plain"
-                    leftSection={<Avatar size={22} radius="xl" color="gray"><Icons.person size={IconSize.inline} /></Avatar>}
+                    leftSection={<Avatar src={shelfFileUrl(work.authorIconFile)} size={22} radius="xl" color="gray">{!work.authorIconFile && work.authorKey && getProvider(work.provider).hasProfileImages ? <NoImageMark /> : <Icons.person size={IconSize.inline} />}</Avatar>}
                     disabled={!work.authorKey}
                     onClick={() => work.authorKey && navigate(`/people/${encodeURIComponent(work.provider)}/${encodeURIComponent(work.authorKey)}`)}
                   >

@@ -40,6 +40,17 @@ export const savedCoverUrl = (workId: number | string, generation: number) => im
 export const savedEntityCoverUrl = (workId: number | string, kind: "people" | "series", generation: number) => imageUrl(`saved-entity/${workId}/${kind}/${generation}`, false);
 export const savedCollectionCoverUrl = (workId: number | string, collectionId: string, generation: number) => imageUrl(`saved-collection/${workId}/${collectionId}/${generation}`, false);
 
+/**
+ * プロフィール画像を持つ取得元か。pixiv はアイコンの無い人にも「画像なし」の絵を返すが、
+ * FANBOX は URL を返さないので、保存するものが無い。持たない取得元には「画像なし」の絵を出さない。
+ */
+export const hasProfileImages = (source: string) => source === "pixiv" || source === "fanbox";
+
+/** アイコンを置いていない作者の絵。デスクトップ版（`NoImageMark`）と同じ絵で、保存元での見え方に揃える。 */
+export function NoProfileImage() {
+  return <img className="no-profile-image" src="/no-profile.png" alt="" decoding="async" />;
+}
+
 // 一度出た画像は、スクロールで戻ったときに溶け込ませず、その場で出す。
 const loaded = new Set<string>();
 // 画像のない作者は多い。行き来のたびに問い合わせ直さない。通信の失敗もあるので、しばらくしたら試し直す。

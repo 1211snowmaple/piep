@@ -1,3 +1,5 @@
+import { NoImageMark } from "@/components/NoImageMark";
+import { getProvider } from "@/lib/providers";
 import { memo, useCallback } from "react";
 import { ActionIcon, Avatar, Badge, Card, Group, Menu, Text, Tooltip, UnstyledButton } from "@mantine/core";
 import { modals } from "@mantine/modals";
@@ -157,7 +159,7 @@ function AuthorLine({ work, size = 20, interactive = true }: { work: ListedWork;
         }}
       >
         <Avatar src={icon} size={size} radius="xl" color="gray" className="work-card__avatar" imageProps={{ loading: "lazy", decoding: "async" }}>
-          <Icons.person size={Math.round(size * 0.58)} />
+          {!icon && key && getProvider(work.source).hasProfileImages ? <NoImageMark /> : <Icons.person size={Math.round(size * 0.58)} />}
         </Avatar>
         <Text size="xs" c="dimmed" className="identity-name">{name}</Text>
       </Group>

@@ -1,7 +1,7 @@
 import { MantineProvider } from "@mantine/core";
 import { ModalsProvider } from "@mantine/modals";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
@@ -59,6 +59,18 @@ describe("WorkCard", () => {
     renderCard();
     fireEvent.keyDown(screen.getByRole("link", { name: /雨上がりの図書室でを開く/ }), { key: "Enter" });
     expect(window.location.hash).toBe("#/works/101");
+  });
+
+  it("shows the same no-image picture as the author pages when an author has no icon", () => {
+    const { unmount } = renderCard({ work: { ...demoWorks[1], personIconPath: null } });
+    expect(screen.getByRole("link", { name: "mizu atelierの作品を見る" }).querySelector("img.no-image-mark")).not.toBeNull();
+    unmount();
+    // プロフィール画像の無い取得元と、作者の分からない作品は人型のまま。
+    renderCard({ work: { ...demoWorks[1], source: "local", personIconPath: null } });
+    expect(document.querySelector("img.no-image-mark")).toBeNull();
+    cleanup();
+    renderCard({ work: { ...demoWorks[1], personId: null, authorId: "", personIconPath: null } });
+    expect(document.querySelector("img.no-image-mark")).toBeNull();
   });
 
   it("opens the work from non-control card content", () => {

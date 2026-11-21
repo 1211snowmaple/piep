@@ -1,3 +1,5 @@
+import { NoImageMark } from "@/components/NoImageMark";
+import { getProvider } from "@/lib/providers";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ActionRow } from "@/components/ActionRow";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
@@ -570,7 +572,7 @@ function LegacyWorkPage() {
                     color="gray"
                     px={0}
                     className="work-hero__author-link button-plain"
-                    leftSection={<Avatar src={getAssetUrl(work.personIconPath)} size={22} radius="xl" color="gray"><Icons.person size={IconSize.inline} /></Avatar>}
+                    leftSection={<Avatar src={getAssetUrl(work.personIconPath)} size={22} radius="xl" color="gray">{!work.personIconPath && (work.personId || work.authorId) && getProvider(work.source).hasProfileImages ? <NoImageMark /> : <Icons.person size={IconSize.inline} />}</Avatar>}
                     onClick={() => navigate(`/people/${encodeURIComponent(work.source)}/${encodeURIComponent(work.personId || work.authorId)}`)}
                   >
                     {work.personName || work.authorName}

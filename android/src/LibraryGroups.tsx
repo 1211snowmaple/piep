@@ -7,22 +7,23 @@ import { WorkCard } from "./WorkCard";
 import { ProviderMark } from "./ProviderMark";
 import { CollectionArtwork } from "./CollectionArtwork";
 import { VirtualWorkList } from "./VirtualWorkList";
-import { entityCoverUrl, imageRecentlyFailed, SmoothImage } from "./images";
+import { entityCoverUrl, hasProfileImages, imageRecentlyFailed, NoProfileImage, SmoothImage } from "./images";
 import { splitEntitySort, type EntitySort } from "./librarySort";
 import { refreshShortList, useAutoLoad, useSavedStates, useStatusRecovery } from "./workList";
 
-export function GroupArtwork({ kind, src, initial }: { kind: "people" | "series" | "collections"; src: string | null; initial?: string }) {
+export function GroupArtwork({ kind, src, initial, source }: { kind: "people" | "series" | "collections"; src: string | null; initial?: string; source?: string }) {
   const [failed, setFailed] = useState(() => imageRecentlyFailed(src));
   useEffect(() => { setFailed(imageRecentlyFailed(src)); }, [src]);
+  const noImage = kind === "people" && source !== undefined && hasProfileImages(source) && (!src || failed);
   return <span className={`group-card-art group-card-art--${kind}`} aria-hidden="true">
-    {kind === "people" ? <Icons.person /> : kind === "series" ? <Icons.series /> : initial}
+    {noImage ? <NoProfileImage /> : kind === "people" ? <Icons.person /> : kind === "series" ? <Icons.series /> : initial}
     {src && !failed && <SmoothImage src={src} alt="" onFailed={() => setFailed(true)} />}
   </span>;
 }
 
 export function EntityCard({ kind, entity, onOpen }: { kind: "people" | "series"; entity: PcEntity; onOpen: () => void }) {
   return <button className="group-card" type="button" onClick={onOpen}>
-    <GroupArtwork kind={kind} src={entity.hasCover ? entityCoverUrl(kind, entity.source, entity.sourceKey) : null} />
+    <GroupArtwork kind={kind} source={entity.source} src={entity.hasCover ? entityCoverUrl(kind, entity.source, entity.sourceKey) : null} />
     <span className="group-card-text"><strong>{entity.displayName}</strong>{entity.sampleTitle && <span>{entity.sampleTitle}</span>}<small className="group-card-meta"><ProviderMark source={entity.source} compact /><span>{entity.count.toLocaleString("ja-JP")} 作品{kind === "series" && entity.isConcluded !== null ? ` · ${entity.isConcluded ? "完結" : "連載中"}` : ""}</span></small></span>
   </button>;
 }
