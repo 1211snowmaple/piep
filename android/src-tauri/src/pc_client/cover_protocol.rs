@@ -376,8 +376,7 @@ fn failure(status: StatusCode) -> Response<Vec<u8>> {
 fn cache_path(dir: &Path, server: &str, path: &str) -> PathBuf {
     // 接続先が変わると同じ番号が別の作品を指す。接続先ごとに分ける。
     let mut hasher = Sha256::new();
-    // APNG 検査のない旧版が保存した画像を、検査済みとして使い回さない。
-    hasher.update(b"display-image-validation-v2\0");
+    hasher.update(b"display-image-validation\0");
     hasher.update(server.as_bytes());
     hasher.update([0]);
     hasher.update(path.as_bytes());
