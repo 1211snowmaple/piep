@@ -4760,7 +4760,7 @@ dependencies = [
 
 [[package]]
 name = "piep"
-version = "0.40.1"
+version = "0.41.0"
 dependencies = [
  "arc-swap",
  "argon2",
