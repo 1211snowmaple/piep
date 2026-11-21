@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { isTauriRuntime } from "@/services/dbApi";
-import { upsertSavedSearch } from "@/services/shelfApi";
+import { upsertSavedSearch } from "@/services/savedSearchApi";
 
 const LEGACY_KEY = "piep.saved-searches.v2";
 const DONE_KEY = "piep.saved-searches.migrated";

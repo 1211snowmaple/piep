@@ -6,28 +6,28 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import EntityPage from "@/features/library/EntityPage";
-import type { ShelfEntityHead, ShelfSeriesFacet } from "@/services/libraryV2Api";
+import type { ShelfEntityHead, ShelfSeriesFacet } from "@/services/shelfApi";
 import type { FacetCount } from "@/types/library";
 
 const PERSON = "0195f1c2-0000-7000-8000-0000000000a1";
 const SERIES = "0195f1c2-0000-7000-8000-0000000000b1";
 
 const api = vi.hoisted(() => ({
-  libraryV2Entity: vi.fn(),
-  libraryV2EntityTags: vi.fn(),
-  libraryV2PersonSeries: vi.fn(),
-  libraryV2EntityOriginal: vi.fn(),
-  libraryV2EntityCollections: vi.fn(),
+  shelfEntity: vi.fn(),
+  shelfEntityTags: vi.fn(),
+  shelfPersonSeries: vi.fn(),
+  shelfEntityOriginal: vi.fn(),
+  shelfEntityCollections: vi.fn(),
 }));
 const shelf = vi.hoisted(() => ({ searchShelf: vi.fn() }));
 const dialogs = vi.hoisted(() => ({ openSingleDialog: vi.fn() }));
 
-vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
+vi.mock("@/services/shelfApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/shelfApi")>()),
   ...api,
 }));
-vi.mock("@/features/library/shelfV2", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/features/library/shelfV2")>()),
+vi.mock("@/features/library/shelf", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/features/library/shelf")>()),
   searchShelf: shelf.searchShelf,
 }));
 vi.mock("@/services/dialogApi", async (importOriginal) => ({
@@ -96,7 +96,7 @@ const tags: FacetCount[] = [
 
 const emptyWorks = {
   items: [], nextCursor: null, totalEstimate: 0,
-  searchMeta: { engine: "library-v2", query: null, totalEstimate: 0, indexComplete: true, explanations: [] },
+  searchMeta: { engine: "shelf", query: null, totalEstimate: 0, indexComplete: true, explanations: [] },
   facetsVersion: 0,
 };
 
@@ -121,18 +121,18 @@ beforeAll(() => {
 beforeEach(() => {
   window.localStorage.clear();
   vi.clearAllMocks();
-  api.libraryV2Entity.mockResolvedValue(head());
-  api.libraryV2EntityTags.mockResolvedValue(tags);
-  api.libraryV2PersonSeries.mockResolvedValue({ items: [series()], next: null, total: 1 });
-  api.libraryV2EntityOriginal.mockResolvedValue(null);
-  api.libraryV2EntityCollections.mockResolvedValue([]);
+  api.shelfEntity.mockResolvedValue(head());
+  api.shelfEntityTags.mockResolvedValue(tags);
+  api.shelfPersonSeries.mockResolvedValue({ items: [series()], next: null, total: 1 });
+  api.shelfEntityOriginal.mockResolvedValue(null);
+  api.shelfEntityCollections.mockResolvedValue([]);
   shelf.searchShelf.mockResolvedValue(emptyWorks);
   dialogs.openSingleDialog.mockReset();
 });
 
 describe("author page", () => {
   it("does not truncate the primary entity title on its own detail page", async () => {
-    api.libraryV2Entity.mockResolvedValue(head({ name: "催眠アプリに翻弄されるLOビアンたち" }));
+    api.shelfEntity.mockResolvedValue(head({ name: "催眠アプリに翻弄されるLOビアンたち" }));
     renderAuthor();
 
     const heading = await screen.findByRole("heading", {
@@ -162,7 +162,7 @@ describe("author page", () => {
     expect(await screen.findByText("ファンタジー")).toBeInTheDocument();
     expect(screen.getByText("長編")).toBeInTheDocument();
     expect(screen.getByText("12")).toBeInTheDocument();
-    expect(api.libraryV2EntityTags).toHaveBeenCalledWith("person", PERSON);
+    expect(api.shelfEntityTags).toHaveBeenCalledWith("person", PERSON);
   });
 
   it("narrows the works to a tag without leaving the author", async () => {
@@ -209,7 +209,7 @@ describe("author page", () => {
     fireEvent.click(await screen.findByRole("tab", { name: /シリーズ/ }));
     await waitFor(() => expect(window.location.hash).toContain("tab=series"));
     expect(await screen.findByText("季節の栞")).toBeInTheDocument();
-    await waitFor(() => expect(api.libraryV2PersonSeries).toHaveBeenCalledWith(PERSON, {
+    await waitFor(() => expect(api.shelfPersonSeries).toHaveBeenCalledWith(PERSON, {
       query: null,
       sort: "work_count",
       order: "desc",
@@ -227,7 +227,7 @@ describe("author page", () => {
 
     await waitFor(() => expect(window.location.hash).toContain("series_sort=file_size_bytes"));
     expect(window.location.hash).toContain("series_order=asc");
-    await waitFor(() => expect(api.libraryV2PersonSeries).toHaveBeenCalledWith(PERSON, expect.objectContaining({
+    await waitFor(() => expect(api.shelfPersonSeries).toHaveBeenCalledWith(PERSON, expect.objectContaining({
       sort: "file_size_bytes",
       order: "asc",
     })));
@@ -239,7 +239,7 @@ describe("author page", () => {
       external_key: `s${index}`,
       name: `保存シリーズ ${index + 1}`,
     }));
-    api.libraryV2PersonSeries.mockImplementation(async (_id: string, params: { offset: number }) => params.offset
+    api.shelfPersonSeries.mockImplementation(async (_id: string, params: { offset: number }) => params.offset
       ? { items: [series({ external_key: "s60", name: "続きのシリーズ" })], next: null, total: 61 }
       : { items: firstItems, next: 60, total: 61 });
     renderAuthor();
@@ -253,7 +253,7 @@ describe("author page", () => {
     if (loadMore) fireEvent.click(loadMore);
     expect(await screen.findByText("続きのシリーズ")).toBeInTheDocument();
     expect(screen.getByText("61 / 61件を表示中")).toBeInTheDocument();
-    expect(api.libraryV2PersonSeries).toHaveBeenLastCalledWith(PERSON, {
+    expect(api.shelfPersonSeries).toHaveBeenLastCalledWith(PERSON, {
       query: null,
       sort: "work_count",
       order: "desc",
@@ -263,7 +263,7 @@ describe("author page", () => {
   });
 
   it("searches all saved series on the shelf, keeps the query in the URL, and names its controls", async () => {
-    api.libraryV2PersonSeries.mockImplementation(async (_id: string, params: { query: string | null }) => params.query === "目当て"
+    api.shelfPersonSeries.mockImplementation(async (_id: string, params: { query: string | null }) => params.query === "目当て"
       ? { items: [series({ external_key: "wanted", name: "目当ての長編" })], next: null, total: 1 }
       : { items: [series()], next: null, total: 1 });
     renderAuthor("#/people/pixiv/aoba?tab=series");
@@ -272,13 +272,13 @@ describe("author page", () => {
     expect(screen.getByText("保存済みシリーズ全体を名前・説明から検索します")).toBeInTheDocument();
     fireEvent.change(search, { target: { value: "目当て" } });
     await waitFor(() => expect(window.location.hash).toContain("series_q=%E7%9B%AE%E5%BD%93%E3%81%A6"), { timeout: 1500 });
-    await waitFor(() => expect(api.libraryV2PersonSeries).toHaveBeenCalledWith(PERSON, expect.objectContaining({ query: "目当て", offset: 0 })));
+    await waitFor(() => expect(api.shelfPersonSeries).toHaveBeenCalledWith(PERSON, expect.objectContaining({ query: "目当て", offset: 0 })));
     expect(await screen.findByText("目当ての長編")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "シリーズの検索語を消す" })).toHaveAccessibleName();
   });
 
   it("keeps loaded series visible when the next page cannot be read", async () => {
-    api.libraryV2PersonSeries.mockImplementation(async (_id: string, params: { offset: number }) => {
+    api.shelfPersonSeries.mockImplementation(async (_id: string, params: { offset: number }) => {
       if (params.offset) throw new Error("棚が変わりました。先頭から読み直してください");
       return { items: [series()], next: 1, total: 2 };
     });
@@ -350,8 +350,8 @@ describe("author page", () => {
   });
 
   it("keeps working for an author with no series and no tags", async () => {
-    api.libraryV2PersonSeries.mockResolvedValue({ items: [], next: null, total: 0 });
-    api.libraryV2EntityTags.mockResolvedValue([]);
+    api.shelfPersonSeries.mockResolvedValue({ items: [], next: null, total: 0 });
+    api.shelfEntityTags.mockResolvedValue([]);
     renderAuthor();
     // No tag bar rather than an empty one, and the series tab still opens.
     expect(await screen.findByRole("tab", { name: /作品/ })).toBeInTheDocument();
@@ -363,19 +363,19 @@ describe("author page", () => {
 describe("EntityPage route handling", () => {
   it("accepts a literal percent sign in an already-decoded source key", async () => {
     // The router decodes route params; decoding again crashes on a valid '%'.
-    api.libraryV2Entity.mockResolvedValue(head({ external_key: "creator%key" }));
-    api.libraryV2PersonSeries.mockResolvedValue({ items: [], next: null, total: 0 });
-    api.libraryV2EntityTags.mockResolvedValue([]);
+    api.shelfEntity.mockResolvedValue(head({ external_key: "creator%key" }));
+    api.shelfPersonSeries.mockResolvedValue({ items: [], next: null, total: 0 });
+    api.shelfEntityTags.mockResolvedValue([]);
     renderAuthor("#/people/pixiv/creator%25key");
 
     expect(await screen.findByRole("heading", { level: 1 })).toBeInTheDocument();
-    expect(api.libraryV2Entity).toHaveBeenCalledWith("person", "pixiv", "creator%key");
+    expect(api.shelfEntity).toHaveBeenCalledWith("person", "pixiv", "creator%key");
   });
 });
 
 describe("series page", () => {
   beforeEach(() => {
-    api.libraryV2Entity.mockResolvedValue(head({ id: SERIES, kind: "series", external_key: "s1", name: "季節の栞", work_count: 2 }));
+    api.shelfEntity.mockResolvedValue(head({ id: SERIES, kind: "series", external_key: "s1", name: "季節の栞", work_count: 2 }));
   });
 
   /**
@@ -383,7 +383,7 @@ describe("series page", () => {
    * 辿る経路が作者かシリーズかの違いしかない。
    */
   it("opens the collections this series belongs to, the same way an author does", async () => {
-    api.libraryV2EntityCollections.mockResolvedValue([{
+    api.shelfEntityCollections.mockResolvedValue([{
       id: "0195f1c2-0000-7000-8000-0000000000d1",
       legacy_id: null,
       name: "連作の棚",
@@ -406,7 +406,7 @@ describe("series page", () => {
 
     const tab = await screen.findByRole("tab", { name: /コレクション/ });
     expect(within(tab).getByText("1")).toBeInTheDocument();
-    expect(api.libraryV2EntityCollections).toHaveBeenCalledWith("series", SERIES);
+    expect(api.shelfEntityCollections).toHaveBeenCalledWith("series", SERIES);
     expect(await screen.findByText("連作の棚")).toBeInTheDocument();
     const sort = screen.getByRole("combobox", { name: "コレクションの並び順" });
     fireEvent.click(sort);
@@ -419,8 +419,8 @@ describe("series page", () => {
     renderEntity("series", "#/series/pixiv/s1");
     await waitFor(() => expect(shelf.searchShelf).toHaveBeenCalledWith(expect.anything(), { series: SERIES }));
     // A series has no list of series, but it does have tags worth narrowing by.
-    expect(api.libraryV2PersonSeries).not.toHaveBeenCalled();
-    expect(api.libraryV2EntityTags).toHaveBeenCalledWith("series", SERIES);
+    expect(api.shelfPersonSeries).not.toHaveBeenCalled();
+    expect(api.shelfEntityTags).toHaveBeenCalledWith("series", SERIES);
     expect(within(document.body).queryByRole("tab", { name: /シリーズ/ })).toBeNull();
   });
 });

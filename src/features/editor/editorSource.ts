@@ -2,15 +2,15 @@ import type { QueryClient } from "@tanstack/react-query";
 import { getDemoEditor } from "@/mocks/demoData";
 import { getAssetUrl } from "@/services/dbApi";
 import {
-  libraryV2EditPointer,
-  libraryV2Editor,
-  libraryV2ImportEditImage,
-  libraryV2SaveEditor,
-  libraryV2Work,
+  shelfEditPointer,
+  shelfEditor,
+  shelfImportEditImage,
+  shelfSaveEditor,
+  shelfWork,
   shelfFileUrl,
   type ShelfEditorMedia,
-} from "@/services/libraryV2Api";
-import { invalidateShelf } from "@/features/library/shelfV2";
+} from "@/services/shelfApi";
+import { invalidateShelf } from "@/features/library/shelf";
 import type { AssetEntry, EditorDocument, WorkBlock, WorkBlockInput, WorkEditRevision } from "@/types/library";
 
 /**
@@ -125,7 +125,7 @@ export function shelfEditorSource(work: string): EditorSource {
     .filter((asset) => asset.shelfFile)
     .map((asset) => ({ id: asset.id, file: asset.shelfFile!, name: asset.filename, mimeType: asset.mimeType }));
   const load = async (): Promise<EditorDoc> => {
-    const [view, head] = await Promise.all([libraryV2Editor(work), libraryV2Work(work)]);
+    const [view, head] = await Promise.all([shelfEditor(work), shelfWork(work)]);
     remember({ base: view.base, generation: view.generation });
     const revision = (value: typeof view.active) => value && { title: value.title, baseVersion: value.baseVersion };
     return {
@@ -144,7 +144,7 @@ export function shelfEditorSource(work: string): EditorSource {
     };
   };
   const save = async (doc: EditorDoc, title: string | null, blocks: WorkBlockInput[], publish: boolean) => {
-    const result = await libraryV2SaveEditor(work, {
+    const result = await shelfSaveEditor(work, {
       base: state.base,
       expected: state.generation,
       title,
@@ -163,17 +163,17 @@ export function shelfEditorSource(work: string): EditorSource {
     saveDraft: (doc, title, blocks) => save(doc, title, blocks, false),
     publish: (doc, title, blocks) => save(doc, title, blocks, true),
     discard: async () => {
-      await libraryV2EditPointer(work, state.generation, { kind: "discard" });
+      await shelfEditPointer(work, state.generation, { kind: "discard" });
       return load();
     },
     importImage: async (doc, path) => {
-      const imported = await libraryV2ImportEditImage(path);
+      const imported = await shelfImportEditImage(path);
       const id = doc.assets.reduce((max, asset) => Math.max(max, asset.id), 0) + 1;
       return shelfAsset({ ...imported, id });
     },
     afterSave: (queryClient) => {
       queryClient.invalidateQueries({ queryKey: ["editor-document", work] });
-      queryClient.invalidateQueries({ queryKey: ["library-v2-work", work] });
+      queryClient.invalidateQueries({ queryKey: ["shelf-work", work] });
     },
     afterPublish: (queryClient) => { void invalidateShelf(queryClient); },
   };

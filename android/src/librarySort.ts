@@ -27,7 +27,9 @@ export const sortGroups: { label: string; items: FixedSort[] }[] = [
 
 const defaultSort: FixedSort = "dateDesc";
 const rememberedKey = "piep.android.library.sort";
-const savedConditionsKey = "piep.android.library.saved-conditions.v1";
+const savedConditionsKey = "piep.android.library.saved-conditions";
+/** 携帯 0.10 までの名前。保存した条件は利用者が作ったものなので、捨てずに一度だけ移す。 */
+const previousSavedConditionsKey = "piep.android.library.saved-conditions.v1";
 
 export function loadRememberedSort(): FixedSort {
   try {
@@ -88,7 +90,17 @@ export interface SavedCondition {
   criteria: PcSearchCriteria;
 }
 
+function moveSavedConditionsFromPreviousKey(): void {
+  try {
+    const previous = window.localStorage.getItem(previousSavedConditionsKey);
+    if (previous === null) return;
+    if (window.localStorage.getItem(savedConditionsKey) === null) window.localStorage.setItem(savedConditionsKey, previous);
+    window.localStorage.removeItem(previousSavedConditionsKey);
+  } catch { /* storage unavailable */ }
+}
+
 export function loadSavedConditions(): SavedCondition[] {
+  moveSavedConditionsFromPreviousKey();
   try {
     const raw = JSON.parse(window.localStorage.getItem(savedConditionsKey) ?? "[]");
     if (!Array.isArray(raw)) return [];

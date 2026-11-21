@@ -1,5 +1,5 @@
 //! サーバーモードを通しで確かめる。本物の HTTP で話し、本物のファイルと DB を動かす。
-//! 棚を読む口（`/api/v2/libraries/...`）の試験は `v2/tests.rs`、棚の送信は `standalone_shipment_tests.rs`。
+//! 棚を読む口（`/api/libraries/...`）の試験は `v2/tests.rs`、棚の送信は `standalone_shipment_tests.rs`。
 
 use super::http::{
     admin_router, combined_router, reader_router, AdminAsset, AdminWeb, ConnectionInfo,
@@ -45,7 +45,7 @@ impl Drop for TestRoot {
 
 async fn pair_with(client: &reqwest::Client, url: &str, secret: &str) -> serde_json::Value {
     let paired = client
-        .post(format!("{url}/api/v2/pair"))
+        .post(format!("{url}/api/pair"))
         .json(&serde_json::json!({ "secret": secret, "deviceName": "test Android" }))
         .send()
         .await
@@ -85,7 +85,7 @@ async fn self_signed_https_requires_pairing_and_revocation_takes_effect() {
         .expect("probe client");
     let mut hello = None;
     for _ in 0..40 {
-        match probe.get(format!("{url}/api/v2/hello")).send().await {
+        match probe.get(format!("{url}/api/hello")).send().await {
             Ok(response) => {
                 hello = Some(response);
                 break;
@@ -119,7 +119,7 @@ async fn self_signed_https_requires_pairing_and_revocation_takes_effect() {
         .expect("pinned client");
 
     let unauthorized = client
-        .get(format!("{url}/api/v2/about"))
+        .get(format!("{url}/api/about"))
         .send()
         .await
         .expect("request");
@@ -136,7 +136,7 @@ async fn self_signed_https_requires_pairing_and_revocation_takes_effect() {
 
     // 一回限りの鍵は、使ったら終わり。
     let again = client
-        .post(format!("{url}/api/v2/pair"))
+        .post(format!("{url}/api/pair"))
         .json(&serde_json::json!({ "secret": secret, "deviceName": "another" }))
         .send()
         .await
@@ -144,7 +144,7 @@ async fn self_signed_https_requires_pairing_and_revocation_takes_effect() {
     assert_eq!(again.status(), StatusCode::UNAUTHORIZED);
 
     let about = client
-        .get(format!("{url}/api/v2/about"))
+        .get(format!("{url}/api/about"))
         .bearer_auth(token)
         .send()
         .await
@@ -153,7 +153,7 @@ async fn self_signed_https_requires_pairing_and_revocation_takes_effect() {
 
     // 読み手の鍵では管理の API を使えない。
     let admin = client
-        .get(format!("{url}/api/v2/admin/status"))
+        .get(format!("{url}/api/admin/status"))
         .bearer_auth(token)
         .send()
         .await
@@ -166,7 +166,7 @@ async fn self_signed_https_requires_pairing_and_revocation_takes_effect() {
         .revoke_device(device_id)
         .expect("revoke"));
     let revoked = client
-        .get(format!("{url}/api/v2/about"))
+        .get(format!("{url}/api/about"))
         .bearer_auth(token)
         .send()
         .await
@@ -214,13 +214,13 @@ async fn protected_admin_routes_reject_before_receiving_the_body() {
         .unwrap();
     let url = spawn_plain(combined_router(Arc::clone(&parts.context)));
     for (method, path) in [
-        ("POST", "/api/v2/admin/pairings"),
-        ("POST", "/api/v2/admin/shelf/shipments"),
-        ("POST", "/api/v2/admin/shelf/shipments/unused/needed"),
-        ("PUT", "/api/v2/admin/shelf/shipments/unused/chunks/unused"),
-        ("POST", "/api/v2/admin/shelf/shipments/unused/commit"),
-        ("PUT", "/api/v2/admin/devices/unused/shelf"),
-        ("PUT", "/api/v2/admin/settings/server-name"),
+        ("POST", "/api/admin/pairings"),
+        ("POST", "/api/admin/shelf/shipments"),
+        ("POST", "/api/admin/shelf/shipments/unused/needed"),
+        ("PUT", "/api/admin/shelf/shipments/unused/chunks/unused"),
+        ("POST", "/api/admin/shelf/shipments/unused/commit"),
+        ("PUT", "/api/admin/devices/unused/shelf"),
+        ("PUT", "/api/admin/settings/server-name"),
     ] {
         for (token, status) in [
             (None, 401),
@@ -304,7 +304,7 @@ async fn the_public_side_refuses_what_it_should() {
     // 無認証で答えるのは hello と pair だけ。
     assert_eq!(
         client
-            .get(format!("{url}/api/v2/hello"))
+            .get(format!("{url}/api/hello"))
             .send()
             .await
             .unwrap()
@@ -320,21 +320,27 @@ async fn the_public_side_refuses_what_it_should() {
         "admin/shelf/shipments",
     ] {
         let response = client
-            .get(format!("{url}/api/v2/{path}"))
+            .get(format!("{url}/api/{path}"))
             .send()
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
         let wrong = client
-            .get(format!("{url}/api/v2/{path}"))
+            .get(format!("{url}/api/{path}"))
             .bearer_auth("wrong")
             .send()
             .await
             .unwrap();
         assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED, "{path}");
     }
-    // 旧 API の口は無い。
-    for path in ["/api/v1/hello", "/api/v1/works/1", "/api/v1/admin/status"] {
+    // 版の付いた旧い口は無い。
+    for path in [
+        "/api/v1/hello",
+        "/api/v1/works/1",
+        "/api/v1/admin/status",
+        "/api/v2/hello",
+        "/api/v2/admin/status",
+    ] {
         let gone = client
             .get(format!("{url}{path}"))
             .bearer_auth(&token)
@@ -345,7 +351,7 @@ async fn the_public_side_refuses_what_it_should() {
     }
 
     // 更新を頼めるのは管理者だけ。手で置いたサーバーは自分では更新できない。
-    let update_url = format!("{url}/api/v2/admin/update");
+    let update_url = format!("{url}/api/admin/update");
     assert_eq!(
         client.post(&update_url).send().await.unwrap().status(),
         StatusCode::UNAUTHORIZED
@@ -369,7 +375,7 @@ async fn the_public_side_refuses_what_it_should() {
 
     // 管理の口を分けると、読み手の口には管理の API が存在しない。
     let split = client
-        .get(format!("{reader_url}/api/v2/admin/status"))
+        .get(format!("{reader_url}/api/admin/status"))
         .bearer_auth(&token)
         .send()
         .await
@@ -379,7 +385,7 @@ async fn the_public_side_refuses_what_it_should() {
     assert_eq!(body["code"], "not_found");
     assert_eq!(
         client
-            .get(format!("{reader_url}/api/v2/hello"))
+            .get(format!("{reader_url}/api/hello"))
             .send()
             .await
             .unwrap()
@@ -390,7 +396,7 @@ async fn the_public_side_refuses_what_it_should() {
     // 要求の大きさの上限。
     let huge = "x".repeat(70 * 1024);
     let pair = client
-        .post(format!("{url}/api/v2/pair"))
+        .post(format!("{url}/api/pair"))
         .json(&serde_json::json!({ "secret": huge, "deviceName": "x" }))
         .send()
         .await
@@ -399,14 +405,14 @@ async fn the_public_side_refuses_what_it_should() {
 
     // 経路が付けた利用者名は、認証にも記録にも使わない。
     let forged = client
-        .get(format!("{url}/api/v2/about"))
+        .get(format!("{url}/api/about"))
         .header("Tailscale-User-Login", "someone@example.test")
         .send()
         .await
         .unwrap();
     assert_eq!(forged.status(), StatusCode::UNAUTHORIZED);
     let listed = client
-        .get(format!("{url}/api/v2/admin/devices"))
+        .get(format!("{url}/api/admin/devices"))
         .bearer_auth(&token)
         .header("Tailscale-User-Login", "someone@example.test")
         .send()
@@ -429,7 +435,7 @@ async fn the_public_side_refuses_what_it_should() {
         (reqwest::Method::GET, "admin/devices"),
     ] {
         let response = client
-            .request(method, format!("{url}/api/v2/{path}"))
+            .request(method, format!("{url}/api/{path}"))
             .bearer_auth(reader_token)
             .send()
             .await
@@ -444,14 +450,14 @@ async fn the_public_side_refuses_what_it_should() {
         .unwrap();
     for _ in 0..10 {
         client
-            .post(format!("{url}/api/v2/pair"))
+            .post(format!("{url}/api/pair"))
             .json(&serde_json::json!({ "secret": "wrong", "deviceName": "x" }))
             .send()
             .await
             .unwrap();
     }
     let limited = client
-        .post(format!("{url}/api/v2/pair"))
+        .post(format!("{url}/api/pair"))
         .json(&serde_json::json!({ "secret": secret, "deviceName": "x" }))
         .send()
         .await
@@ -581,7 +587,7 @@ impl AdminSite {
 
     async fn set_up(&self) -> String {
         let response = self
-            .post("/api/v2/admin/web/setup")
+            .post("/api/admin/web/setup")
             .json(&serde_json::json!({
                 "ticket": self.setup_ticket(),
                 "username": "snow",
@@ -595,7 +601,7 @@ impl AdminSite {
     }
 
     async fn login(&self, username: &str, password: &str) -> reqwest::Response {
-        self.post("/api/v2/admin/web/login")
+        self.post("/api/admin/web/login")
             .json(&serde_json::json!({ "username": username, "password": password }))
             .send()
             .await
@@ -621,7 +627,7 @@ fn cookie_of(response: &reqwest::Response) -> String {
 async fn the_first_admin_needs_a_ticket_that_works_once() {
     let site = AdminSite::new("admin-first");
     let attempt = |ticket: String| {
-        site.post("/api/v2/admin/web/setup")
+        site.post("/api/admin/web/setup")
             .json(&serde_json::json!({
                 "ticket": ticket,
                 "username": "snow",
@@ -657,7 +663,7 @@ async fn the_first_admin_needs_a_ticket_that_works_once() {
     // 決まりに合わないパスワードでは、券を使い切らない。
     let ticket = site.setup_ticket();
     let weak = site
-        .post("/api/v2/admin/web/setup")
+        .post("/api/admin/web/setup")
         .json(&serde_json::json!({
             "ticket": ticket,
             "username": "snow",
@@ -681,7 +687,7 @@ async fn the_first_admin_needs_a_ticket_that_works_once() {
 async fn the_session_cookie_has_the_designed_attributes_and_ends_at_logout() {
     let site = AdminSite::new("admin-cookie");
     let response = site
-        .post("/api/v2/admin/web/setup")
+        .post("/api/admin/web/setup")
         .json(&serde_json::json!({
             "ticket": site.setup_ticket(),
             "username": "snow",
@@ -704,23 +710,19 @@ async fn the_session_cookie_has_the_designed_attributes_and_ends_at_logout() {
     let cookie = raw.split(';').next().unwrap().to_string();
 
     let status = site
-        .get("/api/v2/admin/status")
+        .get("/api/admin/status")
         .header(header::COOKIE, &cookie)
         .send()
         .await
         .unwrap();
     assert_eq!(status.status(), StatusCode::OK);
     assert_eq!(
-        site.get("/api/v2/admin/status")
-            .send()
-            .await
-            .unwrap()
-            .status(),
+        site.get("/api/admin/status").send().await.unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
 
     let logout = site
-        .post("/api/v2/admin/web/logout")
+        .post("/api/admin/web/logout")
         .header(header::COOKIE, &cookie)
         .send()
         .await
@@ -731,7 +733,7 @@ async fn the_session_cookie_has_the_designed_attributes_and_ends_at_logout() {
         "\"cookies\""
     );
     let after = site
-        .get("/api/v2/admin/status")
+        .get("/api/admin/status")
         .header(header::COOKIE, &cookie)
         .send()
         .await
@@ -761,7 +763,7 @@ async fn login_errors_look_the_same_and_the_wait_does_not_lock_out_tickets() {
 
     // 券は数えないので、持ち主は入れる。
     let ticket = site
-        .post("/api/v2/admin/web/ticket")
+        .post("/api/admin/web/ticket")
         .json(&serde_json::json!({ "ticket": site.login_ticket() }))
         .send()
         .await
@@ -773,7 +775,7 @@ async fn login_errors_look_the_same_and_the_wait_does_not_lock_out_tickets() {
 async fn requests_from_other_sites_and_unknown_hosts_are_refused() {
     let site = AdminSite::new("admin-csrf");
     let cookie = site.set_up().await;
-    let url = format!("{}/api/v2/admin/web/logout", site.url);
+    let url = format!("{}/api/admin/web/logout", site.url);
     let send = |pairs: Vec<(&'static str, &'static str)>| {
         let mut request = site.client.post(&url).header(header::COOKIE, &cookie);
         for (name, value) in pairs {
@@ -793,7 +795,7 @@ async fn requests_from_other_sites_and_unknown_hosts_are_refused() {
     }
     // 届いていないので、ログインは続いている。
     let status = site
-        .get("/api/v2/admin/status")
+        .get("/api/admin/status")
         .header(header::COOKIE, &cookie)
         .send()
         .await
@@ -808,7 +810,7 @@ async fn requests_from_other_sites_and_unknown_hosts_are_refused() {
         .await
         .unwrap();
     assert_eq!(unknown.status(), StatusCode::FORBIDDEN);
-    site.post("/api/v2/admin/web/ticket")
+    site.post("/api/admin/web/ticket")
         .header(header::HOST, "piep.example.net")
         .header(header::ORIGIN, "https://piep.example.net")
         .json(&serde_json::json!({ "ticket": site.login_ticket() }))
@@ -844,7 +846,7 @@ async fn requests_from_other_sites_and_unknown_hosts_are_refused() {
     .unwrap();
     let bearer = site
         .client
-        .get(format!("{}/api/v2/admin/status", site.url))
+        .get(format!("{}/api/admin/status", site.url))
         .bearer_auth(&token)
         .header(header::HOST, "attacker.example")
         .send()
@@ -871,7 +873,7 @@ async fn a_link_is_not_issued_where_the_page_is_not_served() {
     let public = spawn_plain(combined_router(Arc::clone(&site.parts.context)));
     let refused = site
         .client
-        .post(format!("{public}/api/v2/admin/tickets"))
+        .post(format!("{public}/api/admin/tickets"))
         .bearer_auth(&token)
         .send()
         .await
@@ -886,7 +888,7 @@ async fn a_link_is_not_issued_where_the_page_is_not_served() {
     // 画面のある口では、今までどおり出す。
     let issued = site
         .client
-        .post(format!("{}/api/v2/admin/tickets", site.url))
+        .post(format!("{}/api/admin/tickets", site.url))
         .bearer_auth(&token)
         .send()
         .await
@@ -941,7 +943,7 @@ async fn the_name_the_desktop_issued_a_link_for_opens_the_page() {
     assert!(!hostile.contains("<script>"), "{hostile}");
     // 部品や API には、今までどおり JSON で答える。
     let api = site
-        .get("/api/v2/admin/web/state")
+        .get("/api/admin/web/state")
         .header(header::HOST, "piep.example.net")
         .send()
         .await
@@ -952,7 +954,7 @@ async fn the_name_the_desktop_issued_a_link_for_opens_the_page() {
 
     let issued = site
         .client
-        .post(format!("{}/api/v2/admin/tickets", site.url))
+        .post(format!("{}/api/admin/tickets", site.url))
         .bearer_auth(&token)
         .header(header::HOST, "piep.example.net")
         .send()
@@ -971,7 +973,7 @@ async fn the_name_the_desktop_issued_a_link_for_opens_the_page() {
     let after = page("piep.example.net").await.unwrap();
     assert_eq!(after.status(), StatusCode::OK);
     let entered = site
-        .post("/api/v2/admin/web/ticket")
+        .post("/api/admin/web/ticket")
         .header(header::HOST, "piep.example.net")
         .json(&serde_json::json!({ "ticket": ticket }))
         .send()
@@ -1000,7 +1002,7 @@ async fn tickets_come_only_from_the_key_and_important_actions_ask_again() {
     .unwrap();
     let issue = || {
         site.client
-            .post(format!("{}/api/v2/admin/tickets", site.url))
+            .post(format!("{}/api/admin/tickets", site.url))
             .bearer_auth(&token)
             .send()
     };
@@ -1020,7 +1022,7 @@ async fn tickets_come_only_from_the_key_and_important_actions_ask_again() {
 
     // 券で入る。券は 2 度使えない。
     let entered = site
-        .post("/api/v2/admin/web/ticket")
+        .post("/api/admin/web/ticket")
         .json(&serde_json::json!({ "ticket": ticket }))
         .send()
         .await
@@ -1028,7 +1030,7 @@ async fn tickets_come_only_from_the_key_and_important_actions_ask_again() {
     assert_eq!(entered.status(), StatusCode::OK);
     let cookie = cookie_of(&entered);
     let again = site
-        .post("/api/v2/admin/web/ticket")
+        .post("/api/admin/web/ticket")
         .json(&serde_json::json!({ "ticket": ticket }))
         .send()
         .await
@@ -1037,7 +1039,7 @@ async fn tickets_come_only_from_the_key_and_important_actions_ask_again() {
 
     // ブラウザからは券を作れない。
     let by_cookie = site
-        .post("/api/v2/admin/tickets")
+        .post("/api/admin/tickets")
         .header(header::COOKIE, &cookie)
         .send()
         .await
@@ -1047,7 +1049,7 @@ async fn tickets_come_only_from_the_key_and_important_actions_ask_again() {
     // 券で入っただけでは、パスワードの変更を聞き直す。
     let change = |password: &'static str| {
         site.client
-            .put(format!("{}/api/v2/admin/password", site.url))
+            .put(format!("{}/api/admin/password", site.url))
             .header("sec-fetch-site", "same-origin")
             .header(header::COOKIE, &cookie)
             .json(&serde_json::json!({ "password": password }))
@@ -1058,7 +1060,7 @@ async fn tickets_come_only_from_the_key_and_important_actions_ask_again() {
     let body: serde_json::Value = asked.json().await.unwrap();
     assert_eq!(body["code"], "reauth_required");
     let wrong = site
-        .post("/api/v2/admin/web/reauth")
+        .post("/api/admin/web/reauth")
         .header(header::COOKIE, &cookie)
         .json(&serde_json::json!({ "password": "違うパスワードをここに入れる" }))
         .send()
@@ -1066,7 +1068,7 @@ async fn tickets_come_only_from_the_key_and_important_actions_ask_again() {
         .unwrap();
     assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
     let right = site
-        .post("/api/v2/admin/web/reauth")
+        .post("/api/admin/web/reauth")
         .header(header::COOKIE, &cookie)
         .json(&serde_json::json!({ "password": GOOD_PASSWORD }))
         .send()
@@ -1124,7 +1126,7 @@ async fn pages_carry_the_security_headers_and_secrets_stay_out_of_the_record() {
     let ticket = site.setup_ticket();
     let cookie = {
         let response = site
-            .post("/api/v2/admin/web/setup")
+            .post("/api/admin/web/setup")
             .json(&serde_json::json!({
                 "ticket": ticket,
                 "username": "snow",
@@ -1137,7 +1139,7 @@ async fn pages_carry_the_security_headers_and_secrets_stay_out_of_the_record() {
     };
     site.login("snow", "違うパスワードをここに入れる").await;
     let audit: serde_json::Value = site
-        .get("/api/v2/admin/audit")
+        .get("/api/admin/audit")
         .header(header::COOKIE, &cookie)
         .send()
         .await
@@ -1166,8 +1168,8 @@ async fn the_admin_screen_is_not_on_the_reader_port_or_a_public_only_server() {
     for path in [
         "/admin",
         "/admin/",
-        "/api/v2/admin/status",
-        "/api/v2/admin/web/state",
+        "/api/admin/status",
+        "/api/admin/web/state",
     ] {
         let response = client
             .get(format!("{reader}{path}"))
@@ -1185,7 +1187,7 @@ async fn the_admin_screen_is_not_on_the_reader_port_or_a_public_only_server() {
     let page = client.get(format!("{public}/admin/")).send().await.unwrap();
     assert_eq!(page.status(), StatusCode::NOT_FOUND);
     let by_cookie = client
-        .get(format!("{public}/api/v2/admin/status"))
+        .get(format!("{public}/api/admin/status"))
         .header(header::COOKIE, &cookie)
         .send()
         .await
@@ -1203,7 +1205,7 @@ async fn the_admin_screen_is_not_on_the_reader_port_or_a_public_only_server() {
         StatusCode::NOT_FOUND
     );
     let stopped = site
-        .get("/api/v2/admin/status")
+        .get("/api/admin/status")
         .header(header::COOKIE, &cookie)
         .send()
         .await
@@ -1215,7 +1217,7 @@ async fn the_admin_screen_is_not_on_the_reader_port_or_a_public_only_server() {
 async fn about_is_for_registered_devices_and_hello_stays_silent_about_the_version() {
     let site = AdminSite::new("admin-about");
     let hello: serde_json::Value = site
-        .get("/api/v2/hello")
+        .get("/api/hello")
         .send()
         .await
         .unwrap()
@@ -1224,7 +1226,7 @@ async fn about_is_for_registered_devices_and_hello_stays_silent_about_the_versio
         .unwrap();
     assert!(hello.get("version").is_none());
     assert_eq!(
-        site.get("/api/v2/about").send().await.unwrap().status(),
+        site.get("/api/about").send().await.unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
     let token = pair_admin(
@@ -1238,7 +1240,7 @@ async fn about_is_for_registered_devices_and_hello_stays_silent_about_the_versio
     .await
     .unwrap();
     let about: serde_json::Value = site
-        .get("/api/v2/about")
+        .get("/api/about")
         .bearer_auth(&token)
         .send()
         .await
@@ -1263,15 +1265,11 @@ async fn text_is_compressed_only_for_a_client_that_asks() {
         .no_proxy()
         .build()
         .expect("client");
-    let plain = client
-        .get(format!("{url}/api/v2/hello"))
-        .send()
-        .await
-        .unwrap();
+    let plain = client.get(format!("{url}/api/hello")).send().await.unwrap();
     assert_eq!(plain.status(), StatusCode::OK);
     assert!(plain.headers().get("content-encoding").is_none());
     let packed = client
-        .get(format!("{url}/api/v2/hello"))
+        .get(format!("{url}/api/hello"))
         .header("accept-encoding", "gzip")
         .send()
         .await
@@ -1300,11 +1298,11 @@ async fn unauthorized_bodies_are_rejected_before_they_are_received() {
         .unwrap();
     let url = spawn_plain(combined_router(Arc::clone(&parts.context)));
     for (method, path, token, expected) in [
-        ("POST", "/api/v2/admin/shelf/shipments/s/needed", None, 401),
-        ("PUT", "/api/v2/admin/shelf/shipments/s/chunks/c", None, 401),
+        ("POST", "/api/admin/shelf/shipments/s/needed", None, 401),
+        ("PUT", "/api/admin/shelf/shipments/s/chunks/c", None, 401),
         (
             "PUT",
-            "/api/v2/admin/shelf/shipments/s/chunks/c",
+            "/api/admin/shelf/shipments/s/chunks/c",
             Some(reader.token.as_str()),
             403,
         ),
@@ -1364,7 +1362,7 @@ async fn pairing_secrets_and_library_bodies_are_not_forwarded_to_redirects() {
         let client = super::sync_send::build_client(&remote).await.unwrap();
         let response = client
             .put(format!(
-                "{}/api/v2/admin/shelf/shipments/s/chunks/c",
+                "{}/api/admin/shelf/shipments/s/chunks/c",
                 remote.url
             ))
             .bearer_auth("admin-token")

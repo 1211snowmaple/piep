@@ -6,7 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useAppNavigate } from "@/app/router";
 import { Icons, IconSize } from "@/lib/icons";
 import { isTauriRuntime } from "@/services/dbApi";
-import { searchShelf } from "@/features/library/shelfV2";
+import { searchShelf } from "@/features/library/shelf";
 import { searchDemoWorks } from "@/mocks/demoData";
 import { useDefaultSearchMode } from "@/lib/searchPreferences";
 import { SearchMethodMenu } from "@/components/SearchMethodMenu";

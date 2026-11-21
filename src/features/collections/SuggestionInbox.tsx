@@ -17,8 +17,8 @@ import { demoSuggestions, getDemoReader } from "@/mocks/demoData";
 import { nameCollectionSuggestion } from "@/services/assistApi";
 import { acceptCollectionSuggestion, listCollectionSuggestions, rejectCollectionSuggestion, suggestionNameOverride } from "@/services/collectionApi";
 import { isTauriRuntime } from "@/services/dbApi";
-import { libraryV2Content, shelfFileUrl } from "@/services/libraryV2Api";
-import { invalidateShelf } from "@/features/library/shelfV2";
+import { shelfContent, shelfFileUrl } from "@/services/shelfApi";
+import { invalidateShelf } from "@/features/library/shelf";
 import type { CollectionSuggestion, CollectionSuggestionMember, SavedSearchSuggestion, WorkKey } from "@/types/collections";
 import "./discovery.css";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
@@ -340,7 +340,7 @@ function ReaderPreview({ member, runtime, onBack }: { member: CollectionSuggesti
     queryFn: async () => {
       // 新しい棚の候補は作品の UUID で読む。読む画面と同じ HTML を平文にして見せる。
       if (runtime && member.work) {
-        const shelfPage = await libraryV2Content(member.work, null, page);
+        const shelfPage = await shelfContent(member.work, null, page);
         return { ...shelfPage, plainText: htmlText(shelfPage.html) };
       }
       const demo = getDemoReader(member.downloadId!);

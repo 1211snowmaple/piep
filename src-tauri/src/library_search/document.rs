@@ -290,7 +290,7 @@ impl Library {
         crate::database::attachment::apply_attachment_text(post, provider, &texts.files);
         // 差し込んだ印の `localPath`（「原本を見る」）は一時に書き出したファイルを指していて、
         // ここを出ると消える。添付のファイルの識別子に置き換え、原本はそれで開く
-        // （`library_v2_render_pdf_page`）。知らない場所を指す印は外す（押しても開けない）。
+        // （`shelf_render_pdf_page`）。知らない場所を指す印は外す（押しても開けない）。
         if let Some(blocks) = post
             .pointer_mut("/body/blocks")
             .and_then(serde_json::Value::as_array_mut)

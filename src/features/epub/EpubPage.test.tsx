@@ -38,11 +38,11 @@ const shelf = vi.hoisted(() => ({ byIds: vi.fn() }));
 async function shelfWorks(ids: string[]) {
   return ids.flatMap((id) => {
     const work = demoWorks.find((item) => `w-${item.id}` === id);
-    return work ? [{ ...work, id, shelf: "v2" as const }] : [];
+    return work ? [{ ...work, id, shelf: true as const }] : [];
   });
 }
-vi.mock("@/features/library/shelfV2", async (original) => ({
-  ...(await original<typeof import("@/features/library/shelfV2")>()),
+vi.mock("@/features/library/shelf", async (original) => ({
+  ...(await original<typeof import("@/features/library/shelf")>()),
   shelfEntriesByIds: shelf.byIds,
 }));
 
@@ -54,7 +54,7 @@ function QueueProbe() {
 beforeEach(() => {
   clearCompletedOperations();
   window.localStorage.clear();
-  window.localStorage.setItem("piep.epub-queue.v2", JSON.stringify(["w-101", "w-108"]));
+  window.localStorage.setItem("piep.epub-queue", JSON.stringify(["w-101", "w-108"]));
   shelf.byIds.mockReset().mockImplementation(shelfWorks);
   window.location.hash = "#/epub";
   writeExportSettings({ ...readExportSettings(), outputDir: "C:/exports" });
@@ -171,8 +171,8 @@ it.each(["success", "failed", "invalid", "canceled"])("keeps later additions and
 });
 
 it("exports works of the shelf by their id, in queue order, and keeps a failed one queued", async () => {
-  window.localStorage.setItem("piep.epub-queue.v2", JSON.stringify(["w-101", "w-1", "w-108"]));
-  shelf.byIds.mockImplementation(async (ids: string[]) => [...await shelfWorks(ids), { ...demoWorks[0], id: "w-1", shelf: "v2" as const, title: "棚の一冊" }]);
+  window.localStorage.setItem("piep.epub-queue", JSON.stringify(["w-101", "w-1", "w-108"]));
+  shelf.byIds.mockImplementation(async (ids: string[]) => [...await shelfWorks(ids), { ...demoWorks[0], id: "w-1", shelf: true as const, title: "棚の一冊" }]);
   api.exportEpubBatch.mockResolvedValue({ successCount: 2, failedCount: 1, failedIds: ["w-1"], invalidIds: [], outputFiles: ["C:/exports/101.epub", "C:/exports/108.epub"], invalidCount: 0, issues: [], canceled: false, skippedIds: [] } satisfies ExportBatchResult);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(<MantineProvider><ModalsProvider><QueryClientProvider client={client}><AppRouter><WorkspaceProvider><EpubPage /><QueueProbe /></WorkspaceProvider></AppRouter></QueryClientProvider></ModalsProvider></MantineProvider>);

@@ -4,7 +4,7 @@
 //! 同じ要求を送り直しても一度だけ効く。世代が違えば（別の端末やデスクトップで変わっていれば）
 //! 409 と今の値を返し、端末の時刻で勝者を決めない。
 //!
-//! デスクトップ版は棚の持ち主の変更を `/api/v2/admin/shelf/favorites` から取り込む。
+//! デスクトップ版は棚の持ち主の変更を `/api/admin/shelf/favorites` から取り込む。
 
 use super::{internal, invalid, not_found, ApiError, Context, Principal};
 use crate::library::protocol::Id;

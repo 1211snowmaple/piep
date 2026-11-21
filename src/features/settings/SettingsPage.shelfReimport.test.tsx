@@ -11,18 +11,18 @@ const reimport = vi.hoisted(() => ({
 }));
 const operationSpies = vi.hoisted(() => ({ complete: vi.fn(), log: vi.fn() }));
 
-vi.mock("@/features/library/shelfV2", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/features/library/shelfV2")>()),
-  useLibraryV2Status: () => ({ data: { state: "ready", path: "C:\\shelf" } }),
+vi.mock("@/features/library/shelf", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/features/library/shelf")>()),
+  useShelfStatus: () => ({ data: { state: "ready", path: "C:\\shelf" } }),
 }));
 vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
-  libraryV2Dashboard: vi.fn().mockResolvedValue({ stats: { totalDownloads: 12, totalAssets: 108, totalSizeBytes: 32_000_000 } }),
+  shelfDashboard: vi.fn().mockResolvedValue({ stats: { totalDownloads: 12, totalAssets: 108, totalSizeBytes: 32_000_000 } }),
 }));
 vi.mock("@/services/shelfBackupApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfBackupApi")>()),
-  libraryV2RestoreState: vi.fn().mockResolvedValue({ pending: null, last: null }),
-  libraryV2ReimportFolders: reimport.shelf,
+  shelfRestoreState: vi.fn().mockResolvedValue({ pending: null, last: null }),
+  shelfReimportFolders: reimport.shelf,
 }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),

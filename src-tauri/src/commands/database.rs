@@ -180,7 +180,7 @@ pub async fn search_rebuild_index(
     let options = job_options.unwrap_or(SearchRebuildJobOptions {
         include_semantic: None,
     });
-    let library = app.state::<Arc<AppState>>().library_v2.library()?;
+    let library = app.state::<Arc<AppState>>().shelf.library()?;
     if let Some(enabled) = options.include_semantic {
         let target = Arc::clone(&library);
         tokio::task::spawn_blocking(move || {
@@ -200,7 +200,7 @@ pub async fn search_set_semantic_enabled(
     enabled: bool,
 ) -> Result<SearchIndexStatus, String> {
     run_db_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         super::library_health::apply_semantic_enabled(&library, enabled)?;
         library
             .search_index_status(enabled)
@@ -375,7 +375,7 @@ fn emit_search_index_progress(
 #[tauri::command]
 pub async fn db_list_saved_searches(app: tauri::AppHandle) -> Result<Vec<SavedSearchView>, String> {
     run_db_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         saved_search_shelf::list(&library)
     })
     .await
@@ -388,7 +388,7 @@ pub async fn db_upsert_saved_search(
     input: SavedSearchViewInput,
 ) -> Result<SavedSearchView, String> {
     run_library_write_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         saved_search_shelf::upsert(&library, input)
     })
     .await
@@ -398,7 +398,7 @@ pub async fn db_upsert_saved_search(
 #[tauri::command]
 pub async fn db_delete_saved_search(app: tauri::AppHandle, id: String) -> Result<bool, String> {
     run_library_write_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         saved_search_shelf::delete(&library, &id)
     })
     .await
@@ -411,8 +411,8 @@ pub async fn db_propose_collection_names(
     collection_id: String,
 ) -> Result<Vec<CollectionNameCandidate>, String> {
     run_db_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
-        let target = super::library_v2::collection_target(&library, &collection_id)?;
+        let library = state.shelf.library()?;
+        let target = super::shelf::collection_target(&library, &collection_id)?;
         library.collection_name_proposals_on_shelf(target)
     })
     .await
@@ -430,8 +430,8 @@ pub async fn db_name_collection_with_model(
 ) -> Result<crate::assist::GeneratedAssist<crate::assist::NamedBundle>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let works = tokio::task::spawn_blocking(move || {
-        let library = state.library_v2.library()?;
-        let target = super::library_v2::collection_target(&library, &collection_id)?;
+        let library = state.shelf.library()?;
+        let target = super::shelf::collection_target(&library, &collection_id)?;
         library.collection_naming_works_on_shelf(target)
     })
     .await
@@ -458,11 +458,10 @@ pub async fn db_try_naming_engine(
 ) -> Result<crate::assist::TrialResult, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let works = tokio::task::spawn_blocking(move || {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         match collection_id {
-            Some(id) => library.collection_naming_works_on_shelf(
-                super::library_v2::collection_target(&library, &id)?,
-            ),
+            Some(id) => library
+                .collection_naming_works_on_shelf(super::shelf::collection_target(&library, &id)?),
             None => library.sample_naming_works_on_shelf(),
         }
     })
@@ -487,7 +486,7 @@ pub async fn db_name_collection_suggestion(
     // 材料を読むところと、外へ送るところを分ける。送っているあいだ
     // ライブラリの錠を握ったままにしない。
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let library = state.library_v2.library()?;
+    let library = state.shelf.library()?;
     let works = {
         let library = library.clone();
         let suggestion_id = suggestion_id.clone();
@@ -511,7 +510,7 @@ pub async fn db_name_collection_suggestion(
 #[tauri::command]
 pub async fn db_dismiss_swept_suggestions(app: tauri::AppHandle) -> Result<usize, String> {
     run_library_write_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         library.dismiss_swept_collection_suggestions()
     })
     .await
@@ -526,7 +525,7 @@ pub async fn db_sweep_collection_candidates(
     app: tauri::AppHandle,
 ) -> Result<CollectionSweepResult, String> {
     run_library_write_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         library.sweep_collection_suggestions()
     })
     .await
@@ -541,8 +540,8 @@ pub async fn db_suggest_collection_additions(
     collection_id: String,
 ) -> Result<CollectionAdditionResult, String> {
     run_db_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
-        let target = super::library_v2::collection_target(&library, &collection_id)?;
+        let library = state.shelf.library()?;
+        let target = super::shelf::collection_target(&library, &collection_id)?;
         library.collection_additions_on_shelf(target)
     })
     .await
@@ -560,7 +559,7 @@ pub async fn db_generate_collection_suggestion(
     request: CollectionSuggestionRequest,
 ) -> Result<CollectionSuggestion, String> {
     run_library_write_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         let seeds = request
             .seed_works
             .iter()
@@ -589,7 +588,7 @@ pub async fn db_list_collection_suggestions(
     state_filter: Option<String>,
 ) -> Result<Vec<CollectionSuggestion>, String> {
     run_db_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         library.collection_suggestion_views(state_filter.as_deref())
     })
     .await
@@ -605,7 +604,7 @@ pub async fn db_dismiss_collection_suggestion(
     suggestion_id: String,
 ) -> Result<bool, String> {
     run_library_write_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         library.dismiss_collection_suggestion_view(&suggestion_id)
     })
     .await
@@ -631,7 +630,7 @@ pub async fn db_accept_collection_suggestion(
 ) -> Result<AcceptedCollection, String> {
     run_library_write_blocking(app, move |state| {
         let name = input.name.clone();
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         let id = library.accept_collection_suggestion_view(&input)?;
         let name = library
             .collection_detail(id)
@@ -657,7 +656,7 @@ pub async fn db_reject_collection_suggestion(
     member_keys: Option<Vec<WorkKey>>,
 ) -> Result<bool, String> {
     run_library_write_blocking(app, move |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         library.reject_collection_suggestion_view(&suggestion_id, member_keys.as_deref())
     })
     .await
@@ -672,7 +671,7 @@ pub async fn db_get_search_index_status(
     app: tauri::AppHandle,
 ) -> Result<SearchIndexStatus, String> {
     run_db_blocking(app, |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         library
             .search_index_status(super::library_health::semantic_enabled())
             .map_err(|e| e.to_string())
@@ -995,7 +994,7 @@ pub async fn refresh_entity_profile(
     *last_refresh = Some(Instant::now());
 
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let library = state.library_v2.library()?;
+    let library = state.shelf.library()?;
     profile_shelf::refresh(state, library, params).await
 }
 
@@ -1005,7 +1004,7 @@ pub async fn db_get_entity_profile_repair_status(
     app: tauri::AppHandle,
 ) -> Result<EntityProfileRepairView, String> {
     let status = run_db_blocking(app, |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         library.profile_repair_status().map_err(|e| e.to_string())
     })
     .await?;
@@ -1035,7 +1034,7 @@ pub async fn repair_incomplete_entity_profiles(
     ENTITY_PROFILE_REPAIR_CANCEL.store(false, Ordering::Release);
 
     let targets = run_db_blocking(app.clone(), |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         library.incomplete_profiles().map_err(|e| e.to_string())
     })
     .await?;
@@ -1136,7 +1135,7 @@ pub async fn repair_incomplete_entity_profiles(
 
     let canceled = ENTITY_PROFILE_REPAIR_CANCEL.load(Ordering::Acquire);
     let remaining = run_db_blocking(app.clone(), |state| {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         library.profile_repair_status().map_err(|e| e.to_string())
     })
     .await?

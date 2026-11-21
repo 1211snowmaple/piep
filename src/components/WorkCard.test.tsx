@@ -15,12 +15,12 @@ vi.mock("@/services/updateJobApi", async (importOriginal) => ({
   listPendingRevisionsCommand: updateJobApi.listPendingRevisionsCommand,
 }));
 const shelfApi = vi.hoisted(() => ({
-  libraryV2Status: vi.fn(),
-  libraryV2SetUserState: vi.fn(),
-  libraryV2RemoveWork: vi.fn(),
+  shelfStatus: vi.fn(),
+  shelfSetUserState: vi.fn(),
+  shelfRemoveWork: vi.fn(),
 }));
-vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
+vi.mock("@/services/shelfApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/shelfApi")>()),
   ...shelfApi,
 }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
@@ -48,9 +48,9 @@ function renderCard(props: Partial<React.ComponentProps<typeof WorkCard>> = {}) 
 describe("WorkCard", () => {
   beforeEach(() => {
     updateJobApi.listPendingRevisionsCommand.mockResolvedValue([]);
-    shelfApi.libraryV2Status.mockReset();
-    shelfApi.libraryV2SetUserState.mockReset();
-    shelfApi.libraryV2RemoveWork.mockReset();
+    shelfApi.shelfStatus.mockReset();
+    shelfApi.shelfSetUserState.mockReset();
+    shelfApi.shelfRemoveWork.mockReset();
   });
 
   it("is keyboard accessible and opens the work route", () => {
@@ -254,7 +254,7 @@ describe("WorkCard", () => {
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ work: shelfId, foundAt: "2026-09-01T00:00:00Z" }]);
     const { id: _legacy, ...rest } = demoWorks[0];
-    renderCard({ work: { ...rest, id: shelfId, shelf: "v2", coverUrl: null, coverPath: null, legacyId: null } });
+    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: null, coverPath: null, legacyId: null } });
 
     fireEvent.click(await screen.findByRole("button", { name: /未保存の改稿を比較/ }));
     expect(window.location.hash).toBe(`#/works/${shelfId}?tab=history&compare=pending`);
@@ -273,7 +273,7 @@ describe("WorkCard", () => {
     window.location.hash = "#/library";
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     const { id: _legacy, ...rest } = demoWorks[0];
-    renderCard({ work: { ...rest, id: shelfId, shelf: "v2", coverUrl: "http://piep-library.localhost/abc", coverPath: null, legacyId: null } });
+    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: "http://piep-library.localhost/abc", coverPath: null, legacyId: null } });
 
     expect(screen.getByAltText("雨上がりの図書室での表紙")).toHaveAttribute("src", "http://piep-library.localhost/abc");
     // 改稿の印は棚の作品 ID で照らすので、旧棚の番号の改稿は出さない。EPUB のキューには棚の作品の ID で積む。
@@ -291,16 +291,16 @@ describe("WorkCard", () => {
 
   it("writes the flags of a work on the shelf", async () => {
     window.location.hash = "#/library";
-    shelfApi.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
-    shelfApi.libraryV2SetUserState.mockResolvedValue({ favorite: true, watching: false, generation: 2 });
+    shelfApi.shelfStatus.mockResolvedValue({ state: "ready", path: "x" });
+    shelfApi.shelfSetUserState.mockResolvedValue({ favorite: true, watching: false, generation: 2 });
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     const { id: _legacy, ...rest } = demoWorks[0];
-    renderCard({ work: { ...rest, id: shelfId, shelf: "v2", coverUrl: null, coverPath: null, legacyId: null, favorite: false, watchUpdates: false } });
+    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: null, coverPath: null, legacyId: null, favorite: false, watchUpdates: false } });
 
     fireEvent.click(await screen.findByRole("button", { name: /雨上がりの図書室で：お気に入りに追加/ }));
-    expect(shelfApi.libraryV2SetUserState).toHaveBeenCalledWith(shelfId, { favorite: true });
+    expect(shelfApi.shelfSetUserState).toHaveBeenCalledWith(shelfId, { favorite: true });
     fireEvent.click(screen.getByRole("button", { name: /雨上がりの図書室で：更新監視をオンにする/ }));
-    expect(shelfApi.libraryV2SetUserState).toHaveBeenCalledWith(shelfId, { watching: true });
+    expect(shelfApi.shelfSetUserState).toHaveBeenCalledWith(shelfId, { watching: true });
   });
 
 });

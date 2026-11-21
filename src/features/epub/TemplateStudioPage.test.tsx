@@ -19,7 +19,6 @@ const epubApi = vi.hoisted(() => ({
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  searchDownloadsV2: () => Promise.resolve({ items: [], nextCursor: null, totalEstimate: 0, searchMeta: {}, facetsVersion: 1 }),
 }));
 
 vi.mock("@/services/epubApi", async (importOriginal) => ({

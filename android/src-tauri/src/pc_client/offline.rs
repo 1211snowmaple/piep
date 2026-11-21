@@ -466,7 +466,7 @@ async fn save_entity_cover(
         return Ok(None);
     }
     let mut url = reqwest::Url::parse(&format!(
-        "{}/api/v2/libraries/{}/{kind}/cover",
+        "{}/api/libraries/{}/{kind}/cover",
         saved.url,
         library.get()
     ))
@@ -535,7 +535,7 @@ async fn save_collection_covers(
             continue;
         }
         let endpoint = format!(
-            "/api/v2/libraries/{}/collections/{}/cover/file",
+            "/api/libraries/{}/collections/{}/cover/file",
             library.get(),
             collection.id
         );
@@ -846,7 +846,7 @@ async fn save_shelf_into(
             client,
             saved,
             &format!(
-                "/api/v2/libraries/{}/works/{}/cover?size=large",
+                "/api/libraries/{}/works/{}/cover?size=large",
                 library.library_id().get(),
                 work.id
             ),

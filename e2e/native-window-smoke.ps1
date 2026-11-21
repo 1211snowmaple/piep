@@ -18,8 +18,8 @@ $resolvedArtifacts = (Resolve-Path -LiteralPath $ArtifactDirectory).Path
 $previousRunId = $env:PIEP_SMOKE_TEST_ID
 $env:PIEP_SMOKE_TEST_ID = [guid]::NewGuid().ToString('N')
 # The shelf's own override would send the run to whatever library it names.
-$previousLibraryDir = $env:PIEP_LIBRARY_V2_DIR
-$env:PIEP_LIBRARY_V2_DIR = $null
+$previousLibraryDir = $env:PIEP_SHELF_DIR
+$env:PIEP_SHELF_DIR = $null
 $identifier = "io.github.u1211snowmaple.piep.smoke.$($env:PIEP_SMOKE_TEST_ID)"
 $appDataRoot = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath('ApplicationData'))
 $localAppDataRoot = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath('LocalApplicationData'))
@@ -118,5 +118,5 @@ finally {
     }
   }
   $env:PIEP_SMOKE_TEST_ID = $previousRunId
-  $env:PIEP_LIBRARY_V2_DIR = $previousLibraryDir
+  $env:PIEP_SHELF_DIR = $previousLibraryDir
 }

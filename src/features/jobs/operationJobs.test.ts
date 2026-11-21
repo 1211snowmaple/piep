@@ -168,7 +168,7 @@ describe("operation history", () => {
     expect(writes).toHaveBeenCalledTimes(2);
     expect(
       JSON.parse(
-        window.localStorage.getItem("piep.operation-history.v1") ?? "[]",
+        window.localStorage.getItem("piep.operation-history") ?? "[]",
       )[0],
     ).toMatchObject({ status: "completed", current: 10 });
     writes.mockRestore();

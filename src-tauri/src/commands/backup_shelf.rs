@@ -11,7 +11,7 @@
 //! 作者・シリーズのアーカイブは、その作品だけを写した棚の部分写し（`Library::copy_works`）。
 //! 棚としては開けず、入れ替えには使えない。取り込みは今の棚に無い行だけを足す（`Library::merge_part`）。
 
-use crate::commands::library_v2::{library_dir, LibraryV2};
+use crate::commands::shelf::{library_dir, Shelf};
 use crate::library::{Library, LibraryId, PartTransfer};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -142,11 +142,8 @@ pub(crate) fn inspect(
 
 /// 今の棚の写しを `destination`（まだ無いフォルダー）に作る。試験中の写しからも作れる（棚は書き換えない）。
 #[tauri::command]
-pub async fn library_v2_backup(
-    app: tauri::AppHandle,
-    destination: String,
-) -> Result<String, String> {
-    let shelf = app.state::<Arc<LibraryV2>>().inner().clone();
+pub async fn shelf_backup(app: tauri::AppHandle, destination: String) -> Result<String, String> {
+    let shelf = app.state::<Arc<Shelf>>().inner().clone();
     let library = shelf.library()?;
     let _guard = claim()?;
     let destination = PathBuf::from(destination);
@@ -203,7 +200,7 @@ pub(crate) fn unused_folder(parent: &Path, name: &str) -> Result<PathBuf, String
 /// 作者・シリーズの作品を、棚の部分写しとして `parent` の中の新しいフォルダーへ書き出す。
 /// 棚は読むだけなので、切り替える前の（読むだけの）棚からも書き出せる。
 #[tauri::command]
-pub async fn library_v2_export_entity_archive(
+pub async fn shelf_export_entity_archive(
     app: tauri::AppHandle,
     kind: String,
     provider: String,
@@ -211,9 +208,9 @@ pub async fn library_v2_export_entity_archive(
     parent: String,
     name: String,
 ) -> Result<ShelfArchiveExport, String> {
-    let shelf = app.state::<Arc<LibraryV2>>().inner().clone();
+    let shelf = app.state::<Arc<Shelf>>().inner().clone();
     let library = shelf.library()?;
-    let kind = crate::commands::library_v2::entity_kind(&kind)?;
+    let kind = crate::commands::shelf::entity_kind(&kind)?;
     let _guard = claim()?;
     tokio::task::spawn_blocking(move || {
         let entity = library
@@ -241,11 +238,11 @@ pub async fn library_v2_export_entity_archive(
 
 /// 作者・シリーズのアーカイブの作品を、今の棚へ足す。今の棚にある作品・記録はそのまま。
 #[tauri::command]
-pub async fn library_v2_import_archive(
+pub async fn shelf_import_archive(
     app: tauri::AppHandle,
     path: String,
 ) -> Result<PartTransfer, String> {
-    let shelf = app.state::<Arc<LibraryV2>>().inner().clone();
+    let shelf = app.state::<Arc<Shelf>>().inner().clone();
     let library = shelf.library()?;
     let _guard = claim()?;
     let outcome = tokio::task::spawn_blocking(move || {
@@ -275,11 +272,11 @@ pub async fn library_v2_import_archive(
 
 /// 棚の写しを検査して、中身を数える。
 #[tauri::command]
-pub async fn library_v2_inspect_backup(
+pub async fn shelf_inspect_backup(
     app: tauri::AppHandle,
     path: String,
 ) -> Result<ShelfBackupInspection, String> {
-    let shelf = app.state::<Arc<LibraryV2>>().inner().clone();
+    let shelf = app.state::<Arc<Shelf>>().inner().clone();
     let current = shelf.library().ok().map(|library| library.id);
     let _guard = claim()?;
     tokio::task::spawn_blocking(move || inspect(Path::new(&path), current))
@@ -289,11 +286,11 @@ pub async fn library_v2_inspect_backup(
 
 /// 検査を通った写しで、次の起動のときに棚を入れ替えるよう予約する。今の棚は消さずに隣へ退ける。
 #[tauri::command]
-pub async fn library_v2_schedule_restore(
+pub async fn shelf_schedule_restore(
     app: tauri::AppHandle,
     path: String,
 ) -> Result<ShelfBackupInspection, String> {
-    let shelf = app.state::<Arc<LibraryV2>>().inner().clone();
+    let shelf = app.state::<Arc<Shelf>>().inner().clone();
     let current = shelf.library().ok().map(|library| library.id);
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let live = library_dir(&app_data);
@@ -340,7 +337,7 @@ pub struct RestoreState {
 
 /// 予約した復元と、前回の起動での入れ替えの結果を読む（設定の画面が出す）。
 #[tauri::command]
-pub fn library_v2_restore_state(app: tauri::AppHandle) -> Result<RestoreState, String> {
+pub fn shelf_restore_state(app: tauri::AppHandle) -> Result<RestoreState, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let live = library_dir(&app_data);
     fn read<T: serde::de::DeserializeOwned>(path: PathBuf) -> Option<T> {
@@ -356,7 +353,7 @@ pub fn library_v2_restore_state(app: tauri::AppHandle) -> Result<RestoreState, S
 
 /// 予約を取り消す。
 #[tauri::command]
-pub fn library_v2_cancel_restore(app: tauri::AppHandle) -> Result<bool, String> {
+pub fn shelf_cancel_restore(app: tauri::AppHandle) -> Result<bool, String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     match std::fs::remove_file(request_path(&library_dir(&app_data))) {
         Ok(()) => Ok(true),

@@ -5,8 +5,8 @@ const listUpdateTargets = vi.fn();
 const listWatchGroups = vi.fn();
 const listUpdateJobsCommand = vi.fn();
 const startUpdateJobCommand = vi.fn();
-const libraryV2Status = vi.fn();
-const libraryV2Search = vi.fn();
+const shelfStatus = vi.fn();
+const shelfSearch = vi.fn();
 const storeValues = new Map<string, unknown>();
 
 vi.mock("@tauri-apps/plugin-notification", () => ({
@@ -23,9 +23,9 @@ vi.mock("@/services/updateJobApi", () => ({
   listUpdateJobsCommand: () => listUpdateJobsCommand(),
   startUpdateJobCommand: (...args: unknown[]) => startUpdateJobCommand(...args),
 }));
-vi.mock("@/services/libraryV2Api", () => ({
-  libraryV2Status: () => libraryV2Status(),
-  libraryV2Search: (...args: unknown[]) => libraryV2Search(...args),
+vi.mock("@/services/shelfApi", () => ({
+  shelfStatus: () => shelfStatus(),
+  shelfSearch: (...args: unknown[]) => shelfSearch(...args),
 }));
 vi.mock("@/store", () => ({
   store: {
@@ -57,14 +57,14 @@ beforeEach(() => {
   listWatchGroups.mockReset().mockResolvedValue([]);
   listUpdateJobsCommand.mockReset().mockResolvedValue([]);
   startUpdateJobCommand.mockReset().mockResolvedValue({ totals: 1 });
-  libraryV2Status.mockReset().mockResolvedValue({ state: "ready", path: "x" });
-  libraryV2Search.mockReset().mockResolvedValue({ cards: [] });
+  shelfStatus.mockReset().mockResolvedValue({ state: "ready", path: "x" });
+  shelfSearch.mockReset().mockResolvedValue({ cards: [] });
 });
 
 describe("automatic update checks", () => {
   // 監視対象が空でも、作品の監視は棚の作品の旗として残っている。
   it("checks the shelf when only a saved work is watched", async () => {
-    libraryV2Search.mockResolvedValue({ cards: [{ id: "019ad000-0000-7000-8000-000000000001" }] });
+    shelfSearch.mockResolvedValue({ cards: [{ id: "019ad000-0000-7000-8000-000000000001" }] });
     await runStartupTick();
     expect(startUpdateJobCommand).toHaveBeenCalledWith(expect.objectContaining({ scope: "all" }));
   });
@@ -81,7 +81,7 @@ describe("automatic update checks", () => {
   });
 
   it("waits for the authoritative shelf to open before scheduling a job", async () => {
-    libraryV2Status.mockResolvedValue({ state: "indexing", path: "x" });
+    shelfStatus.mockResolvedValue({ state: "indexing", path: "x" });
     listUpdateTargets.mockResolvedValue([{ id: 1 }]);
     await runStartupTick();
     expect(startUpdateJobCommand).not.toHaveBeenCalled();

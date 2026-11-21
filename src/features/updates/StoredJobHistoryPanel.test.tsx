@@ -6,7 +6,7 @@ import { AppRouter } from "@/app/router";
 import type { StoredJobHistory } from "@/services/jobHistoryApi";
 
 const mocks=vi.hoisted(()=>({history:vi.fn(),items:vi.fn(),logs:vi.fn(),hidden:vi.fn(),confirm:vi.fn(),notify:vi.fn(),status:{state:"ready",path:"x"} as {state:string;path?:string}}));
-vi.mock("@/features/library/shelfV2",()=>({useLibraryV2Status:()=>({data:mocks.status})}));
+vi.mock("@/features/library/shelf",()=>({useShelfStatus:()=>({data:mocks.status})}));
 vi.mock("@/services/jobHistoryApi",async(importOriginal)=>({...await importOriginal<typeof import("@/services/jobHistoryApi")>(),storedJobHistory:mocks.history,storedJobItems:mocks.items,storedJobLogs:mocks.logs,setStoredJobHidden:mocks.hidden}));
 vi.mock("@mantine/modals",()=>({modals:{openConfirmModal:mocks.confirm}}));
 vi.mock("@mantine/notifications",()=>({notifications:{show:mocks.notify}}));

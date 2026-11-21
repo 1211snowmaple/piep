@@ -51,14 +51,14 @@ import { isTauriRuntime } from "@/services/dbApi";
 import { openExternalUrl } from "@/services/openerApi";
 import {
   isShelfPdf,
-  libraryV2Content,
-  libraryV2EditHistory,
-  libraryV2EditPointer,
-  libraryV2Media,
-  libraryV2Original,
-  libraryV2RevisionSnapshot,
-  libraryV2SetUserState,
-  libraryV2Work,
+  shelfContent,
+  shelfEditHistory,
+  shelfEditPointer,
+  shelfMedia,
+  shelfOriginal,
+  shelfRevisionSnapshot,
+  shelfSetUserState,
+  shelfWork,
   shelfBodyUrl,
   shelfFileUrl,
   staleEditBaseOf,
@@ -66,8 +66,8 @@ import {
   type ShelfEditorRevision,
   type ShelfMedia,
   type ShelfVersion,
-} from "@/services/libraryV2Api";
-import { editShelfCollection, invalidateShelf, shelfEntry, shelfWorkCollections } from "@/features/library/shelfV2";
+} from "@/services/shelfApi";
+import { editShelfCollection, invalidateShelf, shelfEntry, shelfWorkCollections } from "@/features/library/shelf";
 import { EpubQueueGlyph } from "@/components/EpubQueueGlyph";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { workCollectionsQueryOptions } from "@/features/collections/collectionQueries";
@@ -126,8 +126,8 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   const contentBodyRef = useRef<HTMLDivElement>(null);
 
   const workQuery = useQuery({
-    queryKey: ["library-v2-work", workId],
-    queryFn: () => libraryV2Work(workId),
+    queryKey: ["shelf-work", workId],
+    queryFn: () => shelfWork(workId),
     enabled: runtime,
   });
   const work = workQuery.data;
@@ -141,7 +141,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   // コレクションに入れる・関連作品からひな型を作る。
   const allCollectionsQuery = useQuery({ ...workCollectionsQueryOptions(), enabled: runtime });
   const workCollectionsQuery = useQuery({
-    queryKey: ["library-v2-work-collections", workId],
+    queryKey: ["shelf-work-collections", workId],
     queryFn: () => shelfWorkCollections(workId),
     enabled: runtime,
   });
@@ -163,7 +163,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
     if (watchingChange !== null) return;
     setWatchingChange(watching);
     try {
-      await libraryV2SetUserState(workId, { watching });
+      await shelfSetUserState(workId, { watching });
       await invalidateShelf(queryClient);
     } catch (error) {
       notifications.show({ color: "red", title: "更新監視を変更できません", message: errorMessage(error) });
@@ -178,8 +178,8 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   };
   // 下書き・反映中の版・以前の編集版。
   const historyQuery = useQuery({
-    queryKey: ["library-v2-edit-history", workId],
-    queryFn: () => libraryV2EditHistory(workId),
+    queryKey: ["shelf-edit-history", workId],
+    queryFn: () => shelfEditHistory(workId),
     enabled: runtime,
   });
   const editHistory = historyQuery.data;
@@ -189,8 +189,8 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   const changeEdit = async (key: string, change: ShelfEditChange, done: string, failed: string) => {
     setChanging(key);
     try {
-      const { generation } = await libraryV2EditHistory(workId);
-      await libraryV2EditPointer(workId, generation, change);
+      const { generation } = await shelfEditHistory(workId);
+      await shelfEditPointer(workId, generation, change);
       await invalidateShelf(queryClient);
       notifications.show({ color: "green", message: done });
     } catch (error) {
@@ -221,7 +221,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   const toggleFavorite = async () => {
     if (!work) return;
     try {
-      await libraryV2SetUserState(workId, { favorite: !work.favorite });
+      await shelfSetUserState(workId, { favorite: !work.favorite });
       await invalidateShelf(queryClient);
     } catch (error) {
       notifications.show({ color: "red", title: "お気に入りを変更できません", message: errorMessage(error) });
@@ -229,19 +229,19 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
   };
   const versions = useMemo(() => [...(work?.versions ?? [])].sort((left, right) => right.version - left.version), [work?.versions]);
   const contentQuery = useQuery({
-    queryKey: ["library-v2-content", workId, contentSnapshot, contentPage - 1],
-    queryFn: () => libraryV2Content(workId, contentSnapshot, contentPage - 1),
+    queryKey: ["shelf-content", workId, contentSnapshot, contentPage - 1],
+    queryFn: () => shelfContent(workId, contentSnapshot, contentPage - 1),
     enabled: runtime && tab === "content",
     placeholderData: (previous) => previous,
   });
   const mediaQuery = useQuery({
-    queryKey: ["library-v2-media", workId, assetSnapshot],
-    queryFn: () => libraryV2Media(workId, assetSnapshot),
+    queryKey: ["shelf-media", workId, assetSnapshot],
+    queryFn: () => shelfMedia(workId, assetSnapshot),
     enabled: runtime && tab === "assets",
   });
   const originalQuery = useQuery({
-    queryKey: ["library-v2-original", workId, originalSnapshot],
-    queryFn: () => libraryV2Original(workId, originalSnapshot),
+    queryKey: ["shelf-original", workId, originalSnapshot],
+    queryFn: () => shelfOriginal(workId, originalSnapshot),
     enabled: runtime && tab === "json",
   });
   // 取り込んでいない改稿は作品の属性ではなく、更新確認が見つけた事実なので
@@ -273,13 +273,13 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
     : versions.find((version) => version.snapshot === selectedSnapshot) ?? versions[0] ?? null;
   const previous = selected && !showPending ? versions.find((version) => version.version < selected.version) ?? null : null;
   const selectedText = useQuery({
-    queryKey: ["library-v2-revision-snapshot", workId, selected?.snapshot],
-    queryFn: () => libraryV2RevisionSnapshot(workId, selected!.snapshot),
+    queryKey: ["shelf-revision-snapshot", workId, selected?.snapshot],
+    queryFn: () => shelfRevisionSnapshot(workId, selected!.snapshot),
     enabled: runtime && tab === "history" && Boolean(selected),
   });
   const previousText = useQuery({
-    queryKey: ["library-v2-revision-snapshot", workId, previous?.snapshot],
-    queryFn: () => libraryV2RevisionSnapshot(workId, previous!.snapshot),
+    queryKey: ["shelf-revision-snapshot", workId, previous?.snapshot],
+    queryFn: () => shelfRevisionSnapshot(workId, previous!.snapshot),
     enabled: runtime && tab === "history" && Boolean(previous),
   });
 

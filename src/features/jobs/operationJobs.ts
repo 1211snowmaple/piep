@@ -58,7 +58,7 @@ export interface OperationController {
   linkExternalJob: (jobId: string) => void;
 }
 
-const STORAGE_KEY = "piep.operation-history.v1";
+const STORAGE_KEY = "piep.operation-history";
 const MAX_JOBS = 100;
 // 画面中は全件を保持するが、localStorage は容量が有限なので、再起動後に
 // 復元する履歴だけはDBの更新ジョブと同じ2000件までに抑える。

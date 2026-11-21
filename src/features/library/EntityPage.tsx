@@ -49,7 +49,7 @@ import { externalBrand, ExternalServiceMark, getProvider, ProviderMark, sourceUr
 import { errorMessage, formatBytes, formatDate, formatFreshness, formatNumber } from "@/lib/format";
 import { runSingleCheck } from "@/features/updates/startSingleCheck";
 import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
-import { libraryV2ExportEntityArchive } from "@/services/shelfBackupApi";
+import { shelfExportEntityArchive } from "@/services/shelfBackupApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import { AuthorAssist } from "@/features/assist/AuthorAssist";
 import { CollectionCard } from "@/features/collections/CollectionCard";
@@ -62,8 +62,7 @@ import {
   refreshEntityProfile,
   upsertUpdateTarget,
 } from "@/services/dbApi";
-import { ENTITY_SERIES_PAGE_SIZE } from "@/services/shelfApi";
-import { libraryV2Entity, libraryV2EntityOriginal, libraryV2EntityTags, libraryV2PersonSeries, shelfFileUrl } from "@/services/libraryV2Api";
+import { ENTITY_SERIES_PAGE_SIZE, shelfEntity, shelfEntityOriginal, shelfEntityTags, shelfPersonSeries, shelfFileUrl } from "@/services/shelfApi";
 import {
   searchShelf,
   shelfEntityCollections,
@@ -72,7 +71,7 @@ import {
   shelfPersonEntry,
   shelfSeriesEntry,
   shelfSeriesFacet,
-} from "@/features/library/shelfV2";
+} from "@/features/library/shelf";
 import { openExternalUrl } from "@/services/openerApi";
 import { store } from "@/store";
 import {
@@ -275,16 +274,16 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     tags: activeTags.includes(tag) ? activeTags.filter((item) => item !== tag) : [...activeTags, tag],
   });
   const shelfHead = useQuery({
-    queryKey: ["library-v2-entity", kind, source, key],
+    queryKey: ["shelf-entity", kind, source, key],
     queryFn: async () => {
-      const head = await libraryV2Entity(kind, source, key);
+      const head = await shelfEntity(kind, source, key);
       if (!head) throw new Error(kind === "person" ? "棚にこの作者はいません" : "棚にこのシリーズはありません");
       return head;
     },
     enabled: shelfMode,
   });
   const shelfId = shelfMode ? shelfHead.data?.id ?? null : null;
-  const shelfEntity = useMemo(
+  const shelfEntityEntry = useMemo(
     () => shelfHead.data ? (kind === "person" ? shelfPersonEntry(shelfHead.data) : shelfSeriesEntry(shelfHead.data)) : undefined,
     [kind, shelfHead.data],
   );
@@ -307,7 +306,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     },
   });
   const entity = shelfMode
-    ? { data: shelfEntity, isLoading: shelfHead.isLoading, error: shelfHead.error, refetch: shelfHead.refetch }
+    ? { data: shelfEntityEntry, isLoading: shelfHead.isLoading, error: shelfHead.error, refetch: shelfHead.refetch }
     : previewEntity;
   // 棚の画像はファイルの識別子。見本の画像はパスから URL に直す。
   const assetUrl = (path: string | null | undefined) => shelfMode ? shelfFileUrl(path) : getAssetUrl(path);
@@ -454,7 +453,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     queryKey: ["entity-series", source, key, serverSeriesQuery, seriesSortBy, seriesSortOrder, shelfId ?? "legacy"],
     queryFn: async ({ pageParam: cursor }): Promise<{ items: EntityFacet[]; nextCursor: string | null; total: number }> => {
       if (shelfId) {
-        const page = await libraryV2PersonSeries(shelfId, {
+        const page = await shelfPersonSeries(shelfId, {
           query: serverSeriesQuery || null,
           sort: seriesSortBy,
           order: seriesSortOrder,
@@ -526,7 +525,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const entityTags = useQuery({
     queryKey: ["entity-tags", kind, source, key, shelfId ?? "legacy"],
     queryFn: async (): Promise<FacetCount[]> => shelfId
-      ? libraryV2EntityTags(kind, shelfId)
+      ? shelfEntityTags(kind, shelfId)
       : [],
     enabled: previewMode || Boolean(shelfId),
     staleTime: 5 * 60_000,
@@ -541,7 +540,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     queryFn: async () => {
       if (shelfMode) {
         const head = shelfHead.data;
-        const raw = head?.snapshot ? await libraryV2EntityOriginal(head.id, head.snapshot) : null;
+        const raw = head?.snapshot ? await shelfEntityOriginal(head.id, head.snapshot) : null;
         return raw ? JSON.parse(raw) as Record<string, unknown> : null;
       }
       return entity.data ?? {};
@@ -690,7 +689,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     try {
       const directory = await openSingleDialog({ directory: true, title: "アーカイブの書き出し先" });
       if (!directory) return;
-      const written = await libraryV2ExportEntityArchive(kind, source, key, directory, displayName.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) || key);
+      const written = await shelfExportEntityArchive(kind, source, key, directory, displayName.replace(/[\\/:*?"<>|]/g, "_").slice(0, 80) || key);
       notifications.show({ color: "green", title: `${formatNumber(written.works)}作品を書き出しました`, message: written.path });
     }
     catch (error) { notifications.show({ color: "red", title: "書き出しに失敗しました", message: errorMessage(error) }); }

@@ -64,7 +64,7 @@ import type { ReaderMetadata } from "@/types/library";
 import type { PendingRevision } from "@/services/updateJobApi";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import { ShelfWorkPage } from "@/features/library/ShelfWorkPage";
-import { SHELF_WORK_ID } from "@/services/libraryV2Api";
+import { SHELF_WORK_ID } from "@/services/shelfApi";
 import { ContentPagination, Info, parseWorkTab } from "@/features/library/workPageParts";
 
 // React StrictMode briefly mounts, cleans up, and mounts an effect again in

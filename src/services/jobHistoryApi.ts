@@ -40,19 +40,19 @@ export interface StoredJobLog {
   message: string;
   created_at: number;
 }
-export const storedHistoryKey = ["library-v2-job-history"] as const;
+export const storedHistoryKey = ["shelf-job-history"] as const;
 export const HISTORY_PAGE = 20;
 export const HISTORY_DETAIL_PAGE = 100;
 
 export function storedJobHistory(before: string | null) {
-  return invoke<StoredJobHistory[]>("library_v2_job_history", { before, limit: HISTORY_PAGE });
+  return invoke<StoredJobHistory[]>("shelf_job_history", { before, limit: HISTORY_PAGE });
 }
 export function storedJobItems(job: string, after: number | null) {
-  return invoke<StoredJobItem[]>("library_v2_job_history_items", { job, after, limit: HISTORY_DETAIL_PAGE });
+  return invoke<StoredJobItem[]>("shelf_job_history_items", { job, after, limit: HISTORY_DETAIL_PAGE });
 }
 export function storedJobLogs(job: string, after: number | null) {
-  return invoke<StoredJobLog[]>("library_v2_job_history_logs", { job, after, limit: HISTORY_DETAIL_PAGE });
+  return invoke<StoredJobLog[]>("shelf_job_history_logs", { job, after, limit: HISTORY_DETAIL_PAGE });
 }
 export function setStoredJobHidden(job: string | null, hidden: boolean) {
-  return invoke<number>("library_v2_job_history_visibility", { request: crypto.randomUUID(), job, hidden });
+  return invoke<number>("shelf_job_history_visibility", { request: crypto.randomUUID(), job, hidden });
 }

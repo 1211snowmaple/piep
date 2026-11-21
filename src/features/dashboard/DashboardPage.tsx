@@ -25,8 +25,8 @@ import { demoDashboard } from "@/mocks/demoData";
 import { formatBytes, formatNumber } from "@/lib/format";
 import { getProvider } from "@/lib/providers";
 import { isTauriRuntime } from "@/services/dbApi";
-import { libraryV2Dashboard, libraryV2SearchIndexStatus } from "@/services/shelfHealthApi";
-import { searchShelf } from "@/features/library/shelfV2";
+import { shelfDashboard, shelfSearchIndexStatus } from "@/services/shelfHealthApi";
+import { searchShelf } from "@/features/library/shelf";
 import { store } from "@/store";
 
 export type QuickSaveSource = "pixiv" | "fanbox";
@@ -88,7 +88,7 @@ export default function DashboardPage() {
     queryFn: async () => {
       if (!runtime) return demoDashboard;
       const [counts, recent] = await Promise.all([
-        libraryV2Dashboard(),
+        shelfDashboard(),
         searchShelf({ sortBy: "downloaded_at", sortOrder: "desc", limit: 4 }),
       ]);
       return { ...counts, recentDownloads: recent.items };
@@ -96,7 +96,7 @@ export default function DashboardPage() {
   });
   const index = useQuery({
     queryKey: ["search-index-status"],
-    queryFn: () => runtime ? libraryV2SearchIndexStatus() : Promise.resolve({
+    queryFn: () => runtime ? shelfSearchIndexStatus() : Promise.resolve({
       totalDownloads: demoDashboard.stats.totalDownloads,
       indexedDownloads: demoDashboard.stats.totalDownloads,
       pendingDownloads: 0,

@@ -5,15 +5,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAppNavigate } from "@/app/router";
 import { ErrorState } from "@/components/AsyncState";
 import { startOperation } from "@/features/jobs/operationJobs";
-import { searchShelf } from "@/features/library/shelfV2";
+import { searchShelf } from "@/features/library/shelf";
 import { Icons, IconSize } from "@/lib/icons";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import {
-  libraryV2Diagnostics,
-  libraryV2Maintain,
-  libraryV2OptimizeSearchIndex,
-  libraryV2Reclaim,
-  libraryV2Verify,
+  shelfDiagnostics,
+  shelfMaintain,
+  shelfOptimizeSearchIndex,
+  shelfReclaim,
+  shelfVerify,
 } from "@/services/shelfHealthApi";
 import { MaintenanceTaskCard, MetricCard } from "./diagnosticsParts";
 
@@ -28,14 +28,14 @@ export function ShelfDiagnosticsSection({ runtime, busy }: { runtime: boolean; b
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
   const diagnostics = useQuery({
-    queryKey: ["library-v2-diagnostics"],
-    queryFn: libraryV2Diagnostics,
+    queryKey: ["shelf-diagnostics"],
+    queryFn: shelfDiagnostics,
     enabled: runtime,
     staleTime: 30_000,
   });
   // 一部しか保存できていない作品。更新確認で取り直せるので、一覧のその絞り込みへ案内する。
   const partial = useQuery({
-    queryKey: ["library-v2-partial-count"],
+    queryKey: ["shelf-partial-count"],
     queryFn: () => searchShelf({ acquisitionFilter: "incomplete", limit: 1 }).then((page) => page.totalEstimate ?? 0),
     enabled: runtime,
     staleTime: 60_000,
@@ -64,24 +64,24 @@ export function ShelfDiagnosticsSection({ runtime, busy }: { runtime: boolean; b
     notifications.show({ color: "red", title, message: errorMessage(error) });
 
   const verify = useMutation({
-    mutationFn: run("台帳とファイルを照合", "棚の台帳と、保存した全ファイルの中身を照合しています", libraryV2Verify,
+    mutationFn: run("台帳とファイルを照合", "棚の台帳と、保存した全ファイルの中身を照合しています", shelfVerify,
       (files) => `${formatNumber(files)}ファイルを照合し、問題は見つかりませんでした`),
     onError: failed("照合で問題が見つかりました"),
   });
   const reclaim = useMutation({
-    mutationFn: run("使われていない実体を片付け", "どこからも参照されないファイルを隔離し、期限の過ぎたものを消しています", libraryV2Reclaim,
+    mutationFn: run("使われていない実体を片付け", "どこからも参照されないファイルを隔離し、期限の過ぎたものを消しています", shelfReclaim,
       (report) => report.quarantined_chunks || report.deleted_chunks
         ? `${formatNumber(report.quarantined_chunks)}件を隔離、${formatBytes(report.deleted_bytes)}を解放しました`
         : "片付けるものはありませんでした"),
     onError: failed("片付けられません"),
   });
   const maintain = useMutation({
-    mutationFn: (compact: boolean) => run(compact ? "データベースを圧縮" : "データベースを最適化", compact ? "使われていない領域を片付けて、ファイルを小さくします" : "データベースの統計を整理します", () => libraryV2Maintain(compact),
+    mutationFn: (compact: boolean) => run(compact ? "データベースを圧縮" : "データベースを最適化", compact ? "使われていない領域を片付けて、ファイルを小さくします" : "データベースの統計を整理します", () => shelfMaintain(compact),
       (result) => result.compacted ? `${formatBytes(result.beforeBytes)} → ${formatBytes(result.afterBytes)}` : "最適化が完了しました")(),
     onError: failed("保守操作に失敗しました"),
   });
   const optimize = useMutation({
-    mutationFn: run("全文検索索引を最適化", "分割された索引を安全に統合しています", libraryV2OptimizeSearchIndex,
+    mutationFn: run("全文検索索引を最適化", "分割された索引を安全に統合しています", shelfOptimizeSearchIndex,
       (result) => result.optimized
         ? `${formatNumber(result.beforeSegments)} → ${formatNumber(result.afterSegments)}セグメント · ${formatBytes(result.reclaimedBytes)}回収`
         : "索引はすでに最適です"),

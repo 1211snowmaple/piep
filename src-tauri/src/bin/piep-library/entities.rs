@@ -9,7 +9,7 @@
 //! 名前や題は出力に出さない（違いは ID と項目名だけ）。
 
 use piep_lib::database::{
-    models::{EntityFacetScope, SearchV2Params, WorkCollectionSummary},
+    models::{EntityFacetScope, SearchParams, WorkCollectionSummary},
     Database,
 };
 use piep_lib::library::{EntityKind, Library, WorkFilter, WorkListQuery, WorkSort};
@@ -23,8 +23,8 @@ use std::time::Instant;
 type Error = Box<dyn std::error::Error>;
 type Key = (String, String);
 
-fn old_sequence(old: &Database, params: SearchV2Params) -> Result<Vec<Key>, Error> {
-    let mut params = SearchV2Params {
+fn old_sequence(old: &Database, params: SearchParams) -> Result<Vec<Key>, Error> {
+    let mut params = SearchParams {
         projection: Some("bulk".into()),
         limit: Some(200),
         ..params
@@ -32,7 +32,7 @@ fn old_sequence(old: &Database, params: SearchV2Params) -> Result<Vec<Key>, Erro
     let mut items = Vec::new();
     let mut seen = BTreeSet::new();
     loop {
-        let page = old.search_downloads_v2(&params)?;
+        let page = old.search_downloads(&params)?;
         for item in page.items {
             let key = (item.source, item.source_id);
             if seen.insert(key.clone()) {
@@ -608,7 +608,7 @@ fn collections(
 struct ListCase {
     label: String,
     query: Option<String>,
-    filters: Option<SearchV2Params>,
+    filters: Option<SearchParams>,
     filter: WorkFilter,
     scope: Option<EntityFacetScope>,
     new_scope: EntityScope,
@@ -684,7 +684,7 @@ fn lists(
     }
     let plain = |label: &str,
                  query: Option<&str>,
-                 filters: Option<SearchV2Params>,
+                 filters: Option<SearchParams>,
                  filter: WorkFilter,
                  scope: Option<EntityFacetScope>,
                  new_scope: EntityScope| ListCase {
@@ -750,9 +750,9 @@ fn lists(
     cases.push(plain(
         "favorite",
         None,
-        Some(SearchV2Params {
+        Some(SearchParams {
             favorite: Some(true),
-            ..SearchV2Params::default()
+            ..SearchParams::default()
         }),
         WorkFilter {
             favorite: Some(true),
@@ -764,9 +764,9 @@ fn lists(
     cases.push(plain(
         "fanbox",
         None,
-        Some(SearchV2Params {
+        Some(SearchParams {
             source: Some("fanbox".into()),
-            ..SearchV2Params::default()
+            ..SearchParams::default()
         }),
         WorkFilter {
             provider: Some("fanbox".into()),
@@ -778,9 +778,9 @@ fn lists(
     cases.push(plain(
         "long",
         None,
-        Some(SearchV2Params {
+        Some(SearchParams {
             min_char_count: Some(20_000),
-            ..SearchV2Params::default()
+            ..SearchParams::default()
         }),
         WorkFilter {
             text_length: piep_lib::library::CountRange {
@@ -796,9 +796,9 @@ fn lists(
         cases.push(plain(
             "tag",
             None,
-            Some(SearchV2Params {
+            Some(SearchParams {
                 tags_include: Some(vec![tag.clone()]),
-                ..SearchV2Params::default()
+                ..SearchParams::default()
             }),
             WorkFilter {
                 tags: vec![tag],
@@ -1168,12 +1168,12 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
 
         let old_works = old_sequence(
             &old,
-            SearchV2Params {
+            SearchParams {
                 person_source: Some(key.0.clone()),
                 person_key: Some(key.1.clone()),
                 sort_by: Some("source_created_at".into()),
                 sort_order: Some("desc".into()),
-                ..SearchV2Params::default()
+                ..SearchParams::default()
             },
         )?;
         let new_works = new_sequence(
@@ -1386,12 +1386,12 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
 
         let old_works = old_sequence(
             &old,
-            SearchV2Params {
+            SearchParams {
                 series_source: Some(key.0.clone()),
                 series_key: Some(key.1.clone()),
                 sort_by: Some("series_order".into()),
                 sort_order: Some("asc".into()),
-                ..SearchV2Params::default()
+                ..SearchParams::default()
             },
         )?;
         let new_works = new_sequence(

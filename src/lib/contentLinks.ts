@@ -4,7 +4,7 @@ import { useAppNavigate } from "@/app/router";
 import { contentLinkTarget, normalizeContentLinkUrl } from "@shared/contentLinkTarget";
 import type { ContentLinkTarget } from "@shared/contentLinkTarget";
 import { isTauriRuntime } from "@/services/dbApi";
-import { libraryV2Entity, libraryV2FindWork } from "@/services/libraryV2Api";
+import { shelfEntity, shelfFindWork } from "@/services/shelfApi";
 import { openExternalUrl } from "@/services/openerApi";
 
 /**
@@ -29,10 +29,10 @@ type ResolvedLink =
 async function resolveTarget(target: ContentLinkTarget): Promise<ResolvedLink> {
   try {
     if (target.kind === "work") {
-      const found = await libraryV2FindWork(target.source, target.sourceId);
+      const found = await shelfFindWork(target.source, target.sourceId);
       return found ? { kind: "work", downloadId: found.id, title: found.title } : null;
     }
-    const head = await libraryV2Entity(target.kind, target.source, target.sourceKey);
+    const head = await shelfEntity(target.kind, target.source, target.sourceKey);
     const route = target.kind === "person" ? "people" : "series";
     return head ? { kind: "path", path: `/${route}/${encodeURIComponent(target.source)}/${encodeURIComponent(target.sourceKey)}` } : null;
   } catch {

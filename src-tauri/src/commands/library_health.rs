@@ -3,7 +3,7 @@
 //! 意味検索を使うかは棚のデータではなくアプリの設定なので、アプリのフォルダーの
 //! `search-settings.json` に置く。無いうちは使わない。
 
-use super::library_v2::LibraryV2;
+use super::shelf::Shelf;
 use crate::database::models::{
     DashboardSummary, FacetCount, FilterFacets, LibraryMaintenanceResult, LibraryShelfCounts,
     SearchIndexOptimizationResult, SearchIndexStatus,
@@ -115,7 +115,7 @@ pub(crate) fn apply_semantic_enabled(library: &Arc<Library>, enabled: bool) -> R
 }
 
 async fn on_library<T: Send + 'static>(
-    state: &Arc<LibraryV2>,
+    state: &Arc<Shelf>,
     f: impl FnOnce(Arc<Library>) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     let library = state.library()?;
@@ -126,8 +126,8 @@ async fn on_library<T: Send + 'static>(
 
 /// 検索の索引の状態（ホーム・設定・一覧の索引の表示）。
 #[tauri::command]
-pub async fn library_v2_search_index_status(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_search_index_status(
+    state: State<'_, Arc<Shelf>>,
 ) -> Result<SearchIndexStatus, String> {
     let state = Arc::clone(&state);
     on_library(&state, |library| {
@@ -140,9 +140,7 @@ pub async fn library_v2_search_index_status(
 
 /// ホームの集計。最近の保存は含めない（画面が棚の一覧で引く）。
 #[tauri::command]
-pub async fn library_v2_dashboard(
-    state: State<'_, Arc<LibraryV2>>,
-) -> Result<DashboardSummary, String> {
+pub async fn shelf_dashboard(state: State<'_, Arc<Shelf>>) -> Result<DashboardSummary, String> {
     let state = Arc::clone(&state);
     on_library(&state, |library| {
         let index = library
@@ -156,8 +154,8 @@ pub async fn library_v2_dashboard(
 /// 横の欄の件数。読みかけは、端末の記録を棚へ移したあとは棚の読書位置で、移す前は
 /// 端末に残る旧棚の番号（`legacyReading`）で数える。
 #[tauri::command]
-pub async fn library_v2_shelf_counts(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_counts(
+    state: State<'_, Arc<Shelf>>,
     legacy_reading: Option<Vec<i64>>,
 ) -> Result<LibraryShelfCounts, String> {
     let state = Arc::clone(&state);
@@ -184,9 +182,7 @@ pub async fn library_v2_shelf_counts(
 
 /// 診断の数を測る。
 #[tauri::command]
-pub async fn library_v2_diagnostics(
-    state: State<'_, Arc<LibraryV2>>,
-) -> Result<ShelfDiagnostics, String> {
+pub async fn shelf_diagnostics(state: State<'_, Arc<Shelf>>) -> Result<ShelfDiagnostics, String> {
     let state = Arc::clone(&state);
     on_library(&state, |library| {
         let index = library
@@ -199,8 +195,8 @@ pub async fn library_v2_diagnostics(
 
 /// 台帳の統計を整え、`compact` なら空き領域を回収する。
 #[tauri::command]
-pub async fn library_v2_maintain(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_maintain(
+    state: State<'_, Arc<Shelf>>,
     compact: bool,
 ) -> Result<LibraryMaintenanceResult, String> {
     let state = Arc::clone(&state);
@@ -214,8 +210,8 @@ pub async fn library_v2_maintain(
 
 /// 全文検索の索引の断片をまとめる。
 #[tauri::command]
-pub async fn library_v2_optimize_search_index(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_optimize_search_index(
+    state: State<'_, Arc<Shelf>>,
 ) -> Result<SearchIndexOptimizationResult, String> {
     let state = Arc::clone(&state);
     on_library(&state, |library| {
@@ -226,7 +222,7 @@ pub async fn library_v2_optimize_search_index(
 
 /// 台帳と全ファイルを照合する（壊れていれば最初に見つけた問題を誤りで返す）。
 #[tauri::command]
-pub async fn library_v2_verify(state: State<'_, Arc<LibraryV2>>) -> Result<u64, String> {
+pub async fn shelf_verify(state: State<'_, Arc<Shelf>>) -> Result<u64, String> {
     let state = Arc::clone(&state);
     on_library(&state, |library| {
         library.verify().map_err(|e| e.to_string())
@@ -236,7 +232,7 @@ pub async fn library_v2_verify(state: State<'_, Arc<LibraryV2>>) -> Result<u64, 
 
 /// どこからも参照されない実体を片付ける（使われてから 1 日は残し、隔離して 7 日後に消す）。
 #[tauri::command]
-pub async fn library_v2_reclaim(state: State<'_, Arc<LibraryV2>>) -> Result<ReclaimReport, String> {
+pub async fn shelf_reclaim(state: State<'_, Arc<Shelf>>) -> Result<ReclaimReport, String> {
     let state = Arc::clone(&state);
     on_library(&state, |library| {
         library.reclaim_now().map_err(|e| e.to_string())
@@ -246,9 +242,7 @@ pub async fn library_v2_reclaim(state: State<'_, Arc<LibraryV2>>) -> Result<Recl
 
 /// 一覧の絞り込みの選択肢（タグ・作者・種別・添付）と件数。
 #[tauri::command]
-pub async fn library_v2_filter_facets(
-    state: State<'_, Arc<LibraryV2>>,
-) -> Result<FilterFacets, String> {
+pub async fn shelf_filter_facets(state: State<'_, Arc<Shelf>>) -> Result<FilterFacets, String> {
     let state = Arc::clone(&state);
     on_library(&state, |library| {
         library.filter_facets().map_err(|e| e.to_string())
@@ -258,8 +252,8 @@ pub async fn library_v2_filter_facets(
 
 /// 絞り込みの選択肢を名前で探す（`kind` は `tags` か `authors`）。
 #[tauri::command]
-pub async fn library_v2_search_filter_facets(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_search_filter_facets(
+    state: State<'_, Arc<Shelf>>,
     kind: String,
     query: Option<String>,
     limit: Option<usize>,
@@ -283,8 +277,8 @@ pub struct ListedWorkRef {
 
 /// 本文のリンクが指す作品が棚に載っていれば、その ID と題名（外した作品は引かない）。
 #[tauri::command]
-pub async fn library_v2_find_work(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_find_work(
+    state: State<'_, Arc<Shelf>>,
     provider: String,
     key: String,
 ) -> Result<Option<ListedWorkRef>, String> {

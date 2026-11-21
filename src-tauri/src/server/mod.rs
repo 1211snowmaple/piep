@@ -12,6 +12,7 @@ pub mod http;
 pub mod install;
 #[cfg(windows)]
 mod install_acl;
+pub mod reader;
 mod shelf_send;
 pub mod standalone;
 pub mod store;
@@ -20,7 +21,6 @@ pub mod sync_send;
 mod tests;
 pub mod tls;
 pub mod update;
-pub mod v2;
 pub mod watchdog;
 
 /// 携帯端末との契約の版。壊す変更のときだけ上げる。

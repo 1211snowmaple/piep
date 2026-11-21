@@ -91,7 +91,7 @@ impl LibraryProcessLock {
 /// アプリ全体で共有される状態。
 pub struct AppState {
     /// 起動時に開いた棚。取得ワーカーも同じ口から参照する。
-    pub(crate) library_v2: Arc<commands::library_v2::LibraryV2>,
+    pub(crate) shelf: Arc<commands::shelf::Shelf>,
     /// Export holds a read guard while every library mutation holds a write
     /// guard, giving backups one coherent DB/filesystem generation.
     pub library_gate: Arc<tokio::sync::RwLock<()>>,
@@ -101,20 +101,20 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(library_v2: Arc<commands::library_v2::LibraryV2>) -> Self {
+    pub fn new(shelf: Arc<commands::shelf::Shelf>) -> Self {
         Self {
-            library_v2,
+            shelf,
             library_gate: Arc::new(tokio::sync::RwLock::new(())),
             _library_process_lock: None,
         }
     }
 
     fn new_with_library_lock(
-        library_v2: Arc<commands::library_v2::LibraryV2>,
+        shelf: Arc<commands::shelf::Shelf>,
         library_process_lock: LibraryProcessLock,
     ) -> Self {
         Self {
-            library_v2,
+            shelf,
             library_gate: Arc::new(tokio::sync::RwLock::new(())),
             _library_process_lock: Some(library_process_lock),
         }
@@ -151,15 +151,9 @@ fn prepare_library(
         Err(error) => log::warn!("pdfium の置き場所を決められない: {error}"),
     }
 
-    let library_v2 = app
-        .state::<Arc<commands::library_v2::LibraryV2>>()
-        .inner()
-        .clone();
-    commands::library_v2::open_for_startup(Arc::clone(&library_v2), app_data)?;
-    let state = Arc::new(AppState::new_with_library_lock(
-        library_v2,
-        library_process_lock,
-    ));
+    let shelf = app.state::<Arc<commands::shelf::Shelf>>().inner().clone();
+    commands::shelf::open_for_startup(Arc::clone(&shelf), app_data)?;
+    let state = Arc::new(AppState::new_with_library_lock(shelf, library_process_lock));
     if let Err(e) = state.jobs().recover_update_jobs_on_startup() {
         log::warn!("Failed to recover update jobs: {}", e);
     }
@@ -221,19 +215,16 @@ pub fn run() -> tauri::Result<()> {
         .plugin(tauri_plugin_process::init())
         .manage(commands::startup::StartupGate::default())
         .manage(commands::startup::WindowSchemeFile::default())
-        .manage(Arc::new(commands::library_v2::LibraryV2::default()))
+        .manage(Arc::new(commands::shelf::Shelf::default()))
         // 新しい棚の画像（評価文書 4.1 の 2）。開いていなければ 503。
         .register_asynchronous_uri_scheme_protocol(
-            commands::library_v2::URI_SCHEME,
+            commands::shelf::URI_SCHEME,
             |context, request, responder| {
-                let state = Arc::clone(
-                    &context
-                        .app_handle()
-                        .state::<Arc<commands::library_v2::LibraryV2>>(),
-                );
+                let state =
+                    Arc::clone(&context.app_handle().state::<Arc<commands::shelf::Shelf>>());
                 let path = request.uri().path().to_owned();
                 tauri::async_runtime::spawn_blocking(move || {
-                    responder.respond(commands::library_v2::respond(&state, &path));
+                    responder.respond(commands::shelf::respond(&state, &path));
                 });
             },
         )
@@ -295,57 +286,57 @@ pub fn run() -> tauri::Result<()> {
             // 起動 (commands::startup)
             commands::startup::startup_wait_for_library,
             commands::startup::startup_remember_color_scheme,
-            // 新しい棚の読み取り (commands::library_v2)
-            commands::library_v2::library_v2_status,
-            commands::library_v2::library_v2_set_user_state,
-            commands::library_v2::library_v2_remove_work,
-            commands::library_v2::library_v2_edit_collection,
-            commands::library_v2::library_v2_editor,
-            commands::library_v2::library_v2_edit_history,
-            commands::library_v2::library_v2_job_history,
-            commands::library_v2::library_v2_job_history_items,
-            commands::library_v2::library_v2_job_history_logs,
-            commands::library_v2::library_v2_job_history_visibility,
-            commands::library_v2::library_v2_save_editor,
-            commands::library_v2::library_v2_edit_pointer,
-            commands::library_v2::library_v2_import_edit_image,
-            commands::library_v2::library_v2_reading_position,
-            commands::library_v2::library_v2_set_reading_position,
-            commands::library_v2::library_v2_clear_reading_positions,
-            commands::library_v2::library_v2_adopt_device_positions,
-            commands::library_v2::library_v2_search,
-            commands::library_v2::library_v2_decorations,
-            commands::library_v2::library_v2_work,
-            commands::library_v2::library_v2_content,
-            commands::library_v2::library_v2_outline,
-            commands::library_v2::library_v2_search_content,
-            commands::library_v2::library_v2_neighbors,
-            commands::library_v2::library_v2_media,
-            commands::library_v2::library_v2_render_pdf_page,
-            commands::library_v2::library_v2_entity,
-            commands::library_v2::library_v2_entity_tags,
-            commands::library_v2::library_v2_search_suggest,
-            commands::library_v2::library_v2_person_series,
-            commands::library_v2::library_v2_entity_original,
-            commands::library_v2::library_v2_entities,
-            commands::library_v2::library_v2_entity_collections,
-            commands::library_v2::library_v2_work_collections,
+            // 新しい棚の読み取り (commands::shelf)
+            commands::shelf::shelf_status,
+            commands::shelf::shelf_set_user_state,
+            commands::shelf::shelf_remove_work,
+            commands::shelf::shelf_edit_collection,
+            commands::shelf::shelf_editor,
+            commands::shelf::shelf_edit_history,
+            commands::shelf::shelf_job_history,
+            commands::shelf::shelf_job_history_items,
+            commands::shelf::shelf_job_history_logs,
+            commands::shelf::shelf_job_history_visibility,
+            commands::shelf::shelf_save_editor,
+            commands::shelf::shelf_edit_pointer,
+            commands::shelf::shelf_import_edit_image,
+            commands::shelf::shelf_reading_position,
+            commands::shelf::shelf_set_reading_position,
+            commands::shelf::shelf_clear_reading_positions,
+            commands::shelf::shelf_adopt_device_positions,
+            commands::shelf::shelf_search,
+            commands::shelf::shelf_decorations,
+            commands::shelf::shelf_work,
+            commands::shelf::shelf_content,
+            commands::shelf::shelf_outline,
+            commands::shelf::shelf_search_content,
+            commands::shelf::shelf_neighbors,
+            commands::shelf::shelf_media,
+            commands::shelf::shelf_render_pdf_page,
+            commands::shelf::shelf_entity,
+            commands::shelf::shelf_entity_tags,
+            commands::shelf::shelf_search_suggest,
+            commands::shelf::shelf_person_series,
+            commands::shelf::shelf_entity_original,
+            commands::shelf::shelf_entities,
+            commands::shelf::shelf_entity_collections,
+            commands::shelf::shelf_work_collections,
             // 新しい棚の数と手入れ (commands::library_health)
-            commands::library_health::library_v2_search_index_status,
-            commands::library_health::library_v2_dashboard,
-            commands::library_health::library_v2_shelf_counts,
-            commands::library_health::library_v2_diagnostics,
-            commands::library_health::library_v2_maintain,
-            commands::library_health::library_v2_optimize_search_index,
-            commands::library_health::library_v2_verify,
-            commands::library_health::library_v2_reclaim,
-            commands::library_health::library_v2_filter_facets,
-            commands::library_health::library_v2_search_filter_facets,
-            commands::library_health::library_v2_find_work,
-            commands::library_v2::library_v2_collections,
-            commands::library_v2::library_v2_collection,
-            commands::library_v2::library_v2_revision_snapshot,
-            commands::library_v2::library_v2_original,
+            commands::library_health::shelf_search_index_status,
+            commands::library_health::shelf_dashboard,
+            commands::library_health::shelf_counts,
+            commands::library_health::shelf_diagnostics,
+            commands::library_health::shelf_maintain,
+            commands::library_health::shelf_optimize_search_index,
+            commands::library_health::shelf_verify,
+            commands::library_health::shelf_reclaim,
+            commands::library_health::shelf_filter_facets,
+            commands::library_health::shelf_search_filter_facets,
+            commands::library_health::shelf_find_work,
+            commands::shelf::shelf_collections,
+            commands::shelf::shelf_collection,
+            commands::shelf::shelf_revision_snapshot,
+            commands::shelf::shelf_original,
             // サーバーモード (commands::server)
             commands::server::server_status,
             commands::server::server_create_reader_pairing,
@@ -403,20 +394,20 @@ pub fn run() -> tauri::Result<()> {
             commands::assist::assist_discover_engines,
             commands::assist::assist_runtime_profile,
             commands::assist::assist_proofread,
-            commands::assist::library_v2_assist_related_tags,
-            commands::assist::library_v2_assist_accept_related_tags,
-            commands::assist::library_v2_assist_remove_related_tag,
-            commands::assist::library_v2_assist_suggest_tags,
-            commands::assist::library_v2_assist_accept_tags,
-            commands::assist::library_v2_assist_work_tags,
-            commands::assist::library_v2_assist_remove_tag,
-            commands::assist::library_v2_assist_interpret_search,
-            commands::assist::library_v2_assist_describe_author,
-            commands::assist::library_v2_assist_propose_splits,
-            commands::assist::library_v2_assist_summarize_work,
-            commands::assist::library_v2_assist_recap_previous,
-            commands::assist::library_v2_assist_load_note,
-            commands::assist::library_v2_assist_delete_note,
+            commands::assist::shelf_assist_related_tags,
+            commands::assist::shelf_assist_accept_related_tags,
+            commands::assist::shelf_assist_remove_related_tag,
+            commands::assist::shelf_assist_suggest_tags,
+            commands::assist::shelf_assist_accept_tags,
+            commands::assist::shelf_assist_work_tags,
+            commands::assist::shelf_assist_remove_tag,
+            commands::assist::shelf_assist_interpret_search,
+            commands::assist::shelf_assist_describe_author,
+            commands::assist::shelf_assist_propose_splits,
+            commands::assist::shelf_assist_summarize_work,
+            commands::assist::shelf_assist_recap_previous,
+            commands::assist::shelf_assist_load_note,
+            commands::assist::shelf_assist_delete_note,
             commands::database::db_try_naming_engine,
             commands::database::db_name_collection_suggestion,
             commands::database::db_generate_collection_suggestion,
@@ -440,16 +431,16 @@ pub fn run() -> tauri::Result<()> {
             commands::database::db_get_entity_profile_repair_status,
             commands::database::repair_incomplete_entity_profiles,
             commands::database::cancel_entity_profile_repair,
-            commands::original_images::library_v2_original_image_status,
-            commands::backup_shelf::library_v2_backup,
-            commands::backup_shelf::library_v2_export_entity_archive,
-            commands::backup_shelf::library_v2_import_archive,
-            commands::reimport_shelf::library_v2_reimport_folders,
-            commands::backup_shelf::library_v2_inspect_backup,
-            commands::backup_shelf::library_v2_schedule_restore,
-            commands::backup_shelf::library_v2_restore_state,
-            commands::backup_shelf::library_v2_cancel_restore,
-            commands::original_images::library_v2_upgrade_pixiv_images_to_original,
+            commands::original_images::shelf_original_image_status,
+            commands::backup_shelf::shelf_backup,
+            commands::backup_shelf::shelf_export_entity_archive,
+            commands::backup_shelf::shelf_import_archive,
+            commands::reimport_shelf::shelf_reimport_folders,
+            commands::backup_shelf::shelf_inspect_backup,
+            commands::backup_shelf::shelf_schedule_restore,
+            commands::backup_shelf::shelf_restore_state,
+            commands::backup_shelf::shelf_cancel_restore,
+            commands::original_images::shelf_upgrade_pixiv_images_to_original,
             commands::original_images::cancel_original_image_upgrade,
             // 更新ジョブ (commands::update_jobs)
             commands::update_jobs::start_update_job,

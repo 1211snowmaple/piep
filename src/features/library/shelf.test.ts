@@ -6,8 +6,8 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: tauri.invoke,
 }));
 
-import { encodeShelfCursor, searchShelfEntities, shelfCollectionSummary, shelfEntry, shelfFilter, shelfRequest, ShelfUnsupportedError } from "@/features/library/shelfV2";
-import type { ShelfCard, ShelfCollectionSummary, ShelfEntityRow } from "@/services/libraryV2Api";
+import { encodeShelfCursor, searchShelfEntities, shelfCollectionSummary, shelfEntry, shelfFilter, shelfRequest, ShelfUnsupportedError } from "@/features/library/shelf";
+import type { ShelfCard, ShelfCollectionSummary, ShelfEntityRow } from "@/services/shelfApi";
 
 const card: ShelfCard = {
   id: "0195f1c2-0000-7000-8000-000000000001",
@@ -200,7 +200,7 @@ describe("searchShelfEntities", () => {
     tauri.invoke.mockResolvedValueOnce({ items: [row], total: 9 });
     const page = await searchShelfEntities("person", "作", 60, 120, { favorite: true, tagsInclude: ["雨"], idsInclude: [3] }, "name", "asc", { watch: "paused", minWorkCount: 2, concluded: null });
     const [command, args] = tauri.invoke.mock.calls[0];
-    expect(command).toBe("library_v2_entities");
+    expect(command).toBe("shelf_entities");
     expect(args).toMatchObject({
       kind: "person",
       query: "作",
@@ -215,7 +215,7 @@ describe("searchShelfEntities", () => {
     });
     expect(page.total).toBe(9);
     const [facet] = page.items;
-    expect(facet).toMatchObject({ shelf: "v2", source: "pixiv", sourceKey: "77", displayName: "作者一", count: 4, watch: "paused", sampleTitle: "見本" });
+    expect(facet).toMatchObject({ shelf: true, source: "pixiv", sourceKey: "77", displayName: "作者一", count: 4, watch: "paused", sampleTitle: "見本" });
     // アイコンのない作者はヘッダーを顔にする（旧棚と同じ）。
     expect(facet.coverPath).toBe("ef".repeat(32));
     expect(facet.latestDownloadedAt).toBe("2026-01-02T00:00:00.000Z");
@@ -253,7 +253,7 @@ describe("shelfCollectionSummary", () => {
     };
     const summary = shelfCollectionSummary(item);
     expect(summary).toMatchObject({
-      shelf: "v2",
+      shelf: true,
       id: "c1",
       collectionKind: "unordered",
       coverMode: "file",

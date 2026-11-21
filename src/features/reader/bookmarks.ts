@@ -15,7 +15,9 @@ export interface Bookmark {
   createdAt: string;
 }
 
-const STORAGE_KEY = "piep.bookmarks.v1";
+const STORAGE_KEY = "piep.bookmarks";
+/** 0.41 までの名前。しおりは利用者が挟んだものなので、捨てずに一度だけ移す。 */
+const PREVIOUS_KEY = "piep.bookmarks.v1";
 const CHANGED_EVENT = "piep:bookmarks-changed";
 
 type Store = Record<string, Bookmark[]>;
@@ -35,7 +37,19 @@ function isBookmark(value: unknown): value is Bookmark {
     && typeof bookmark.createdAt === "string";
 }
 
+function moveFromPreviousKey() {
+  try {
+    const previous = localStorage.getItem(PREVIOUS_KEY);
+    if (previous === null) return;
+    if (localStorage.getItem(STORAGE_KEY) === null) localStorage.setItem(STORAGE_KEY, previous);
+    localStorage.removeItem(PREVIOUS_KEY);
+  } catch {
+    /* 移せなければ次の起動でもう一度試す。 */
+  }
+}
+
 function readStore(): Store {
+  moveFromPreviousKey();
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as unknown;
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};

@@ -12,10 +12,10 @@ import { useUpdateJobSummaries } from "@/features/updates/updateJobs";
 import { countSavedDeferredUpdateCandidatesCommand } from "@/services/updateJobApi";
 import { parseAcquisitionFilter } from "@/lib/acquisition";
 import { readingKeysAdopted, readingWorkIds, subscribeReadingPositions } from "@/features/library/readingShelf";
-import { libraryV2ShelfCounts } from "@/services/shelfHealthApi";
+import { shelfCounts } from "@/services/shelfHealthApi";
 import { formatCompactCount, formatNumber } from "@/lib/format";
 import { isTauriRuntime } from "@/services/dbApi";
-import { listSavedSearches } from "@/services/shelfApi";
+import { listSavedSearches } from "@/services/savedSearchApi";
 import { activeShelf, LIBRARY_SHELVES, type LibraryShelf } from "@/app/libraryShelves";
 import type { LibraryShelfCounts, SavedSearchRecord } from "@/types/library";
 import { useLibrarySidebarVisibility } from "./librarySidebarPreferences";
@@ -112,7 +112,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
   const [visibleShelves] = useLibrarySidebarVisibility();
   const { epubQueue } = useWorkspace();
   const [openGroups, setOpenGroups] = useLocalStorage<Record<GroupId, boolean>>({
-    key: "piep.nav-groups.v1",
+    key: "piep.nav-groups",
     defaultValue: DEFAULT_OPEN,
   });
 
@@ -125,7 +125,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
     queryKey: ["library-shelf-counts", readingIds],
     queryFn: () => !runtime
       ? Promise.resolve(PREVIEW_COUNTS)
-      : libraryV2ShelfCounts(readingKeysAdopted() ? null : readingIds),
+      : shelfCounts(readingKeysAdopted() ? null : readingIds),
     staleTime: 30_000,
   });
   const attentionCount = useQuery({

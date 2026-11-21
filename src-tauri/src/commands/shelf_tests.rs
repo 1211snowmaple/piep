@@ -10,21 +10,21 @@ impl Drop for Temp {
 }
 
 fn temp(name: &str) -> Temp {
-    Temp(std::env::temp_dir().join(format!("piep-v2-app-{name}-{}", LibraryId::now_v7())))
+    Temp(std::env::temp_dir().join(format!("piep-shelf-app-{name}-{}", LibraryId::now_v7())))
 }
 
 #[test]
 fn a_missing_library_is_created_switched_over_and_serves_nothing_until_asked() {
     let dir = temp("absent");
-    let state = LibraryV2::default();
-    assert_eq!(state.status(), LibraryV2Status::Starting);
+    let state = Shelf::default();
+    assert_eq!(state.status(), ShelfState::Starting);
     assert!(state.library().is_err());
     assert_eq!(respond(&state, &"0".repeat(64)).status(), 503);
     assert_eq!(respond(&state, "/not-a-file").status(), 400);
     state.open(&dir.0).unwrap();
     assert_eq!(
         state.status(),
-        LibraryV2Status::Indexing {
+        ShelfState::Indexing {
             path: dir.0.clone()
         }
     );
@@ -45,12 +45,12 @@ fn an_existing_library_opens_indexes_and_serves_files_by_their_fingerprint() {
             .unwrap();
         file.id
     };
-    let state = LibraryV2::default();
+    let state = Shelf::default();
     state.open(&dir.0).unwrap();
     state.sync_index(&dir.0);
     assert_eq!(
         state.status(),
-        LibraryV2Status::Ready {
+        ShelfState::Ready {
             path: dir.0.clone()
         }
     );
@@ -70,9 +70,9 @@ fn a_shelf_that_was_never_switched_over_is_not_opened() {
         let library = Library::create(&dir.0).unwrap();
         assert_eq!(library.switched_at().unwrap(), None);
     }
-    let state = LibraryV2::default();
+    let state = Shelf::default();
     assert!(state.open(&dir.0).is_err());
-    assert!(matches!(state.status(), LibraryV2Status::Failed { .. }));
+    assert!(matches!(state.status(), ShelfState::Failed { .. }));
     assert!(state.library().is_err());
 }
 

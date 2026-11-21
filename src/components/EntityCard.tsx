@@ -6,7 +6,7 @@ import { useAppNavigate } from "@/app/router";
 import { getProvider, ProviderMark } from "@/lib/providers";
 import { formatDate, formatNumber } from "@/lib/format";
 import { getAssetUrl } from "@/services/dbApi";
-import { shelfFileUrl } from "@/services/libraryV2Api";
+import { shelfFileUrl } from "@/services/shelfApi";
 import type { EntityFacet } from "@/types/library";
 
 /**
@@ -55,7 +55,7 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
   // 詳細画面は最初から icon だけを見ており、同じ作者が画面によって
   // 別の顔になっていた。シリーズの枠は表紙を出す場所なので今までどおり。
   // 新しい棚の画像はファイルの識別子。旧棚のパスとは URL への直し方が違う。
-  const asset = (path: string | null | undefined) => entity.shelf === "v2" ? shelfFileUrl(path) : getAssetUrl(path);
+  const asset = (path: string | null | undefined) => entity.shelf === true ? shelfFileUrl(path) : getAssetUrl(path);
   const icon = asset(kind === "person" ? entity.iconPath : entity.iconPath ?? entity.coverPath);
   // 保存元が画像を持ちうるのに、この人は置いていない。「まだ無い」ではなく
   // 「置いていない」なので、保存元と同じく一枚の絵で示す。

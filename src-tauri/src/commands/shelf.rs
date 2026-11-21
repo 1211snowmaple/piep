@@ -1,6 +1,6 @@
 //! 棚をアプリから開く。
 //!
-//! 棚は `PIEP_LIBRARY_V2_DIR` か、アプリのフォルダーの中の `library`。無ければ空の棚を作る。
+//! 棚は `PIEP_SHELF_DIR` か、アプリのフォルダーの中の `library`。無ければ空の棚を作る。
 //! 開くのは起動の門の中、本文の検索の索引の同期は別のスレッドで進める（全棚では索引を
 //! 初めて作るのに数分かかるので、画面を待たせない）。
 //!
@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::State;
 
-pub const DIR_ENV: &str = "PIEP_LIBRARY_V2_DIR";
+pub const DIR_ENV: &str = "PIEP_SHELF_DIR";
 /// アプリのフォルダーの中の棚の場所。
 pub const INSIDE_DIR: &str = "library";
 pub const URI_SCHEME: &str = "piep-library";
@@ -31,7 +31,7 @@ pub const URI_SCHEME: &str = "piep-library";
 /// 新しい棚の状態。
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state")]
-pub enum LibraryV2Status {
+pub enum ShelfState {
     /// まだ開いていない（起動の直後）。
     Starting,
     Opening {
@@ -50,8 +50,8 @@ pub enum LibraryV2Status {
     },
 }
 
-pub struct LibraryV2 {
-    status: Mutex<LibraryV2Status>,
+pub struct Shelf {
+    status: Mutex<ShelfState>,
     library: OnceLock<Arc<Library>>,
     /// 最近ページに分けた本文。ページをめくるたびに本文全体を組み直さない。
     documents: Mutex<VecDeque<CachedDocument>>,
@@ -74,10 +74,10 @@ type CachedDocument = (LibraryId, ResourceScope, Arc<RenderedDocument>);
 /// ページに分けた本文を覚えておく数。作品の画面と読む画面は一度に一作品で、版を見比べても数冊。
 const DOCUMENT_CACHE: usize = 4;
 
-impl Default for LibraryV2 {
+impl Default for Shelf {
     fn default() -> Self {
         Self {
-            status: Mutex::new(LibraryV2Status::Starting),
+            status: Mutex::new(ShelfState::Starting),
             library: OnceLock::new(),
             documents: Mutex::new(VecDeque::new()),
             legacy_numbers: Mutex::new(None),
@@ -87,24 +87,24 @@ impl Default for LibraryV2 {
     }
 }
 
-impl LibraryV2 {
+impl Shelf {
     #[cfg(test)]
     pub(crate) fn with_test_library(library: Arc<Library>) -> Self {
         let state = Self::default();
         assert!(state.library.set(library).is_ok());
         state
     }
-    fn set(&self, status: LibraryV2Status) {
+    fn set(&self, status: ShelfState) {
         if let Ok(mut slot) = self.status.lock() {
             *slot = status;
         }
     }
 
-    pub fn status(&self) -> LibraryV2Status {
+    pub fn status(&self) -> ShelfState {
         self.status
             .lock()
             .map(|slot| slot.clone())
-            .unwrap_or(LibraryV2Status::Starting)
+            .unwrap_or(ShelfState::Starting)
     }
 
     /// 作品の旧棚での番号（移行の記録）。棚にある作品は約 3 万件なので、全部を一度に持つ。
@@ -149,10 +149,8 @@ impl LibraryV2 {
     /// 本文の検索ができる棚。索引の同期が済むまでは誤り。
     fn searchable(&self) -> Result<Arc<Library>, String> {
         match self.status() {
-            LibraryV2Status::Ready { .. } => self.library(),
-            LibraryV2Status::Indexing { .. } => {
-                Err("新しい棚の検索の索引を準備しています".to_string())
-            }
+            ShelfState::Ready { .. } => self.library(),
+            ShelfState::Indexing { .. } => Err("新しい棚の検索の索引を準備しています".to_string()),
             _ => Err("新しい棚は開いていません".to_string()),
         }
     }
@@ -189,7 +187,7 @@ impl LibraryV2 {
 
     /// 棚を開く。無ければ空の棚を作る。正本に切り替えていない棚（移行で作った写し）は開かない。
     pub fn open(&self, path: &Path) -> Result<(), String> {
-        self.set(LibraryV2Status::Opening { path: path.into() });
+        self.set(ShelfState::Opening { path: path.into() });
         let opened = if path.join("library.json").is_file() {
             Library::open(path)
         } else {
@@ -200,7 +198,7 @@ impl LibraryV2 {
             Ok(library) => Arc::new(library),
             Err(error) => {
                 let message = format!("棚を開けません: {error}");
-                self.set(LibraryV2Status::Failed {
+                self.set(ShelfState::Failed {
                     path: path.into(),
                     message: message.clone(),
                 });
@@ -209,14 +207,14 @@ impl LibraryV2 {
         };
         if !matches!(library.switched_at(), Ok(Some(_))) {
             let message = "正本に切り替えていない棚は開けません".to_string();
-            self.set(LibraryV2Status::Failed {
+            self.set(ShelfState::Failed {
                 path: path.into(),
                 message: message.clone(),
             });
             return Err(message);
         }
         let _ = self.library.set(library);
-        self.set(LibraryV2Status::Indexing { path: path.into() });
+        self.set(ShelfState::Indexing { path: path.into() });
         Ok(())
     }
 
@@ -233,7 +231,7 @@ impl LibraryV2 {
             ),
             Err(error) => {
                 log::error!("棚の索引を同期できません: {error}");
-                self.set(LibraryV2Status::Failed {
+                self.set(ShelfState::Failed {
                     path: path.into(),
                     message: error.to_string(),
                 });
@@ -242,7 +240,7 @@ impl LibraryV2 {
         }
         // 保存のたびに合わせるが、前回の起動で残った分もここで追いつかせる。
         super::library_health::schedule_semantic_sync(Arc::clone(&library));
-        self.set(LibraryV2Status::Ready { path: path.into() });
+        self.set(ShelfState::Ready { path: path.into() });
     }
 }
 
@@ -255,7 +253,7 @@ pub fn library_dir(app_data: &Path) -> PathBuf {
 }
 
 /// 起動のときに呼ぶ。棚を開き（無ければ作る）、本文の検索の索引は別のスレッドで同期する。
-pub fn open_for_startup(state: Arc<LibraryV2>, app_data: &Path) -> Result<(), String> {
+pub fn open_for_startup(state: Arc<Shelf>, app_data: &Path) -> Result<(), String> {
     super::library_health::set_settings_dir(app_data);
     let path = library_dir(app_data);
     // 予約した復元は、棚を開く前に入れ替える。
@@ -271,7 +269,7 @@ pub fn open_for_startup(state: Arc<LibraryV2>, app_data: &Path) -> Result<(), St
 }
 
 /// `piep-library` の URI の要求に答える。パスはファイルの識別子（64 桁の 16 進）。
-pub fn respond(state: &LibraryV2, path: &str) -> tauri::http::Response<Vec<u8>> {
+pub fn respond(state: &Shelf, path: &str) -> tauri::http::Response<Vec<u8>> {
     let respond = |status: u16, body: Vec<u8>, mime: Option<&str>| {
         let mut builder = tauri::http::Response::builder()
             .status(status)
@@ -321,7 +319,7 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
 /// 新しい棚の状態（ない・開いている・索引の同期中・使える・失敗）。使えるときは移行の
 /// 未解決の記録も返す。
 #[tauri::command]
-pub fn library_v2_status(state: State<'_, Arc<LibraryV2>>) -> LibraryV2Status {
+pub fn shelf_status(state: State<'_, Arc<Shelf>>) -> ShelfState {
     state.status()
 }
 
@@ -332,8 +330,8 @@ fn parse_id(value: &str) -> Result<LibraryId, String> {
 /// お気に入り・更新の監視を変える（正本に切り替えた棚だけ）。`request` は画面が一回の操作ごとに
 /// 作る ID で、送り直しても二度書かない。
 #[tauri::command]
-pub async fn library_v2_set_user_state(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_set_user_state(
+    state: State<'_, Arc<Shelf>>,
     request: String,
     work: String,
     favorite: Option<bool>,
@@ -449,8 +447,8 @@ fn location_scope(location: &crate::library::ReadingLocation) -> ResourceScope {
 /// 読書位置（正本に切り替えた棚だけ）。`snapshot` を省くと今読む本文。その本文の位置でなければ
 /// （別の版・編集で読んでいた、ページの位置でない）返さない。
 #[tauri::command]
-pub async fn library_v2_reading_position(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_reading_position(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     snapshot: Option<LibraryId>,
 ) -> Result<Option<ShelfReading>, String> {
@@ -490,8 +488,8 @@ pub async fn library_v2_reading_position(
 /// 今読む本文。読み終えたら `finished`（読みかけの棚から降りる）。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn library_v2_set_reading_position(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_set_reading_position(
+    state: State<'_, Arc<Shelf>>,
     request: LibraryId,
     work: LibraryId,
     snapshot: Option<LibraryId>,
@@ -541,8 +539,8 @@ pub async fn library_v2_set_reading_position(
 /// 読みかけから外す（読書位置を消す。正本に切り替えた棚だけ）。位置の無い作品は何もしない。
 /// 外した作品の数を返す。
 #[tauri::command]
-pub async fn library_v2_clear_reading_positions(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_clear_reading_positions(
+    state: State<'_, Arc<Shelf>>,
     works: Vec<LibraryId>,
 ) -> Result<usize, String> {
     let state = Arc::clone(&state);
@@ -580,8 +578,8 @@ pub async fn library_v2_clear_reading_positions(
 /// 画面は端末の記録をその ID で書き直す。棚に位置がない作品だけ、そのページの頭として書く
 /// （端末の細かい位置は px なので割合にできない。この端末では端末の記録のほうを使う）。
 #[tauri::command]
-pub async fn library_v2_adopt_device_positions(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_adopt_device_positions(
+    state: State<'_, Arc<Shelf>>,
     positions: Vec<(i64, u64)>,
 ) -> Result<Vec<(i64, LibraryId)>, String> {
     let state = Arc::clone(&state);
@@ -642,8 +640,8 @@ pub async fn library_v2_adopt_device_positions(
 /// 作品を棚から外す（正本に切り替えた棚だけ）。保存版・編集・コレクションの行は残る。
 /// 本文の検索の索引からは、続けて同期して消す。
 #[tauri::command]
-pub async fn library_v2_remove_work(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_remove_work(
+    state: State<'_, Arc<Shelf>>,
     request: String,
     work: String,
 ) -> Result<(), String> {
@@ -694,7 +692,7 @@ pub struct SearchView {
 
 /// 読みかけの棚は端末の読書位置の鍵（旧棚の番号）で来る。棚の作品の ID に読み替えて絞る。
 fn narrow_to_legacy_works(
-    state: &LibraryV2,
+    state: &Shelf,
     library: &Library,
     filter: &mut WorkFilter,
     legacy_works: Option<Vec<i64>>,
@@ -725,8 +723,8 @@ fn narrow_to_legacy_works(
 /// `legacy_works` を渡すと、旧棚の番号でその作品だけに絞る（読みかけの棚）。`person` は取得元の
 /// 作者の指名（ライブラリの絞り込みの `personSource`・`personKey`）。
 #[tauri::command]
-pub async fn library_v2_search(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_search(
+    state: State<'_, Arc<Shelf>>,
     search: TextSearch,
     mut query: WorkListQuery,
     legacy_works: Option<Vec<i64>>,
@@ -773,8 +771,8 @@ pub async fn library_v2_search(
 
 /// 一ページぶんの一致した箇所と理由。
 #[tauri::command]
-pub async fn library_v2_decorations(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_decorations(
+    state: State<'_, Arc<Shelf>>,
     text: String,
     matches: Vec<SearchMatch>,
 ) -> Result<Vec<SearchDecoration>, String> {
@@ -810,10 +808,7 @@ pub struct WorkView {
 
 /// 作品の画面の頭（一覧の項目・説明・作者とシリーズの ID）と、保存した版。
 #[tauri::command]
-pub async fn library_v2_work(
-    state: State<'_, Arc<LibraryV2>>,
-    work: LibraryId,
-) -> Result<WorkView, String> {
+pub async fn shelf_work(state: State<'_, Arc<Shelf>>, work: LibraryId) -> Result<WorkView, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let library = state.library()?;
@@ -857,8 +852,8 @@ pub struct ContentPageView {
 
 /// 本文の一ページの HTML。`snapshot` を省くと今読む本文。
 #[tauri::command]
-pub async fn library_v2_content(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_content(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     snapshot: Option<LibraryId>,
     page: usize,
@@ -885,8 +880,8 @@ pub async fn library_v2_content(
 
 /// 本文全体の見出し（読む画面の目次）。`snapshot` を省くと今読む本文。
 #[tauri::command]
-pub async fn library_v2_outline(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_outline(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     snapshot: Option<LibraryId>,
 ) -> Result<Vec<ReaderOutlineEntry>, String> {
@@ -903,8 +898,8 @@ pub async fn library_v2_outline(
 
 /// 本文内検索（読む画面）。旧棚と同じ畳み方で、ページごとの一致を返す。
 #[tauri::command]
-pub async fn library_v2_search_content(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_search_content(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     snapshot: Option<LibraryId>,
     query: String,
@@ -943,8 +938,8 @@ pub struct NeighborsView {
 /// 作品が入っているコレクション・シリーズ・作者ごとの、前後の作品。並びを丸ごと返さず、
 /// 位置と両隣だけを返す（長いシリーズや作者でも一往復で済む）。
 #[tauri::command]
-pub async fn library_v2_neighbors(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_neighbors(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
 ) -> Result<Vec<NeighborsView>, String> {
     let state = Arc::clone(&state);
@@ -979,8 +974,8 @@ pub async fn library_v2_neighbors(
 
 /// 版（省くと今読む本文）の画像・添付。
 #[tauri::command]
-pub async fn library_v2_media(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_media(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     snapshot: Option<LibraryId>,
 ) -> Result<Vec<MediaView>, String> {
@@ -1000,8 +995,8 @@ pub async fn library_v2_media(
 /// `page` は 0 から。作品の版に PDF として載っていないファイルは断る。旧棚の
 /// `render_pdf_attachment_page` と同じく控えは持たず、要求のたびに描く。
 #[tauri::command]
-pub async fn library_v2_render_pdf_page(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_render_pdf_page(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     file: String,
     page: usize,
@@ -1033,8 +1028,8 @@ pub async fn library_v2_render_pdf_page(
 /// 選んだ保存状態の本文と作品情報・画像・添付を比較する。別作品の保存状態や編集 ID は拒否する。
 /// 本文の未取得は null、保存済みの空の本文は空文字。画像は保存時の指紋と棚の URI 用の識別子で返す。
 #[tauri::command]
-pub async fn library_v2_revision_snapshot(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_revision_snapshot(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     snapshot: LibraryId,
 ) -> Result<crate::library_view::RevisionSnapshotView, String> {
@@ -1051,8 +1046,8 @@ pub async fn library_v2_revision_snapshot(
 
 /// 版（省くと現在の版）を作った取得元の応答。なければ None。
 #[tauri::command]
-pub async fn library_v2_original(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_original(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     snapshot: Option<LibraryId>,
 ) -> Result<Option<String>, String> {
@@ -1086,8 +1081,8 @@ pub(crate) fn entity_kind(kind: &str) -> Result<crate::library::EntityKind, Stri
 
 /// 作者・シリーズの画面の頭（取得元の ID から）。棚に無ければ None。
 #[tauri::command]
-pub async fn library_v2_entity(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_entity(
+    state: State<'_, Arc<Shelf>>,
     kind: String,
     provider: String,
     key: String,
@@ -1106,8 +1101,8 @@ pub async fn library_v2_entity(
 
 /// 検索欄の候補（旧棚の `search_suggest` と同じ形）。題の候補の `sourceKey` は新しい棚の作品の ID。
 #[tauri::command]
-pub async fn library_v2_search_suggest(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_search_suggest(
+    state: State<'_, Arc<Shelf>>,
     text: String,
     limit: Option<i64>,
 ) -> Result<crate::database::models::SearchSuggestResult, String> {
@@ -1125,8 +1120,8 @@ pub async fn library_v2_search_suggest(
 
 /// 作者・シリーズの作品に付いた取得元のタグと数。
 #[tauri::command]
-pub async fn library_v2_entity_tags(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_entity_tags(
+    state: State<'_, Arc<Shelf>>,
     kind: String,
     entity: LibraryId,
     limit: usize,
@@ -1145,8 +1140,8 @@ pub async fn library_v2_entity_tags(
 
 /// 作者の作品が属するシリーズの一ページ。`order` は `asc`・`desc`（省くと鍵ごとの既定）。
 #[tauri::command]
-pub async fn library_v2_person_series(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_person_series(
+    state: State<'_, Arc<Shelf>>,
     person: LibraryId,
     query: Option<String>,
     sort: Option<SeriesSort>,
@@ -1177,8 +1172,8 @@ pub async fn library_v2_person_series(
 
 /// 作者・シリーズの今の版を作った取得元の応答（画面の「保存データ」の欄）。なければ None。
 #[tauri::command]
-pub async fn library_v2_entity_original(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_entity_original(
+    state: State<'_, Arc<Shelf>>,
     entity: LibraryId,
     snapshot: LibraryId,
 ) -> Result<Option<String>, String> {
@@ -1206,8 +1201,8 @@ pub struct SeriesKey {
 /// `asc`・`desc`（省くと鍵ごとの既定）、`sort` を省くと作品の多い順。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn library_v2_entities(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_entities(
+    state: State<'_, Arc<Shelf>>,
     kind: String,
     query: Option<String>,
     mut filter: WorkFilter,
@@ -1286,8 +1281,8 @@ pub async fn library_v2_entities(
 
 /// 作者・シリーズの作品を一つでも含むコレクション（作者・シリーズの画面のコレクションの欄）。
 #[tauri::command]
-pub async fn library_v2_entity_collections(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_entity_collections(
+    state: State<'_, Arc<Shelf>>,
     kind: String,
     entity: LibraryId,
 ) -> Result<Vec<CollectionSummary>, String> {
@@ -1305,8 +1300,8 @@ pub async fn library_v2_entity_collections(
 
 /// 作品の入ったコレクション（作品の画面の「コレクションに追加」で、入っているものに印を付ける）。
 #[tauri::command]
-pub async fn library_v2_work_collections(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_work_collections(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
 ) -> Result<Vec<CollectionSummary>, String> {
     let state = Arc::clone(&state);
@@ -1323,8 +1318,8 @@ pub async fn library_v2_work_collections(
 
 /// ライブラリの「コレクション」タブの一覧（更新の新しい順。並べ替えと絞り込みは画面が持つ）。
 #[tauri::command]
-pub async fn library_v2_collections(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_collections(
+    state: State<'_, Arc<Shelf>>,
 ) -> Result<Vec<CollectionSummary>, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
@@ -1355,8 +1350,8 @@ pub struct CollectionMemberView {
 
 /// コレクションの画面。`id` は旧棚の ID（移したもの）か新しい棚の ID。
 #[tauri::command]
-pub async fn library_v2_collection(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_collection(
+    state: State<'_, Arc<Shelf>>,
     id: String,
 ) -> Result<CollectionView, String> {
     let state = Arc::clone(&state);
@@ -1383,7 +1378,7 @@ pub(crate) fn collection_target(library: &Library, id: &str) -> Result<LibraryId
 }
 
 fn collection_view(
-    state: &LibraryV2,
+    state: &Shelf,
     library: &Library,
     target: LibraryId,
 ) -> Result<CollectionView, String> {
@@ -1524,8 +1519,8 @@ fn collection_change(
 /// コレクションを一回編集する（正本に切り替えた棚だけ）。作るときは `id` に画面が作った新しい ID を
 /// 渡す。編集した後の中身を返す（消したときは None）。
 #[tauri::command]
-pub async fn library_v2_edit_collection(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_edit_collection(
+    state: State<'_, Arc<Shelf>>,
     request: LibraryId,
     id: String,
     change: CollectionChangeInput,
@@ -1559,8 +1554,8 @@ pub async fn library_v2_edit_collection(
 
 /// 作品の編集画面を開く（下書き、反映中の版、今の版の本文の順）。読むだけなので切り替える前も開ける。
 #[tauri::command]
-pub async fn library_v2_editor(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_editor(
+    state: State<'_, Arc<Shelf>>,
     work: String,
 ) -> Result<crate::library_work_edit::EditorView, String> {
     let state = Arc::clone(&state);
@@ -1575,7 +1570,7 @@ pub async fn library_v2_editor(
 }
 
 /// 編集した後の後始末。一覧の集計を捨て、本文の検索の索引を追いつかせる。
-fn after_edit(state: &LibraryV2, library: &Arc<Library>, work: LibraryId) {
+fn after_edit(state: &Shelf, library: &Arc<Library>, work: LibraryId) {
     state.forget_derived();
     if let Err(error) = library.audit_pixiv_edit_images(work) {
         log::warn!("編集した作品の取得状態を見直せません: {error}");
@@ -1588,8 +1583,8 @@ fn after_edit(state: &LibraryV2, library: &Arc<Library>, work: LibraryId) {
 
 /// 作品の編集のようす（下書き・反映中の版・以前の編集版）。読むだけなので切り替える前も開ける。
 #[tauri::command]
-pub async fn library_v2_edit_history(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_edit_history(
+    state: State<'_, Arc<Shelf>>,
     work: String,
 ) -> Result<crate::library_work_edit::EditHistory, String> {
     let state = Arc::clone(&state);
@@ -1605,8 +1600,8 @@ pub async fn library_v2_edit_history(
 
 /// 編集画面の段を下書きに保存する（`publish` なら続けて反映する。正本に切り替えた棚だけ）。
 #[tauri::command]
-pub async fn library_v2_save_editor(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_save_editor(
+    state: State<'_, Arc<Shelf>>,
     request: String,
     work: String,
     save: crate::library_work_edit::EditorSave,
@@ -1630,8 +1625,8 @@ pub async fn library_v2_save_editor(
 
 /// 編集の指し先を変える（下書きを捨てる・反映をやめる。正本に切り替えた棚だけ）。
 #[tauri::command]
-pub async fn library_v2_edit_pointer(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_edit_pointer(
+    state: State<'_, Arc<Shelf>>,
     request: String,
     work: String,
     expected: i64,
@@ -1661,8 +1656,8 @@ pub async fn library_v2_edit_pointer(
 
 /// 編集に使う画像を棚へ取り込む（正本に切り替えた棚だけ）。`id` は 0 で返し、画面が番号を付ける。
 #[tauri::command]
-pub async fn library_v2_import_edit_image(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_import_edit_image(
+    state: State<'_, Arc<Shelf>>,
     path: String,
 ) -> Result<crate::library_work_edit::EditorMedia, String> {
     let state = Arc::clone(&state);
@@ -1702,13 +1697,13 @@ pub async fn library_v2_import_edit_image(
 }
 
 #[cfg(test)]
-#[path = "library_v2_tests.rs"]
+#[path = "shelf_tests.rs"]
 mod tests;
 
 /// 棚に保管した完了履歴を、開始日時と UUID の順にページ分割して読む。実行は始めない。
 #[tauri::command]
-pub async fn library_v2_job_history(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_job_history(
+    state: State<'_, Arc<Shelf>>,
     before: Option<String>,
     limit: usize,
 ) -> Result<Vec<crate::library::JobHistory>, String> {
@@ -1725,8 +1720,8 @@ pub async fn library_v2_job_history(
 
 /// 完了履歴の項目を当時の順に読む。現在版や旧棚の作品行から結果を補わない。
 #[tauri::command]
-pub async fn library_v2_job_history_items(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_job_history_items(
+    state: State<'_, Arc<Shelf>>,
     job: String,
     after: Option<i64>,
     limit: usize,
@@ -1744,8 +1739,8 @@ pub async fn library_v2_job_history_items(
 
 /// 完了履歴のログを当時の順と文言で読む。原入力の本文は返さない。
 #[tauri::command]
-pub async fn library_v2_job_history_logs(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_job_history_logs(
+    state: State<'_, Arc<Shelf>>,
     job: String,
     after: Option<i64>,
     limit: usize,
@@ -1763,8 +1758,8 @@ pub async fn library_v2_job_history_logs(
 
 /// 完了履歴を一覧から外す、または戻す。ジョブを省くと現在の完了履歴をまとめて外す。
 #[tauri::command]
-pub async fn library_v2_job_history_visibility(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_job_history_visibility(
+    state: State<'_, Arc<Shelf>>,
     request: String,
     job: Option<String>,
     hidden: bool,

@@ -1,7 +1,7 @@
 //! 旧棚の一覧・読書・表紙と、新しい棚の同じものを並べて、順序・値・時間を比べる。
 //! 旧棚は写しを開く（旧 DB は開くときに後片付けを書き込む）。新しい棚は読むだけ。
 
-use piep_lib::database::{models::DownloadEntry, models::SearchV2Params, Database};
+use piep_lib::database::{models::DownloadEntry, models::SearchParams, Database};
 use piep_lib::library::{Library, ResourceScope, WorkCard, WorkListQuery, WorkSort};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -43,13 +43,13 @@ fn time(s: &str) -> Option<i64> {
         .map(|d| d.timestamp_millis())
 }
 
-fn old_params(sort: &str, desc: bool, limit: usize, cursor: Option<String>) -> SearchV2Params {
-    SearchV2Params {
+fn old_params(sort: &str, desc: bool, limit: usize, cursor: Option<String>) -> SearchParams {
+    SearchParams {
         sort_by: Some(sort.into()),
         sort_order: Some(if desc { "desc" } else { "asc" }.into()),
         limit: Some(limit as i64),
         cursor,
-        ..SearchV2Params::default()
+        ..SearchParams::default()
     }
 }
 
@@ -127,8 +127,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path, samples: usize) -> Re
             let mut cursor = None;
             loop {
                 let started = Instant::now();
-                let page =
-                    old.search_downloads_v2(&old_params(name, desc, PAGE, cursor.clone()))?;
+                let page = old.search_downloads(&old_params(name, desc, PAGE, cursor.clone()))?;
                 old_pages.push(ms(started.elapsed()));
                 old_cursors.push(cursor.clone());
                 old_items.extend(
@@ -172,11 +171,11 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path, samples: usize) -> Re
             let old_middle_cursor = old_cursors[old_cursors.len() / 2].clone();
             let new_middle_cursor = new_cursors[new_cursors.len() / 2].clone();
             let old_first = repeat(|| {
-                old.search_downloads_v2(&old_params(name, desc, PAGE, None))?;
+                old.search_downloads(&old_params(name, desc, PAGE, None))?;
                 Ok(())
             })?;
             let old_middle = repeat(|| {
-                old.search_downloads_v2(&old_params(name, desc, PAGE, old_middle_cursor.clone()))?;
+                old.search_downloads(&old_params(name, desc, PAGE, old_middle_cursor.clone()))?;
                 Ok(())
             })?;
             let new_first = repeat(|| {
@@ -258,7 +257,7 @@ fn compare_reading(
     let mut order = Vec::new();
     let mut cursor = None;
     loop {
-        let page = old.search_downloads_v2(&old_params("date", true, 1000, cursor))?;
+        let page = old.search_downloads(&old_params("date", true, 1000, cursor))?;
         order.extend(page.items);
         cursor = page.next_cursor;
         if cursor.is_none() {

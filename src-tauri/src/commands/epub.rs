@@ -258,7 +258,7 @@ pub(crate) struct LoadedWork {
 
 /// 棚の作品を一冊分読む。
 pub(crate) fn load_work_manifest(
-    shelf: &crate::commands::library_v2::LibraryV2,
+    shelf: &crate::commands::shelf::Shelf,
     work: EpubWork,
 ) -> Result<LoadedWork, String> {
     let library = shelf.library()?;
@@ -272,7 +272,7 @@ pub(crate) fn load_work_manifest(
 }
 
 /// 進み具合に出す題。読めなければ ID。
-fn work_title(shelf: &crate::commands::library_v2::LibraryV2, work: EpubWork) -> String {
+fn work_title(shelf: &crate::commands::shelf::Shelf, work: EpubWork) -> String {
     shelf
         .library()
         .ok()
@@ -838,11 +838,11 @@ type CollectionParts = (CollectionBook, Vec<(bool, EpubWork, String)>, Vec<Strin
 
 /// 新しい棚のコレクション。表紙は表紙に選んだ作品の表紙と同じ画像の回。
 fn collection_parts_on_shelf(
-    shelf: &crate::commands::library_v2::LibraryV2,
+    shelf: &crate::commands::shelf::Shelf,
     id: &str,
 ) -> Result<CollectionParts, String> {
     let library = shelf.library()?;
-    let target = crate::commands::library_v2::collection_target(&library, id)?;
+    let target = crate::commands::shelf::collection_target(&library, id)?;
     let detail = library
         .collection_detail(target)
         .map_err(|e| e.to_string())?;
@@ -889,7 +889,7 @@ pub async fn export_collection_epub(
 ) -> Result<String, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let shelf_state = app
-        .state::<Arc<crate::commands::library_v2::LibraryV2>>()
+        .state::<Arc<crate::commands::shelf::Shelf>>()
         .inner()
         .clone();
     let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
@@ -1092,7 +1092,7 @@ fn aggregate_batch_results(mut completed: Vec<BatchItemResult>) -> ExportBatchRe
 fn export_batch_item(
     app: tauri::AppHandle,
     _state: Arc<AppState>,
-    shelf: Arc<crate::commands::library_v2::LibraryV2>,
+    shelf: Arc<crate::commands::shelf::Shelf>,
     templates_dir: PathBuf,
     download_id: EpubWork,
     index: u32,
@@ -1216,7 +1216,7 @@ pub async fn export_epub_batch(
     let _export_guard = begin_epub_export(&EPUB_EXPORT_STATE, &operation_id)?;
     let state = app.state::<Arc<AppState>>().inner().clone();
     let shelf = app
-        .state::<Arc<crate::commands::library_v2::LibraryV2>>()
+        .state::<Arc<crate::commands::shelf::Shelf>>()
         .inner()
         .clone();
     let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
@@ -1532,7 +1532,7 @@ pub async fn preview_epub_template(
 ) -> Result<TemplatePreview, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let shelf = app
-        .state::<Arc<crate::commands::library_v2::LibraryV2>>()
+        .state::<Arc<crate::commands::shelf::Shelf>>()
         .inner()
         .clone();
     let _library_snapshot_guard = state.library_gate.clone().read_owned().await;

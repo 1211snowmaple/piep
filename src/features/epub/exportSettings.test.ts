@@ -34,10 +34,10 @@ describe("書き出しの決めごとを憶えておく", () => {
   });
 
   it("壊れた憶えは既定へ落とす。書き出しが止まる理由にはしない", () => {
-    window.localStorage.setItem("piep.epub-export.v1", "{ not json");
+    window.localStorage.setItem("piep.epub-export", "{ not json");
     expect(readExportSettings()).toEqual(defaultExportSettings);
 
-    window.localStorage.setItem("piep.epub-export.v1", JSON.stringify({ writingMode: "斜め", compression: 5 }));
+    window.localStorage.setItem("piep.epub-export", JSON.stringify({ writingMode: "斜め", compression: 5 }));
     const restored = readExportSettings();
     expect(restored.writingMode).toBeNull();
     expect(restored.compression).toEqual(defaultExportSettings.compression);

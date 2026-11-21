@@ -762,7 +762,7 @@ pub async fn download_and_save(
         data
     };
     let shelf = app
-        .try_state::<Arc<crate::commands::library_v2::LibraryV2>>()
+        .try_state::<Arc<crate::commands::shelf::Shelf>>()
         .map(|state| Arc::clone(&state))
         .ok_or_else(|| "棚は開いていません".to_string())?;
     let library = shelf.library()?;

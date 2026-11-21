@@ -1513,33 +1513,30 @@ async fn page_asset(
 /// `admin_router` に足す API。Cookie と鍵のどちらでも通るもの。
 pub(super) fn api_routes() -> Router<Ctx> {
     Router::new()
-        .route("/api/v2/admin/tickets", post(issue_ticket))
-        .route("/api/v2/admin/password", put(change_password))
-        .route("/api/v2/admin/sessions", get(list_sessions))
-        .route("/api/v2/admin/sessions/{id}", delete(end_session))
+        .route("/api/admin/tickets", post(issue_ticket))
+        .route("/api/admin/password", put(change_password))
+        .route("/api/admin/sessions", get(list_sessions))
+        .route("/api/admin/sessions/{id}", delete(end_session))
         .route(
-            "/api/v2/admin/settings/update",
+            "/api/admin/settings/update",
             get(get_update_settings).put(put_update_settings),
         )
-        .route("/api/v2/admin/settings/server-name", put(put_server_name))
-        .route("/api/v2/admin/update/check", post(update_check))
-        .route("/api/v2/admin/update/history", get(update_history))
-        .route("/api/v2/admin/update/retry", post(update_retry))
-        .route("/api/v2/admin/update/rollback", post(update_rollback))
-        .route("/api/v2/admin/audit", get(audit_list))
-        .route("/api/v2/admin/storage", get(storage))
-        .route(
-            "/api/v2/admin/connection",
-            get(connection).put(put_connection),
-        )
-        .route("/api/v2/admin/restart", post(restart))
+        .route("/api/admin/settings/server-name", put(put_server_name))
+        .route("/api/admin/update/check", post(update_check))
+        .route("/api/admin/update/history", get(update_history))
+        .route("/api/admin/update/retry", post(update_retry))
+        .route("/api/admin/update/rollback", post(update_rollback))
+        .route("/api/admin/audit", get(audit_list))
+        .route("/api/admin/storage", get(storage))
+        .route("/api/admin/connection", get(connection).put(put_connection))
+        .route("/api/admin/restart", post(restart))
 }
 
 /// 画面とログイン。管理画面を出す口にだけ足す。
 pub(super) fn web_routes(ctx: Ctx) -> Router {
     let authenticated = Router::new()
-        .route("/api/v2/admin/web/reauth", post(web_reauth))
-        .route("/api/v2/admin/web/disable", post(web_disable))
+        .route("/api/admin/web/reauth", post(web_reauth))
+        .route("/api/admin/web/disable", post(web_disable))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&ctx),
             super::authorize_admin_before_body,
@@ -1549,12 +1546,12 @@ pub(super) fn web_routes(ctx: Ctx) -> Router {
         .route("/admin", get(|| async { Redirect::to("/admin/") }))
         .route("/admin/", get(page_root))
         .route("/admin/{*path}", get(page_asset))
-        .route("/api/v2/admin/web/state", get(web_state))
-        .route("/api/v2/admin/web/login", post(web_login))
-        .route("/api/v2/admin/web/ticket-info", post(web_ticket_info))
-        .route("/api/v2/admin/web/ticket", post(web_ticket))
-        .route("/api/v2/admin/web/setup", post(web_setup))
-        .route("/api/v2/admin/web/logout", post(web_logout))
+        .route("/api/admin/web/state", get(web_state))
+        .route("/api/admin/web/login", post(web_login))
+        .route("/api/admin/web/ticket-info", post(web_ticket_info))
+        .route("/api/admin/web/ticket", post(web_ticket))
+        .route("/api/admin/web/setup", post(web_setup))
+        .route("/api/admin/web/logout", post(web_logout))
         .layer(axum::extract::DefaultBodyLimit::max(super::MAX_JSON_BYTES))
         .with_state(Arc::clone(&ctx));
     with_guard(routes, Arc::clone(&ctx)).layer(middleware::from_fn_with_state(ctx, secure_headers))

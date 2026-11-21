@@ -46,57 +46,57 @@ export interface ShelfReclaimReport {
   removed_damaged: number;
 }
 
-export function libraryV2SearchIndexStatus(): Promise<SearchIndexStatus> {
-  return invoke<SearchIndexStatus>("library_v2_search_index_status");
+export function shelfSearchIndexStatus(): Promise<SearchIndexStatus> {
+  return invoke<SearchIndexStatus>("shelf_search_index_status");
 }
 
 /** ホームの集計。`recentDownloads` は空（最近の保存は棚の一覧で引く）。 */
-export function libraryV2Dashboard(): Promise<DashboardSummary> {
-  return invoke<DashboardSummary>("library_v2_dashboard");
+export function shelfDashboard(): Promise<DashboardSummary> {
+  return invoke<DashboardSummary>("shelf_dashboard");
 }
 
 /** 横の欄の件数。`legacyReading` は端末に旧棚の番号で残る読みかけ（棚へ引き取る前だけ渡す）。 */
-export function libraryV2ShelfCounts(legacyReading: number[] | null): Promise<LibraryShelfCounts> {
-  return invoke<LibraryShelfCounts>("library_v2_shelf_counts", { legacyReading });
+export function shelfCounts(legacyReading: number[] | null): Promise<LibraryShelfCounts> {
+  return invoke<LibraryShelfCounts>("shelf_counts", { legacyReading });
 }
 
-export function libraryV2Diagnostics(): Promise<ShelfDiagnostics> {
-  return invoke<ShelfDiagnostics>("library_v2_diagnostics");
+export function shelfDiagnostics(): Promise<ShelfDiagnostics> {
+  return invoke<ShelfDiagnostics>("shelf_diagnostics");
 }
 
-export function libraryV2Maintain(compact: boolean): Promise<LibraryMaintenanceResult> {
-  return invoke<LibraryMaintenanceResult>("library_v2_maintain", { compact });
+export function shelfMaintain(compact: boolean): Promise<LibraryMaintenanceResult> {
+  return invoke<LibraryMaintenanceResult>("shelf_maintain", { compact });
 }
 
-export function libraryV2OptimizeSearchIndex(): Promise<SearchIndexOptimizationResult> {
-  return invoke<SearchIndexOptimizationResult>("library_v2_optimize_search_index");
+export function shelfOptimizeSearchIndex(): Promise<SearchIndexOptimizationResult> {
+  return invoke<SearchIndexOptimizationResult>("shelf_optimize_search_index");
 }
 
 /** 台帳と全ファイルを照合し、確かめたファイルの数を返す（問題があれば誤り）。 */
-export function libraryV2Verify(): Promise<number> {
-  return invoke<number>("library_v2_verify");
+export function shelfVerify(): Promise<number> {
+  return invoke<number>("shelf_verify");
 }
 
-export function libraryV2Reclaim(): Promise<ShelfReclaimReport> {
-  return invoke<ShelfReclaimReport>("library_v2_reclaim");
+export function shelfReclaim(): Promise<ShelfReclaimReport> {
+  return invoke<ShelfReclaimReport>("shelf_reclaim");
 }
 
 /** 一覧の絞り込みの選択肢（タグ・作者・種別・添付）。作者・シリーズの束ねは含めない。 */
-export function libraryV2FilterFacets(): Promise<FilterFacets> {
-  return invoke<FilterFacets>("library_v2_filter_facets");
+export function shelfFilterFacets(): Promise<FilterFacets> {
+  return invoke<FilterFacets>("shelf_filter_facets");
 }
 
 /** 絞り込みの選択肢を名前で探す。 */
-export function libraryV2SearchFilterFacets(kind: "tags" | "authors", query: string | null, limit = 30): Promise<FacetCount[]> {
-  return invoke<FacetCount[]>("library_v2_search_filter_facets", { kind, query: query?.trim() || null, limit });
+export function shelfSearchFilterFacets(kind: "tags" | "authors", query: string | null, limit = 30): Promise<FacetCount[]> {
+  return invoke<FacetCount[]>("shelf_search_filter_facets", { kind, query: query?.trim() || null, limit });
 }
 
 /** 新しい棚の、縮小版のまま残る pixiv の表紙・挿絵の数と、走っている取り直しの進み具合。 */
-export function libraryV2OriginalImageStatus(): Promise<OriginalImageStatus> {
-  return invoke<OriginalImageStatus>("library_v2_original_image_status");
+export function shelfOriginalImageStatus(): Promise<OriginalImageStatus> {
+  return invoke<OriginalImageStatus>("shelf_original_image_status");
 }
 
 /** 新しい棚で、縮小版の表紙・挿絵を原寸に取り直す（版は増えない）。正本に切り替えた棚だけ。 */
-export function libraryV2UpgradePixivImagesToOriginal(): Promise<OriginalImageResult> {
-  return invoke<OriginalImageResult>("library_v2_upgrade_pixiv_images_to_original");
+export function shelfUpgradePixivImagesToOriginal(): Promise<OriginalImageResult> {
+  return invoke<OriginalImageResult>("shelf_upgrade_pixiv_images_to_original");
 }

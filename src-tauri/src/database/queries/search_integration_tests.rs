@@ -70,11 +70,11 @@ fn repair_history_stays_readable_without_counting_as_an_author_revision() {
     db.set_version_change_kind(id, 2, "repair").unwrap();
     let mut query = params("");
     query.revision_filter = Some("saved_revisions".into());
-    assert!(db.search_downloads_v2(&query).unwrap().items.is_empty());
+    assert!(db.search_downloads(&query).unwrap().items.is_empty());
     query.revision_filter = Some("revised".into());
-    assert!(db.search_downloads_v2(&query).unwrap().items.is_empty());
+    assert!(db.search_downloads(&query).unwrap().items.is_empty());
     query.revision_filter = Some("first_version".into());
-    assert_eq!(db.search_downloads_v2(&query).unwrap().items[0].id, id);
+    assert_eq!(db.search_downloads(&query).unwrap().items[0].id, id);
     let versions = db.get_versions(id).unwrap();
     assert_eq!(db.get_library_shelf_counts(&[]).unwrap().revised, 0);
     assert_eq!(versions.len(), 2);
@@ -82,7 +82,7 @@ fn repair_history_stays_readable_without_counting_as_an_author_revision() {
     db.set_version_change_kind(id, 2, "source").unwrap();
     assert_eq!(db.get_library_shelf_counts(&[]).unwrap().revised, 1);
     query.revision_filter = Some("saved_revisions".into());
-    assert_eq!(db.search_downloads_v2(&query).unwrap().items[0].id, id);
+    assert_eq!(db.search_downloads(&query).unwrap().items[0].id, id);
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn pasted_work_urls_find_the_work_and_keep_provider_ids_separate() {
         ("https://creator.fanbox.cc/posts/123", fanbox),
         ("url:https://www.fanbox.cc/@creator/posts/123", fanbox),
     ] {
-        let result = db.search_downloads_v2(&params(url)).unwrap();
+        let result = db.search_downloads(&params(url)).unwrap();
         assert_eq!(
             result.items.iter().map(|item| item.id).collect::<Vec<_>>(),
             vec![expected],
@@ -160,7 +160,7 @@ fn acquisition_and_revision_filters_distinguish_available_pending_and_saved_edit
     let mut query = params("");
     query.acquisition_filter = Some("complete".into());
     let ids = db
-        .search_downloads_v2(&query)
+        .search_downloads(&query)
         .unwrap()
         .items
         .into_iter()
@@ -169,11 +169,11 @@ fn acquisition_and_revision_filters_distinguish_available_pending_and_saved_edit
     assert_eq!(ids, HashSet::from([history, pending]));
     assert!(!ids.contains(&held));
     query.revision_filter = Some("pending_revision".into());
-    assert_eq!(db.search_downloads_v2(&query).unwrap().items[0].id, pending);
+    assert_eq!(db.search_downloads(&query).unwrap().items[0].id, pending);
     query.revision_filter = Some("saved_revisions".into());
-    assert_eq!(db.search_downloads_v2(&query).unwrap().items[0].id, history);
+    assert_eq!(db.search_downloads(&query).unwrap().items[0].id, history);
     query.favorite = Some(false);
-    assert!(db.search_downloads_v2(&query).unwrap().items.is_empty());
+    assert!(db.search_downloads(&query).unwrap().items.is_empty());
 }
 
 #[test]
@@ -1647,8 +1647,8 @@ fn temp_paths() -> (TempRoot, PathBuf, PathBuf) {
     (guard, root, storage)
 }
 
-fn params(query: &str) -> SearchV2Params {
-    SearchV2Params {
+fn params(query: &str) -> SearchParams {
+    SearchParams {
         text: None,
         query: Some(query.to_string()),
         source: None,
@@ -1692,8 +1692,8 @@ fn params(query: &str) -> SearchV2Params {
     }
 }
 
-fn v2_params(query: Option<&str>, limit: i64, cursor: Option<String>) -> SearchV2Params {
-    SearchV2Params {
+fn paged_params(query: Option<&str>, limit: i64, cursor: Option<String>) -> SearchParams {
+    SearchParams {
         text: None,
         query: query.map(str::to_string),
         source: None,
@@ -1869,10 +1869,10 @@ fn saved_asset_audit_backfills_legacy_archives_without_changing_sources_or_decis
             .unwrap(),
         None
     );
-    let mut params = v2_params(None, 20, None);
+    let mut params = paged_params(None, 20, None);
     params.acquisition_filter = Some("incomplete".into());
     assert_eq!(
-        db.search_downloads_v2(&params)
+        db.search_downloads(&params)
             .unwrap()
             .items
             .iter()
@@ -2342,12 +2342,12 @@ fn historical_search_is_opt_in_and_groups_saved_revisions_by_work() {
     }
     db.reindex_download(download_id).unwrap();
 
-    let current_only = db.search_downloads_v2(&params("旧版限定語")).unwrap();
+    let current_only = db.search_downloads(&params("旧版限定語")).unwrap();
     assert!(current_only.items.is_empty());
 
     let mut with_history = params("旧版限定語");
     with_history.version_scope = Some("all".to_string());
-    let historical = db.search_downloads_v2(&with_history).unwrap();
+    let historical = db.search_downloads(&with_history).unwrap();
     assert_eq!(historical.items.len(), 1);
     assert_eq!(historical.items[0].id, download_id);
     assert_eq!(historical.items[0].matched_version, Some(1));
@@ -2369,7 +2369,7 @@ fn historical_search_is_opt_in_and_groups_saved_revisions_by_work() {
     let mut historical_revised_only = with_history.clone();
     historical_revised_only.revision_filter = Some("revised".to_string());
     assert_eq!(
-        db.search_downloads_v2(&historical_revised_only)
+        db.search_downloads(&historical_revised_only)
             .unwrap()
             .items
             .len(),
@@ -2377,7 +2377,7 @@ fn historical_search_is_opt_in_and_groups_saved_revisions_by_work() {
     );
     historical_revised_only.revision_filter = Some("first_version".to_string());
     assert!(db
-        .search_downloads_v2(&historical_revised_only)
+        .search_downloads(&historical_revised_only)
         .unwrap()
         .items
         .is_empty());
@@ -2385,13 +2385,13 @@ fn historical_search_is_opt_in_and_groups_saved_revisions_by_work() {
     // The same historical match set must survive an explicit SQL-owned sort.
     // Otherwise choosing title/date ordering would silently lose old versions.
     with_history.sort_by = Some("title".to_string());
-    let sorted = db.search_downloads_v2(&with_history).unwrap();
+    let sorted = db.search_downloads(&with_history).unwrap();
     assert_eq!(sorted.items.len(), 1);
     assert_eq!(sorted.items[0].matched_version, Some(1));
 
     let mut current_match = params("新版限定語");
     current_match.version_scope = Some("all".to_string());
-    let current = db.search_downloads_v2(&current_match).unwrap();
+    let current = db.search_downloads(&current_match).unwrap();
     assert_eq!(current.items.len(), 1);
     assert_eq!(current.items[0].matched_version, None);
 }
@@ -2491,13 +2491,13 @@ fn asset_kind_filter_and_index_describe_only_the_current_revision() {
     })
     .unwrap();
 
-    let mut images = v2_params(None, 20, None);
+    let mut images = paged_params(None, 20, None);
     images.asset_filter = Some("has_images".to_string());
-    assert!(db.search_downloads_v2(&images).unwrap().items.is_empty());
-    let mut files = v2_params(None, 20, None);
+    assert!(db.search_downloads(&images).unwrap().items.is_empty());
+    let mut files = paged_params(None, 20, None);
     files.asset_filter = Some("has_files".to_string());
     assert_eq!(
-        db.search_downloads_v2(&files).unwrap().items[0].id,
+        db.search_downloads(&files).unwrap().items[0].id,
         download_id
     );
 
@@ -4399,11 +4399,11 @@ fn asset_and_version_sorts_support_both_directions() {
     }
 
     for key in ["asset_count", "current_version"] {
-        let mut search = v2_params(None, 20, None);
+        let mut search = paged_params(None, 20, None);
         search.sort_by = Some(key.to_string());
         search.sort_order = Some("asc".to_string());
         assert_eq!(
-            db.search_downloads_v2(&search)
+            db.search_downloads(&search)
                 .unwrap()
                 .items
                 .iter()
@@ -4415,7 +4415,7 @@ fn asset_and_version_sorts_support_both_directions() {
 
         search.sort_order = Some("desc".to_string());
         assert_eq!(
-            db.search_downloads_v2(&search)
+            db.search_downloads(&search)
                 .unwrap()
                 .items
                 .iter()
@@ -4427,11 +4427,11 @@ fn asset_and_version_sorts_support_both_directions() {
 
         // The same order must survive the disk-backed text-search path rather
         // than only working for an unsearched library listing.
-        let mut lexical = v2_params(Some("本文"), 20, None);
+        let mut lexical = paged_params(Some("本文"), 20, None);
         lexical.sort_by = Some(key.to_string());
         lexical.sort_order = Some("asc".to_string());
         assert_eq!(
-            db.search_downloads_v2(&lexical)
+            db.search_downloads(&lexical)
                 .unwrap()
                 .items
                 .iter()
@@ -4540,7 +4540,7 @@ fn bulk_search_collection_crosses_the_former_single_page_boundary() {
         );
     }
 
-    let mut selection = v2_params(None, 1, None);
+    let mut selection = paged_params(None, 1, None);
     selection.offset = Some(9);
     let snapshot = db
         .collect_search_match_snapshot(&selection, SIMULATED_LEGACY_CAP as i64)
@@ -4577,7 +4577,7 @@ fn bulk_search_snapshot_updates_and_deletes_without_retaining_all_ids() {
         );
     }
 
-    let selection = v2_params(None, 3, None);
+    let selection = paged_params(None, 3, None);
     let watched = db.set_watch_updates_for_search(&selection, true).unwrap();
     assert_eq!(watched.matched_count, MATCHES as i64);
     assert_eq!(watched.changed_count, MATCHES as i64);
@@ -4730,12 +4730,12 @@ fn same_name_author_filter_composes_with_source() {
         )
         .unwrap();
 
-    let fanbox_only = SearchV2Params {
+    let fanbox_only = SearchParams {
         source: Some("fanbox".to_string()),
         authors_include: Some(vec!["同名作者".to_string()]),
-        ..v2_params(None, 20, None)
+        ..paged_params(None, 20, None)
     };
-    let result = db.search_downloads_v2(&fanbox_only).unwrap();
+    let result = db.search_downloads(&fanbox_only).unwrap();
     assert_eq!(result.items.len(), 1);
     assert_eq!(result.items[0].source, "fanbox");
     assert_eq!(result.items[0].title, "FANBOXの作品");
@@ -4880,7 +4880,7 @@ fn lexical_cursor_reaches_every_match_beyond_one_thousand_results() {
     let mut seen = HashSet::new();
     let mut checked_native_cursor = false;
     loop {
-        let result = db.search_downloads_v2(&request).unwrap();
+        let result = db.search_downloads(&request).unwrap();
         assert_eq!(result.total_estimate, Some(ITEM_COUNT as i64));
         for item in result.items {
             assert!(
@@ -4943,7 +4943,7 @@ fn lexical_search_after_does_not_skip_filtered_hits_inside_a_batch() {
     let mut seen = HashSet::new();
     let mut checked_internal_total = false;
     loop {
-        let result = db.search_downloads_v2(&request).unwrap();
+        let result = db.search_downloads(&request).unwrap();
         for item in result.items {
             assert!(seen.insert(item.id));
             assert!(item.tags.iter().any(|tag| tag == "対象"));
@@ -4983,7 +4983,7 @@ fn lexical_cursor_carries_the_first_page_total() {
     }
     let mut request = params("総件数カーソル");
     request.limit = Some(2);
-    let first = db.search_downloads_v2(&request).unwrap();
+    let first = db.search_downloads(&request).unwrap();
     assert_eq!(first.total_estimate, Some(7));
     let decoded = decode_cursor(first.next_cursor.as_deref()).unwrap();
     assert_eq!(decoded.total_estimate, Some(7));
@@ -4991,7 +4991,7 @@ fn lexical_cursor_carries_the_first_page_total() {
     assert!(decoded.snapshot_id.is_some());
 
     request.cursor = first.next_cursor;
-    let second = db.search_downloads_v2(&request).unwrap();
+    let second = db.search_downloads(&request).unwrap();
     assert_eq!(second.total_estimate, Some(7));
 }
 
@@ -5021,7 +5021,7 @@ fn lexical_cursor_survives_equal_score_segment_merge() {
 
     let mut request = params("同点マージ境界");
     request.limit = Some(17);
-    let first = db.search_downloads_v2(&request).unwrap();
+    let first = db.search_downloads(&request).unwrap();
     let mut seen = first
         .items
         .iter()
@@ -5034,7 +5034,7 @@ fn lexical_cursor_survives_equal_score_segment_merge() {
     let (_, after) = super::super::tantivy_index::optimize_segments(&storage).unwrap();
     assert_eq!(after, 1);
     while request.cursor.is_some() {
-        let page = db.search_downloads_v2(&request).unwrap();
+        let page = db.search_downloads(&request).unwrap();
         for item in &page.items {
             assert!(seen.insert(item.id), "duplicate id {}", item.id);
         }
@@ -5114,7 +5114,7 @@ fn ranked_snapshot_cursor_expires_after_library_or_index_generation_changes() {
     }
     let mut request = params("世代固定検索");
     request.limit = Some(2);
-    let first = db.search_downloads_v2(&request).unwrap();
+    let first = db.search_downloads(&request).unwrap();
     let cursor = first.next_cursor.expect("first page cursor");
 
     insert_download(
@@ -5127,14 +5127,14 @@ fn ranked_snapshot_cursor_expires_after_library_or_index_generation_changes() {
         "世代固定検索の本文",
     );
     request.cursor = Some(cursor);
-    let error = db.search_downloads_v2(&request).unwrap_err();
+    let error = db.search_downloads(&request).unwrap_err();
     assert!(
         error.contains("expired") || error.contains("invalidated"),
         "a cursor must never continue against a newly ranked generation: {error}"
     );
 
     request.cursor = None;
-    let restarted = db.search_downloads_v2(&request).unwrap();
+    let restarted = db.search_downloads(&request).unwrap();
     assert_eq!(restarted.total_estimate, Some(6));
 }
 
@@ -5161,7 +5161,7 @@ fn search_index_optimization_reduces_segments_without_changing_results() {
     );
     let mut search_params = params("索引統合検証");
     search_params.limit = Some(30);
-    let before = db.search_downloads_v2(&search_params).unwrap();
+    let before = db.search_downloads(&search_params).unwrap();
     let before_ids = before
         .items
         .iter()
@@ -5173,7 +5173,7 @@ fn search_index_optimization_reduces_segments_without_changing_results() {
         super::super::tantivy_index::optimize_segments(&storage).unwrap();
     assert_eq!(reported_before, before_segments);
     assert_eq!(reported_after, 1);
-    let after = db.search_downloads_v2(&search_params).unwrap();
+    let after = db.search_downloads(&search_params).unwrap();
     let after_ids = after
         .items
         .iter()
@@ -5922,19 +5922,16 @@ fn entity_facets_do_not_split_one_identity_when_snapshot_names_differ() {
     // An old saved search still names the former snapshot. Resolve that name
     // through the stable identity so it keeps returning all of the author's
     // works after a rename.
-    let mut old_name_filter = v2_params(None, 20, None);
+    let mut old_name_filter = paged_params(None, 20, None);
     old_name_filter.authors_include = Some(vec!["旧作者名".to_string()]);
     assert_eq!(
-        db.search_downloads_v2(&old_name_filter)
-            .unwrap()
-            .items
-            .len(),
+        db.search_downloads(&old_name_filter).unwrap().items.len(),
         2
     );
     old_name_filter.authors_include = None;
     old_name_filter.authors_exclude = Some(vec!["旧作者名".to_string()]);
     assert!(db
-        .search_downloads_v2(&old_name_filter)
+        .search_downloads(&old_name_filter)
         .unwrap()
         .items
         .is_empty());
@@ -6047,7 +6044,7 @@ fn entity_facets_narrow_to_the_library_filters() {
         2
     );
 
-    let by_tag = SearchV2Params {
+    let by_tag = SearchParams {
         tags_include: Some(vec!["日常".to_string()]),
         ..params("")
     };
@@ -6080,7 +6077,7 @@ fn entity_facets_narrow_to_the_library_filters() {
         .unwrap();
     assert!(named.is_empty());
 
-    let favourites_only = SearchV2Params {
+    let favourites_only = SearchParams {
         favorite: Some(true),
         ..params("")
     };
@@ -6173,7 +6170,7 @@ fn smart_search_ranks_metadata_over_body_and_supports_body_search() {
     );
 
     let results = db
-        .search_downloads_v2(&params("秘密キーワード"))
+        .search_downloads(&params("秘密キーワード"))
         .unwrap()
         .items;
     assert_eq!(results.first().map(|dl| dl.id), Some(title_hit));
@@ -6184,11 +6181,11 @@ fn smart_search_ranks_metadata_over_body_and_supports_body_search() {
         .map(|dl| !dl.match_highlights.is_empty())
         .unwrap_or(false));
 
-    let partial = db.search_downloads_v2(&params("秘密キ")).unwrap().items;
+    let partial = db.search_downloads(&params("秘密キ")).unwrap().items;
     assert!(partial.iter().any(|dl| dl.id == body_only));
 
     let excluded = db
-        .search_downloads_v2(&params("秘密 -タイトル"))
+        .search_downloads(&params("秘密 -タイトル"))
         .unwrap()
         .items;
     assert!(excluded.iter().any(|dl| dl.id == body_only));
@@ -6196,7 +6193,7 @@ fn smart_search_ranks_metadata_over_body_and_supports_body_search() {
 }
 
 #[test]
-fn search_v2_uses_cursor_without_duplicate_pages() {
+fn search_uses_cursor_without_duplicate_pages() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
@@ -6204,13 +6201,13 @@ fn search_v2_uses_cursor_without_duplicate_pages() {
     let second = insert_download(&db, &storage, "2", "二番目", "作者B", &["日常"], "本文B");
     let third = insert_download(&db, &storage, "3", "三番目", "作者C", &["日常"], "本文C");
 
-    let page1 = db.search_downloads_v2(&v2_params(None, 2, None)).unwrap();
+    let page1 = db.search_downloads(&paged_params(None, 2, None)).unwrap();
     assert_eq!(page1.items.len(), 2);
     assert!(page1.next_cursor.is_some());
     assert!(page1.next_cursor.as_deref().unwrap().starts_with("k:"));
 
     let page2 = db
-        .search_downloads_v2(&v2_params(None, 2, page1.next_cursor.clone()))
+        .search_downloads(&paged_params(None, 2, page1.next_cursor.clone()))
         .unwrap();
     let mut seen = page1.items.iter().map(|dl| dl.id).collect::<Vec<_>>();
     seen.extend(page2.items.iter().map(|dl| dl.id));
@@ -6223,7 +6220,7 @@ fn search_v2_uses_cursor_without_duplicate_pages() {
     assert!(page2.next_cursor.is_none());
 
     let query = db
-        .search_downloads_v2(&v2_params(Some("番目"), 10, None))
+        .search_downloads(&paged_params(Some("番目"), 10, None))
         .unwrap();
     assert_eq!(query.search_meta.engine, "tantivy-lexical");
     assert_eq!(query.items.len(), 3);
@@ -6364,7 +6361,7 @@ fn exact_author_intent_excludes_other_authors_that_only_mention_the_name() {
         "本文で明確な作者名について触れている",
     );
 
-    let result = db.search_downloads_v2(&params("明確な作者名")).unwrap();
+    let result = db.search_downloads(&params("明確な作者名")).unwrap();
     let ids = result
         .items
         .iter()
@@ -6408,9 +6405,7 @@ fn series_token_filters_by_series_relation() {
     db.upsert_download_series(in_series, "pixiv", "s-100", "構造化シリーズ", Some(1))
         .unwrap();
 
-    let result = db
-        .search_downloads_v2(&params("series:pixiv:s-100"))
-        .unwrap();
+    let result = db.search_downloads(&params("series:pixiv:s-100")).unwrap();
     assert_eq!(
         result.items.iter().map(|dl| dl.id).collect::<Vec<_>>(),
         vec![in_series]
@@ -6418,14 +6413,14 @@ fn series_token_filters_by_series_relation() {
     assert!(!result.items.iter().any(|dl| dl.id == outside));
 
     let by_title = db
-        .search_downloads_v2(&params("series:\"構造化シリーズ\""))
+        .search_downloads(&params("series:\"構造化シリーズ\""))
         .unwrap();
     assert_eq!(
         by_title.items.iter().map(|dl| dl.id).collect::<Vec<_>>(),
         vec![in_series]
     );
 
-    let legacy_suggestion_value = db.search_downloads_v2(&params("pixiv:s-100")).unwrap();
+    let legacy_suggestion_value = db.search_downloads(&params("pixiv:s-100")).unwrap();
     assert_eq!(
         legacy_suggestion_value
             .items
@@ -6435,7 +6430,7 @@ fn series_token_filters_by_series_relation() {
         vec![in_series]
     );
 
-    let exact_title = db.search_downloads_v2(&params("構造化シリーズ")).unwrap();
+    let exact_title = db.search_downloads(&params("構造化シリーズ")).unwrap();
     assert_eq!(
         exact_title.items.iter().map(|dl| dl.id).collect::<Vec<_>>(),
         vec![in_series]
@@ -6516,10 +6511,10 @@ fn structured_series_and_date_filters_are_applied_to_library_results() {
         }
     }
 
-    let mut in_series = v2_params(None, 20, None);
+    let mut in_series = paged_params(None, 20, None);
     in_series.series_filter = Some("in_series".to_string());
     assert_eq!(
-        db.search_downloads_v2(&in_series)
+        db.search_downloads(&in_series)
             .unwrap()
             .items
             .iter()
@@ -6528,10 +6523,10 @@ fn structured_series_and_date_filters_are_applied_to_library_results() {
         vec![serialized]
     );
 
-    let mut standalone = v2_params(None, 20, None);
+    let mut standalone = paged_params(None, 20, None);
     standalone.series_filter = Some("standalone".to_string());
     assert_eq!(
-        db.search_downloads_v2(&standalone)
+        db.search_downloads(&standalone)
             .unwrap()
             .items
             .iter()
@@ -6540,12 +6535,12 @@ fn structured_series_and_date_filters_are_applied_to_library_results() {
         HashSet::from([standalone_in_range, standalone_outside_range])
     );
 
-    let mut created_in_range = v2_params(None, 20, None);
+    let mut created_in_range = paged_params(None, 20, None);
     created_in_range.date_field = Some("source_created_at".to_string());
     created_in_range.date_from = Some("2026-01-01".to_string());
     created_in_range.date_to = Some("2026-06-30".to_string());
     assert_eq!(
-        db.search_downloads_v2(&created_in_range)
+        db.search_downloads(&created_in_range)
             .unwrap()
             .items
             .iter()
@@ -6554,11 +6549,11 @@ fn structured_series_and_date_filters_are_applied_to_library_results() {
         HashSet::from([serialized, standalone_in_range])
     );
 
-    let mut updated_from = v2_params(None, 20, None);
+    let mut updated_from = paged_params(None, 20, None);
     updated_from.date_field = Some("source_updated_at".to_string());
     updated_from.date_from = Some("2026-08-01".to_string());
     assert_eq!(
-        db.search_downloads_v2(&updated_from)
+        db.search_downloads(&updated_from)
             .unwrap()
             .items
             .iter()
@@ -6623,7 +6618,7 @@ fn revision_edit_and_cover_filters_are_applied_to_library_results() {
         ("cover", "has_cover", revised),
         ("cover", "no_cover", first_version),
     ] {
-        let mut search = v2_params(None, 20, None);
+        let mut search = paged_params(None, 20, None);
         match field {
             "revision" => search.revision_filter = Some(value.to_string()),
             "edit" => search.edit_filter = Some(value.to_string()),
@@ -6631,7 +6626,7 @@ fn revision_edit_and_cover_filters_are_applied_to_library_results() {
             _ => unreachable!(),
         }
         assert_eq!(
-            db.search_downloads_v2(&search)
+            db.search_downloads(&search)
                 .unwrap()
                 .items
                 .iter()
@@ -6642,11 +6637,11 @@ fn revision_edit_and_cover_filters_are_applied_to_library_results() {
         );
     }
 
-    let mut numeric = v2_params(None, 20, None);
+    let mut numeric = paged_params(None, 20, None);
     numeric.min_asset_count = Some(5);
     numeric.max_file_size_bytes = Some(12 * 1024 * 1024);
     assert_eq!(
-        db.search_downloads_v2(&numeric)
+        db.search_downloads(&numeric)
             .unwrap()
             .items
             .iter()
@@ -6659,7 +6654,7 @@ fn revision_edit_and_cover_filters_are_applied_to_library_results() {
     numeric.max_asset_count = Some(2);
     numeric.max_file_size_bytes = Some(2 * 1024 * 1024);
     assert_eq!(
-        db.search_downloads_v2(&numeric)
+        db.search_downloads(&numeric)
             .unwrap()
             .items
             .iter()
@@ -6685,14 +6680,14 @@ fn japanese_reading_kana_and_romaji_match_same_work() {
     );
 
     for query in ["てすと", "テスト", "tesuto", "しょうせつ", "shousetsu"] {
-        let result = db.search_downloads_v2(&params(query)).unwrap();
+        let result = db.search_downloads(&params(query)).unwrap();
         assert!(
             result.items.iter().any(|dl| dl.id == target),
             "query {query} should match the target"
         );
     }
 
-    let romaji = db.search_downloads_v2(&params("shousetsu")).unwrap();
+    let romaji = db.search_downloads(&params("shousetsu")).unwrap();
     let target_row = romaji.items.iter().find(|dl| dl.id == target).unwrap();
     assert!(target_row.score_reasons.iter().any(|reason| {
         matches!(
@@ -6721,7 +6716,7 @@ fn smart_search_does_not_add_semantic_reasons() {
         &["物語"],
         "本文にも小説という語を含みます。",
     );
-    let result = db.search_downloads_v2(&params("novel")).unwrap();
+    let result = db.search_downloads(&params("novel")).unwrap();
     let target_row = result.items.iter().find(|dl| dl.id == target).unwrap();
 
     assert_eq!(result.search_meta.engine, "tantivy-lexical");
@@ -6917,11 +6912,11 @@ fn an_author_page_can_show_their_series_and_tags_and_drill_into_both() {
 
     // Drilling in: the author's works carrying one of their tags. Author and
     // tag filters have to compose, or a tag on this page cannot be followed.
-    let mut params = v2_params(None, 20, None);
+    let mut params = paged_params(None, 20, None);
     params.person_source = Some("pixiv".to_string());
     params.person_key = Some("aoba".to_string());
     params.tags_include = Some(vec!["ファンタジー".to_string()]);
-    let page = db.search_downloads_v2(&params).unwrap();
+    let page = db.search_downloads(&params).unwrap();
     let ids = page.items.iter().map(|item| item.id).collect::<Vec<_>>();
     assert_eq!(ids.len(), 2);
     assert!(ids.contains(&first) && ids.contains(&second));
@@ -7255,11 +7250,11 @@ fn numbered_pages_work_for_an_ordering_and_are_refused_for_relevance() {
     }
 
     let page_of = |offset: i64| {
-        let mut params = v2_params(None, 3, None);
+        let mut params = paged_params(None, 3, None);
         params.sort_by = Some("title".to_string());
         params.sort_order = Some("asc".to_string());
         params.offset = Some(offset);
-        db.search_downloads_v2(&params)
+        db.search_downloads(&params)
             .unwrap()
             .items
             .iter()
@@ -7286,8 +7281,8 @@ fn numbered_pages_work_for_an_ordering_and_are_refused_for_relevance() {
     let mut without = first.clone();
     without.offset = None;
     assert_eq!(
-        db.search_downloads_v2(&relevance).unwrap().items.len(),
-        db.search_downloads_v2(&without).unwrap().items.len(),
+        db.search_downloads(&relevance).unwrap().items.len(),
+        db.search_downloads(&without).unwrap().items.len(),
         "an offset must be ignored rather than silently shifting a relevance page"
     );
 }
@@ -7319,16 +7314,16 @@ fn shelf_counts_ignore_reading_positions_for_works_that_no_longer_exist() {
     );
 
     // The same list used as a filter returns exactly those works.
-    let mut params = v2_params(None, 20, None);
+    let mut params = paged_params(None, 20, None);
     params.ids_include = Some(vec![first, 999_999]);
-    let page = db.search_downloads_v2(&params).unwrap();
+    let page = db.search_downloads(&params).unwrap();
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].id, first);
 
     // An empty membership list means an empty shelf, never the whole library.
-    let mut none = v2_params(None, 20, None);
+    let mut none = paged_params(None, 20, None);
     none.ids_include = Some(Vec::new());
-    assert_eq!(db.search_downloads_v2(&none).unwrap().items.len(), 0);
+    assert_eq!(db.search_downloads(&none).unwrap().items.len(), 0);
 
     // The revised shelf combines accepted version history and a pending
     // provider rewrite without counting either work twice.
@@ -7350,10 +7345,10 @@ fn shelf_counts_ignore_reading_positions_for_works_that_no_longer_exist() {
     })
     .unwrap();
     assert_eq!(db.get_library_shelf_counts(&[]).unwrap().revised, 2);
-    let mut revised = v2_params(None, 20, None);
+    let mut revised = paged_params(None, 20, None);
     revised.revision_filter = Some("revised".into());
     let revised_ids: HashSet<_> = db
-        .search_downloads_v2(&revised)
+        .search_downloads(&revised)
         .unwrap()
         .items
         .into_iter()
@@ -7382,22 +7377,22 @@ fn library_attention_filters_only_saved_held_works() {
     }
     assert_eq!(db.count_deferred_update_candidates().unwrap(), 2);
     assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 1);
-    let mut params = v2_params(None, 20, None);
+    let mut params = paged_params(None, 20, None);
     params.acquisition_filter = Some("attention".into());
-    assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, saved);
+    assert_eq!(db.search_downloads(&params).unwrap().items[0].id, saved);
     params.acquisition_filter = Some("incomplete".into());
-    assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, saved);
+    assert_eq!(db.search_downloads(&params).unwrap().items[0].id, saved);
     db.set_update_candidate_status("pixiv", "held-saved", "dismissed")
         .unwrap();
     params.acquisition_filter = Some("dismissed".into());
-    assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, saved);
+    assert_eq!(db.search_downloads(&params).unwrap().items[0].id, saved);
     // 非表示にしたら要確認から抜ける。一覧に残り続けて件数が減らないと、外した
     // 意味がない。何も無い作品（要確認なし）とも混ぜない。
     assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 0);
     for filter in ["attention", "incomplete", "complete"] {
         params.acquisition_filter = Some(filter.into());
         assert!(
-            db.search_downloads_v2(&params).unwrap().items.is_empty(),
+            db.search_downloads(&params).unwrap().items.is_empty(),
             "{filter}"
         );
     }
@@ -7632,11 +7627,11 @@ fn historical_unavailable_work_stays_searchable_until_a_successful_recheck() {
     drop(db);
     let db = Database::open(&db_path, &storage).unwrap();
     assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 1);
-    let mut params = v2_params(None, 20, None);
+    let mut params = paged_params(None, 20, None);
     params.acquisition_filter = Some("attention".into());
-    assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, id);
+    assert_eq!(db.search_downloads(&params).unwrap().items[0].id, id);
     params.acquisition_filter = Some("unavailable".into());
-    assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, id);
+    assert_eq!(db.search_downloads(&params).unwrap().items[0].id, id);
     db.clear_resolved_unavailable_candidates("pixiv", &["unavailable-history".into()])
         .unwrap();
     drop(db);
@@ -7873,7 +7868,7 @@ fn synonyms_do_not_match_every_work_through_its_source_url() {
         "本文",
     );
 
-    let hits = db.search_downloads_v2(&params("物語")).unwrap();
+    let hits = db.search_downloads(&params("物語")).unwrap();
     let ids = hits.items.iter().map(|item| item.id).collect::<Vec<_>>();
     assert_eq!(
         ids,
@@ -7883,14 +7878,14 @@ fn synonyms_do_not_match_every_work_through_its_source_url() {
 
     // The URL itself is still findable: pasting one has to reach its work.
     let pasted = db
-        .search_downloads_v2(&params("https://www.pixiv.net/novel/show.php?id=111"))
+        .search_downloads(&params("https://www.pixiv.net/novel/show.php?id=111"))
         .unwrap();
     assert!(
         pasted.items.iter().any(|item| item.source_id == "111"),
         "a pasted source URL must still find its work"
     );
     // As must the bare id, which is what the URL actually identifies.
-    let by_id = db.search_downloads_v2(&params("222")).unwrap();
+    let by_id = db.search_downloads(&params("222")).unwrap();
     assert!(by_id.items.iter().any(|item| item.source_id == "222"));
 }
 
@@ -7941,7 +7936,7 @@ fn changing_the_index_format_requeues_the_whole_library() {
     assert_eq!(status.pending_downloads, 0);
     assert!(status.is_complete);
     // And the work is genuinely searchable again, not merely marked done.
-    let found = db.search_downloads_v2(&params("書式変更")).unwrap();
+    let found = db.search_downloads(&params("書式変更")).unwrap();
     assert_eq!(found.items.len(), 1);
 }
 
@@ -7958,12 +7953,12 @@ fn title_sort_ignores_spaces_before_the_source_title() {
         insert_download(&db, &storage, source_id, title, "作者", &["題"], "本文");
     }
 
-    let mut sorted = v2_params(None, 2, None);
+    let mut sorted = paged_params(None, 2, None);
     sorted.sort_by = Some("title".to_string());
     sorted.sort_order = Some("asc".to_string());
     let mut seen = Vec::new();
     for _ in 0..3 {
-        let page = db.search_downloads_v2(&sorted).unwrap();
+        let page = db.search_downloads(&sorted).unwrap();
         seen.extend(page.items.iter().map(|item| item.title.clone()));
         sorted.cursor = page.next_cursor;
         if sorted.cursor.is_none() {
@@ -8019,7 +8014,7 @@ fn sorted_search_orders_matches_by_column_and_pages_without_gaps() {
     for _ in 0..5 {
         let mut page_params = sorted.clone();
         page_params.cursor = cursor.clone();
-        let page = db.search_downloads_v2(&page_params).unwrap();
+        let page = db.search_downloads(&page_params).unwrap();
         assert_eq!(page.search_meta.engine, "tantivy-sorted");
         assert_eq!(page.total_estimate, Some(5));
         seen.extend(page.items.iter().map(|item| item.title.clone()));
@@ -8042,7 +8037,7 @@ fn sorted_search_orders_matches_by_column_and_pages_without_gaps() {
     );
 
     // Without an explicit sort the same query still ranks by relevance.
-    let relevance = db.search_downloads_v2(&params("花暦")).unwrap();
+    let relevance = db.search_downloads(&params("花暦")).unwrap();
     assert_ne!(relevance.search_meta.engine, "tantivy-sorted");
 }
 
@@ -8073,7 +8068,7 @@ fn sorted_search_respects_library_filters() {
     let mut sorted = params("花暦");
     sorted.sort_by = Some("downloaded_at".to_string());
     sorted.favorite = Some(true);
-    let page = db.search_downloads_v2(&sorted).unwrap();
+    let page = db.search_downloads(&sorted).unwrap();
     assert_eq!(page.total_estimate, Some(1));
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].id, favorite);
@@ -8107,7 +8102,7 @@ fn sorted_search_uses_bounded_temp_table_batches_and_carries_total() {
     request.sort_by = Some("title".to_string());
     request.sort_order = Some("asc".to_string());
     request.limit = Some(31);
-    let first = db.search_downloads_v2(&request).unwrap();
+    let first = db.search_downloads(&request).unwrap();
     assert_eq!(first.total_estimate, Some(MATCHES as i64));
     assert_eq!(first.items.len(), 31);
     let (_, _, cache_after_first) = db.query_cache_stats();
@@ -8115,7 +8110,7 @@ fn sorted_search_uses_bounded_temp_table_batches_and_carries_total() {
     let cursor = decode_cursor(first.next_cursor.as_deref()).unwrap();
     assert_eq!(cursor.total_estimate, Some(MATCHES as i64));
     request.cursor = first.next_cursor;
-    let second = db.search_downloads_v2(&request).unwrap();
+    let second = db.search_downloads(&request).unwrap();
     assert_eq!(second.total_estimate, Some(MATCHES as i64));
     assert!(first
         .items
@@ -8134,7 +8129,7 @@ fn sorted_search_uses_bounded_temp_table_batches_and_carries_total() {
         "流し込み検索の本文",
     );
     request.cursor = None;
-    let after_insert = db.search_downloads_v2(&request).unwrap();
+    let after_insert = db.search_downloads(&request).unwrap();
     assert_eq!(after_insert.total_estimate, Some(MATCHES as i64 + 1));
     let (_, _, cache_after_insert) = db.query_cache_stats();
     assert!(
@@ -8176,7 +8171,7 @@ fn multi_term_search_requires_each_term() {
         "本文",
     );
 
-    let result = db.search_downloads_v2(&params("alpha beta")).unwrap();
+    let result = db.search_downloads(&params("alpha beta")).unwrap();
     assert!(result.items.iter().any(|item| item.id == target));
     assert!(!result.items.iter().any(|item| item.id == alpha_only));
     assert!(!result.items.iter().any(|item| item.id == beta_only));
@@ -8200,7 +8195,7 @@ fn semantic_mode_reports_work_level_similarity_without_a_false_body_match() {
     let mut semantic_params = params("novel");
     semantic_params.search_mode = Some("semantic".to_string());
 
-    let result = db.search_downloads_v2(&semantic_params).unwrap();
+    let result = db.search_downloads(&semantic_params).unwrap();
     let target_row = result.items.iter().find(|dl| dl.id == target).unwrap();
     assert!(target_row
         .score_reasons
@@ -8344,10 +8339,10 @@ fn library_browsing_stays_fast_on_a_large_library() {
         .unwrap_or(0);
 
     // The library browses with an empty query, which is the keyset path.
-    let mut first = v2_params(None, 60, None);
+    let mut first = paged_params(None, 60, None);
     first.projection = Some("libraryGallery".to_string());
     let started = Instant::now();
-    let page1 = db.search_downloads_v2(&first).unwrap();
+    let page1 = db.search_downloads(&first).unwrap();
     let first_elapsed = started.elapsed();
     assert_eq!(page1.items.len(), 60);
     assert_eq!(page1.total_estimate, Some(seeded as i64));
@@ -8356,7 +8351,7 @@ fn library_browsing_stays_fast_on_a_large_library() {
         "a large library must expose more pages"
     );
     let started = Instant::now();
-    let warm_page1 = db.search_downloads_v2(&first).unwrap();
+    let warm_page1 = db.search_downloads(&first).unwrap();
     let warm_first_elapsed = started.elapsed();
     assert_eq!(warm_page1.items.len(), page1.items.len());
 
@@ -8364,10 +8359,10 @@ fn library_browsing_stays_fast_on_a_large_library() {
     let mut cursor = page1.next_cursor.clone();
     let mut deepest = Duration::ZERO;
     for _ in 0..40 {
-        let mut page_params = v2_params(None, 60, cursor.clone());
+        let mut page_params = paged_params(None, 60, cursor.clone());
         page_params.projection = Some("libraryGallery".to_string());
         let started = Instant::now();
-        let page = db.search_downloads_v2(&page_params).unwrap();
+        let page = db.search_downloads(&page_params).unwrap();
         deepest = deepest.max(started.elapsed());
         cursor = page.next_cursor.clone();
         assert!(cursor.is_some(), "paging ended earlier than expected");
@@ -8603,12 +8598,12 @@ fn lexical_snapshots_scale_with_fixed_memory_batches() {
     ranked.limit = Some(60);
     ranked.projection = Some("bulk".to_string());
     let started = Instant::now();
-    let first = db.search_downloads_v2(&ranked).unwrap();
+    let first = db.search_downloads(&ranked).unwrap();
     let ranked_cold = started.elapsed();
     assert_eq!(first.total_estimate, Some(works as i64));
     ranked.cursor = first.next_cursor;
     let started = Instant::now();
-    let second = db.search_downloads_v2(&ranked).unwrap();
+    let second = db.search_downloads(&ranked).unwrap();
     let ranked_warm = started.elapsed();
     assert_eq!(second.items.len(), 60);
 
@@ -8618,12 +8613,12 @@ fn lexical_snapshots_scale_with_fixed_memory_batches() {
     sorted.sort_by = Some("title".to_string());
     sorted.sort_order = Some("asc".to_string());
     let started = Instant::now();
-    let first_sorted = db.search_downloads_v2(&sorted).unwrap();
+    let first_sorted = db.search_downloads(&sorted).unwrap();
     let sorted_cold = started.elapsed();
     assert_eq!(first_sorted.total_estimate, Some(works as i64));
     sorted.cursor = first_sorted.next_cursor;
     let started = Instant::now();
-    let second_sorted = db.search_downloads_v2(&sorted).unwrap();
+    let second_sorted = db.search_downloads(&sorted).unwrap();
     let sorted_warm = started.elapsed();
     assert_eq!(second_sorted.items.len(), 60);
 
@@ -8758,7 +8753,7 @@ fn smart_search_handles_5000_seed_items_under_target() {
     let mut search_params = params("検索性能 seed7");
     search_params.limit = Some(120);
     let started = Instant::now();
-    let result = db.search_downloads_v2(&search_params).unwrap();
+    let result = db.search_downloads(&search_params).unwrap();
     let elapsed = started.elapsed();
     eprintln!("5000-item smart search: {elapsed:?}");
 
@@ -8844,7 +8839,7 @@ fn active_edit_revision_drives_reader_and_search_body() {
     assert!(edited_reader.plain_text.contains("編集固有キーワード"));
 
     let search = db
-        .search_downloads_v2(&v2_params(Some("編集固有キーワード"), 10, None))
+        .search_downloads(&paged_params(Some("編集固有キーワード"), 10, None))
         .unwrap();
     assert_eq!(search.items.first().map(|item| item.id), Some(download_id));
 }
@@ -9337,7 +9332,7 @@ fn an_edited_title_reaches_the_library_and_the_index() {
         "読み手が直した題"
     );
     let search = db
-        .search_downloads_v2(&v2_params(Some("読み手が直した題"), 10, None))
+        .search_downloads(&paged_params(Some("読み手が直した題"), 10, None))
         .unwrap();
     assert_eq!(search.items.first().map(|item| item.id), Some(download_id));
 
@@ -9372,10 +9367,10 @@ fn edited_titles_drive_both_ordering_and_keyset_cursors() {
         let mut cursor = None;
         let mut titles = Vec::new();
         loop {
-            let mut query = v2_params(None, 1, cursor.clone());
+            let mut query = paged_params(None, 1, cursor.clone());
             query.sort_by = Some("title".to_string());
             query.sort_order = Some(order.to_string());
-            let page = db.search_downloads_v2(&query).unwrap();
+            let page = db.search_downloads(&query).unwrap();
             titles.extend(page.items.into_iter().map(|item| item.title));
             let Some(next) = page.next_cursor else { break };
             cursor = Some(next);
@@ -9400,15 +9395,15 @@ fn sql_cursor_is_rejected_when_the_filter_scope_changes() {
         .unwrap();
     }
 
-    let mut first = v2_params(None, 1, None);
+    let mut first = paged_params(None, 1, None);
     first.sort_by = Some("title".to_string());
     first.sort_order = Some("asc".to_string());
-    let stale_cursor = db.search_downloads_v2(&first).unwrap().next_cursor.unwrap();
+    let stale_cursor = db.search_downloads(&first).unwrap().next_cursor.unwrap();
 
     let mut narrowed = first;
     narrowed.cursor = Some(stale_cursor);
     narrowed.favorite = Some(true);
-    let result = db.search_downloads_v2(&narrowed).unwrap();
+    let result = db.search_downloads(&narrowed).unwrap();
     assert_eq!(
         result.items.first().map(|item| item.title.as_str()),
         Some("A")

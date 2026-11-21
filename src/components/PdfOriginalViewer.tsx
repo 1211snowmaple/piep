@@ -3,7 +3,7 @@ import { Alert, Button, Group, Loader, Modal, Stack, Text } from "@mantine/core"
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import type { PdfPageImage } from "@/services/dbApi";
-import { libraryV2RenderPdfPage } from "@/services/libraryV2Api";
+import { shelfRenderPdfPage } from "@/services/shelfApi";
 import { errorMessage } from "@/lib/format";
 
 export interface PdfOriginalTarget {
@@ -16,7 +16,7 @@ export interface PdfOriginalTarget {
 
 /** 紙面を描く。棚は、その作品の PDF の添付でなければ断る。 */
 function renderTargetPage(target: PdfOriginalTarget, page: number, width: number) {
-  return libraryV2RenderPdfPage(target.workId, target.localPath, page, width);
+  return shelfRenderPdfPage(target.workId, target.localPath, page, width);
 }
 
 /**

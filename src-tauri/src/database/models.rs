@@ -1366,7 +1366,7 @@ pub struct DownloadSeries {
 
 /// 作者・シリーズの一覧そのものにかける条件。
 ///
-/// 配下の作品にかける [`SearchV2Params`] とは層が違う。追いかけているか、
+/// 配下の作品にかける [`SearchParams`] とは層が違う。追いかけているか、
 /// 何作品以上あるか、完結しているか - どれも束ね自身の性質で、作品の側には
 /// 無い。混ぜると「監視中」が作品の話か作者の話か読めなくなる。
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1382,7 +1382,7 @@ pub struct EntityFacetScope {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SearchV2Params {
+pub struct SearchParams {
     pub text: Option<String>,
     pub query: Option<String>,
     pub source: Option<String>,
@@ -1472,7 +1472,7 @@ pub struct SearchEntityIntent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SearchV2Result {
+pub struct SearchResult {
     pub items: Vec<DownloadEntry>,
     pub next_cursor: Option<String>,
     pub total_estimate: Option<i64>,

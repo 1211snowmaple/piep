@@ -41,7 +41,7 @@ import { cancelEpubExport, exportEpubBatch, listEpubTemplates } from "@/services
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
 import type { DownloadEntry, ShelfEntry } from "@/types/library";
-import { shelfEntriesByIds } from "@/features/library/shelfV2";
+import { shelfEntriesByIds } from "@/features/library/shelf";
 import type { EpubQueueId } from "@/app/WorkspaceContext";
 import type { ExportBatchResult, ExportProgress, TemplateInfo } from "@/types/epub";
 import { getOperationJobs, startOperation, type OperationController } from "@/features/jobs/operationJobs";

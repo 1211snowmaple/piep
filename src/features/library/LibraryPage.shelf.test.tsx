@@ -5,20 +5,20 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
-import type { ShelfCard } from "@/services/libraryV2Api";
+import type { ShelfCard } from "@/services/shelfApi";
 import LibraryPage from "./LibraryPage";
 
-const v2 = vi.hoisted(() => ({
-  libraryV2Status: vi.fn(),
-  libraryV2Search: vi.fn(),
-  libraryV2SetUserState: vi.fn(),
-  libraryV2RemoveWork: vi.fn(),
+const shelfApi = vi.hoisted(() => ({
+  shelfStatus: vi.fn(),
+  shelfSearch: vi.fn(),
+  shelfSetUserState: vi.fn(),
+  shelfRemoveWork: vi.fn(),
 }));
-vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
-  ...v2,
+vi.mock("@/services/shelfApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/shelfApi")>()),
+  ...shelfApi,
 }));
-const health = vi.hoisted(() => ({ libraryV2FilterFacets: vi.fn(), libraryV2SearchFilterFacets: vi.fn() }));
+const health = vi.hoisted(() => ({ shelfFilterFacets: vi.fn(), shelfSearchFilterFacets: vi.fn() }));
 vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
   ...health,
@@ -82,11 +82,11 @@ describe("新しい棚の一覧の操作", () => {
   });
   beforeEach(() => {
     window.location.hash = "#/library";
-    v2.libraryV2Status.mockResolvedValue({ state: "ready", path: "C:/shelf" });
-    v2.libraryV2Search.mockResolvedValue({ page: { items: [], next: null, total: 2 }, intent: null, matches: [], cards: [card(1), card(2)] });
-    v2.libraryV2SetUserState.mockResolvedValue({ favorite: true, watching: false, generation: 2 });
-    v2.libraryV2RemoveWork.mockResolvedValue(undefined);
-    health.libraryV2FilterFacets.mockResolvedValue({
+    shelfApi.shelfStatus.mockResolvedValue({ state: "ready", path: "C:/shelf" });
+    shelfApi.shelfSearch.mockResolvedValue({ page: { items: [], next: null, total: 2 }, intent: null, matches: [], cards: [card(1), card(2)] });
+    shelfApi.shelfSetUserState.mockResolvedValue({ favorite: true, watching: false, generation: 2 });
+    shelfApi.shelfRemoveWork.mockResolvedValue(undefined);
+    health.shelfFilterFacets.mockResolvedValue({
       tags: [{ name: "雨", count: 2, sources: [] }],
       authors: [{ name: "作者", count: 2, sources: ["pixiv"] }],
       authorEntities: [],
@@ -108,8 +108,8 @@ describe("新しい棚の一覧の操作", () => {
     expect((await screen.findAllByText("2件")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "その他" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "お気に入りに追加" }));
-    await waitFor(() => expect(v2.libraryV2SetUserState).toHaveBeenCalledTimes(2));
-    expect(v2.libraryV2SetUserState).toHaveBeenCalledWith(card(1).id, { favorite: true });
+    await waitFor(() => expect(shelfApi.shelfSetUserState).toHaveBeenCalledTimes(2));
+    expect(shelfApi.shelfSetUserState).toHaveBeenCalledWith(card(1).id, { favorite: true });
     expect(legacy.setFlagsForIds).not.toHaveBeenCalled();
   });
 
@@ -121,7 +121,7 @@ describe("新しい棚の一覧の操作", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "棚から外す" }));
     const dialog = await screen.findByRole("dialog", { name: "選択した作品を棚から外しますか？" });
     fireEvent.click(within(dialog).getByRole("button", { name: "外す" }));
-    await waitFor(() => expect(v2.libraryV2RemoveWork).toHaveBeenCalledWith(card(2).id));
+    await waitFor(() => expect(shelfApi.shelfRemoveWork).toHaveBeenCalledWith(card(2).id));
     expect(legacy.deleteDownloads).not.toHaveBeenCalled();
   });
 
@@ -129,7 +129,7 @@ describe("新しい棚の一覧の操作", () => {
   it("絞り込みの選択肢を新しい棚から数える", async () => {
     view();
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
-    await waitFor(() => expect(health.libraryV2FilterFacets).toHaveBeenCalled());
+    await waitFor(() => expect(health.shelfFilterFacets).toHaveBeenCalled());
     expect(legacy.getFilterFacets).not.toHaveBeenCalled();
   });
 });

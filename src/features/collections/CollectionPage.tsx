@@ -41,12 +41,12 @@ import { CollectionCoverModal } from "./CollectionCoverModal";
 import { CollectionRenameModal } from "./CollectionRenameModal";
 import { collectionMemberKey, CollectionMemberList } from "./CollectionMemberList";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
-import { libraryV2ImportEditImage, type ShelfCollectionChange } from "@/services/libraryV2Api";
+import { shelfImportEditImage, type ShelfCollectionChange } from "@/services/shelfApi";
 import {
   editShelfCollection,
   invalidateShelf,
   shelfCollection,
-} from "@/features/library/shelfV2";
+} from "@/features/library/shelf";
 
 function workKey(work: { source: string; sourceId: string }): WorkKey {
   return { source: work.source, sourceId: work.sourceId };
@@ -88,7 +88,7 @@ export default function CollectionPage() {
   const [formOpened, form] = useDisclosure(false);
   const [renameAssist, setRenameAssist] = useState(false);
   // 棚から出す（プレビューは見本）。
-  const queryKey = ["library-v2-collection", collectionId];
+  const queryKey = ["shelf-collection", collectionId];
   const collectionQuery = useQuery({
     queryKey,
     queryFn: () => runtime ? shelfCollection(collectionId!) : Promise.resolve(getDemoCollection(collectionId!)),
@@ -404,7 +404,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, onEdit, onChanged
     onConfirm: async () => {
       try {
         await editShelfCollection(collection.id, { kind: "delete" });
-        queryClient.removeQueries({ queryKey: ["library-v2-collection", collection.id] });
+        queryClient.removeQueries({ queryKey: ["shelf-collection", collection.id] });
         void invalidateShelf(queryClient);
         navigate("/library?tab=collections");
       } catch (error) { notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) }); } },
@@ -631,7 +631,7 @@ function CollectionDetail({ collection, readOnly: previewOnly, onEdit, onChanged
         onClose={coverModal.close}
         collection={collection}
         busy={coverMutation.isPending}
-        importImage={async (path) => (await libraryV2ImportEditImage(path)).file}
+        importImage={async (path) => (await shelfImportEditImage(path)).file}
         onSave={(input, coverWork) => coverMutation.mutate({ input, coverWork })}
       />}
       {!editOff && <CollectionSplitAssist

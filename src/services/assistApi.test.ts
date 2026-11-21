@@ -172,15 +172,15 @@ describe("棚へ頼む", () => {
   it("作品は棚の ID で頼む", async () => {
     vi.mocked(invoke).mockResolvedValue([]);
     await acceptRelatedTags("w1", ["雨"]);
-    expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_accept_related_tags", { work: "w1", tags: ["雨"] });
+    expect(invoke).toHaveBeenLastCalledWith("shelf_assist_accept_related_tags", { work: "w1", tags: ["雨"] });
   });
   it("覚え書き・前回のあらすじ・分け方も棚へ頼む", async () => {
     vi.mocked(invoke).mockResolvedValue({ value: null, provenance: null });
     await loadNote("work", "w2:w1", "recap", null);
-    expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_load_note", { subjectType: "work", subjectKey: "w2:w1", noteKind: "recap", engine: null });
+    expect(invoke).toHaveBeenLastCalledWith("shelf_assist_load_note", { subjectType: "work", subjectKey: "w2:w1", noteKind: "recap", engine: null });
     await recapPrevious(engine, "w1", "w2");
-    expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_recap_previous", { engine, previous: "w1", current: "w2" });
+    expect(invoke).toHaveBeenLastCalledWith("shelf_assist_recap_previous", { engine, previous: "w1", current: "w2" });
     await proposeSplits(engine, "c1");
-    expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_propose_splits", { engine, collection: "c1" });
+    expect(invoke).toHaveBeenLastCalledWith("shelf_assist_propose_splits", { engine, collection: "c1" });
   });
 });

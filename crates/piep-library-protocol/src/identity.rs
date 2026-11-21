@@ -30,7 +30,7 @@ pub struct LibraryIdentity {
 impl LibraryIdentity {
     pub fn new(library_id: Id, subject_id: Id, sync_epoch: Id) -> Self {
         Self {
-            format: "piep-library-api-v2".into(),
+            format: "piep-library-api".into(),
             api_version: 2,
             storage_version: 1,
             transfer_format: "piep-resource-transfer-v1".into(),
@@ -48,7 +48,7 @@ impl LibraryIdentity {
         }
     }
     pub fn validate(&self) -> Result<()> {
-        if self.format != "piep-library-api-v2"
+        if self.format != "piep-library-api"
             || self.api_version != 2
             || self.storage_version != 1
             || self.transfer_format != "piep-resource-transfer-v1"

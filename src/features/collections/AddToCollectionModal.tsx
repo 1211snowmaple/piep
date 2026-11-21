@@ -21,8 +21,8 @@ import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { workCollectionsQueryOptions } from "./collectionQueries";
 import { isTauriRuntime } from "@/services/dbApi";
-import { editShelfCollection, invalidateShelf } from "@/features/library/shelfV2";
-import type { ShelfWorkKey } from "@/services/libraryV2Api";
+import { editShelfCollection, invalidateShelf } from "@/features/library/shelf";
+import type { ShelfWorkKey } from "@/services/shelfApi";
 import type { CollectionKind } from "@/types/collections";
 
 /**

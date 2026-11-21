@@ -64,7 +64,7 @@ export interface WorkCollectionSummary {
    * 新しい棚から読んだもの。表紙（`coverPath`・`coverImagePath`・各マスの `coverPath`）は
    * パスでなくファイルの識別子で、`shelfFileUrl` で URL にする。
    */
-  shelf?: "v2";
+  shelf?: true;
 }
 
 export interface WorkCollectionMember {

@@ -1,6 +1,6 @@
 import { demoCollections } from "@/mocks/demoData";
 import { isTauriRuntime } from "@/services/dbApi";
-import { shelfCollections } from "@/features/library/shelfV2";
+import { shelfCollections } from "@/features/library/shelf";
 import type { WorkCollectionSummary } from "@/types/collections";
 
 /**
@@ -15,7 +15,7 @@ import type { WorkCollectionSummary } from "@/types/collections";
  */
 export function workCollectionsQueryOptions() {
   return {
-    queryKey: ["library-v2-collections"] as const,
+    queryKey: ["shelf-collections"] as const,
     queryFn: (): Promise<WorkCollectionSummary[]> =>
       isTauriRuntime() ? shelfCollections() : Promise.resolve(demoCollections as WorkCollectionSummary[]),
   };

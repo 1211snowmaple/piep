@@ -3,7 +3,7 @@ import { Box } from "@mantine/core";
 import { WorkCover } from "@/components/WorkCover";
 import { authorHue, sigilCells } from "@shared/coverSigil";
 import { getAssetUrl } from "@/services/dbApi";
-import { shelfFileUrl } from "@/services/libraryV2Api";
+import { shelfFileUrl } from "@/services/shelfApi";
 import type { CollectionCoverTile, WorkCollectionSummary } from "@/types/collections";
 
 type CollectionCoverData = Pick<
@@ -33,7 +33,7 @@ export function CollectionCover({
 }) {
   const tiles = collection.coverTiles ?? [];
   // 新しい棚の表紙はパスでなくファイルの識別子。
-  const asset = collection.shelf === "v2" ? shelfFileUrl : getAssetUrl;
+  const asset = collection.shelf === true ? shelfFileUrl : getAssetUrl;
   const requestedMode = resolveMode(collection, tiles);
   const [failedImage, setFailedImage] = useState<string | null>(null);
   const imageSrc = requestedMode === "file"

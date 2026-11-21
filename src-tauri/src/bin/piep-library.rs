@@ -247,7 +247,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         Some("app-open") if args.len()==3=>{
             // アプリと同じ手順で新しい棚を開き、索引を同期して、一覧と検索を一度ずつ引く。
-            let state=piep_lib::commands::library_v2::LibraryV2::default();
+            let state=piep_lib::commands::shelf::Shelf::default();
             let started=std::time::Instant::now();
             state.open(Path::new(&args[2]))?;
             state.sync_index(Path::new(&args[2]));

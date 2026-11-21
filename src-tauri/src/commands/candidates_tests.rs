@@ -11,9 +11,9 @@ fn fixture() -> (Temp, AppState, Arc<Library>) {
     std::fs::create_dir_all(&root).unwrap();
     let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
     library.switch_over().unwrap();
-    let state = AppState::new(Arc::new(
-        super::super::library_v2::LibraryV2::with_test_library(library.clone()),
-    ));
+    let state = AppState::new(Arc::new(super::super::shelf::Shelf::with_test_library(
+        library.clone(),
+    )));
     (Temp(root), state, library)
 }
 fn candidate(key: &str, kind: &str) -> UpdateCandidateInput {

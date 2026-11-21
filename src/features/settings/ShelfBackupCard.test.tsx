@@ -9,12 +9,12 @@ import { ShelfBackupCard } from "./ShelfBackupCard";
 const api = vi.hoisted(() => ({ backup: vi.fn(), inspect: vi.fn(), schedule: vi.fn(), state: vi.fn(), cancel: vi.fn(), importArchive: vi.fn() }));
 const dialog = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("@/services/shelfBackupApi", () => ({
-  libraryV2Backup: api.backup,
-  libraryV2InspectBackup: api.inspect,
-  libraryV2ScheduleRestore: api.schedule,
-  libraryV2RestoreState: api.state,
-  libraryV2CancelRestore: api.cancel,
-  libraryV2ImportArchive: api.importArchive,
+  shelfBackup: api.backup,
+  shelfInspectBackup: api.inspect,
+  shelfScheduleRestore: api.schedule,
+  shelfRestoreState: api.state,
+  shelfCancelRestore: api.cancel,
+  shelfImportArchive: api.importArchive,
 }));
 vi.mock("@/services/dialogApi", () => ({ openSingleDialog: dialog.open }));
 

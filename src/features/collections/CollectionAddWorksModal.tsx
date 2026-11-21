@@ -6,9 +6,9 @@ import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { WorkCard } from "@/components/WorkCard";
 import { formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
-import { searchShelf } from "@/features/library/shelfV2";
+import { searchShelf } from "@/features/library/shelf";
 import type { WorkCollection } from "@/types/collections";
-import type { ListedWork, SearchV2Params } from "@/types/library";
+import type { ListedWork, SearchParams } from "@/types/library";
 
 /** 作品を取得元と取得元の ID で指す（旧棚の番号も新しい棚の ID も持たない回を含めて一つの形）。 */
 function keyOf(work: { source: string; sourceId: string }): string {
@@ -97,8 +97,8 @@ export function CollectionAddWorksModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opened]);
 
-  const params = useMemo<SearchV2Params>(() => {
-    const base: SearchV2Params = {
+  const params = useMemo<SearchParams>(() => {
+    const base: SearchParams = {
       query: debouncedQuery.trim() || null,
       sortBy: debouncedQuery.trim() ? "relevance" : "downloaded_at",
       sortOrder: "desc",
@@ -117,7 +117,7 @@ export function CollectionAddWorksModal({
   }, [authors, debouncedQuery, scope, seriesKey, sharedTags]);
 
   const searchQuery = useQuery({
-    queryKey: ["library-v2-collection-add-works", collection.id, params],
+    queryKey: ["shelf-collection-add-works", collection.id, params],
     // 棚は検索語を `text` で受ける。
     queryFn: (): Promise<{ items: ListedWork[] }> => searchShelf({ ...params, text: params.query, query: null }),
     enabled: opened,

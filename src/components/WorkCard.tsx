@@ -20,8 +20,8 @@ import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import type { DownloadEntry, ListedWork, ShelfEntry } from "@/types/library";
-import { invalidateShelf, isShelfEntry } from "@/features/library/shelfV2";
-import { libraryV2RemoveWork, libraryV2SetUserState } from "@/services/libraryV2Api";
+import { invalidateShelf, isShelfEntry } from "@/features/library/shelf";
+import { shelfRemoveWork, shelfSetUserState } from "@/services/shelfApi";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 interface WorkCardProps {
@@ -458,7 +458,7 @@ function ShelfWorkActions({ work, queued, onQueue }: { work: ShelfEntry; queued:
   const off = { "--ai-color": "var(--flag-off)" } as React.CSSProperties;
   const change = async (next: { favorite?: boolean; watching?: boolean }, failure: string) => {
     try {
-      await libraryV2SetUserState(work.id, next);
+      await shelfSetUserState(work.id, next);
       await invalidateShelf(queryClient);
       return true;
     } catch (error) {
@@ -480,7 +480,7 @@ function ShelfWorkActions({ work, queued, onQueue }: { work: ShelfEntry; queued:
     confirmProps: DANGER_CONFIRM,
     onConfirm: async () => {
       try {
-        await libraryV2RemoveWork(work.id);
+        await shelfRemoveWork(work.id);
         await invalidateShelf(queryClient);
         notifications.show({ color: "green", message: "作品を棚から外しました" });
       } catch (error) {

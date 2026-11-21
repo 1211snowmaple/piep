@@ -61,7 +61,7 @@ impl Drop for Fixture {
 fn state(root: &std::path::Path, library: Arc<Library>) -> Arc<AppState> {
     std::fs::create_dir_all(root.join("runtime")).unwrap();
     Arc::new(AppState::new(Arc::new(
-        crate::commands::library_v2::LibraryV2::with_test_library(library),
+        crate::commands::shelf::Shelf::with_test_library(library),
     )))
 }
 fn params(force: bool) -> RefreshEntityProfileParams {

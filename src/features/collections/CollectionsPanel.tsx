@@ -19,14 +19,14 @@ import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { generateShelfCollectionSuggestion, listCollectionSuggestions } from "@/services/collectionApi";
 import { isTauriRuntime } from "@/services/dbApi";
-import { SHELF_WORK_ID as SHELF_WORK } from "@/services/libraryV2Api";
+import { SHELF_WORK_ID as SHELF_WORK } from "@/services/shelfApi";
 import { demoSuggestions } from "@/mocks/demoData";
 import type { CollectionSortBy, WorkCollectionInput, WorkCollectionSummary } from "@/types/collections";
 import { workCollectionsQueryOptions } from "./collectionQueries";
 import { CollectionCard } from "./CollectionCard";
 import { CollectionFormModal } from "./CollectionFormModal";
 import { CollectionSweepModal } from "./CollectionSweepModal";
-import { editShelfCollection, invalidateShelf } from "@/features/library/shelfV2";
+import { editShelfCollection, invalidateShelf } from "@/features/library/shelf";
 
 /** The collection list as it appears inside the library, beside 作品 /
  *  作者・クリエイター / シリーズ. The detail screen stays on its own route. */

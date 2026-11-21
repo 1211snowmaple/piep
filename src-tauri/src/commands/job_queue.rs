@@ -12,7 +12,7 @@ pub(crate) struct Jobs {
 impl AppState {
     pub(crate) fn jobs(&self) -> Jobs {
         Jobs {
-            library: self.library_v2.library().ok(),
+            library: self.shelf.library().ok(),
         }
     }
 }

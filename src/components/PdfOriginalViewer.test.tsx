@@ -11,8 +11,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * 消えないことである。原本は取り込んだ本文を疑うために開くので、いま何ページ
  * 目を見ているのかが分からなくなると用をなさない。
  */
-const shelfApi = vi.hoisted(() => ({ libraryV2RenderPdfPage: vi.fn() }));
-vi.mock("@/services/libraryV2Api", () => shelfApi);
+const shelfApi = vi.hoisted(() => ({ shelfRenderPdfPage: vi.fn() }));
+vi.mock("@/services/shelfApi", () => shelfApi);
 
 import { PdfOriginalViewer, type PdfOriginalTarget } from "./PdfOriginalViewer";
 
@@ -42,7 +42,7 @@ function renderViewer(first: PdfOriginalTarget = target) {
 
 describe("PdfOriginalViewer", () => {
   beforeEach(() => {
-    shelfApi.libraryV2RenderPdfPage.mockReset().mockImplementation(
+    shelfApi.shelfRenderPdfPage.mockReset().mockImplementation(
       (_id: string, _path: string, index: number) => Promise.resolve(page(index)),
     );
   });
@@ -62,7 +62,7 @@ describe("PdfOriginalViewer", () => {
     await userEvent.click(screen.getByRole("button", { name: /次のページ/ }));
 
     await waitFor(() =>
-      expect(shelfApi.libraryV2RenderPdfPage).toHaveBeenCalledWith("w-7", target.localPath, 1, expect.any(Number)),
+      expect(shelfApi.shelfRenderPdfPage).toHaveBeenCalledWith("w-7", target.localPath, 1, expect.any(Number)),
     );
     // 描き替わるまでのあいだ、紙面が消えて空白にならないこと。
     expect(screen.getByRole("img")).toBeInTheDocument();
@@ -94,7 +94,7 @@ describe("PdfOriginalViewer", () => {
 
   it.each([false, true])("別の添付には前の紙面とページ番号を引き継がない（同じパス: %s）", async (samePath) => {
     let finish!: (value: ReturnType<typeof page>) => void;
-    shelfApi.libraryV2RenderPdfPage.mockImplementation((id: string, _path: string, index: number) => id === "w-7"
+    shelfApi.shelfRenderPdfPage.mockImplementation((id: string, _path: string, index: number) => id === "w-7"
       ? Promise.resolve(page(index))
       : new Promise<ReturnType<typeof page>>((resolve) => { finish = resolve; }));
     const view = renderViewer();
@@ -104,8 +104,8 @@ describe("PdfOriginalViewer", () => {
     const next = { workId: "w-8", localPath: samePath ? target.localPath : "C:/library/other.pdf", fileName: "別の添付.pdf" };
     view.show(next);
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
-    await waitFor(() => expect(shelfApi.libraryV2RenderPdfPage).toHaveBeenCalledWith("w-8", next.localPath, 0, expect.any(Number)));
-    expect(shelfApi.libraryV2RenderPdfPage.mock.calls.filter(([id, , index]) => id === "w-8" && index !== 0)).toEqual([]);
+    await waitFor(() => expect(shelfApi.shelfRenderPdfPage).toHaveBeenCalledWith("w-8", next.localPath, 0, expect.any(Number)));
+    expect(shelfApi.shelfRenderPdfPage.mock.calls.filter(([id, , index]) => id === "w-8" && index !== 0)).toEqual([]);
     await act(async () => { finish({ ...page(0), pageCount: 1, image: "data:image/webp;base64,other" }); });
     expect(await screen.findByText("1 / 1 ページ")).toBeInTheDocument();
   });
@@ -120,12 +120,12 @@ describe("PdfOriginalViewer", () => {
       fireEvent.keyDown(window, { key: "ArrowRight" });
     });
     await waitFor(() => expect(screen.getByText("3 / 3 ページ")).toBeInTheDocument());
-    expect(shelfApi.libraryV2RenderPdfPage.mock.calls.some(([, , index]) => index >= 3)).toBe(false);
+    expect(shelfApi.shelfRenderPdfPage.mock.calls.some(([, , index]) => index >= 3)).toBe(false);
   });
 
 
   it("says so when a page cannot be drawn, instead of showing an empty sheet", async () => {
-    shelfApi.libraryV2RenderPdfPage.mockReset().mockRejectedValue("pdfium.dll が見つかりません");
+    shelfApi.shelfRenderPdfPage.mockReset().mockRejectedValue("pdfium.dll が見つかりません");
     renderViewer();
     expect(await screen.findByText(/pdfium.dll が見つかりません/)).toBeInTheDocument();
   });
