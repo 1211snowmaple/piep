@@ -532,7 +532,6 @@ mod tests {
         let dir = crate::server::tests::TestRoot::created("watchdog");
         let paths = ServerPaths::new(&dir.0).expect("paths");
         fs::create_dir_all(paths.state()).expect("state");
-        fs::create_dir_all(paths.library()).expect("library");
         fs::write(paths.root.join("piep-server.exe"), b"fixed bootstrap").expect("bootstrap");
         for version in ["1.0.0", "1.1.0"] {
             fs::create_dir_all(paths.version_dir(version)).expect("version");
@@ -545,7 +544,7 @@ mod tests {
     #[test]
     fn a_pending_version_becomes_current_and_can_be_rolled_back() {
         let (_dir, paths) = laid_out();
-        let database = rusqlite::Connection::open(paths.database()).expect("db");
+        let database = rusqlite::Connection::open(paths.store()).expect("db");
         database
             .execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1);")
             .expect("seed");
@@ -564,7 +563,7 @@ mod tests {
         let record = UpdateRecord::load(&paths);
         assert_eq!(record.skipped, vec!["1.1.0".to_string()]);
         assert!(record.last_error.expect("error").contains("1.0.0"));
-        let database = rusqlite::Connection::open(paths.database()).expect("db");
+        let database = rusqlite::Connection::open(paths.store()).expect("db");
         let value: i64 = database
             .query_row("SELECT v FROM t", [], |row| row.get(0))
             .expect("value");
@@ -618,7 +617,7 @@ mod tests {
     fn an_interrupted_rollback_finishes_before_retrying_the_pending_version() {
         for current in ["1.1.0", "1.0.0"] {
             let (_dir, paths) = laid_out();
-            let database = rusqlite::Connection::open(paths.database()).unwrap();
+            let database = rusqlite::Connection::open(paths.store()).unwrap();
             database
                 .execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1);")
                 .unwrap();
@@ -636,7 +635,7 @@ mod tests {
             assert!(!paths.pending_version().exists());
             assert!(!rollback_mark(&paths).exists());
             assert_eq!(UpdateRecord::load(&paths).skipped, ["1.1.0"]);
-            let database = rusqlite::Connection::open(paths.database()).unwrap();
+            let database = rusqlite::Connection::open(paths.store()).unwrap();
             let value: i64 = database
                 .query_row("SELECT v FROM t", [], |row| row.get(0))
                 .unwrap();
@@ -647,7 +646,7 @@ mod tests {
     #[test]
     fn a_manual_rollback_is_deferred_until_the_body_exits_and_can_resume() {
         let (_dir, paths) = laid_out();
-        let database = rusqlite::Connection::open(paths.database()).unwrap();
+        let database = rusqlite::Connection::open(paths.store()).unwrap();
         database
             .execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1);")
             .unwrap();
@@ -672,7 +671,7 @@ mod tests {
         assert!(!requested_rollback_mark(&paths).exists());
         assert_eq!(UpdateRecord::load(&paths).skipped, ["1.1.0"]);
         assert!(UpdateRecord::load(&paths).last_error.is_none());
-        let database = rusqlite::Connection::open(paths.database()).unwrap();
+        let database = rusqlite::Connection::open(paths.store()).unwrap();
         assert_eq!(
             database
                 .query_row("SELECT v FROM t", [], |row| row.get::<_, i64>(0))

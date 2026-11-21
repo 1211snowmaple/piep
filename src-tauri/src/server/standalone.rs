@@ -53,7 +53,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub public_url: String,
     pub tls: Option<TlsSetting>,
-    pub library_v2: Option<ReaderShelfConfig>,
+    pub shelf: Option<ReaderShelfConfig>,
     #[serde(default)]
     pub update: UpdateConfig,
 }
@@ -74,7 +74,7 @@ impl ReaderShelfConfig {
     fn root(&self, paths: &ServerPaths) -> Result<PathBuf, String> {
         match self.generation {
             Some(generation) => native::generation_path(paths, generation),
-            None => Ok(paths.native_library()),
+            None => Ok(paths.shelf()),
         }
     }
 
@@ -177,23 +177,9 @@ impl ServerPaths {
     pub fn config_trial(&self) -> PathBuf {
         self.state().join("config-trial")
     }
-    pub fn library(&self) -> PathBuf {
-        self.root.join("library")
-    }
-    pub fn native_library(&self) -> PathBuf {
-        self.root.join("library-v2")
-    }
-    pub fn storage(&self) -> PathBuf {
-        self.library().join("downloads")
-    }
-    pub fn database(&self) -> PathBuf {
-        self.library().join("piep.db")
-    }
-    pub fn trash(&self) -> PathBuf {
-        self.root.join("library-trash")
-    }
-    pub fn incoming(&self) -> PathBuf {
-        self.root.join("incoming")
+    /// 配る棚（世代を選んでいないとき）。
+    pub fn shelf(&self) -> PathBuf {
+        self.root.join("shelf")
     }
     pub fn state(&self) -> PathBuf {
         self.root.join("state")
@@ -354,7 +340,7 @@ pub(crate) async fn next_connection(
         admin_listen,
         public_url,
         tls,
-        library_v2: current.library_v2.clone(),
+        shelf: current.shelf.clone(),
         update: current.update.clone(),
     };
     next.validate()?;
@@ -707,7 +693,7 @@ async fn report_ready(paths: ServerPaths, config: ServerConfig) -> Result<(), St
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     // 配っている棚の台帳を検査する。まだ棚を受け取っていなければ検査する物は無い。
-    let Some(shelf) = &config.library_v2 else {
+    let Some(shelf) = &config.shelf else {
         return watchdog::write_ready_mark(&paths);
     };
     let database = shelf.root(&paths)?.join("library.db");
@@ -865,12 +851,17 @@ fn lock_server(paths: &ServerPaths) -> Result<File, String> {
 }
 
 async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
+    // 0.40 までの名前（`library-v2` と `[library_v2]`）を棚の名前へ移し、
     // 送られた棚を組み終えていれば、設定を読む前に配る棚をそれへ切り替える。
     {
         let paths = paths.clone();
-        tokio::task::spawn_blocking(move || shipment::apply_pending(&paths))
-            .await
-            .map_err(|error| error.to_string())?;
+        tokio::task::spawn_blocking(move || {
+            native::rename_old_layout(&paths)?;
+            shipment::apply_pending(&paths);
+            Ok::<(), String>(())
+        })
+        .await
+        .map_err(|error| error.to_string())??;
     }
     let config = load_config(&paths)?;
     let material = tls_material(&paths, &config).await?;
@@ -880,7 +871,7 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
     let tls_config = material.map(|material| material.config);
     let parts = assemble(&paths, config.public_url(), fingerprint)?;
     let mut served = None;
-    if let Some(settings) = &config.library_v2 {
+    if let Some(settings) = &config.shelf {
         let shelf = settings.open(&paths, Arc::clone(&parts.context.store))?;
         served = Some(Arc::clone(shelf.library()));
         parts.context.set_reader_shelf(shelf)?;
@@ -1335,7 +1326,7 @@ mod tests {
             Temp(std::env::temp_dir().join(format!("piep-server-v2-{}", uuid::Uuid::now_v7())));
         let paths = ServerPaths::new(&temp.0).unwrap();
         fs::create_dir_all(paths.state()).unwrap();
-        let library = crate::library::Library::create(&paths.native_library()).unwrap();
+        let library = crate::library::Library::create(&paths.shelf()).unwrap();
         let id = Id::new(library.id).unwrap();
         let body = "配信で確かめる本文。".repeat(100);
         let saved = library
@@ -1364,12 +1355,13 @@ mod tests {
         };
         let granted = pair("登録した端末");
         let other = pair("許可のない端末");
-        let text = format!(
-            "[library_v2]\nlibrary_id = \"{}\"\nsync_epoch = \"{}\"\n[library_v2.readers]\n\"{}\" = \"{}\"\n",
+        let text =
+            format!(
+            "[shelf]\nlibrary_id = \"{}\"\nsync_epoch = \"{}\"\n[shelf.readers]\n\"{}\" = \"{}\"\n",
             id.get(), epoch.get(), granted.device_id, subject.get(),
         );
         let changed_connection = connection_text(&text, &config("")).unwrap();
-        let settings = config(&changed_connection).library_v2.unwrap();
+        let settings = config(&changed_connection).shelf.unwrap();
         assert_eq!(settings.readers.get(&granted.device_id), Some(&subject));
         let mut wrong = settings.clone();
         wrong.library_id = subject;
@@ -1673,7 +1665,7 @@ auto = false
                 cert: PathBuf::from("C:/certs/cert.pem"),
                 key: PathBuf::from("C:/certs/key.pem"),
             }),
-            library_v2: None,
+            shelf: None,
             update: UpdateConfig::default(),
         };
         let written = connection_text(&text, &next).expect("written");
@@ -1694,7 +1686,7 @@ auto = false
             admin_listen: None,
             public_url: String::new(),
             tls: None,
-            library_v2: None,
+            shelf: None,
             update: UpdateConfig::default(),
         };
         let written = connection_text(&written, &back).expect("written again");
