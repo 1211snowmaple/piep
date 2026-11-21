@@ -7,7 +7,7 @@ import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { Icons, IconSize } from "@/lib/icons";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { useAppNavigate } from "@/app/router";
-import { useLibraryV2Status } from "@/features/library/shelfV2";
+import { useShelfStatus } from "@/features/library/shelf";
 import { HISTORY_DETAIL_PAGE, HISTORY_PAGE, setStoredJobHidden, storedHistoryKey, storedJobHistory, storedJobItems, storedJobLogs, type StoredJobHistory } from "@/services/jobHistoryApi";
 
 function date(value: number): string { return formatDate(new Date(value).toISOString(), true); }
@@ -19,7 +19,7 @@ function counts(job: StoredJobHistory): string {
 
 /** 再開できる実行中の記録と、棚に封をした以前の記録を、同じ履歴タブで開く。 */
 export function StoredJobHistoryPanel({ runtime, current, hasCurrent, onShelfReady }: { runtime: boolean; current: ReactNode; hasCurrent: boolean; onShelfReady: () => Promise<void> }) {
-  const status = useLibraryV2Status(runtime);
+  const status = useShelfStatus(runtime);
   const active = runtime && status.data?.state === "ready";
   const queryClient = useQueryClient();
   const [selected, setSelected] = useState<StoredJobHistory | null>(null);

@@ -5,7 +5,7 @@
 //! `series_order` の昇順、作者は `source_created_at` の昇順、コレクションは `get_work_collection`
 //! の並び（棚にある作品だけ）。
 
-use piep_lib::database::{models::SearchV2Params, Database};
+use piep_lib::database::{models::SearchParams, Database};
 use piep_lib::library::{Library, NeighborKind, WorkCard, WorkListQuery, WorkNeighbors};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -57,8 +57,8 @@ fn new_row(row: &WorkNeighbors) -> Row {
 }
 
 /// 旧棚の読む画面と同じく、並びを最後までたどる。
-fn old_sequence(old: &Database, params: SearchV2Params) -> Result<Vec<Key>, Error> {
-    let mut params = SearchV2Params {
+fn old_sequence(old: &Database, params: SearchParams) -> Result<Vec<Key>, Error> {
+    let mut params = SearchParams {
         sort_order: Some("asc".into()),
         projection: Some("bulk".into()),
         limit: Some(200),
@@ -67,7 +67,7 @@ fn old_sequence(old: &Database, params: SearchV2Params) -> Result<Vec<Key>, Erro
     let mut items: Vec<Key> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     loop {
-        let page = old.search_downloads_v2(&params)?;
+        let page = old.search_downloads(&params)?;
         for item in page.items {
             let key = (item.source, item.source_id);
             if seen.insert(key.clone()) {
@@ -172,11 +172,11 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
                     if !series_lists.contains_key(&list_key) {
                         let list = old_sequence(
                             &old,
-                            SearchV2Params {
+                            SearchParams {
                                 series_source: Some(entry.source.clone()),
                                 series_key: Some(series.to_string()),
                                 sort_by: Some("series_order".into()),
-                                ..SearchV2Params::default()
+                                ..SearchParams::default()
                             },
                         )?;
                         series_lists.insert(list_key.clone(), list);
@@ -203,11 +203,11 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
                 if !person_lists.contains_key(&list_key) {
                     let list = old_sequence(
                         &old,
-                        SearchV2Params {
+                        SearchParams {
                             person_source: Some(entry.source.clone()),
                             person_key: Some(person.clone()),
                             sort_by: Some("source_created_at".into()),
-                            ..SearchV2Params::default()
+                            ..SearchParams::default()
                         },
                     )?;
                     person_lists.insert(list_key.clone(), list);

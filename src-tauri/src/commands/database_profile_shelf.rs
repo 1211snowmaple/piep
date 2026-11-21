@@ -438,7 +438,7 @@ where
         }
     }
     let head = result?;
-    state.library_v2.forget_derived();
+    state.shelf.forget_derived();
     serde_json::to_value(head).map_err(|e| e.to_string())
 }
 

@@ -1,5 +1,5 @@
-//! サーバーの HTTP 層。登録と接続確認（`/api/v2/hello`・`pair`・`about`）と管理の API
-//! （`/api/v2/admin/...`）。棚を読む口（`/api/v2/identity`・`/api/v2/libraries/...`）は `v2`。
+//! サーバーの HTTP 層。登録と接続確認（`/api/hello`・`pair`・`about`）と管理の API
+//! （`/api/admin/...`）。棚を読む口（`/api/identity`・`/api/libraries/...`）は `v2`。
 //!
 //! URL が知られていても読めないことを前提にする。無認証で答えるのは `hello` と
 //! `pair` だけで、応答にパスや内部の誤り文を出さない。
@@ -37,7 +37,7 @@ const ADMIN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const READER_PAIRING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const PAIR_ATTEMPTS_PER_MINUTE: usize = 10;
 
-/// `hello` と `about` で知らせる機能の一覧。棚を読む口の機能は `/api/v2/identity` が知らせる。
+/// `hello` と `about` で知らせる機能の一覧。棚を読む口の機能は `/api/identity` が知らせる。
 const CAPABILITIES: &[&str] = &["read"];
 
 pub struct ServerContext {
@@ -48,7 +48,7 @@ pub struct ServerContext {
     pub public_url: Option<String>,
     /// 自己署名で待ち受けているときの証明書の指紋。
     pub fingerprint: Option<String>,
-    reader_shelf: OnceLock<Arc<super::v2::Context>>,
+    reader_shelf: OnceLock<Arc<super::reader::Context>>,
     /// 自己更新の係。`install` で置いた単独サーバーにだけある。
     update: OnceLock<Arc<UpdateController>>,
     /// 管理画面。管理者の口を持つ単独サーバーにだけある。
@@ -99,7 +99,10 @@ impl ServerContext {
 
     /// 配信する棚を決め、本文の検索の索引を棚に合わせ始める。索引を作るあいだは棚を
     /// 開いたままにするので、開いただけの棚（確かめて閉じるもの）では始めない。
-    pub(super) fn set_reader_shelf(&self, shelf: Arc<super::v2::Context>) -> Result<(), String> {
+    pub(super) fn set_reader_shelf(
+        &self,
+        shelf: Arc<super::reader::Context>,
+    ) -> Result<(), String> {
         self.reader_shelf
             .set(Arc::clone(&shelf))
             .map_err(|_| "棚は既に設定されています".to_owned())?;
@@ -108,7 +111,7 @@ impl ServerContext {
     }
 
     /// 配っている棚。
-    pub(super) fn reader_shelf(&self) -> Option<&Arc<super::v2::Context>> {
+    pub(super) fn reader_shelf(&self) -> Option<&Arc<super::reader::Context>> {
         self.reader_shelf.get()
     }
 
@@ -229,14 +232,14 @@ fn require_admin(ctx: &ServerContext, headers: &HeaderMap) -> Result<AuthorizedD
 
 fn device_routes(ctx: Ctx) -> Router {
     Router::new()
-        .route("/api/v2/about", get(about))
+        .route("/api/about", get(about))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&ctx),
             authorize_device_before_body,
         ))
         // 登録と接続確認だけは公開する。
-        .route("/api/v2/hello", get(hello))
-        .route("/api/v2/pair", post(pair))
+        .route("/api/hello", get(hello))
+        .route("/api/pair", post(pair))
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .layer(middleware::from_fn(read_timeout))
         .with_state(ctx)
@@ -245,37 +248,37 @@ fn device_routes(ctx: Ctx) -> Router {
 fn admin_routes(ctx: Ctx) -> Router {
     let routes = Router::new()
         .merge(admin_web::api_routes())
-        .route("/api/v2/admin/status", get(admin_status))
-        .route("/api/v2/admin/update", post(admin_update))
-        .route("/api/v2/admin/pairings", post(admin_pairing))
-        .route("/api/v2/admin/devices", get(admin_devices))
-        .route("/api/v2/admin/devices/{id}", delete(admin_revoke))
-        .route("/api/v2/admin/shelf/reading", get(admin_shelf_reading))
-        .route("/api/v2/admin/shelf/favorites", get(admin_shelf_favorites))
+        .route("/api/admin/status", get(admin_status))
+        .route("/api/admin/update", post(admin_update))
+        .route("/api/admin/pairings", post(admin_pairing))
+        .route("/api/admin/devices", get(admin_devices))
+        .route("/api/admin/devices/{id}", delete(admin_revoke))
+        .route("/api/admin/shelf/reading", get(admin_shelf_reading))
+        .route("/api/admin/shelf/favorites", get(admin_shelf_favorites))
         .route(
-            "/api/v2/admin/shelf/shipments",
+            "/api/admin/shelf/shipments",
             get(shelf_admin::status).post(shelf_admin::open),
         )
         .route(
-            "/api/v2/admin/shelf/shipments/{id}",
+            "/api/admin/shelf/shipments/{id}",
             delete(shelf_admin::abort),
         )
         .route(
-            "/api/v2/admin/shelf/shipments/{id}/needed",
+            "/api/admin/shelf/shipments/{id}/needed",
             post(shelf_admin::needed),
         )
         .route(
-            "/api/v2/admin/shelf/shipments/{id}/chunks/{chunk}",
+            "/api/admin/shelf/shipments/{id}/chunks/{chunk}",
             put(shelf_admin::put_chunk).layer(DefaultBodyLimit::max(
                 piep_storage::MAX_ENCODED_CHUNK_BYTES as usize + 1024,
             )),
         )
         .route(
-            "/api/v2/admin/shelf/shipments/{id}/commit",
+            "/api/admin/shelf/shipments/{id}/commit",
             post(shelf_admin::commit),
         )
         .route(
-            "/api/v2/admin/devices/{id}/shelf",
+            "/api/admin/devices/{id}/shelf",
             put(shelf_admin::set_reader),
         )
         .layer(DefaultBodyLimit::max(MAX_ADMIN_BYTES))
@@ -358,7 +361,7 @@ fn finish(router: Router, ctx: &Ctx) -> Router {
         .layer(middleware::from_fn(no_store));
     // v2 の資産は形式とキャッシュの条件を自分で決める。配信時に圧縮し直さない。
     let routes = match ctx.reader_shelf.get() {
-        Some(shelf) => routes.merge(super::v2::router(Arc::clone(shelf))),
+        Some(shelf) => routes.merge(super::reader::router(Arc::clone(shelf))),
         None => routes,
     };
     routes.layer(middleware::from_fn(observe))
@@ -516,7 +519,7 @@ struct AdminStatus {
     version: &'static str,
     api_version: u32,
     /// 配っている棚。まだ受け取っていない単独サーバーでは無い。
-    shelf: Option<super::v2::ShelfStatus>,
+    shelf: Option<super::reader::ShelfStatus>,
     devices: Vec<serde_json::Value>,
     public_url: Option<String>,
     update: Option<UpdateStatus>,

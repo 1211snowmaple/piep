@@ -50,7 +50,7 @@ export interface DownloadEntry {
  */
 export interface ShelfEntry extends Omit<DownloadEntry, "id"> {
   id: string;
-  shelf: "v2";
+  shelf: true;
   coverUrl: string | null;
   /** 旧棚から移した作品の、旧棚での番号。端末の読書位置・しおりはこの番号で引く。 */
   legacyId: number | null;
@@ -311,7 +311,7 @@ export interface FacetCount {
 
 export interface EntityFacet {
   /** 新しい棚（試験中）から引いたもの。画像の欄はパスでなくファイルの識別子。 */
-  shelf?: "v2";
+  shelf?: true;
   source: string;
   sourceKey: string;
   displayName: string;
@@ -560,7 +560,7 @@ export type LibraryDateField = "downloaded_at" | "source_created_at" | "source_u
 
 export type LibrarySortOrder = "asc" | "desc";
 
-export interface SearchV2Params {
+export interface SearchParams {
   text?: string | null;
   query?: string | null;
   source?: string | null;
@@ -606,7 +606,7 @@ export interface SearchV2Params {
   versionScope?: LibraryVersionScope | null;
 }
 
-export interface SearchV2Result {
+export interface SearchResult {
   items: DownloadEntry[];
   nextCursor: string | null;
   totalEstimate: number | null;

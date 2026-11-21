@@ -5,7 +5,7 @@ import type {
   WorkCollectionMember,
   WorkCollectionSummary,
 } from "@/types/collections";
-import type { DashboardSummary, DownloadEntry, EditorDocument, FilterFacets, ReaderDocument, SearchV2Result } from "@/types/library";
+import type { DashboardSummary, DownloadEntry, EditorDocument, FilterFacets, ReaderDocument, SearchResult } from "@/types/library";
 
 const now = new Date();
 const isoDaysAgo = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
@@ -146,7 +146,7 @@ export const demoFacets: FilterFacets = {
   assetTypes: [{ name: "image", count: 7102 }, { name: "file", count: 1139 }],
 };
 
-export function searchDemoWorks(text = "", source?: string | null): SearchV2Result {
+export function searchDemoWorks(text = "", source?: string | null): SearchResult {
   const q = text.toLocaleLowerCase("ja-JP").trim();
   const items = demoWorks.filter((work) => {
     if (source && work.source !== source) return false;

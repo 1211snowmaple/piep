@@ -858,7 +858,7 @@ mod tests {
             Fixture(std::env::temp_dir().join(format!("piep-app-save-{}", LibraryId::now_v7())));
         let library = Arc::new(Library::create(&fixture.0.join("shelf")).unwrap());
         library.switch_over().unwrap();
-        let shelf = Arc::new(LibraryV2::with_test_library(Arc::clone(&library)));
+        let shelf = Arc::new(Shelf::with_test_library(Arc::clone(&library)));
         let mut data = json!({"title":"投稿","type":"file","body":{"files":[{"id":"a","name":"alpha","url":format!("http://{address}/a.txt")}]}});
         let saved = save_to_shelf(
             Arc::clone(&shelf),
@@ -985,7 +985,7 @@ mod tests {
             );
         }
         let first = first.unwrap();
-        let shelf = Arc::new(LibraryV2::with_test_library(Arc::clone(&library)));
+        let shelf = Arc::new(Shelf::with_test_library(Arc::clone(&library)));
         let saved = save_to_shelf(
             shelf,
             Arc::clone(&library),

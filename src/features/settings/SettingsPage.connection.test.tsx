@@ -18,13 +18,13 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
   isTauriRuntime: () => true,
   getSearchIndexStatus: vi.fn().mockResolvedValue({ totalDownloads: 12, indexedDownloads: 12, pendingDownloads: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 0, semanticIndexedDownloads: 0, semanticPendingDownloads: 12, semanticModelReady: false, embeddingProvider: "CPU", gpuEnabled: false, throughputPerSec: null }),
 }));
-vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
-  libraryV2Status: vi.fn().mockResolvedValue({ state: "ready", path: "C:/piep/library" }),
+vi.mock("@/services/shelfApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/shelfApi")>()),
+  shelfStatus: vi.fn().mockResolvedValue({ state: "ready", path: "C:/piep/library" }),
 }));
 vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
-  libraryV2Dashboard: vi.fn().mockResolvedValue({ stats: { totalDownloads: 12, pixivCount: 12, fanboxCount: 0, totalAssets: 108, totalSizeBytes: 32_000_000 } }),
+  shelfDashboard: vi.fn().mockResolvedValue({ stats: { totalDownloads: 12, pixivCount: 12, fanboxCount: 0, totalAssets: 108, totalSizeBytes: 32_000_000 } }),
 }));
 vi.mock("@/store", () => ({
   store: storeApi,

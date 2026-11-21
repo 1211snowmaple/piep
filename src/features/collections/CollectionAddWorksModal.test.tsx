@@ -3,13 +3,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { demoWorks, getDemoCollection } from "@/mocks/demoData";
-import type { DownloadEntry, SearchV2Params } from "@/types/library";
+import type { DownloadEntry, SearchParams } from "@/types/library";
 import { CollectionAddWorksModal } from "./CollectionAddWorksModal";
 
 const shelf = vi.hoisted(() => ({ searchShelf: vi.fn() }));
 
-vi.mock("@/features/library/shelfV2", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/features/library/shelfV2")>()),
+vi.mock("@/features/library/shelf", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/features/library/shelf")>()),
   searchShelf: shelf.searchShelf,
 }));
 
@@ -32,7 +32,7 @@ function result(items: DownloadEntry[]) {
 describe("CollectionAddWorksModal", () => {
   beforeEach(() => {
     shelf.searchShelf.mockReset();
-    shelf.searchShelf.mockImplementation((params: SearchV2Params) => Promise.resolve(result([params.favorite ? demoWorks[1] : demoWorks[0]])));
+    shelf.searchShelf.mockImplementation((params: SearchParams) => Promise.resolve(result([params.favorite ? demoWorks[1] : demoWorks[0]])));
   });
 
   it("keeps selected works when a scope change replaces the visible results", async () => {

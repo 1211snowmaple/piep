@@ -9,8 +9,8 @@ import { requestOperationCancel, startOperation, type OperationController } from
 import { errorMessage, formatNumber } from "@/lib/format";
 import { cancelOriginalImageUpgrade, type OriginalImageProgress } from "@/services/dbApi";
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
-import { libraryV2OriginalImageStatus, libraryV2UpgradePixivImagesToOriginal } from "@/services/shelfHealthApi";
-import { invalidateShelf } from "@/features/library/shelfV2";
+import { shelfOriginalImageStatus, shelfUpgradePixivImagesToOriginal } from "@/services/shelfHealthApi";
+import { invalidateShelf } from "@/features/library/shelf";
 
 /**
  * 縮小版で保存された pixiv の表紙・挿絵を、原寸に取り直す。
@@ -27,7 +27,7 @@ export function OriginalImagesCard({ runtime, disabled }: { runtime: boolean; di
   const [liveProgress, setLiveProgress] = useState<OriginalImageProgress | null>(null);
   const status = useQuery({
     queryKey: ["original-image-status"],
-    queryFn: libraryV2OriginalImageStatus,
+    queryFn: shelfOriginalImageStatus,
     enabled: runtime,
     staleTime: 0,
     refetchInterval: (query) => query.state.data?.running ? 2_000 : false,
@@ -69,7 +69,7 @@ export function OriginalImagesCard({ runtime, disabled }: { runtime: boolean; di
         if (payload.error) operationRef.current?.log(`${payload.activeLabel ?? "画像"}: ${payload.error}`, "warn");
       });
       try {
-        return await libraryV2UpgradePixivImagesToOriginal();
+        return await shelfUpgradePixivImagesToOriginal();
       } catch (error) {
         operationRef.current?.fail(error);
         throw error;

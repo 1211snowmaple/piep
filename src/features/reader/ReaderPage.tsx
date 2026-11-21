@@ -47,8 +47,8 @@ import { previewReaderSource, shelfReaderSource, SHELF_WORK_ID, type ReaderSourc
 import { RecapPanel } from "@/features/assist/RecapPanel";
 import { NeighborPlaceholder, NeighborTile, formatReadingTime } from "@/features/reader/ReaderNextUp";
 import type { DownloadEntry, ShelfEntry } from "@/types/library";
-import { libraryV2Neighbors, type ShelfCard, type ShelfNeighbors } from "@/services/libraryV2Api";
-import { shelfEntry } from "@/features/library/shelfV2";
+import { shelfNeighbors, type ShelfCard, type ShelfNeighbors } from "@/services/shelfApi";
+import { shelfEntry } from "@/features/library/shelf";
 
 interface ReadingContextRow {
   key: string;
@@ -289,7 +289,7 @@ function Reader({ source }: { source: ReaderSource }) {
   const requestedVersion = Number(searchParams.get("version"));
   const normalizedRequestedVersion = Number.isFinite(requestedVersion) && requestedVersion > 0 ? requestedVersion : null;
   const [version, setVersion] = useState<number | null>(normalizedRequestedVersion);
-  const [settings, setSettings] = useLocalStorage<ReaderSettings>({ key: "piep.reader-settings.v4", defaultValue: defaults });
+  const [settings, setSettings] = useLocalStorage<ReaderSettings>({ key: "piep.reader-settings", defaultValue: defaults });
   const [settingsOpened, settingsDrawer] = useDisclosure(false);
   const [searchOpened, searchDrawer] = useDisclosure(false);
   const [outlineOpened, outlineDrawer] = useDisclosure(false);
@@ -331,7 +331,7 @@ function Reader({ source }: { source: ReaderSource }) {
   // この端末で開き直すための控えとして残す。
   const shelfReading = runtime && source.shelf ? source.shelfReading ?? null : null;
   const shelfReadingQuery = useQuery({
-    queryKey: ["library-v2-reading", id, version],
+    queryKey: ["shelf-reading", id, version],
     queryFn: () => shelfReading!.read(version),
     enabled: Boolean(shelfReading),
     staleTime: Infinity,
@@ -378,8 +378,8 @@ function Reader({ source }: { source: ReaderSource }) {
     [markedPagesQuery.data],
   );
   const shelfNeighborsQuery = useQuery({
-    queryKey: ["library-v2-neighbors", id],
-    queryFn: () => libraryV2Neighbors(String(id)),
+    queryKey: ["shelf-neighbors", id],
+    queryFn: () => shelfNeighbors(String(id)),
     enabled: runtime && source.shelf && validId,
     staleTime: 60_000,
   });

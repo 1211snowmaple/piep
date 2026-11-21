@@ -373,7 +373,7 @@ async fn send(
     };
     let response = client
         .put(format!(
-            "{}/api/v2/libraries/{}/works/{work}/reading",
+            "{}/api/libraries/{}/works/{work}/reading",
             saved.url,
             scope.library_id().get(),
         ))
@@ -422,7 +422,7 @@ async fn fetch(
 ) -> Result<Option<MobileShelfReadingPage>, ClientError> {
     let (generation, saved, client) = connection(pc, scope)?;
     let mut url = reqwest::Url::parse(&format!(
-        "{}/api/v2/libraries/{}/reading",
+        "{}/api/libraries/{}/reading",
         saved.url,
         scope.library_id().get()
     ))

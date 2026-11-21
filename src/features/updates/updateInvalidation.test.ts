@@ -63,14 +63,14 @@ describe("更新確認のあとに古くなるもの", () => {
   /** 正本に切り替えた棚では、保存した作品は棚へ入る。棚から出す画面も古い（棚の状態は除く）。 */
   it("切り替えた棚の一覧と作品にも知らせる", () => {
     const client = new QueryClient();
-    client.setQueryData(["library-v2", { sort: "saved" }], []);
-    client.setQueryData(["library-v2-work", "w"], {});
-    client.setQueryData(["library-v2-status"], {});
+    client.setQueryData(["shelf", { sort: "saved" }], []);
+    client.setQueryData(["shelf-work", "w"], {});
+    client.setQueryData(["shelf-status"], {});
     client.setQueryData(["settings"], {});
     invalidateAfterUpdateJob(client);
-    expect(client.getQueryState(["library-v2", { sort: "saved" }])?.isInvalidated).toBe(true);
-    expect(client.getQueryState(["library-v2-work", "w"])?.isInvalidated).toBe(true);
-    expect(client.getQueryState(["library-v2-status"])?.isInvalidated).toBe(false);
+    expect(client.getQueryState(["shelf", { sort: "saved" }])?.isInvalidated).toBe(true);
+    expect(client.getQueryState(["shelf-work", "w"])?.isInvalidated).toBe(true);
+    expect(client.getQueryState(["shelf-status"])?.isInvalidated).toBe(false);
     expect(client.getQueryState(["settings"])?.isInvalidated).toBe(false);
   });
 

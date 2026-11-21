@@ -94,7 +94,7 @@ impl Server {
     }
     fn resource(&self, entity: uuid::Uuid, snapshot: uuid::Uuid) -> String {
         format!(
-            "/api/v2/libraries/{}/entities/{entity}/views/snapshot/{snapshot}/resources/media",
+            "/api/libraries/{}/entities/{entity}/views/snapshot/{snapshot}/resources/media",
             self.library.id
         )
     }
@@ -190,7 +190,7 @@ async fn raw_response_archives_are_not_exposed_by_the_reader_gateway() {
             _ => None,
         })
         .unwrap();
-    let path=format!("/api/v2/libraries/{}/entities/{}/views/snapshot/{}/resources/original/manifest?observation={observation}",server.library.id,saved.entity_id,saved.snapshot_id);
+    let path=format!("/api/libraries/{}/entities/{}/views/snapshot/{}/resources/original/manifest?observation={observation}",server.library.id,saved.entity_id,saved.snapshot_id);
     assert_eq!(
         server.get(&path).send().await.unwrap().status(),
         StatusCode::FORBIDDEN
@@ -214,7 +214,7 @@ fn save(library: &Library, input: Capture) -> crate::library::CaptureResult {
 #[tokio::test]
 async fn identity_requires_bearer_and_offers_the_reader_bundle_but_no_mutation() {
     let server = Server::start().await;
-    for path in ["/api/v2/identity", "/api/v2/identity?token=fixture"] {
+    for path in ["/api/identity", "/api/identity?token=fixture"] {
         assert_eq!(
             server
                 .client
@@ -226,7 +226,7 @@ async fn identity_requires_bearer_and_offers_the_reader_bundle_but_no_mutation()
             StatusCode::UNAUTHORIZED
         );
     }
-    let response = server.get("/api/v2/identity").send().await.unwrap();
+    let response = server.get("/api/identity").send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let identity = protocol::LibraryIdentity::parse(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(identity.library_id.get(), server.library.id);
@@ -234,7 +234,7 @@ async fn identity_requires_bearer_and_offers_the_reader_bundle_but_no_mutation()
     assert!(identity.capabilities.reader_bundle && !identity.capabilities.mutations);
     assert_eq!(
         server
-            .get("/api/v2/identity")
+            .get("/api/identity")
             .header(header::ORIGIN, "https://other.invalid")
             .send()
             .await
@@ -313,7 +313,7 @@ async fn one_bundle_describes_every_readable_file_and_each_chunk_comes_back_thro
     let saved = save(&server.library, capture("one", Some(&original)));
     let missing = save(&server.library, capture("two", None));
     let view = format!(
-        "/api/v2/libraries/{}/entities/{}/views/snapshot/{}",
+        "/api/libraries/{}/entities/{}/views/snapshot/{}",
         server.library.id, saved.entity_id, saved.snapshot_id
     );
     let response = server.get(&format!("{view}/bundle")).send().await.unwrap();
@@ -363,7 +363,7 @@ async fn one_bundle_describes_every_readable_file_and_each_chunk_comes_back_thro
     // 画像が未保存の作品では、表紙の file は載らない（取りに行かせない）。
     let response = server
         .get(&format!(
-            "/api/v2/libraries/{}/entities/{}/views/snapshot/{}/bundle",
+            "/api/libraries/{}/entities/{}/views/snapshot/{}/bundle",
             server.library.id, missing.entity_id, missing.snapshot_id
         ))
         .send()
@@ -375,7 +375,7 @@ async fn one_bundle_describes_every_readable_file_and_each_chunk_comes_back_thro
     for (path, status) in [
         (
             format!(
-                "/api/v2/libraries/{}/entities/{}/views/snapshot/{}/bundle",
+                "/api/libraries/{}/entities/{}/views/snapshot/{}/bundle",
                 server.library.id, missing.entity_id, saved.snapshot_id
             ),
             StatusCode::NOT_FOUND,
@@ -441,7 +441,7 @@ async fn missing_resources_invalid_parameters_and_wrong_libraries_do_not_fall_ba
 async fn provider_keys_resolve_to_the_current_reading_view_only_while_on_the_shelf() {
     let server = Server::start().await;
     let saved = save(&server.library, capture("work+one", None));
-    let route = format!("/api/v2/libraries/{}/works/lookup", server.library.id);
+    let route = format!("/api/libraries/{}/works/lookup", server.library.id);
     let url = format!("{route}?provider=pixiv&key=work%2Bone");
     let response = server
         .get(&url)
@@ -456,7 +456,7 @@ async fn provider_keys_resolve_to_the_current_reading_view_only_while_on_the_she
     assert_eq!(view.snapshot_id.get(), saved.snapshot_id);
     assert_eq!(view.edit_id, None);
     let bundle_url = format!(
-        "/api/v2/libraries/{}/entities/{}/views/snapshot/{}/bundle",
+        "/api/libraries/{}/entities/{}/views/snapshot/{}/bundle",
         server.library.id,
         view.entity_id.get(),
         view.snapshot_id.get(),
@@ -507,7 +507,7 @@ async fn provider_keys_resolve_to_the_current_reading_view_only_while_on_the_she
     assert_eq!(reflected.edit_id, Some(Id::new(edit).unwrap()));
     assert_eq!(reflected.snapshot_id, view.snapshot_id);
     let edit_url = format!(
-        "/api/v2/libraries/{}/entities/{}/views/edit/{edit}/bundle",
+        "/api/libraries/{}/entities/{}/views/edit/{edit}/bundle",
         server.library.id,
         reflected.entity_id.get(),
     );
@@ -571,7 +571,7 @@ async fn the_works_list_pages_tied_dates_and_keeps_cursors_with_the_reader_and_e
         .library
         .remove_work(uuid::Uuid::now_v7(), removed.entity_id, 1)
         .unwrap();
-    let route = format!("/api/v2/libraries/{}/works", server.library.id);
+    let route = format!("/api/libraries/{}/works", server.library.id);
     let first = format!("{route}?limit=1");
     let response = server
         .get(&first)
@@ -664,7 +664,7 @@ impl Server {
     fn search_as(&self, body: serde_json::Value, token: &str) -> reqwest::RequestBuilder {
         self.client
             .post(format!(
-                "{}/api/v2/libraries/{}/works/search",
+                "{}/api/libraries/{}/works/search",
                 self.base, self.library.id
             ))
             .bearer_auth(token)
@@ -828,7 +828,7 @@ async fn the_work_screen_and_cover_come_from_the_current_version_of_a_shelved_wo
     let server = Server::start().await;
     let covered = save(&server.library, capture("covered", Some(&png())));
     let bare = save(&server.library, capture("bare", None));
-    let work = |id: uuid::Uuid| format!("/api/v2/libraries/{}/works/{id}", server.library.id);
+    let work = |id: uuid::Uuid| format!("/api/libraries/{}/works/{id}", server.library.id);
 
     let detail: piep_mobile_api::MobileShelfWorkDetail = server
         .get(&work(covered.entity_id))
@@ -890,7 +890,7 @@ async fn the_work_screen_and_cover_come_from_the_current_version_of_a_shelved_wo
         ),
         (
             format!(
-                "/api/v2/libraries/{}/works/{}",
+                "/api/libraries/{}/works/{}",
                 uuid::Uuid::now_v7(),
                 covered.entity_id
             ),
@@ -929,7 +929,7 @@ impl Server {
     ) -> reqwest::RequestBuilder {
         self.client
             .put(format!(
-                "{}/api/v2/libraries/{}/works/{work}/favorite",
+                "{}/api/libraries/{}/works/{work}/favorite",
                 self.base, self.library.id
             ))
             .bearer_auth(token)
@@ -1077,7 +1077,7 @@ async fn edit_reads_are_limited_to_the_subjects_published_and_archived_views() {
     let first = save_edit(server.authority.subject.get(), 0, true);
     let draft = save_edit(server.authority.subject.get(), 1, false);
     let second = save_edit(server.authority.other_subject.get(), 0, true);
-    let shelf = format!("/api/v2/libraries/{}", server.library.id);
+    let shelf = format!("/api/libraries/{}", server.library.id);
     let lookup = format!("{shelf}/works/lookup?provider=pixiv&key=edited");
     for (token, expected) in [("fixture", first), ("second", second)] {
         let view: protocol::WorkReadingView = server
@@ -1256,7 +1256,7 @@ fn grouped_shelf(library: &Library) -> BTreeMap<&'static str, uuid::Uuid> {
 
 impl Server {
     fn shelf(&self, rest: &str) -> String {
-        format!("/api/v2/libraries/{}{rest}", self.library.id)
+        format!("/api/libraries/{}{rest}", self.library.id)
     }
     async fn read<T: serde::de::DeserializeOwned>(&self, rest: &str, token: &str) -> T {
         self.get_as(&self.shelf(rest), token)
@@ -1476,10 +1476,7 @@ async fn people_series_and_collections_come_from_the_shelf_in_the_v1_shapes() {
     }
     assert_eq!(
         server
-            .get(&format!(
-                "/api/v2/libraries/{}/people",
-                uuid::Uuid::now_v7()
-            ))
+            .get(&format!("/api/libraries/{}/people", uuid::Uuid::now_v7()))
             .send()
             .await
             .unwrap()
@@ -1560,7 +1557,7 @@ impl Server {
     ) -> reqwest::RequestBuilder {
         self.client
             .put(format!(
-                "{}/api/v2/libraries/{}/works/{work}/reading",
+                "{}/api/libraries/{}/works/{work}/reading",
                 self.base, self.library.id
             ))
             .bearer_auth(token)
@@ -1574,7 +1571,7 @@ impl Server {
     ) -> piep_mobile_api::MobileShelfReadingPage {
         self.client
             .get(format!(
-                "{}/api/v2/libraries/{}/reading",
+                "{}/api/libraries/{}/reading",
                 self.base, self.library.id
             ))
             .query(&[("cursor", cursor), ("limit", &limit.to_string())])
@@ -1778,7 +1775,7 @@ async fn reading_positions_are_written_once_refuse_stale_generations_and_come_ba
         let response = server
             .client
             .get(format!(
-                "{}/api/v2/libraries/{}/reading",
+                "{}/api/libraries/{}/reading",
                 server.base, server.library.id
             ))
             .query(&[("cursor", cursor.as_str())])
@@ -1819,7 +1816,7 @@ async fn owner_page(context: &Arc<Context>, cursor: Option<&str>) -> serde_json:
 
 #[tokio::test]
 async fn phone_positions_and_favorites_on_the_served_copy_come_back_to_the_desktop_shelf() {
-    use crate::commands::library_v2::adopt_remote_reading;
+    use crate::commands::shelf::adopt_remote_reading;
     use crate::library::{ReadingAnchor, ReadingLocation, ReadingPosition, ReadingUpdate};
     // デスクトップの棚と、その写しを配るサーバーの棚（同じ棚の ID・同じ作品の ID）。
     let desktop_dir = Temp::new();
@@ -1946,7 +1943,7 @@ async fn phone_positions_and_favorites_on_the_served_copy_come_back_to_the_deskt
     let own = ReadingPosition {
         location: Some(page(south.snapshot_id, 0)),
         finished: true,
-        device: Some(crate::commands::library_v2::desktop_device(&desktop)),
+        device: Some(crate::commands::shelf::desktop_device(&desktop)),
         updated_at: Some(i64::MAX),
         generation: 9,
     };

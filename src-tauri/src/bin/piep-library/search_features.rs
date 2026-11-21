@@ -1,6 +1,6 @@
 //! 本文の検索の残りの機能を旧棚と突き合わせる：一致した箇所の抜粋と理由、作者・シリーズ名の
 //! 解釈、過去の改稿の検索、意味検索。旧棚は写しの DB と一時の場所に作った索引で、旧棚の検索の
-//! 入り口（`search_downloads_v2`）をそのまま呼ぶ。本番の索引は開かない。
+//! 入り口（`search_downloads`）をそのまま呼ぶ。本番の索引は開かない。
 //!
 //! 意味検索は、旧棚の意味検索の索引の写し（`<work>/old-semantic/search/semantic-v2/index.sqlite`）と
 //! モデルの写し（`<work>/old-semantic/models/`）があるときだけ比べる。新しい棚はその写しからベクトルを
@@ -8,7 +8,7 @@
 //!
 //! 出力は件数と問い合わせの番号だけで、問い合わせや作品の文字列は書かない。
 
-use piep_lib::database::models::{DownloadEntry, SearchV2Params};
+use piep_lib::database::models::{DownloadEntry, SearchParams};
 use piep_lib::database::queries::SearchIndexRebuildOptions;
 use piep_lib::database::{semantic_index, tantivy_index, Database};
 use piep_lib::library::{Library, LibraryId, WorkListQuery, WorkSort};
@@ -72,12 +72,12 @@ struct Shelves {
 
 impl Shelves {
     /// 旧棚の検索。続きのページを最後までたどる。
-    fn old_search(&self, params: SearchV2Params) -> Result<(Vec<DownloadEntry>, Value), Error> {
+    fn old_search(&self, params: SearchParams) -> Result<(Vec<DownloadEntry>, Value), Error> {
         let mut items = Vec::new();
         let mut cursor = None;
         let mut intent = Value::Null;
         loop {
-            let result = self.old.search_downloads_v2(&SearchV2Params {
+            let result = self.old.search_downloads(&SearchParams {
                 limit: Some(1000),
                 cursor: cursor.clone(),
                 ..params.clone()
@@ -358,7 +358,7 @@ fn compare_decorations(shelves: &Shelves, conn: &rusqlite::Connection) -> Result
     let (mut compared, mut old_ms, mut new_ms) = (0usize, 0.0, 0.0);
     for (number, query) in queries.iter().enumerate() {
         let t = Instant::now();
-        let (old_items, old_intent) = shelves.old_search(SearchV2Params {
+        let (old_items, old_intent) = shelves.old_search(SearchParams {
             query: Some(query.clone()),
             ..Default::default()
         })?;
@@ -550,7 +550,7 @@ fn compare_intents(shelves: &Shelves, conn: &rusqlite::Connection) -> Result<Val
     let (mut kinds, mut old_ms, mut new_ms) = (BTreeMap::<String, usize>::new(), 0.0, 0.0);
     for (number, name) in names.iter().enumerate() {
         let t = Instant::now();
-        let (old_items, old_intent) = shelves.old_search(SearchV2Params {
+        let (old_items, old_intent) = shelves.old_search(SearchParams {
             query: Some(name.clone()),
             ..Default::default()
         })?;
@@ -663,7 +663,7 @@ fn compare_history(
     let mut raw_history_hits = 0usize;
     for (number, query) in queries.iter().enumerate() {
         let t = Instant::now();
-        let (old_items, old_intent) = shelves.old_search(SearchV2Params {
+        let (old_items, old_intent) = shelves.old_search(SearchParams {
             query: Some(query.clone()),
             version_scope: Some("all".into()),
             ..Default::default()
@@ -923,7 +923,7 @@ fn compare_structured(shelves: &Shelves, conn: &rusqlite::Connection) -> Result<
     let (mut old_ms, mut new_ms) = (0.0, 0.0);
     for (number, (kind, query)) in queries.iter().enumerate() {
         let t = Instant::now();
-        let (old_items, _) = shelves.old_search(SearchV2Params {
+        let (old_items, _) = shelves.old_search(SearchParams {
             query: Some(query.clone()),
             ..Default::default()
         })?;

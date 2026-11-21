@@ -19,14 +19,14 @@ use crate::assist::{
     FEATURE_NATURAL_LANGUAGE_SEARCH, FEATURE_READER_RECAP, FEATURE_TAG_SUGGESTION,
     FEATURE_WORK_SYNOPSIS,
 };
-use crate::commands::library_v2::{collection_target, LibraryV2};
+use crate::commands::shelf::{collection_target, Shelf};
 use crate::database::queries::{AiNote, RelatedTagCandidate, TaggedName};
 use crate::library::{Library, LibraryId, TagProvenance};
 
-async fn blocking<T, F>(state: &State<'_, Arc<LibraryV2>>, f: F) -> Result<T, String>
+async fn blocking<T, F>(state: &State<'_, Arc<Shelf>>, f: F) -> Result<T, String>
 where
     T: Send + 'static,
-    F: FnOnce(Arc<LibraryV2>) -> Result<T, String> + Send + 'static,
+    F: FnOnce(Arc<Shelf>) -> Result<T, String> + Send + 'static,
 {
     let state = Arc::clone(state);
     tauri::async_runtime::spawn_blocking(move || f(state))
@@ -75,7 +75,7 @@ fn compare_note_config(note: &mut AiNote, engine: &AssistEngine) -> Result<(), S
 /// タグを変えたあと、検索の索引を追いつかせて今のタグを返す。棚の変更は済んでいるので、
 /// 索引の失敗はその旨を添えて伝える。
 fn finish_tag_change(
-    state: &LibraryV2,
+    state: &Shelf,
     library: &Arc<Library>,
     work: LibraryId,
     changed: bool,
@@ -143,8 +143,8 @@ impl assist::ShelfLookup for ShelfAssist {
 
 /// 棚の取得元タグの併用から候補を出す。モデルも通信も使わない。
 #[tauri::command]
-pub async fn library_v2_assist_related_tags(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_related_tags(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
 ) -> Result<Vec<RelatedTagCandidate>, String> {
     blocking(&state, move |state| {
@@ -158,8 +158,8 @@ pub async fn library_v2_assist_related_tags(
 
 /// 選んだ併用候補を、自分で付けたタグとして足す。棚にある名前だけ。
 #[tauri::command]
-pub async fn library_v2_assist_accept_related_tags(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_accept_related_tags(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     tags: Vec<String>,
 ) -> Result<Vec<TaggedName>, String> {
@@ -175,8 +175,8 @@ pub async fn library_v2_assist_accept_related_tags(
 
 /// 自分で付けたタグだけを外す。
 #[tauri::command]
-pub async fn library_v2_assist_remove_related_tag(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_remove_related_tag(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     tag: String,
 ) -> Result<Vec<TaggedName>, String> {
@@ -192,8 +192,8 @@ pub async fn library_v2_assist_remove_related_tag(
 
 /// この作品に足りていないタグを、棚の語彙から挙げてもらう。**付けはしない。**
 #[tauri::command]
-pub async fn library_v2_assist_suggest_tags(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_suggest_tags(
+    state: State<'_, Arc<Shelf>>,
     engine: AssistEngine,
     work: LibraryId,
 ) -> Result<GeneratedAssist<Vec<TagProposal>>, String> {
@@ -216,8 +216,8 @@ pub async fn library_v2_assist_suggest_tags(
 
 /// 案から選んだタグを、「モデルの案を採った」印で付ける。
 #[tauri::command]
-pub async fn library_v2_assist_accept_tags(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_accept_tags(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     tags: Vec<String>,
 ) -> Result<Vec<TaggedName>, String> {
@@ -233,8 +233,8 @@ pub async fn library_v2_assist_accept_tags(
 
 /// 出どころ付きのタグ一覧。
 #[tauri::command]
-pub async fn library_v2_assist_work_tags(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_work_tags(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
 ) -> Result<Vec<TaggedName>, String> {
     blocking(&state, move |state| {
@@ -248,8 +248,8 @@ pub async fn library_v2_assist_work_tags(
 
 /// モデルの案から採ったタグを外す。取得元のタグは外せない。
 #[tauri::command]
-pub async fn library_v2_assist_remove_tag(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_remove_tag(
+    state: State<'_, Arc<Shelf>>,
     work: LibraryId,
     tag: String,
 ) -> Result<Vec<TaggedName>, String> {
@@ -267,8 +267,8 @@ pub async fn library_v2_assist_remove_tag(
 
 /// 「こういうのが読みたい」を、棚のタグと検索語に言い換える。検索も保存もしない。
 #[tauri::command]
-pub async fn library_v2_assist_interpret_search(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_interpret_search(
+    state: State<'_, Arc<Shelf>>,
     engine: AssistEngine,
     phrase: String,
 ) -> Result<GeneratedAssist<SearchIntent>, String> {
@@ -293,8 +293,8 @@ pub async fn library_v2_assist_interpret_search(
 /// この作者の作風を、題名とタグからまとめてもらう。本文は送らない。
 /// 覚え書きは正本に切り替えた棚にだけ残す（読むだけの棚では見せるだけ）。
 #[tauri::command]
-pub async fn library_v2_assist_describe_author(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_describe_author(
+    state: State<'_, Arc<Shelf>>,
     engine: AssistEngine,
     provider: String,
     person_key: String,
@@ -327,8 +327,8 @@ pub async fn library_v2_assist_describe_author(
 
 /// このコレクションを分けたほうがよいか、案を出してもらう。分けはしない。
 #[tauri::command]
-pub async fn library_v2_assist_propose_splits(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_propose_splits(
+    state: State<'_, Arc<Shelf>>,
     engine: AssistEngine,
     collection: String,
 ) -> Result<GeneratedAssist<Vec<BundleSplit>>, String> {
@@ -378,7 +378,7 @@ fn progress_sink(
 
 /// 覚え書きを残す。読むだけの棚（切り替える前）では残さない。
 async fn save_note(
-    state: &State<'_, Arc<LibraryV2>>,
+    state: &State<'_, Arc<Shelf>>,
     subject_type: &'static str,
     subject_key: String,
     note_kind: &'static str,
@@ -399,9 +399,9 @@ async fn save_note(
 
 /// 本文から、あとで思い出すためのあらすじを作ってもらう。**本文を送るので、許可が要る。**
 #[tauri::command]
-pub async fn library_v2_assist_summarize_work(
+pub async fn shelf_assist_summarize_work(
     app: tauri::AppHandle,
-    state: State<'_, Arc<LibraryV2>>,
+    state: State<'_, Arc<Shelf>>,
     engine: AssistEngine,
     work: LibraryId,
 ) -> Result<GeneratedAssist<AssistNote>, String> {
@@ -436,9 +436,9 @@ pub async fn library_v2_assist_summarize_work(
 
 /// 直前の話の要点を出す。連載の続きを、間を空けて読むときのため。
 #[tauri::command]
-pub async fn library_v2_assist_recap_previous(
+pub async fn shelf_assist_recap_previous(
     app: tauri::AppHandle,
-    state: State<'_, Arc<LibraryV2>>,
+    state: State<'_, Arc<Shelf>>,
     engine: AssistEngine,
     previous: LibraryId,
     current: LibraryId,
@@ -488,8 +488,8 @@ pub async fn library_v2_assist_recap_previous(
 
 /// 保存してある覚え書きを読む。**モデルを呼ばない** — 無ければ無いと返す。
 #[tauri::command]
-pub async fn library_v2_assist_load_note(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_load_note(
+    state: State<'_, Arc<Shelf>>,
     subject_type: String,
     subject_key: String,
     note_kind: String,
@@ -510,8 +510,8 @@ pub async fn library_v2_assist_load_note(
 
 /// 覚え書きを消す（正本に切り替えた棚だけ）。
 #[tauri::command]
-pub async fn library_v2_assist_delete_note(
-    state: State<'_, Arc<LibraryV2>>,
+pub async fn shelf_assist_delete_note(
+    state: State<'_, Arc<Shelf>>,
     subject_type: String,
     subject_key: String,
     note_kind: String,

@@ -14,9 +14,9 @@ fn fixture() -> (Temp, AppState, Arc<Library>) {
     std::fs::create_dir_all(&root).unwrap();
     let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
     library.switch_over().unwrap();
-    let state = AppState::new(Arc::new(
-        crate::commands::library_v2::LibraryV2::with_test_library(library.clone()),
-    ));
+    let state = AppState::new(Arc::new(crate::commands::shelf::Shelf::with_test_library(
+        library.clone(),
+    )));
     (Temp(root), state, library)
 }
 fn request() -> StartUpdateJobRequest {

@@ -49,12 +49,12 @@ import { errorMessage, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { listenForScrollIntent, scrollViewportToTop } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
-import { invalidateShelf, isShelfEntry, searchShelf, searchShelfEntities, ShelfUnsupportedError, type ShelfEntityFacet, type ShelfSearchResult } from "@/features/library/shelfV2";
+import { invalidateShelf, isShelfEntry, searchShelf, searchShelfEntities, ShelfUnsupportedError, type ShelfEntityFacet, type ShelfSearchResult } from "@/features/library/shelf";
 import { LibraryShelfMenu } from "./LibraryShelfMenu";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { parseViewMode, useViewMode } from "@/lib/viewMode";
 import { entityKey, VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
-import { libraryV2ExportEntityArchive } from "@/services/shelfBackupApi";
+import { shelfExportEntityArchive } from "@/services/shelfBackupApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import type { EntityWatchState } from "@/components/EntityCard";
 import { SearchAssistModal } from "@/features/assist/SearchAssistModal";
@@ -70,9 +70,9 @@ import {
   listUpdateTargets,
   upsertUpdateTarget,
 } from "@/services/dbApi";
-import { libraryV2ClearReadingPositions, libraryV2RemoveWork, libraryV2SearchSuggest, libraryV2SetUserState, SHELF_WORK_ID } from "@/services/libraryV2Api";
-import { libraryV2FilterFacets, libraryV2SearchFilterFacets } from "@/services/shelfHealthApi";
-import { deleteSavedSearch, listSavedSearches, upsertSavedSearch } from "@/services/shelfApi";
+import { shelfClearReadingPositions, shelfRemoveWork, shelfSearchSuggest, shelfSetUserState, SHELF_WORK_ID } from "@/services/shelfApi";
+import { shelfFilterFacets, shelfSearchFilterFacets } from "@/services/shelfHealthApi";
+import { deleteSavedSearch, listSavedSearches, upsertSavedSearch } from "@/services/savedSearchApi";
 import { forgetReadingPositions, readingKeyOf, readingKeysAdopted, readingWorkIds } from "@/features/library/readingShelf";
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import { useSavedSearchMigration } from "@/features/library/savedSearchMigration";
@@ -91,7 +91,7 @@ import {
   WORK_SORT_OPTIONS,
 } from "@/features/library/sortOptions";
 import type { CollectionSortBy } from "@/types/collections";
-import type { EntityFacet, EntityFacetScope, EntitySortBy, FacetCount, LibraryAssetFilter, LibraryCoverFilter, LibraryDateField, LibraryEditFilter, LibraryRevisionFilter, LibrarySeriesFilter, LibrarySortBy, LibrarySortOrder, LibraryVersionScope, LibraryWatchFilter, ListedWork, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result, UpdateTarget } from "@/types/library";
+import type { EntityFacet, EntityFacetScope, EntitySortBy, FacetCount, LibraryAssetFilter, LibraryCoverFilter, LibraryDateField, LibraryEditFilter, LibraryRevisionFilter, LibrarySeriesFilter, LibrarySortBy, LibrarySortOrder, LibraryVersionScope, LibraryWatchFilter, ListedWork, SavedSearchRecord, SearchSuggestion, SearchParams, SearchResult, UpdateTarget } from "@/types/library";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 type LibraryTab = "works" | "people" | "series" | "collections";
@@ -573,7 +573,7 @@ function uniqueShelfWorks(pages: ShelfSearchResult[] | undefined) {
   })) ?? [];
 }
 
-function uniqueWorks(pages: SearchV2Result[] | undefined) {
+function uniqueWorks(pages: SearchResult[] | undefined) {
   const seen = new Set<number>();
   return pages?.flatMap((page) => page.items.filter((item) => {
     if (seen.has(item.id)) return false;
@@ -583,10 +583,10 @@ function uniqueWorks(pages: SearchV2Result[] | undefined) {
 }
 
 export function updateWorkFlag(
-  data: InfiniteData<SearchV2Result, string | null> | undefined,
+  data: InfiniteData<SearchResult, string | null> | undefined,
   id: number,
   patch: { favorite?: boolean; watchUpdates?: boolean },
-  params: SearchV2Params,
+  params: SearchParams,
 ) {
   if (!data) return data;
   const pageIndex = data.pages.findIndex((page) => page.items.some((item) => item.id === id));
@@ -616,11 +616,11 @@ export function updateWorkFlag(
 
 /** Reverts only the failed field, preserving optimistic/successful sibling mutations. */
 export function rollbackWorkFlag(
-  current: InfiniteData<SearchV2Result, string | null> | undefined,
-  previous: InfiniteData<SearchV2Result, string | null> | undefined,
+  current: InfiniteData<SearchResult, string | null> | undefined,
+  previous: InfiniteData<SearchResult, string | null> | undefined,
   id: number,
   kind: "favorite" | "watch",
-  params: SearchV2Params,
+  params: SearchParams,
 ) {
   if (!previous) return current;
   const previousPageIndex = previous.pages.findIndex((page) => page.items.some((item) => item.id === id));
@@ -1064,7 +1064,7 @@ export default function LibraryPage() {
   // Relevance is walked with a score cursor and has no nth page, so numbers
   // are only offered once an ordering has been chosen.
   const numberedPages = numberedPageEnabled && tab === "works";
-  const params = useMemo<SearchV2Params>(() => ({
+  const params = useMemo<SearchParams>(() => ({
     idsInclude: readingIds,
     text: searchText || null,
     // Selecting both providers is the same as no provider filter; the backend
@@ -1130,7 +1130,7 @@ export default function LibraryPage() {
   // 棚の一覧。プレビューの見本の一覧と別の鍵で持つ。
   const shelfWorks = useInfiniteQuery({
     ...boundedInfiniteListOptions,
-    queryKey: ["library-v2", params],
+    queryKey: ["shelf", params],
     queryFn: ({ pageParam }) => searchShelf({ ...params, cursor: pageParam }),
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage, allPages) => {
@@ -1145,7 +1145,7 @@ export default function LibraryPage() {
   const listing = shelfMode ? shelfWorks : works;
   const facets = useQuery({
     queryKey: ["library-facets", shelfMode],
-    queryFn: () => runtime ? libraryV2FilterFacets() : Promise.resolve(demoFacets),
+    queryFn: () => runtime ? shelfFilterFacets() : Promise.resolve(demoFacets),
     enabled: filterOpened,
   });
   const loadedItems = useMemo(() => uniqueWorks(works.data?.pages), [works.data?.pages]);
@@ -1195,7 +1195,7 @@ export default function LibraryPage() {
     onMutate: (input) => {
       flagMutationsInFlight.current += 1;
       const key = ["library", params] as const;
-      const previous = queryClient.getQueryData<InfiniteData<SearchV2Result, string | null>>(key);
+      const previous = queryClient.getQueryData<InfiniteData<SearchResult, string | null>>(key);
       queryClient.setQueryData(key, updateWorkFlag(previous, input.id, input.kind === "favorite" ? { favorite: input.value } : { watchUpdates: input.value }, params));
       return { key, previous };
     },
@@ -1208,7 +1208,7 @@ export default function LibraryPage() {
     onError: (error, input, context) => {
       if (context?.previous) queryClient.setQueryData(
         context.key,
-        (current: InfiniteData<SearchV2Result, string | null> | undefined) => rollbackWorkFlag(current, context.previous, input.id, input.kind, params),
+        (current: InfiniteData<SearchResult, string | null> | undefined) => rollbackWorkFlag(current, context.previous, input.id, input.kind, params),
       );
       notifications.show({ color: "red", title: "作品情報を更新できません", message: errorMessage(error) });
     },
@@ -1220,7 +1220,7 @@ export default function LibraryPage() {
   // 新しい棚では消さずに棚から外す（版・編集・コレクションの記録は残り、もう一度保存すると戻る）。
   const shelfRemoveMutation = useMutation({
     mutationFn: async (works: ShelfEntry[]) => {
-      for (const work of works) await libraryV2RemoveWork(work.id);
+      for (const work of works) await shelfRemoveWork(work.id);
       return works.length;
     },
     onSuccess: (count) => {
@@ -1250,7 +1250,7 @@ export default function LibraryPage() {
       if (!runtime) return workSelectionCount;
       // 棚の利用者の状態は作品ごとの書き込み。順に書き、途中で失敗したらそこで止める。
       const change = action === "favorite" ? { favorite: true } : { watching: action === "watch" };
-      for (const work of shelfSelected) await libraryV2SetUserState(work.id, change);
+      for (const work of shelfSelected) await shelfSetUserState(work.id, change);
       return shelfSelected.length;
     },
     onSuccess: (count, input) => {
@@ -1420,7 +1420,7 @@ export default function LibraryPage() {
       shelfSelected.forEach((work) => forgetReadingPositions(readingKeyOf(work)));
       if (readingKeysAdopted()) {
         try {
-          await libraryV2ClearReadingPositions(shelfSelected.map((work) => work.id));
+          await shelfClearReadingPositions(shelfSelected.map((work) => work.id));
         } catch (error) {
           notifications.show({ color: "red", title: "読みかけから外せません", message: errorMessage(error) });
           return;
@@ -1467,7 +1467,7 @@ export default function LibraryPage() {
       if (action === "epub") {
         const ids: Array<number | string> = [];
         for (const entity of selectedEntities) {
-          const params: SearchV2Params = {
+          const params: SearchParams = {
             ...(entityKind === "person"
               ? { personSource: entity.source, personKey: entity.sourceKey }
               : { seriesSource: entity.source, seriesKey: entity.sourceKey }),
@@ -1493,7 +1493,7 @@ export default function LibraryPage() {
         for (const entity of selectedEntities) {
           const name = entity.displayName.replace(/[/:*?"<>|]/g, "_").slice(0, 80) || entity.sourceKey;
           // 作品だけを写した棚の部分写し（フォルダー一つ）。設定の復元から取り込める。
-          await libraryV2ExportEntityArchive(entityKind, entity.source, entity.sourceKey, directory, name);
+          await shelfExportEntityArchive(entityKind, entity.source, entity.sourceKey, directory, name);
           written += 1;
         }
         return written;
@@ -1552,8 +1552,8 @@ export default function LibraryPage() {
   // from the works parameters rather than rebuilt, so the two tabs cannot drift
   // into two readings of the same filter. Text, ordering and paging belong to
   // the listing, not to the filter, and are left behind.
-  const entityFilters = useMemo<SearchV2Params | null>(() => {
-    const narrowed: SearchV2Params = {
+  const entityFilters = useMemo<SearchParams | null>(() => {
+    const narrowed: SearchParams = {
       idsInclude: params.idsInclude,
       source: params.source,
       contentType: params.contentType,
@@ -1614,7 +1614,7 @@ export default function LibraryPage() {
   // 集計は棚の側が条件ごとに覚えているので、ページをめくる・件数を聞くたびに集め直さない。
   const shelfEntities = useInfiniteQuery({
     ...boundedInfiniteListOptions,
-    queryKey: ["library-v2-entities", entityKind, searchText, pageSize, entityOffset, numberedPageEnabled, entityFilters, entitySortBy, entitySortOrder, entityScopeParam],
+    queryKey: ["shelf-entities", entityKind, searchText, pageSize, entityOffset, numberedPageEnabled, entityFilters, entitySortBy, entitySortOrder, entityScopeParam],
     queryFn: ({ pageParam }): Promise<EntityFacet[]> => searchShelfEntities(entityKind, searchText || null, pageSize, pageParam, entityFilters, entitySortBy, entitySortOrder, entityScopeParam)
       .then((page) => page.items),
     initialPageParam: entityOffset,
@@ -1636,7 +1636,7 @@ export default function LibraryPage() {
     staleTime: 60_000,
   });
   const shelfEntityTotal = useQuery({
-    queryKey: ["library-v2-entity-count", entityKind, searchText, entityFilters, entityScopeParam],
+    queryKey: ["shelf-entity-count", entityKind, searchText, entityFilters, entityScopeParam],
     queryFn: () => searchShelfEntities(entityKind, searchText || null, 1, 0, entityFilters, entitySortBy, entitySortOrder, entityScopeParam)
       .then((page) => page.total),
     enabled: (tab === "people" || tab === "series") && shelfMode,
@@ -2156,7 +2156,7 @@ export default function LibraryPage() {
  * reading at a glance; the rest is a click away for when the results are not
  * what was expected.
  */
-function SearchInterpretation({ meta }: { meta: SearchV2Result["searchMeta"] }) {
+function SearchInterpretation({ meta }: { meta: SearchResult["searchMeta"] }) {
   const explanations = meta.explanations ?? [];
   const [first, ...rest] = explanations;
   const strict = meta.exactEntity?.strict;
@@ -2241,7 +2241,7 @@ function LibrarySearch({ value, onChange, runtime, shelf, versionScope, method, 
   const suggestions = useQuery({
     queryKey: ["search-suggest", shelf, suggestionText],
     queryFn: async (): Promise<SearchSuggestion[]> => {
-      if (runtime && shelf) return (await libraryV2SearchSuggest(suggestionText, 8)).items;
+      if (runtime && shelf) return (await shelfSearchSuggest(suggestionText, 8)).items;
       const demoSuggestions: SearchSuggestion[] = [
         { kind: "tag", label: "創作", value: "創作", count: 2 },
         { kind: "tag", label: "ファンタジー", value: "ファンタジー", count: 1 },
@@ -2687,14 +2687,14 @@ function FilterForm({ value, scope, versionScope, tab, runtime, shelfMode, autho
   const normalizedSearch = debouncedFilterSearch.trim().toLocaleLowerCase("ja-JP");
   const remoteAuthors = useQuery({
     queryKey: ["filter-facet-search", "authors", normalizedSearch, shelfMode],
-    queryFn: () => shelfMode ? libraryV2SearchFilterFacets("authors", normalizedSearch, 12) : Promise.resolve([]),
+    queryFn: () => shelfMode ? shelfSearchFilterFacets("authors", normalizedSearch, 12) : Promise.resolve([]),
     enabled: runtime && Boolean(normalizedSearch),
     staleTime: 5 * 60_000,
     gcTime: 60_000,
   });
   const remoteTags = useQuery({
     queryKey: ["filter-facet-search", "tags", normalizedSearch, shelfMode],
-    queryFn: () => shelfMode ? libraryV2SearchFilterFacets("tags", normalizedSearch, 12) : Promise.resolve([]),
+    queryFn: () => shelfMode ? shelfSearchFilterFacets("tags", normalizedSearch, 12) : Promise.resolve([]),
     enabled: runtime && Boolean(normalizedSearch),
     staleTime: 5 * 60_000,
     gcTime: 60_000,

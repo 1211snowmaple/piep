@@ -7,17 +7,17 @@ import { AppRouter } from "@/app/router";
 import type { SearchIndexStatus } from "@/types/library";
 import DiagnosticsPage from "./DiagnosticsPage";
 
-const status = vi.hoisted(() => ({ libraryV2Status: vi.fn(), libraryV2Search: vi.fn() }));
-vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
+const status = vi.hoisted(() => ({ shelfStatus: vi.fn(), shelfSearch: vi.fn() }));
+vi.mock("@/services/shelfApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/shelfApi")>()),
   ...status,
 }));
 const health = vi.hoisted(() => ({
-  libraryV2Diagnostics: vi.fn(),
-  libraryV2Maintain: vi.fn(),
-  libraryV2OptimizeSearchIndex: vi.fn(),
-  libraryV2Reclaim: vi.fn(),
-  libraryV2Verify: vi.fn(),
+  shelfDiagnostics: vi.fn(),
+  shelfMaintain: vi.fn(),
+  shelfOptimizeSearchIndex: vi.fn(),
+  shelfReclaim: vi.fn(),
+  shelfVerify: vi.fn(),
 }));
 vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
@@ -65,19 +65,19 @@ function view() {
 
 describe("新しい棚の診断", () => {
   beforeEach(() => {
-    status.libraryV2Status.mockResolvedValue({ state: "ready", path: "C:/shelf" });
-    status.libraryV2Search.mockResolvedValue({ page: { items: [], next: null, total: 2 }, intent: null, matches: [], cards: [] });
+    status.shelfStatus.mockResolvedValue({ state: "ready", path: "C:/shelf" });
+    status.shelfSearch.mockResolvedValue({ page: { items: [], next: null, total: 2 }, intent: null, matches: [], cards: [] });
     legacy.getOriginalImageStatus.mockResolvedValue({ covers: 0, illustrations: 0, running: false, progress: null });
     legacy.getEntityProfileRepairStatus.mockResolvedValue({ personCount: 0, seriesCount: 0, totalCount: 0, running: false, progress: null });
-    health.libraryV2Diagnostics.mockResolvedValue({
+    health.shelfDiagnostics.mockResolvedValue({
       measuredAt: "2026-11-20T00:00:00Z", works: 3, versions: 4, textLength: 120, media: 2, files: 9,
       logicalBytes: 9_000, storedBytes: 4_000, databaseBytes: 100_000, walBytes: 0, liveDatabaseBytes: 90_000,
       fragmentationPercent: 10, lexicalIndexBytes: 5_000, lexicalIndexSegments: 3, historyIndexBytes: 100,
       semanticIndexBytes: 0, processMemoryBytes: null, processPrivateMemoryBytes: null,
       gpuDedicatedMemoryBytes: null, gpuSharedMemoryBytes: null, searchIndex: index,
     });
-    health.libraryV2Verify.mockResolvedValue(9);
-    health.libraryV2OptimizeSearchIndex.mockResolvedValue({ optimized: true, beforeSegments: 3, afterSegments: 1, beforeBytes: 5_000, afterBytes: 4_000, reclaimedBytes: 1_000, elapsedMs: 3 });
+    health.shelfVerify.mockResolvedValue(9);
+    health.shelfOptimizeSearchIndex.mockResolvedValue({ optimized: true, beforeSegments: 3, afterSegments: 1, beforeBytes: 5_000, afterBytes: 4_000, reclaimedBytes: 1_000, elapsedMs: 3 });
   });
   afterEach(() => {
     localStorage.clear();
@@ -98,9 +98,9 @@ describe("新しい棚の診断", () => {
   it("照合と索引の統合を棚に頼む", async () => {
     view();
     fireEvent.click(await screen.findByRole("button", { name: "照合する" }));
-    await waitFor(() => expect(health.libraryV2Verify).toHaveBeenCalled());
+    await waitFor(() => expect(health.shelfVerify).toHaveBeenCalled());
     fireEvent.click(await screen.findByRole("button", { name: "検索索引を最適化" }));
-    await waitFor(() => expect(health.libraryV2OptimizeSearchIndex).toHaveBeenCalled());
+    await waitFor(() => expect(health.shelfOptimizeSearchIndex).toHaveBeenCalled());
   });
 
 });

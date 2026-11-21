@@ -141,7 +141,7 @@ pub(super) async fn discover(
     saved: &SavedConnection,
     generation: u64,
 ) -> Option<NativeLibraryStatus> {
-    let response = get(client, saved, "/api/v2/identity", PROBE_TIMEOUT)
+    let response = get(client, saved, "/api/identity", PROBE_TIMEOUT)
         .await
         .ok()?;
     parse_identity(response, generation).await.ok()
@@ -323,7 +323,7 @@ pub async fn pc_native_set_favorite(
     };
     let response = client
         .put(format!(
-            "{}/api/v2/libraries/{}/works/{}/favorite",
+            "{}/api/libraries/{}/works/{}/favorite",
             saved.url,
             library.library_id.get(),
             work.get()
@@ -385,10 +385,7 @@ pub async fn pc_native_search(
     if let Some(limit) = limit {
         payload["limit"] = serde_json::json!(limit);
     }
-    let endpoint = format!(
-        "/api/v2/libraries/{}/works/search",
-        library.library_id.get()
-    );
+    let endpoint = format!("/api/libraries/{}/works/search", library.library_id.get());
     post_bounded(&state, library, &endpoint, &payload, |bytes| {
         let page: MobileShelfPage =
             serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
@@ -422,7 +419,7 @@ pub(super) async fn work_detail(
     work: Id,
 ) -> Result<MobileShelfWorkDetail, ClientError> {
     let endpoint = format!(
-        "/api/v2/libraries/{}/works/{}",
+        "/api/libraries/{}/works/{}",
         library.library_id.get(),
         work.get()
     );
@@ -443,7 +440,7 @@ pub async fn pc_native_works(
     scope: NativeLibraryScope,
     after: Option<String>,
 ) -> Result<ReaderWorkPage, ClientError> {
-    let mut endpoint = format!("/api/v2/libraries/{}/works", scope.library_id.get());
+    let mut endpoint = format!("/api/libraries/{}/works", scope.library_id.get());
     if let Some(after) = after {
         if after.is_empty() || after.len() > 256 {
             return Err(ClientError::remote());
@@ -530,7 +527,7 @@ pub async fn pc_native_suggest(
         return Err(ClientError::remote());
     }
     let endpoint = format!(
-        "/api/v2/libraries/{}/works/suggest?{}",
+        "/api/libraries/{}/works/suggest?{}",
         library.library_id.get(),
         query(&[("text", text.trim()), ("limit", "8")])
     );
@@ -575,7 +572,7 @@ pub async fn pc_native_entities(
         pairs.push(("order", order));
     }
     let endpoint = format!(
-        "/api/v2/libraries/{}/{kind}?{}",
+        "/api/libraries/{}/{kind}?{}",
         library.library_id.get(),
         query(&pairs)
     );
@@ -603,7 +600,7 @@ pub async fn pc_native_entity_detail(
         return Err(ClientError::remote());
     }
     let endpoint = format!(
-        "/api/v2/libraries/{}/{kind}/detail?{}",
+        "/api/libraries/{}/{kind}/detail?{}",
         library.library_id.get(),
         query(&[("provider", &source), ("key", &key)])
     );
@@ -654,7 +651,7 @@ pub async fn pc_native_entity_series(
         }
     }
     let endpoint = format!(
-        "/api/v2/libraries/{}/people/series?{}",
+        "/api/libraries/{}/people/series?{}",
         library.library_id.get(),
         query(&pairs)
     );
@@ -679,7 +676,7 @@ pub async fn pc_native_collections(
     state: State<'_, PcClientState>,
     library: NativeLibraryScope,
 ) -> Result<Vec<MobileCollection>, ClientError> {
-    let endpoint = format!("/api/v2/libraries/{}/collections", library.library_id.get());
+    let endpoint = format!("/api/libraries/{}/collections", library.library_id.get());
     read(&state, library, &endpoint, |bytes| {
         let items: Vec<MobileCollection> = parse_json(bytes)?;
         if !valid_collections(&items) {
@@ -706,7 +703,7 @@ pub(super) async fn work_collections(
     work: Id,
 ) -> Result<Vec<MobileCollection>, ClientError> {
     let endpoint = format!(
-        "/api/v2/libraries/{}/works/{}/collections",
+        "/api/libraries/{}/works/{}/collections",
         library.library_id.get(),
         work.get()
     );
@@ -737,7 +734,7 @@ pub async fn pc_native_collection(
         return Err(ClientError::remote());
     }
     let endpoint = format!(
-        "/api/v2/libraries/{}/collections/{collection}",
+        "/api/libraries/{}/collections/{collection}",
         library.library_id.get(),
     );
     read(&state, library, &endpoint, |bytes| {
@@ -761,7 +758,7 @@ fn view_path(scope: NativeLibraryScope, entity: Id, view: &ResourceScope) -> Str
         ResourceScope::Edit(id) => ("edit", id),
     };
     format!(
-        "/api/v2/libraries/{}/entities/{}/views/{kind}/{}",
+        "/api/libraries/{}/entities/{}/views/{kind}/{}",
         scope.library_id.get(),
         entity.get(),
         id.get(),
@@ -796,7 +793,7 @@ pub(super) async fn lookup(
         .append_pair("key", key)
         .finish();
     let endpoint = format!(
-        "/api/v2/libraries/{}/works/lookup?{query}",
+        "/api/libraries/{}/works/lookup?{query}",
         scope.library_id.get()
     );
     read(state, scope, &endpoint, |bytes| {

@@ -63,7 +63,7 @@ fn resolve_allowed_path(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, S
     // 環境変数で外に置いた棚。
     let mut roots = Vec::new();
     if let Ok(app_data) = app.path().app_data_dir() {
-        for root in [app_data.clone(), super::library_v2::library_dir(&app_data)] {
+        for root in [app_data.clone(), super::shelf::library_dir(&app_data)] {
             if let Ok(resolved) = root.canonicalize() {
                 roots.push(resolved);
             }

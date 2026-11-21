@@ -27,7 +27,7 @@ export const sortGroups: { label: string; items: FixedSort[] }[] = [
 
 const defaultSort: FixedSort = "dateDesc";
 const rememberedKey = "piep.android.library.sort";
-const savedConditionsKey = "piep.android.library.saved-conditions.v1";
+const savedConditionsKey = "piep.android.library.saved-conditions";
 
 export function loadRememberedSort(): FixedSort {
   try {

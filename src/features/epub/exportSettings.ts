@@ -76,7 +76,7 @@ export const defaultExportSettings: EpubExportSettings = {
   compression: defaultCompression,
 };
 
-const STORAGE_KEY = "piep.epub-export.v1";
+const STORAGE_KEY = "piep.epub-export";
 
 /**
  * 憶えていた決めごと。壊れた値は既定へ落として返す ―― 書き出しの設定が

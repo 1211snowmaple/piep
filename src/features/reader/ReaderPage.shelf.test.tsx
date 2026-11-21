@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
-import type { ShelfCard, ShelfNeighbors, ShelfWork } from "@/services/libraryV2Api";
+import type { ShelfCard, ShelfNeighbors, ShelfWork } from "@/services/shelfApi";
 import { writeReadingPosition } from "@/features/library/readingShelf";
 import ReaderPage from "./ReaderPage";
 
@@ -13,15 +13,15 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
 }));
 
 const api = vi.hoisted(() => ({
-  libraryV2Work: vi.fn(),
-  libraryV2Content: vi.fn(),
-  libraryV2Outline: vi.fn(),
-  libraryV2SearchContent: vi.fn(),
-  libraryV2Neighbors: vi.fn(),
-  libraryV2RenderPdfPage: vi.fn(),
+  shelfWork: vi.fn(),
+  shelfContent: vi.fn(),
+  shelfOutline: vi.fn(),
+  shelfSearchContent: vi.fn(),
+  shelfNeighbors: vi.fn(),
+  shelfRenderPdfPage: vi.fn(),
 }));
-vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
+vi.mock("@/services/shelfApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/shelfApi")>()),
   ...api,
 }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
@@ -90,26 +90,26 @@ describe("ReaderPage on the shelf", () => {
   beforeEach(() => {
     window.localStorage.clear();
     for (const fn of Object.values(api)) fn.mockReset();
-    api.libraryV2Work.mockResolvedValue(work);
-    api.libraryV2Content.mockImplementation(async (_work: string, snapshot: string | null, page: number) => ({
+    api.shelfWork.mockResolvedValue(work);
+    api.shelfContent.mockImplementation(async (_work: string, snapshot: string | null, page: number) => ({
       page,
       pageCount: 1,
       html: `<p>${snapshot === FIRST ? "古い版の本文" : "今の本文"}</p><img class="novel-image" data-local-path="${IMAGE}" alt="挿絵" />`,
       totalPlainTextChars: 7,
       sourcePageStarts: [0],
     }));
-    api.libraryV2Outline.mockResolvedValue([]);
-    api.libraryV2SearchContent.mockResolvedValue([]);
-    api.libraryV2Neighbors.mockResolvedValue([]);
+    api.shelfOutline.mockResolvedValue([]);
+    api.shelfSearchContent.mockResolvedValue([]);
+    api.shelfNeighbors.mockResolvedValue([]);
   });
 
   it("reads the body, images and outline from the shelf and opens the shelf editor", async () => {
     renderReader(`#/reader/${WORK.toUpperCase()}`);
     expect(await screen.findByText("今の本文")).toBeInTheDocument();
     // ID は小文字にそろえて読む（読書位置としおりの鍵も同じ）。
-    expect(api.libraryV2Work).toHaveBeenCalledWith(WORK);
-    expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, null, 0);
-    expect(api.libraryV2Outline).toHaveBeenCalledWith(WORK, null);
+    expect(api.shelfWork).toHaveBeenCalledWith(WORK);
+    expect(api.shelfContent).toHaveBeenCalledWith(WORK, null, 0);
+    expect(api.shelfOutline).toHaveBeenCalledWith(WORK, null);
     expect(screen.getByAltText("挿絵")).toHaveAttribute("src", `http://piep-library.localhost/${IMAGE}`);
     fireEvent.click(screen.getByRole("button", { name: "編集" }));
     await waitFor(() => expect(window.location.hash).toBe(`#/editor/${WORK}`));
@@ -117,28 +117,28 @@ describe("ReaderPage on the shelf", () => {
 
   it("opens the original pages of a PDF attachment from the new shelf", async () => {
     const pdf = "ab".repeat(32);
-    api.libraryV2Content.mockResolvedValue({
+    api.shelfContent.mockResolvedValue({
       page: 0,
       pageCount: 1,
       html: `<div class="attachment-notice">取り込んだ本文 <button type="button" class="attachment-original" data-local-path="${pdf}" data-file-name="本文.pdf">原本を見る</button></div><p>今の本文</p>`,
       totalPlainTextChars: 4,
       sourcePageStarts: [0],
     });
-    api.libraryV2RenderPdfPage.mockResolvedValue({ image: "data:image/webp;base64,page", width: 1200, height: 1553, pageCount: 2 });
+    api.shelfRenderPdfPage.mockResolvedValue({ image: "data:image/webp;base64,page", width: 1200, height: 1553, pageCount: 2 });
     renderReader(`#/reader/${WORK}`);
     fireEvent.click(await screen.findByRole("button", { name: "原本を見る" }));
     expect(await screen.findByRole("img", { name: "本文.pdf の 1 ページ目" })).toBeInTheDocument();
-    expect(api.libraryV2RenderPdfPage).toHaveBeenCalledWith(WORK, pdf, 0, expect.any(Number));
+    expect(api.shelfRenderPdfPage).toHaveBeenCalledWith(WORK, pdf, 0, expect.any(Number));
   });
 
   it("names an edit made on an older version like the old shelf does", async () => {
-    api.libraryV2Work.mockResolvedValue({ ...work, edit_id: FIRST, editBaseVersion: 1 });
+    api.shelfWork.mockResolvedValue({ ...work, edit_id: FIRST, editBaseVersion: 1 });
     renderReader(`#/reader/${WORK}`);
     expect(await screen.findByText("編集版（v1基準）")).toBeInTheDocument();
   });
 
   it("does not warn about an edit made on the current version", async () => {
-    api.libraryV2Work.mockResolvedValue({ ...work, edit_id: FIRST, editBaseVersion: 2 });
+    api.shelfWork.mockResolvedValue({ ...work, edit_id: FIRST, editBaseVersion: 2 });
     renderReader(`#/reader/${WORK}`);
     expect(await screen.findByText("今の本文")).toBeInTheDocument();
     expect(screen.getAllByText("編集版").length).toBeGreaterThan(0);
@@ -150,11 +150,11 @@ describe("ReaderPage on the shelf", () => {
       { kind: "series", id: "s", title: "続き物", ordered: true, position: 2, total: 3, missing: 0, previous: card(PREVIOUS, "前の回"), next: card(NEXT, "次の回", { coverFile: COVER, author_name: "別名", excerpt: "一行目<br />二行目" }) },
       { kind: "person", id: "p", title: "", ordered: false, position: 5, total: 9, missing: 0, previous: card(PREVIOUS, "前の回"), next: null },
     ];
-    api.libraryV2Neighbors.mockResolvedValue(rows);
+    api.shelfNeighbors.mockResolvedValue(rows);
     writeReadingPosition(NEXT, null, { page: 2, top: 10 });
     renderReader(`#/reader/${WORK}`);
     expect(await screen.findByText("公式シリーズ「続き物」")).toBeInTheDocument();
-    expect(api.libraryV2Neighbors).toHaveBeenCalledWith(WORK);
+    expect(api.shelfNeighbors).toHaveBeenCalledWith(WORK);
     expect(screen.getByText("2 / 3 · 公式順")).toBeInTheDocument();
     // 名前のない作者の並びは、作品の作者名で名乗る。読む順ではないので「前の作品」と呼ばない。
     expect(screen.getByText("作者の作品")).toBeInTheDocument();
@@ -173,7 +173,7 @@ describe("ReaderPage on the shelf", () => {
   });
 
   it("offers the next work only when the collection actually has a reading order", async () => {
-    api.libraryV2Neighbors.mockResolvedValue([
+    api.shelfNeighbors.mockResolvedValue([
       { kind: "collection", id: "c", title: "雨の記憶", ordered: true, position: 1, total: 2, missing: 0, previous: null, next: card(NEXT, "となりの話", { author_name: "隣の作者", text_length: 11000, excerpt: "雨の夜に始まる話。" }) },
     ] satisfies ShelfNeighbors[]);
     renderReader(`#/reader/${WORK}`);
@@ -189,7 +189,7 @@ describe("ReaderPage on the shelf", () => {
   });
 
   it("never presents an unordered collection as a serial", async () => {
-    api.libraryV2Neighbors.mockResolvedValue([
+    api.shelfNeighbors.mockResolvedValue([
       { kind: "collection", id: "c", title: "雨の記憶", ordered: false, position: 1, total: 2, missing: 0, previous: null, next: card(NEXT, "となりの話") },
     ] satisfies ShelfNeighbors[]);
     renderReader(`#/reader/${WORK}`);
@@ -206,25 +206,25 @@ describe("ReaderPage on the shelf", () => {
 
   it("continues a work moved from the old shelf at the place and bookmarks kept under its old number", async () => {
     const OLD = 4321;
-    api.libraryV2Work.mockResolvedValue({ ...work, legacyId: OLD });
-    api.libraryV2Content.mockImplementation(async (_work: string, _snapshot: string | null, page: number) => ({
+    api.shelfWork.mockResolvedValue({ ...work, legacyId: OLD });
+    api.shelfContent.mockImplementation(async (_work: string, _snapshot: string | null, page: number) => ({
       page, pageCount: 3, html: `<p>${page + 1}ページ目の本文</p>`, totalPlainTextChars: 30, sourcePageStarts: [0],
     }));
     // 旧棚の読む画面が憶えた位置としおり（旧棚の番号で引く）。
     writeReadingPosition(OLD, null, { page: 2, top: 0 });
-    window.localStorage.setItem("piep.bookmarks.v1", JSON.stringify({
+    window.localStorage.setItem("piep.bookmarks", JSON.stringify({
       [String(OLD)]: [{ id: "b1", page: 3, top: 0, label: "3ページ", createdAt: "2026-11-15T00:00:00Z" }],
     }));
     renderReader(`#/reader/${WORK}`);
     expect(await screen.findByText("2ページ目の本文")).toBeInTheDocument();
-    expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, null, 1);
+    expect(api.shelfContent).toHaveBeenCalledWith(WORK, null, 1);
     expect(screen.getByRole("button", { name: "しおり一覧（1件）" })).toBeInTheDocument();
     // 新しい棚の ID では書かない（旧棚と別の記録にならない）。
     expect(window.localStorage.getItem(`piep.reader-position.${WORK}.current`)).toBeNull();
   });
 
   it("marks a neighbour as being read when its old number has a reading position", async () => {
-    api.libraryV2Neighbors.mockResolvedValue([
+    api.shelfNeighbors.mockResolvedValue([
       { kind: "series", id: "s", title: "続き物", ordered: true, position: 1, total: 2, missing: 0, previous: null, next: card(NEXT, "次の回", { legacyId: 77 }) },
     ] satisfies ShelfNeighbors[]);
     writeReadingPosition(77, null, { page: 1, top: 40 });
@@ -235,7 +235,7 @@ describe("ReaderPage on the shelf", () => {
   it("reads a saved version by turning its number into that version's snapshot", async () => {
     renderReader(`#/reader/${WORK}?version=1`);
     expect(await screen.findByText("古い版の本文")).toBeInTheDocument();
-    await waitFor(() => expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, FIRST, 0));
-    expect(api.libraryV2Content).not.toHaveBeenCalledWith(WORK, null, 0);
+    await waitFor(() => expect(api.shelfContent).toHaveBeenCalledWith(WORK, FIRST, 0));
+    expect(api.shelfContent).not.toHaveBeenCalledWith(WORK, null, 0);
   });
 });

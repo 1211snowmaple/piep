@@ -4,16 +4,16 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
-import type { ShelfCard } from "@/services/libraryV2Api";
+import type { ShelfCard } from "@/services/shelfApi";
 import type { DashboardSummary } from "@/types/library";
 import DashboardPage from "./DashboardPage";
 
-const v2 = vi.hoisted(() => ({ libraryV2Status: vi.fn(), libraryV2Search: vi.fn() }));
-vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
-  ...v2,
+const shelfApi = vi.hoisted(() => ({ shelfStatus: vi.fn(), shelfSearch: vi.fn() }));
+vi.mock("@/services/shelfApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/shelfApi")>()),
+  ...shelfApi,
 }));
-const health = vi.hoisted(() => ({ libraryV2Dashboard: vi.fn(), libraryV2SearchIndexStatus: vi.fn() }));
+const health = vi.hoisted(() => ({ shelfDashboard: vi.fn(), shelfSearchIndexStatus: vi.fn() }));
 vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
   ...health,
@@ -72,10 +72,10 @@ const summary: DashboardSummary = {
 
 describe("新しい棚のホーム", () => {
   beforeEach(() => {
-    v2.libraryV2Status.mockResolvedValue({ state: "ready", path: "C:/shelf" });
-    v2.libraryV2Search.mockResolvedValue({ page: { items: [], next: null, total: 1 }, intent: null, matches: [], cards: [card] });
-    health.libraryV2Dashboard.mockResolvedValue(summary);
-    health.libraryV2SearchIndexStatus.mockResolvedValue({ totalDownloads: 27, indexedDownloads: 27, pendingDownloads: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 0, semanticIndexedDownloads: 0, semanticPendingDownloads: 0, semanticEnabled: false, semanticModelReady: false, embeddingProvider: "cpu", gpuEnabled: false });
+    shelfApi.shelfStatus.mockResolvedValue({ state: "ready", path: "C:/shelf" });
+    shelfApi.shelfSearch.mockResolvedValue({ page: { items: [], next: null, total: 1 }, intent: null, matches: [], cards: [card] });
+    health.shelfDashboard.mockResolvedValue(summary);
+    health.shelfSearchIndexStatus.mockResolvedValue({ totalDownloads: 27, indexedDownloads: 27, pendingDownloads: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 0, semanticIndexedDownloads: 0, semanticPendingDownloads: 0, semanticEnabled: false, semanticModelReady: false, embeddingProvider: "cpu", gpuEnabled: false });
   });
   afterEach(() => {
     localStorage.clear();
@@ -94,7 +94,7 @@ describe("新しい棚のホーム", () => {
     expect((await screen.findAllByText("棚の作品")).length).toBeGreaterThan(0);
     expect(screen.getByText("27")).toBeTruthy();
     expect(screen.getByText("100%")).toBeTruthy();
-    const [, query] = v2.libraryV2Search.mock.calls[0];
+    const [, query] = shelfApi.shelfSearch.mock.calls[0];
     expect(query).toMatchObject({ sort: "saved", descending: true, limit: 4 });
     expect(legacy.getDashboardSummary).not.toHaveBeenCalled();
     expect(legacy.getSearchIndexStatus).not.toHaveBeenCalled();

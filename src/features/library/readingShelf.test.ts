@@ -32,7 +32,7 @@ describe("reading shelf membership", () => {
 
   it("ignores keys that are not reading positions", () => {
     window.localStorage.setItem("piep.library-view", "\"gallery\"");
-    window.localStorage.setItem("piep.reader-settings.v4", "{}");
+    window.localStorage.setItem("piep.reader-settings", "{}");
     window.localStorage.setItem("piep.reader-position.notanumber.current", "50");
     window.localStorage.setItem("piep.reader-position.-3.current", "50");
     setPosition(9, "current", "50");

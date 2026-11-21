@@ -24,13 +24,13 @@ const updateJobApi = vi.hoisted(() => ({
 }));
 
 const shelfCounts = vi.hoisted(() => vi.fn());
-vi.mock("@/services/shelfApi", () => shelfApi);
+vi.mock("@/services/savedSearchApi", () => shelfApi);
 vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
-  libraryV2ShelfCounts: shelfCounts,
+  shelfCounts: shelfCounts,
 }));
-vi.mock("@/features/library/shelfV2", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/features/library/shelfV2")>()),
+vi.mock("@/features/library/shelf", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/features/library/shelf")>()),
   searchShelf: librarySearch,
 }));
 vi.mock("@/services/updateJobApi", async (importOriginal) => ({
@@ -116,7 +116,7 @@ async function row(label: string | RegExp): Promise<HTMLElement> {
 /** The persisted fold state, which is what survives a restart. */
 function foldState(): Record<string, boolean> {
   try {
-    return JSON.parse(window.localStorage.getItem("piep.nav-groups.v1") ?? "{}") as Record<string, boolean>;
+    return JSON.parse(window.localStorage.getItem("piep.nav-groups") ?? "{}") as Record<string, boolean>;
   } catch {
     return {};
   }
@@ -143,7 +143,7 @@ describe("library sidebar", () => {
     await waitFor(() => expect(nav().queryByText("要確認")).toBeNull());
     expect(nav().getByText("すべて")).toBeInTheDocument();
     expect(window.location.hash).toContain("acquisition=attention");
-    expect(JSON.parse(window.localStorage.getItem("piep.library-sidebar.v1")!)).toHaveProperty("attention", false);
+    expect(JSON.parse(window.localStorage.getItem("piep.library-sidebar")!)).toHaveProperty("attention", false);
     fireEvent.click(screen.getByRole("switch", { name: "要確認" }));
     expect(await nav().findByText("要確認")).toBeInTheDocument();
   });

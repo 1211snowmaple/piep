@@ -103,7 +103,7 @@ describe("ReaderPage position restoration", () => {
     dbApi.getReaderContentPage.mockImplementation((_id: number, _version: number | null, page: number) => (
       page === 0 ? Promise.resolve(content(0, "<p>1ページの本文</p>")) : pageTwo.promise
     ));
-    window.localStorage.setItem("piep.bookmarks.v1", JSON.stringify({
+    window.localStorage.setItem("piep.bookmarks", JSON.stringify({
       101: [{ id: "page-two", page: 2, top: 240, label: "2ページ · 20%", createdAt: "2026-08-23T00:00:00.000Z" }],
     }));
 

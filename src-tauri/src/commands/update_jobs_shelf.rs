@@ -18,7 +18,7 @@ async fn blocking<T: Send + 'static>(
 }
 
 pub(super) fn library(app: &tauri::AppHandle) -> Result<Arc<Library>, String> {
-    app.try_state::<Arc<super::super::library_v2::LibraryV2>>()
+    app.try_state::<Arc<super::super::shelf::Shelf>>()
         .ok_or_else(|| "棚は開いていません".to_string())?
         .library()
 }
@@ -597,7 +597,7 @@ pub(super) mod tests {
         let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
         library.switch_over().unwrap();
         let state = AppState::new(Arc::new(
-            super::super::super::library_v2::LibraryV2::with_test_library(library.clone()),
+            super::super::super::shelf::Shelf::with_test_library(library.clone()),
         ));
         (Temp(root), Arc::new(state), library)
     }

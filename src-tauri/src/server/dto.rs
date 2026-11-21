@@ -1,7 +1,7 @@
 //! 携帯の一覧の条件（`MobileSearchRequest`）。受け取った条件を検査し、検索の条件へ直す。
 //! 返す型は `crates/piep-mobile-api` にある（携帯の Rust と画面の型が同じ定義を使う）。
 
-use crate::database::SearchV2Params;
+use crate::database::SearchParams;
 use chrono::NaiveDate;
 use serde::Deserialize;
 
@@ -44,7 +44,7 @@ pub struct MobileSearchRequest {
 
 impl MobileSearchRequest {
     /// モバイル API で受け取る条件を絞り、PC 版の唯一の検索入口に渡す。
-    pub fn into_db_params(self) -> Result<SearchV2Params, String> {
+    pub fn into_db_params(self) -> Result<SearchParams, String> {
         if self
             .text
             .as_ref()

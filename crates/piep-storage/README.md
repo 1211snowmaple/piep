@@ -43,4 +43,4 @@ cargo test --manifest-path crates/piep-storage/Cargo.toml --locked
 cargo clippy --manifest-path crates/piep-storage/Cargo.toml --all-targets --locked -- -D warnings
 ```
 
-HTTP API v2、認証、端末 DB、bundle の原子的な公開や GC はそれぞれの層で実装する。
+携帯向けの HTTP API、認証、端末 DB、bundle の原子的な公開や GC はそれぞれの層で実装する。

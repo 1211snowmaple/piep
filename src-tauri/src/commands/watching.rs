@@ -16,7 +16,7 @@ pub(super) async fn blocking<T: Send + 'static>(
 }
 
 pub(super) fn active(app: &tauri::AppHandle) -> Result<Arc<Library>, String> {
-    app.try_state::<Arc<super::library_v2::LibraryV2>>()
+    app.try_state::<Arc<super::shelf::Shelf>>()
         .ok_or_else(|| "棚は開いていません".to_string())?
         .library()
 }

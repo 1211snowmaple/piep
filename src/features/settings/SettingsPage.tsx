@@ -45,9 +45,9 @@ import { getProvider, providers } from "@/lib/providers";
 import { loginFanboxWebview, loginPixivWebview, verifyFanboxSession, verifyPixivToken } from "@/services/authApi";
 import type { FanboxUser, PixivUser } from "@/services/authApi";
 import { getSearchIndexStatus, isTauriRuntime } from "@/services/dbApi";
-import { libraryV2Dashboard } from "@/services/shelfHealthApi";
-import { libraryV2ReimportFolders } from "@/services/shelfBackupApi";
-import { useLibraryV2Status } from "@/features/library/shelfV2";
+import { shelfDashboard } from "@/services/shelfHealthApi";
+import { shelfReimportFolders } from "@/services/shelfBackupApi";
+import { useShelfStatus } from "@/features/library/shelf";
 import { ShelfBackupCard } from "./ShelfBackupCard";
 import type { SearchIndexStatus } from "@/types/library";
 import { openFilesystemPath } from "@/services/openerApi";
@@ -167,8 +167,8 @@ export default function SettingsPage() {
     },
   });
   // 数と保存先は棚のもの。
-  const shelfStatus = useLibraryV2Status(runtime);
-  const stats = useQuery({ queryKey: ["stats"], queryFn: () => runtime ? libraryV2Dashboard().then((summary) => summary.stats) : Promise.resolve({ totalDownloads: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 }) });
+  const shelfStatus = useShelfStatus(runtime);
+  const stats = useQuery({ queryKey: ["stats"], queryFn: () => runtime ? shelfDashboard().then((summary) => summary.stats) : Promise.resolve({ totalDownloads: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 }) });
   const shelfPath = shelfStatus.data && "path" in shelfStatus.data ? shelfStatus.data.path : null;
   const storagePath = useQuery({ queryKey: ["storage-path", shelfPath], enabled: !runtime || shelfPath !== null, queryFn: () => Promise.resolve(runtime ? shelfPath! : "C:\\Users\\preview\\AppData\\Roaming\\io.github.u1211snowmaple.piep\\library") });
   const index = useQuery({ queryKey: ["search-index-status"], queryFn: () => runtime ? getSearchIndexStatus() : Promise.resolve(PREVIEW_INDEX_STATUS) });
@@ -226,7 +226,7 @@ export default function SettingsPage() {
         onRetry: () => maintenanceMutation.mutate(),
       });
       try {
-        const outcome = await libraryV2ReimportFolders();
+        const outcome = await shelfReimportFolders();
         // 飛ばしたものがあることを黙っていると、件数が合わない理由が誰にも
         // 分からない。何件・なぜ、を同じ行に出す。
         const summary = outcome.skipped.length

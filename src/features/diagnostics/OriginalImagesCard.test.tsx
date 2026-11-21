@@ -13,8 +13,8 @@ vi.mock("@/services/dbApi", async (original) => ({
 vi.mock("@/services/eventBus", () => ({ subscribeTauriEvent: () => () => undefined, onTauriEvent: api.listen }));
 vi.mock("@/services/shelfHealthApi", async (original) => ({
   ...await original<typeof import("@/services/shelfHealthApi")>(),
-  libraryV2OriginalImageStatus: api.status,
-  libraryV2UpgradePixivImagesToOriginal: api.upgrade,
+  shelfOriginalImageStatus: api.status,
+  shelfUpgradePixivImagesToOriginal: api.upgrade,
 }));
 
 beforeEach(() => {

@@ -6,8 +6,8 @@ import { AppRouter } from "@/app/router";
 import { AddToCollectionModal } from "@/features/collections/AddToCollectionModal";
 
 const api = vi.hoisted(() => ({ shelfCollections: vi.fn(), editShelfCollection: vi.fn() }));
-vi.mock("@/features/library/shelfV2", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/features/library/shelfV2")>()),
+vi.mock("@/features/library/shelf", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/features/library/shelf")>()),
   shelfCollections: api.shelfCollections,
   editShelfCollection: api.editShelfCollection,
   invalidateShelf: vi.fn(),

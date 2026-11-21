@@ -2,7 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { rekeyBookmarks, useBookmarks } from "./bookmarks";
 
-const STORAGE_KEY = "piep.bookmarks.v1";
+const STORAGE_KEY = "piep.bookmarks";
 const values = new Map<string, string>();
 
 Object.defineProperty(globalThis, "localStorage", {
@@ -34,6 +34,15 @@ describe("reader bookmarks", () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ 101: [valid, { id: 2 }] }));
     const { result } = renderHook(() => useBookmarks(101));
     expect(result.current.bookmarks).toEqual([valid]);
+  });
+
+  it("moves bookmarks saved under the previous key once", () => {
+    const valid = { id: "bookmark-1", page: 2, top: 120, label: "2ページ · 20%", createdAt: "2026-08-09T00:00:00.000Z" };
+    localStorage.setItem("piep.bookmarks.v1", JSON.stringify({ 101: [valid] }));
+    const { result } = renderHook(() => useBookmarks(101));
+    expect(result.current.bookmarks).toEqual([valid]);
+    expect(localStorage.getItem("piep.bookmarks.v1")).toBeNull();
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}")).toEqual({ 101: [valid] });
   });
 
   it("moves bookmarks of an old-shelf number to the shelf id, for every version", () => {

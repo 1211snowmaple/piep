@@ -82,17 +82,17 @@ impl ReaderShelfConfig {
         &self,
         paths: &ServerPaths,
         store: Arc<ServerStore>,
-    ) -> Result<Arc<super::v2::Context>, String> {
+    ) -> Result<Arc<super::reader::Context>, String> {
         let root = self.root(paths)?;
         let library = Arc::new(
             crate::library::Library::open_matching(&root, self.library_id.get())
                 .map_err(|error| format!("新しい棚を開けません: {error}"))?,
         );
-        let authority = Arc::new(super::v2::DeviceAuthority::new(store));
+        let authority = Arc::new(super::reader::DeviceAuthority::new(store));
         for (device, subject) in &self.readers {
             authority.grant(device.clone(), self.library_id, *subject)?;
         }
-        let context = super::v2::Context::new(library, authority, self.sync_epoch)
+        let context = super::reader::Context::new(library, authority, self.sync_epoch)
             .map_err(|error| error.to_string())?;
         Ok(Arc::new(context))
     }
@@ -667,7 +667,7 @@ async fn report_ready(paths: ServerPaths, config: ServerConfig) -> Result<(), St
     } else {
         "http"
     };
-    let url = format!("{scheme}://{host}:{}/api/v2/hello", address.port());
+    let url = format!("{scheme}://{host}:{}/api/hello", address.port());
     // 自分自身への問い合わせなので、証明書は問わない。
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -1383,7 +1383,7 @@ mod tests {
             .unwrap();
         let get = |token: &str| {
             client
-                .get(format!("{base}/api/v2/identity"))
+                .get(format!("{base}/api/identity"))
                 .bearer_auth(token)
         };
         let denied = get(&other.token).send().await.unwrap();
@@ -1402,7 +1402,7 @@ mod tests {
         assert_eq!(identity.subject_id, subject);
         assert_eq!(identity.sync_epoch, epoch);
         let view = format!(
-            "{base}/api/v2/libraries/{}/entities/{}/views/snapshot/{}",
+            "{base}/api/libraries/{}/entities/{}/views/snapshot/{}",
             id.get(),
             saved.entity_id,
             saved.snapshot_id,
@@ -1444,7 +1444,7 @@ mod tests {
         let restored =
             piep_storage::decode_chunk(&response.bytes().await.unwrap(), &file.chunks[0]).unwrap();
         assert_eq!(crate::library::Fingerprint::of(&restored), file.id);
-        let about = resource(format!("{base}/api/v2/about"))
+        let about = resource(format!("{base}/api/about"))
             .send()
             .await
             .unwrap()
@@ -1457,7 +1457,7 @@ mod tests {
         let administrator = store.consume_pairing(&admin_ticket, "管理端末").unwrap();
         let status = |token: &str| {
             client
-                .get(format!("{base}/api/v2/admin/status"))
+                .get(format!("{base}/api/admin/status"))
                 .bearer_auth(token)
         };
         assert_eq!(
@@ -1480,9 +1480,7 @@ mod tests {
         // 携帯の読書位置は管理の口からだけ読める（デスクトップ版が自分の棚へ取り込む）。
         let reading = |token: &str| {
             client
-                .get(format!(
-                    "{base}/api/v2/admin/shelf/reading?cursor=&limit=10"
-                ))
+                .get(format!("{base}/api/admin/shelf/reading?cursor=&limit=10"))
                 .bearer_auth(token)
         };
         assert_eq!(

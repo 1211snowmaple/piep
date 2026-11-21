@@ -1,7 +1,7 @@
 //! 旧棚の絞り込みと、新しい棚の同じ絞り込みを全件で比べる。作品の集まりと時間を並べる。
 //! 旧棚は写しを開く（旧 DB は開くときに後片付けを書き込む）。新しい棚は読むだけ。
 
-use piep_lib::database::{models::SearchV2Params, Database};
+use piep_lib::database::{models::SearchParams, Database};
 use piep_lib::library::{
     AcquisitionFilter, CountRange, DateField, DateRange, EntityKind, Library, LibraryId,
     MediaFilter, RevisionFilter, WorkFilter, WorkListQuery,
@@ -23,12 +23,12 @@ fn median(mut v: Vec<f64>) -> f64 {
     v.get(v.len() / 2).copied().unwrap_or(0.0)
 }
 
-fn old_walk(old: &Database, params: &SearchV2Params) -> Result<BTreeSet<Key>, Error> {
+fn old_walk(old: &Database, params: &SearchParams) -> Result<BTreeSet<Key>, Error> {
     let mut keys = BTreeSet::new();
     let mut params = params.clone();
     params.limit = Some(200);
     loop {
-        let page = old.search_downloads_v2(&params)?;
+        let page = old.search_downloads(&params)?;
         keys.extend(
             page.items
                 .iter()
@@ -80,7 +80,7 @@ fn day(date: &str, next: bool) -> Result<i64, Error> {
 
 struct Case {
     name: String,
-    old: SearchV2Params,
+    old: SearchParams,
     new: WorkFilter,
 }
 
@@ -154,10 +154,10 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
         }
     }
 
-    let o = SearchV2Params::default;
+    let o = SearchParams::default;
     let f = WorkFilter::default;
     let mut cases = Vec::new();
-    let mut case = |name: &str, old: SearchV2Params, new: WorkFilter| {
+    let mut case = |name: &str, old: SearchParams, new: WorkFilter| {
         cases.push(Case {
             name: name.into(),
             old,
@@ -167,7 +167,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     for provider in ["pixiv", "fanbox"] {
         case(
             &format!("取得元 {provider}"),
-            SearchV2Params {
+            SearchParams {
                 source: Some(provider.into()),
                 ..o()
             },
@@ -179,7 +179,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     }
     case(
         "お気に入り",
-        SearchV2Params {
+        SearchParams {
             favorite: Some(true),
             ..o()
         },
@@ -190,7 +190,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "監視",
-        SearchV2Params {
+        SearchParams {
             watch_filter: Some("watched".into()),
             ..o()
         },
@@ -201,7 +201,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "編集あり",
-        SearchV2Params {
+        SearchParams {
             edit_filter: Some("edited".into()),
             ..o()
         },
@@ -212,7 +212,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "編集なし",
-        SearchV2Params {
+        SearchParams {
             edit_filter: Some("unedited".into()),
             ..o()
         },
@@ -223,7 +223,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "表紙あり",
-        SearchV2Params {
+        SearchParams {
             cover_filter: Some("has_cover".into()),
             ..o()
         },
@@ -234,7 +234,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "表紙なし",
-        SearchV2Params {
+        SearchParams {
             cover_filter: Some("no_cover".into()),
             ..o()
         },
@@ -245,7 +245,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "シリーズ",
-        SearchV2Params {
+        SearchParams {
             series_filter: Some("in_series".into()),
             ..o()
         },
@@ -256,7 +256,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "単発",
-        SearchV2Params {
+        SearchParams {
             series_filter: Some("standalone".into()),
             ..o()
         },
@@ -274,7 +274,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     ] {
         case(
             &format!("画像 {old_name}"),
-            SearchV2Params {
+            SearchParams {
                 asset_filter: Some(old_name.into()),
                 ..o()
             },
@@ -292,7 +292,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     ] {
         case(
             &format!("改稿 {old_name}"),
-            SearchV2Params {
+            SearchParams {
                 revision_filter: Some(old_name.into()),
                 ..o()
             },
@@ -313,7 +313,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     ] {
         case(
             &format!("要確認 {old_name}"),
-            SearchV2Params {
+            SearchParams {
                 acquisition_filter: Some(old_name.into()),
                 ..o()
             },
@@ -325,7 +325,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     }
     case(
         "文字数 1万〜5万",
-        SearchV2Params {
+        SearchParams {
             min_char_count: Some(10_000),
             max_char_count: Some(50_000),
             ..o()
@@ -340,7 +340,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "画像 5 以上",
-        SearchV2Params {
+        SearchParams {
             min_asset_count: Some(5),
             ..o()
         },
@@ -354,7 +354,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "容量 10MB 以上",
-        SearchV2Params {
+        SearchParams {
             min_file_size_bytes: Some(10_000_000),
             ..o()
         },
@@ -383,7 +383,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     ] {
         case(
             &format!("日付 {field:?} {from}〜{to}"),
-            SearchV2Params {
+            SearchParams {
                 date_field: old_field.map(Into::into),
                 date_from: Some(from.into()),
                 date_to: Some(to.into()),
@@ -402,7 +402,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     let first_two = strings(&[&tags[0], &tags[1]]);
     case(
         "タグ 1 位",
-        SearchV2Params {
+        SearchParams {
             tags_include: Some(vec![tags[0].clone()]),
             ..o()
         },
@@ -413,7 +413,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "タグ 60 位",
-        SearchV2Params {
+        SearchParams {
             tags_include: Some(vec![tags[59].clone()]),
             ..o()
         },
@@ -424,7 +424,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "タグ 1・2 位のすべて",
-        SearchV2Params {
+        SearchParams {
             tags_include: Some(first_two.clone()),
             ..o()
         },
@@ -435,7 +435,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "タグ 1・2 位のどれか",
-        SearchV2Params {
+        SearchParams {
             tags_include: Some(first_two.clone()),
             tag_filter_mode: Some("or".into()),
             ..o()
@@ -448,7 +448,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "タグ 1 位を除く",
-        SearchV2Params {
+        SearchParams {
             tags_exclude: Some(vec![tags[0].clone()]),
             ..o()
         },
@@ -459,7 +459,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "作者名 1 位",
-        SearchV2Params {
+        SearchParams {
             authors_include: Some(vec![authors[0].clone()]),
             ..o()
         },
@@ -470,7 +470,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "作者名 1 位を除く",
-        SearchV2Params {
+        SearchParams {
             authors_exclude: Some(vec![authors[0].clone()]),
             ..o()
         },
@@ -482,7 +482,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     if let Some(name) = renamed.first() {
         case(
             "作者の古い名前",
-            SearchV2Params {
+            SearchParams {
                 authors_include: Some(vec![name.clone()]),
                 ..o()
             },
@@ -494,7 +494,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     }
     case(
         "作者 1 位",
-        SearchV2Params {
+        SearchParams {
             person_source: Some(person.0.clone()),
             person_key: Some(person.1.clone()),
             ..o()
@@ -506,7 +506,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "シリーズ 1 位",
-        SearchV2Params {
+        SearchParams {
             series_source: Some(series.0.clone()),
             series_key: Some(series.1.clone()),
             ..o()
@@ -518,7 +518,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "作品の集まり",
-        SearchV2Params {
+        SearchParams {
             ids_include: Some(sampled.iter().map(|s| s.0).collect()),
             ..o()
         },
@@ -534,7 +534,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
     );
     case(
         "重ねがけ（pixiv・タグ 1 位・初版・表紙あり）",
-        SearchV2Params {
+        SearchParams {
             source: Some("pixiv".into()),
             tags_include: Some(vec![tags[0].clone()]),
             revision_filter: Some("first_version".into()),
@@ -566,7 +566,7 @@ pub fn run(old_db: &Path, storage: &Path, new_root: &Path) -> Result<Value, Erro
         let old_ms = first(&mut || {
             let mut params = case.old.clone();
             params.limit = Some(80);
-            old.search_downloads_v2(&params)?;
+            old.search_downloads(&params)?;
             Ok(())
         })?;
         let new_ms = first(&mut || {

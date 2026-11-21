@@ -19,7 +19,7 @@ impl AppState {
     pub(crate) fn candidates(&self) -> Candidates<'_> {
         Candidates {
             state: self,
-            library: self.library_v2.library().ok(),
+            library: self.shelf.library().ok(),
         }
     }
 }

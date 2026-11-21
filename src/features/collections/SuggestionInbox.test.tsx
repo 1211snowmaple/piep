@@ -6,10 +6,10 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { discoverySuggestion } from "./discoveryTestData";
 
-const api = vi.hoisted(() => ({ listCollectionSuggestions: vi.fn(), acceptCollectionSuggestion: vi.fn(), rejectCollectionSuggestion: vi.fn(), dismissCollectionSuggestion: vi.fn(), libraryV2Content: vi.fn(), navigate: vi.fn(), suggestionNameOverride: (proposed: string, selected: string) => proposed === selected ? undefined : selected }));
+const api = vi.hoisted(() => ({ listCollectionSuggestions: vi.fn(), acceptCollectionSuggestion: vi.fn(), rejectCollectionSuggestion: vi.fn(), dismissCollectionSuggestion: vi.fn(), shelfContent: vi.fn(), navigate: vi.fn(), suggestionNameOverride: (proposed: string, selected: string) => proposed === selected ? undefined : selected }));
 vi.mock("@/services/collectionApi", () => api);
 vi.mock("@/services/dbApi", () => ({ isTauriRuntime: () => true, getAssetUrl: (path: string) => path }));
-vi.mock("@/services/libraryV2Api", () => ({ libraryV2Content: api.libraryV2Content, shelfFileUrl: (path: string) => path }));
+vi.mock("@/services/shelfApi", () => ({ shelfContent: api.shelfContent, shelfFileUrl: (path: string) => path }));
 vi.mock("@/services/assistApi", () => ({ nameCollectionSuggestion: vi.fn() }));
 vi.mock("@/features/assist/useAssist", () => ({ useAssist: () => ({ engine: null }) }));
 vi.mock("@/app/router", () => ({ useAppNavigate: () => api.navigate }));
@@ -27,7 +27,7 @@ describe("SuggestionInbox", () => {
     api.listCollectionSuggestions.mockResolvedValue([discoverySuggestion()]);
     api.acceptCollectionSuggestion.mockResolvedValue({ id: "col-1" });
     api.rejectCollectionSuggestion.mockResolvedValue(true);
-    api.libraryV2Content.mockResolvedValue({ page: 0, pageCount: 2, html: "<p>保存した本文をここで確認できます。</p>", totalPlainTextChars: 200, sourcePageStarts: [0] });
+    api.shelfContent.mockResolvedValue({ page: 0, pageCount: 2, html: "<p>保存した本文をここで確認できます。</p>", totalPlainTextChars: 200, sourcePageStarts: [0] });
   });
 
   it("選んだ作品を編集した順序と名前で保存し、確認画面を維持する", async () => {
@@ -57,9 +57,9 @@ describe("SuggestionInbox", () => {
     await userEvent.click(await screen.findByRole("button", { name: "作品2を一つ前へ" }));
     await userEvent.click(screen.getAllByRole("button", { name: "本文を確認" })[0]);
     expect(await screen.findByText("保存した本文をここで確認できます。")).toBeInTheDocument();
-    expect(api.libraryV2Content).toHaveBeenCalledWith("w-2", null, 0);
+    expect(api.shelfContent).toHaveBeenCalledWith("w-2", null, 0);
     await userEvent.click(screen.getByRole("button", { name: "本文の次のページ" }));
-    await waitFor(() => expect(api.libraryV2Content).toHaveBeenCalledWith("w-2", null, 1));
+    await waitFor(() => expect(api.shelfContent).toHaveBeenCalledWith("w-2", null, 1));
     await userEvent.click(screen.getByRole("button", { name: "候補の確認に戻る" }));
     const rows = screen.getAllByRole("checkbox");
     expect(rows[0]).toHaveAccessibleName("作品2を含める");

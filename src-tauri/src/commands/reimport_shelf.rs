@@ -5,7 +5,7 @@
 //! 記録も同じ順に並ぶ。棚にある作品・棚から外した作品には触れない（外した作品を勝手に戻さない）。
 //! 保存フォルダーを手で組んで戻す使い方（削除された作品を EPUB から戻すなど）も同じ道を通る。
 
-use crate::commands::library_v2::LibraryV2;
+use crate::commands::shelf::Shelf;
 use crate::library::{EntityKind, Library};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -268,8 +268,8 @@ pub(crate) async fn reimport_into_shelf(
 
 /// 保存フォルダーを調べ、棚にまだ無い作品を棚へ戻す（切り替えた棚だけ）。
 #[tauri::command]
-pub async fn library_v2_reimport_folders(app: tauri::AppHandle) -> Result<ReimportOutcome, String> {
-    let shelf = app.state::<Arc<LibraryV2>>().inner().clone();
+pub async fn shelf_reimport_folders(app: tauri::AppHandle) -> Result<ReimportOutcome, String> {
+    let shelf = app.state::<Arc<Shelf>>().inner().clone();
     let library = shelf.library()?;
     let storage = folder(&app)?;
     let outcome = reimport_into_shelf(library, storage).await?;

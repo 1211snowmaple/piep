@@ -8,7 +8,7 @@ use super::{
     collect_assets_recursive, compute_content_details, fanbox_missing_material_error,
     fetched_has_material_content, work_save_mutex,
 };
-use crate::commands::library_v2::LibraryV2;
+use crate::commands::shelf::Shelf;
 use crate::library::{
     asset_reference, EntityKind, Library, LibraryId, ResourceReference, ResourceScope, StagedAsset,
     WorkSave,
@@ -316,7 +316,7 @@ pub(crate) async fn save_folder_to_shelf(
 
 /// 取り寄せた応答を切り替えた棚へ保存する。
 pub(super) async fn save_to_shelf(
-    shelf: Arc<LibraryV2>,
+    shelf: Arc<Shelf>,
     library: Arc<Library>,
     data: Value,
     source: String,
@@ -336,7 +336,7 @@ pub(super) async fn save_to_shelf(
 /// みて何もしない）。URL が変わらない画像・添付は棚から戻し、原寸に変わった画像だけを取りに行く。
 /// 棚は画質の違いを版の違いとして扱わないので、版は増えない。
 pub(crate) async fn save_originals_to_shelf(
-    shelf: Arc<LibraryV2>,
+    shelf: Arc<Shelf>,
     library: Arc<Library>,
     data: Value,
     source_id: String,
@@ -356,7 +356,7 @@ pub(crate) async fn save_originals_to_shelf(
 
 #[allow(clippy::too_many_arguments)]
 async fn save_to_shelf_as(
-    shelf: Arc<LibraryV2>,
+    shelf: Arc<Shelf>,
     library: Arc<Library>,
     data: Value,
     source: String,

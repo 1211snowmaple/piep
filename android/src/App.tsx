@@ -55,11 +55,10 @@ const preview = {
 } as const;
 
 const positionKey = "piep.android.preview.page";
-const fontKey = "piep.android.reader.font-size.v2";
-const lineHeightKey = "piep.android.reader.line-height.v2";
-const readerWidthKey = "piep.android.reader.width.v1";
-// 以前は起動のたびに既定の明朝を書き込んでいたので、選んだ記録と見分けがつかない。鍵を変えて読み捨てる。
-const fontFamilyKey = "piep.android.reader.font-family.v2";
+const fontKey = "piep.android.reader.font-size";
+const lineHeightKey = "piep.android.reader.line-height";
+const readerWidthKey = "piep.android.reader.width";
+const fontFamilyKey = "piep.android.reader.font-family";
 const readerThemeKey = "piep.android.reader.theme";
 const appearanceKey = "piep.android.appearance";
 const pagingModeKey = "piep.android.library.paging-mode";

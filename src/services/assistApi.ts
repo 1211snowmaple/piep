@@ -336,37 +336,37 @@ export type AssistWork = string;
 
 /** この作品に足りていないタグを、棚の語彙から挙げてもらう。付けはしない。 */
 export function suggestTags(engine: AssistEngine, work: AssistWork): Promise<TagProposal[]> {
-  return invokeGenerated<TagProposal[]>("library_v2_assist_suggest_tags", { engine, work });
+  return invokeGenerated<TagProposal[]>("shelf_assist_suggest_tags", { engine, work });
 }
 
 /** 案から選んだタグを、`llm` 印で付ける。 */
 export function acceptTags(work: AssistWork, tags: string[]): Promise<TaggedName[]> {
-  return invoke<TaggedName[]>("library_v2_assist_accept_tags", { work, tags });
+  return invoke<TaggedName[]>("shelf_assist_accept_tags", { work, tags });
 }
 
 /** 出どころ付きのタグ一覧。 */
 export function workTags(work: AssistWork): Promise<TaggedName[]> {
-  return invoke<TaggedName[]>("library_v2_assist_work_tags", { work });
+  return invoke<TaggedName[]>("shelf_assist_work_tags", { work });
 }
 
 /** モデルの案から採ったタグを外す。取得元のタグは外せない。 */
 export function removeAssistedTag(work: AssistWork, tag: string): Promise<TaggedName[]> {
-  return invoke<TaggedName[]>("library_v2_assist_remove_tag", { work, tag });
+  return invoke<TaggedName[]>("shelf_assist_remove_tag", { work, tag });
 }
 
 /** 棚内でのタグ併用統計から候補を返す。読み取りだけで、作品のタグは変更しない。 */
 export function relatedTagCandidates(work: AssistWork): Promise<RelatedTagCandidate[]> {
-  return invoke<RelatedTagCandidate[]>("library_v2_assist_related_tags", { work });
+  return invoke<RelatedTagCandidate[]>("shelf_assist_related_tags", { work });
 }
 
 /** 統計候補を利用者が採用し、manual印で付ける。 */
 export function acceptRelatedTags(work: AssistWork, tags: string[]): Promise<TaggedName[]> {
-  return invoke<TaggedName[]>("library_v2_assist_accept_related_tags", { work, tags });
+  return invoke<TaggedName[]>("shelf_assist_accept_related_tags", { work, tags });
 }
 
 /** 利用者が付けたmanualタグだけを外す。 */
 export function removeManualTag(work: AssistWork, tag: string): Promise<TaggedName[]> {
-  return invoke<TaggedName[]>("library_v2_assist_remove_related_tag", { work, tag });
+  return invoke<TaggedName[]>("shelf_assist_remove_related_tag", { work, tag });
 }
 
 // ---- 言葉で探す -----------------------------------------------------------
@@ -393,7 +393,7 @@ export interface ToolTrace {
 
 /** 「こういうのが読みたい」を、棚のタグと検索語に翻訳する。検索はしない。 */
 export function interpretSearch(engine: AssistEngine, phrase: string): Promise<SearchIntent> {
-  return invokeGenerated<SearchIntent>("library_v2_assist_interpret_search", { engine, phrase });
+  return invokeGenerated<SearchIntent>("shelf_assist_interpret_search", { engine, phrase });
 }
 
 // ---- 覚え書き -------------------------------------------------------------
@@ -484,22 +484,22 @@ export function proofreadSegments(engine: AssistEngine, segments: ProofreadSegme
 /** 保存してある覚え書きを読む。**モデルを呼ばない。** */
 export function loadNote(subjectType: NoteSubject, subjectKey: string, noteKind: string, engine?: AssistEngine | null): Promise<StoredNote | null> {
   const args = { subjectType, subjectKey, noteKind, engine: engine ?? null };
-  return invoke<StoredNote | null>("library_v2_assist_load_note", args);
+  return invoke<StoredNote | null>("shelf_assist_load_note", args);
 }
 
 /** 覚え書きを消す。作り直したいときと、要らなくなったとき。 */
 export function deleteNote(subjectType: NoteSubject, subjectKey: string, noteKind: string): Promise<boolean> {
-  return invoke<boolean>("library_v2_assist_delete_note", { subjectType, subjectKey, noteKind });
+  return invoke<boolean>("shelf_assist_delete_note", { subjectType, subjectKey, noteKind });
 }
 
 /** この作者の作風を、題名とタグからまとめてもらう。本文は送らない。 */
 export function describeAuthor(engine: AssistEngine, source: string, personKey: string): Promise<AssistNote> {
-  return invokeGenerated<AssistNote>("library_v2_assist_describe_author", { engine, provider: source, personKey });
+  return invokeGenerated<AssistNote>("shelf_assist_describe_author", { engine, provider: source, personKey });
 }
 
 /** 本文から、あとで思い出すためのあらすじを作ってもらう。**本文を送る。** */
 export function summarizeWork(engine: AssistEngine, work: AssistWork): Promise<AssistNote> {
-  return invokeGenerated<AssistNote>("library_v2_assist_summarize_work", { engine, work });
+  return invokeGenerated<AssistNote>("shelf_assist_summarize_work", { engine, work });
 }
 
 /** あらすじ・前回のあらすじを作っているあいだの段階（`assist-progress` イベント）。 */
@@ -521,7 +521,7 @@ export function recapPrevious(
   previous: AssistWork,
   current: AssistWork,
 ): Promise<AssistNote> {
-  return invokeGenerated<AssistNote>("library_v2_assist_recap_previous", { engine, previous, current });
+  return invokeGenerated<AssistNote>("shelf_assist_recap_previous", { engine, previous, current });
 }
 
 // ---- 束 -------------------------------------------------------------------
@@ -535,7 +535,7 @@ export interface BundleSplit {
 
 /** この束を分けたほうがよいか、案を出してもらう。分けはしない。 */
 export function proposeSplits(engine: AssistEngine, collectionId: string): Promise<BundleSplit[]> {
-  return invokeGenerated<BundleSplit[]>("library_v2_assist_propose_splits", { engine, collection: collectionId });
+  return invokeGenerated<BundleSplit[]>("shelf_assist_propose_splits", { engine, collection: collectionId });
 }
 
 /** 提案の名前を、モデルにも考えてもらう。既存の案に足すだけで置き換えない。 */

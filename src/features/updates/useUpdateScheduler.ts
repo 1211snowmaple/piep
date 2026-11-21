@@ -4,7 +4,7 @@ import { isTauriRuntime, listUpdateTargets, listWatchGroups } from "@/services/d
 import { listUpdateJobsCommand, startUpdateJobCommand, type StartUpdateJobRequest } from "@/services/updateJobApi";
 import { isUpdateJobActive, isUpdateJobTerminal, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { isRunDue, loadSchedule, saveSchedule, readLastRun, writeLastRun } from "@/features/updates/updateSchedule";
-import { libraryV2Search, libraryV2Status } from "@/services/libraryV2Api";
+import { shelfSearch, shelfStatus } from "@/services/shelfApi";
 import { watchGroupMatches } from "@/lib/watchIdentity";
 import type { WatchId } from "@/types/library";
 
@@ -67,7 +67,7 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
         const settings = await loadSchedule();
         const lastRun = await readLastRun();
         if (!isRunDue(settings, lastRun, Date.now(), startup)) return;
-        const shelf = await libraryV2Status();
+        const shelf = await shelfStatus();
         if (shelf.state !== "ready") return;
 
         // すでに走っているジョブがあれば、そのまま任せる。待つのは worker が
@@ -99,7 +99,7 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
           // 作者・シリーズの登録と別なので、両方を確かめる。
           const [targets, watchedWorks] = await Promise.all([
             listUpdateTargets<{ id: WatchId }>(null, true),
-            libraryV2Search({ text: "", versions: "current", mode: "words" }, { sort: "saved", descending: true, limit: 1, after: null, filter: { watching: true }, count: false }).then((result) => ({ items: result.cards })),
+            shelfSearch({ text: "", versions: "current", mode: "words" }, { sort: "saved", descending: true, limit: 1, after: null, filter: { watching: true }, count: false }).then((result) => ({ items: result.cards })),
           ]);
           if (!targets.length && (settings.newWorksOnly || !watchedWorks.items.length)) return;
           request = { scope: "all", mode: settings.mode, watchSaved: settings.watchSaved, newWorksOnly: settings.newWorksOnly };

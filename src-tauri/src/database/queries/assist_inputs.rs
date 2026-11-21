@@ -684,11 +684,11 @@ impl Database {
         or_mode: bool,
         exclude: &[String],
     ) -> Result<i64, String> {
-        let params = SearchV2Params {
+        let params = SearchParams {
             tags_include: (!include.is_empty()).then(|| include.to_vec()),
             tags_exclude: (!exclude.is_empty()).then(|| exclude.to_vec()),
             tag_filter_mode: Some(if or_mode { "or" } else { "and" }.to_string()),
-            ..SearchV2Params::default()
+            ..SearchParams::default()
         };
         self.count_sql_matches(&normalize_search_params(&params))
     }

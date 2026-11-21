@@ -3,7 +3,7 @@ import { Select } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import { useQuery } from "@tanstack/react-query";
 import { demoFacets } from "@/mocks/demoData";
-import { searchShelfEntities } from "./shelfV2";
+import { searchShelfEntities } from "./shelf";
 
 export interface SeriesSelection { key: string; source: string | null; label: string }
 

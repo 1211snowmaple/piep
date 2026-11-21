@@ -136,7 +136,7 @@ export function invalidateAfterUpdateJob(client: QueryClient): void {
   client.invalidateQueries({
     predicate: (query) => {
       const head = query.queryKey[0];
-      return typeof head === "string" && head.startsWith("library-v2") && head !== "library-v2-status";
+      return typeof head === "string" && head.startsWith("shelf") && head !== "shelf-status";
     },
   });
 }

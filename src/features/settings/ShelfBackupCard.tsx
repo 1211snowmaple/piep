@@ -9,12 +9,12 @@ import { errorMessage, formatBytes, formatDate, formatNumber } from "@/lib/forma
 import { openSingleDialog } from "@/services/dialogApi";
 import { startOperation } from "@/features/jobs/operationJobs";
 import {
-  libraryV2Backup,
-  libraryV2CancelRestore,
-  libraryV2ImportArchive,
-  libraryV2InspectBackup,
-  libraryV2RestoreState,
-  libraryV2ScheduleRestore,
+  shelfBackup,
+  shelfCancelRestore,
+  shelfImportArchive,
+  shelfInspectBackup,
+  shelfRestoreState,
+  shelfScheduleRestore,
   type ShelfArchiveImport,
   type ShelfBackupInspection,
 } from "@/services/shelfBackupApi";
@@ -57,8 +57,8 @@ function join(directory: string, name: string): string {
 export function ShelfBackupCard({ runtime, busy }: { runtime: boolean; busy: boolean }) {
   const queryClient = useQueryClient();
   const [review, setReview] = useState<ShelfBackupInspection | null>(null);
-  const state = useQuery({ queryKey: ["library-v2-restore-state"], queryFn: libraryV2RestoreState, enabled: runtime });
-  const refresh = () => queryClient.invalidateQueries({ queryKey: ["library-v2-restore-state"] });
+  const state = useQuery({ queryKey: ["shelf-restore-state"], queryFn: shelfRestoreState, enabled: runtime });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["shelf-restore-state"] });
 
   const backup = useMutation({
     mutationFn: async () => {
@@ -68,7 +68,7 @@ export function ShelfBackupCard({ runtime, busy }: { runtime: boolean; busy: boo
       const operation = startOperation({ kind: "backup", label: "棚のバックアップ", detail: destination, total: null, onRetry: () => backup.mutate() });
       operation.progress(0, null, "棚を写して検査しています");
       try {
-        const path = await libraryV2Backup(destination);
+        const path = await shelfBackup(destination);
         operation.complete("棚のバックアップを作りました");
         return path;
       } catch (error) {
@@ -84,14 +84,14 @@ export function ShelfBackupCard({ runtime, busy }: { runtime: boolean; busy: boo
     mutationFn: async () => {
       const path = await openSingleDialog({ directory: true, title: "復元に使う棚のバックアップ・取り込むアーカイブ" });
       if (!path) return null;
-      return libraryV2InspectBackup(path);
+      return shelfInspectBackup(path);
     },
     onSuccess: (inspection) => { if (inspection) setReview(inspection); },
     onError: (error) => notifications.show({ color: "red", title: "バックアップを検査できません", message: errorMessage(error) }),
   });
 
   const schedule = useMutation({
-    mutationFn: (path: string) => libraryV2ScheduleRestore(path),
+    mutationFn: (path: string) => shelfScheduleRestore(path),
     onSuccess: async () => {
       setReview(null);
       await refresh();
@@ -105,7 +105,7 @@ export function ShelfBackupCard({ runtime, busy }: { runtime: boolean; busy: boo
       const operation = startOperation({ kind: "restore", label: "アーカイブの取り込み", detail: path, total: null });
       operation.progress(0, null, "アーカイブを検査して、棚に無い作品を足しています");
       try {
-        const result = await libraryV2ImportArchive(path);
+        const result = await shelfImportArchive(path);
         operation.complete(archiveImportMessage(result));
         return result;
       } catch (error) {
@@ -123,7 +123,7 @@ export function ShelfBackupCard({ runtime, busy }: { runtime: boolean; busy: boo
   });
 
   const cancel = useMutation({
-    mutationFn: libraryV2CancelRestore,
+    mutationFn: shelfCancelRestore,
     onSuccess: async () => { await refresh(); },
     onError: (error) => notifications.show({ color: "red", title: "予約を取り消せません", message: errorMessage(error) }),
   });

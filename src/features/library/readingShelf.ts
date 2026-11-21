@@ -1,4 +1,4 @@
-import { SHELF_WORK_ID } from "@/services/libraryV2Api";
+import { SHELF_WORK_ID } from "@/services/shelfApi";
 
 /**
  * Which works have been opened and left part-read.

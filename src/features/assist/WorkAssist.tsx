@@ -24,7 +24,7 @@ import {
   type TagProposal,
   type RelatedTagCandidate,
 } from "@/services/assistApi";
-import { invalidateShelf } from "@/features/library/shelfV2";
+import { invalidateShelf } from "@/features/library/shelf";
 import { isTauriRuntime } from "@/services/dbApi";
 import { usePageAssist } from "@/app/PageAssistContext";
 

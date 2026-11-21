@@ -281,7 +281,7 @@ fn parse_route(path: &str) -> Option<Route> {
             uuid::Uuid::parse_str(snapshot).ok()?;
             let size = if rest.is_empty() { "" } else { "?size=large" };
             Some(Route::Remote {
-                endpoint: format!("/api/v2/libraries/{library}/works/{work}/cover{size}"),
+                endpoint: format!("/api/libraries/{library}/works/{work}/cover{size}"),
                 refreshes: false,
             })
         }
@@ -306,10 +306,7 @@ fn parse_route(path: &str) -> Option<Route> {
                 query.append_pair("variant", "banner");
             }
             Some(Route::Remote {
-                endpoint: format!(
-                    "/api/v2/libraries/{library}/{kind}/cover?{}",
-                    query.finish()
-                ),
+                endpoint: format!("/api/libraries/{library}/{kind}/cover?{}", query.finish()),
                 refreshes: true,
             })
         }
@@ -325,9 +322,7 @@ fn parse_route(path: &str) -> Option<Route> {
             let collection = uuid::Uuid::parse_str(collection).ok()?;
             revision.parse::<u64>().ok()?;
             Some(Route::Remote {
-                endpoint: format!(
-                    "/api/v2/libraries/{library}/collections/{collection}/cover/{slot}"
-                ),
+                endpoint: format!("/api/libraries/{library}/collections/{collection}/cover/{slot}"),
                 refreshes: false,
             })
         }
@@ -381,8 +376,7 @@ fn failure(status: StatusCode) -> Response<Vec<u8>> {
 fn cache_path(dir: &Path, server: &str, path: &str) -> PathBuf {
     // 接続先が変わると同じ番号が別の作品を指す。接続先ごとに分ける。
     let mut hasher = Sha256::new();
-    // APNG 検査のない旧版が保存した画像を、検査済みとして使い回さない。
-    hasher.update(b"display-image-validation-v2\0");
+    hasher.update(b"display-image-validation\0");
     hasher.update(server.as_bytes());
     hasher.update([0]);
     hasher.update(path.as_bytes());
@@ -628,7 +622,7 @@ mod tests {
             let cache = CoverCacheState::new(root.join("covers"));
             let file = cache_path(&cache.dir, &saved.url, "/work/1");
             assert_eq!(
-                fetch_and_cache(&state, &cache, &saved, 0, &file, "/api/v2/libraries/01a1eeaa-0000-7000-8000-000000000001/works/01a1eeaa-0000-7000-8000-000000000002/cover")
+                fetch_and_cache(&state, &cache, &saved, 0, &file, "/api/libraries/01a1eeaa-0000-7000-8000-000000000001/works/01a1eeaa-0000-7000-8000-000000000002/cover")
                     .await
                     .unwrap_err(),
                 StatusCode::SERVICE_UNAVAILABLE
@@ -669,7 +663,7 @@ mod tests {
                     let length = socket.read(&mut request).unwrap();
                     assert!(
                         String::from_utf8_lossy(&request[..length])
-                            .starts_with(&format!("GET {} ", "/api/v2/libraries/01a1eeaa-0000-7000-8000-000000000001/works/01a1eeaa-0000-7000-8000-000000000002/cover"))
+                            .starts_with(&format!("GET {} ", "/api/libraries/01a1eeaa-0000-7000-8000-000000000001/works/01a1eeaa-0000-7000-8000-000000000002/cover"))
                     );
                     if change {
                         *changed_state.connection_generation.lock().unwrap() += 1;
@@ -681,7 +675,7 @@ mod tests {
                 let cache = CoverCacheState::new(root.join("covers"));
                 let file = cache_path(&cache.dir, &saved.url, "/work/1");
                 let result =
-                    fetch_and_cache(&state, &cache, &saved, 0, &file, "/api/v2/libraries/01a1eeaa-0000-7000-8000-000000000001/works/01a1eeaa-0000-7000-8000-000000000002/cover")
+                    fetch_and_cache(&state, &cache, &saved, 0, &file, "/api/libraries/01a1eeaa-0000-7000-8000-000000000001/works/01a1eeaa-0000-7000-8000-000000000002/cover")
                         .await;
                 server.join().unwrap();
                 if change {
@@ -706,14 +700,14 @@ mod tests {
         assert_eq!(
             parse_route(&format!("/shelf%2F{library}%2F{work}%2F{snapshot}")),
             Some(Route::Remote {
-                endpoint: format!("/api/v2/libraries/{library}/works/{work}/cover"),
+                endpoint: format!("/api/libraries/{library}/works/{work}/cover"),
                 refreshes: false
             })
         );
         assert_eq!(
             parse_route(&format!("/shelf%2F{library}%2F{work}%2F{snapshot}%2Flarge")),
             Some(Route::Remote {
-                endpoint: format!("/api/v2/libraries/{library}/works/{work}/cover?size=large"),
+                endpoint: format!("/api/libraries/{library}/works/{work}/cover?size=large"),
                 refreshes: false
             })
         );
@@ -723,7 +717,7 @@ mod tests {
             )),
             Some(Route::Remote {
                 endpoint: format!(
-                    "/api/v2/libraries/{library}/people/cover?provider=pixiv&key=a+b&variant=banner"
+                    "/api/libraries/{library}/people/cover?provider=pixiv&key=a+b&variant=banner"
                 ),
                 refreshes: true
             })
@@ -731,7 +725,7 @@ mod tests {
         assert_eq!(
             parse_route(&format!("/shelf-entity%2F{library}%2Fseries%2Ffanbox%2F9")),
             Some(Route::Remote {
-                endpoint: format!("/api/v2/libraries/{library}/series/cover?provider=fanbox&key=9"),
+                endpoint: format!("/api/libraries/{library}/series/cover?provider=fanbox&key=9"),
                 refreshes: true
             })
         );
@@ -740,7 +734,7 @@ mod tests {
                 "/shelf-collection%2F{library}%2F{work}%2Ftile-2%2F4"
             )),
             Some(Route::Remote {
-                endpoint: format!("/api/v2/libraries/{library}/collections/{work}/cover/tile-2"),
+                endpoint: format!("/api/libraries/{library}/collections/{work}/cover/tile-2"),
                 refreshes: false
             })
         );

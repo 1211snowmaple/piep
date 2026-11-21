@@ -12,7 +12,7 @@ interface WorkspaceContextValue {
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
-const STORAGE_KEY = "piep.epub-queue.v2";
+const STORAGE_KEY = "piep.epub-queue";
 
 function isQueueId(id: unknown): id is EpubQueueId {
   return (typeof id === "number" && Number.isInteger(id) && id > 0) || (typeof id === "string" && id.trim().length > 0);

@@ -553,7 +553,7 @@ impl DesktopServer {
             }
         };
         if applied > 0 || read > 0 {
-            state.library_v2.forget_derived();
+            state.shelf.forget_derived();
             self.notify_favorites();
         }
         Ok(applied)
@@ -585,7 +585,7 @@ impl DesktopServer {
     /// 一覧は初めに全部、そのあとは変わった分だけ。どちらの位置が新しいかは書いた時刻で決め、
     /// 同じ位置を何度読んでも二度は書かない。印が別の写しのものならサーバーが初めから返す。
     async fn pull_shelf_reading_locked(&self, state: &Arc<AppState>) -> Result<usize, String> {
-        let Ok(library) = state.library_v2.library() else {
+        let Ok(library) = state.shelf.library() else {
             return Ok(0);
         };
         let Some(remote) = self.settings().remote else {
@@ -620,7 +620,7 @@ impl DesktopServer {
             applied += tokio::task::spawn_blocking(move || {
                 let mut applied = 0;
                 for item in &items {
-                    if crate::commands::library_v2::adopt_remote_reading(
+                    if crate::commands::shelf::adopt_remote_reading(
                         &shelf,
                         item.work,
                         &item.position,
@@ -650,7 +650,7 @@ impl DesktopServer {
         &self,
         state: &Arc<AppState>,
     ) -> Result<Option<usize>, String> {
-        let Ok(library) = state.library_v2.library() else {
+        let Ok(library) = state.shelf.library() else {
             return Ok(None);
         };
         let Some(remote) = self.settings().remote else {
@@ -683,7 +683,7 @@ impl DesktopServer {
             applied += tokio::task::spawn_blocking(move || {
                 let mut applied = 0;
                 for item in &items {
-                    if crate::commands::library_v2::adopt_remote_favorite(
+                    if crate::commands::shelf::adopt_remote_favorite(
                         &shelf,
                         item.work,
                         item.favorite,
@@ -715,7 +715,7 @@ impl DesktopServer {
         if let Err(error) = self.pull_favorites_locked(&state).await {
             log::warn!("携帯のお気に入りを取り込めません: {error}");
         }
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         // 写しを作る前に読む。この間に変わっても、次回もう一度送るだけで取りこぼさない。
         let generation = change_generation(&state);
         let remote = self
@@ -864,7 +864,7 @@ fn forget_embedded_server(dir: &Path) {
 
 /// 送るべき変更があったかを見る印。
 fn change_generation(state: &AppState) -> Option<i64> {
-    state.library_v2.library().ok()?.change_marker().ok()
+    state.shelf.library().ok()?.change_marker().ok()
 }
 
 #[cfg(test)]

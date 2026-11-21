@@ -126,7 +126,7 @@ pub async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, Stri
         .build()
         .map_err(net_error)?;
     let response = probe
-        .get(format!("{}/api/v2/hello", normalized_base(&remote.url)))
+        .get(format!("{}/api/hello", normalized_base(&remote.url)))
         .send()
         .await
         .map_err(net_error)?;
@@ -178,7 +178,7 @@ pub async fn pair_admin(
 ) -> Result<String, String> {
     let client = build_client(remote).await?;
     let response = client
-        .post(format!("{}/api/v2/pair", normalized_base(&remote.url)))
+        .post(format!("{}/api/pair", normalized_base(&remote.url)))
         .json(&serde_json::json!({ "secret": secret, "deviceName": device_name }))
         .send()
         .await
@@ -201,10 +201,7 @@ pub async fn admin_get(
 ) -> Result<serde_json::Value, String> {
     let client = build_client(remote).await?;
     let response = client
-        .get(format!(
-            "{}/api/v2/admin/{path}",
-            normalized_base(&remote.url)
-        ))
+        .get(format!("{}/api/admin/{path}", normalized_base(&remote.url)))
         .bearer_auth(token)
         .send()
         .await
@@ -224,10 +221,7 @@ pub async fn admin_get_if_present(
 ) -> Result<Option<serde_json::Value>, String> {
     let client = build_client(remote).await?;
     let response = client
-        .get(format!(
-            "{}/api/v2/admin/{path}",
-            normalized_base(&remote.url)
-        ))
+        .get(format!("{}/api/admin/{path}", normalized_base(&remote.url)))
         .bearer_auth(token)
         .send()
         .await
@@ -251,10 +245,7 @@ pub async fn admin_post(
 ) -> Result<serde_json::Value, String> {
     let client = build_client(remote).await?;
     let response = client
-        .post(format!(
-            "{}/api/v2/admin/{path}",
-            normalized_base(&remote.url)
-        ))
+        .post(format!("{}/api/admin/{path}", normalized_base(&remote.url)))
         .bearer_auth(token)
         .json(body)
         .send()
@@ -276,10 +267,7 @@ pub async fn admin_put(
 ) -> Result<(), String> {
     let client = build_client(remote).await?;
     let response = client
-        .put(format!(
-            "{}/api/v2/admin/{path}",
-            normalized_base(&remote.url)
-        ))
+        .put(format!("{}/api/admin/{path}", normalized_base(&remote.url)))
         .bearer_auth(token)
         .json(body)
         .send()

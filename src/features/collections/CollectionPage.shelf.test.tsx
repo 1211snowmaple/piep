@@ -5,7 +5,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
-import type { ShelfCard, ShelfCollection, ShelfCollectionSummary } from "@/services/libraryV2Api";
+import type { ShelfCard, ShelfCollection, ShelfCollectionSummary } from "@/services/shelfApi";
 import CollectionPage from "./CollectionPage";
 import { CollectionsPanel } from "./CollectionsPanel";
 
@@ -15,13 +15,13 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
 }));
 
 const api = vi.hoisted(() => ({
-  libraryV2Status: vi.fn(),
-  libraryV2Collection: vi.fn(),
-  libraryV2Collections: vi.fn(),
-  libraryV2EditCollection: vi.fn(),
+  shelfStatus: vi.fn(),
+  shelfCollection: vi.fn(),
+  shelfCollections: vi.fn(),
+  shelfEditCollection: vi.fn(),
 }));
-vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
+vi.mock("@/services/shelfApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/shelfApi")>()),
   ...api,
 }));
 const suggest = vi.hoisted(() => ({
@@ -126,15 +126,15 @@ describe("collections on the shelf", () => {
   beforeEach(() => {
     window.localStorage.clear();
     vi.clearAllMocks();
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
-    api.libraryV2Collection.mockResolvedValue(detail);
-    api.libraryV2Collections.mockResolvedValue([summary]);
+    api.shelfStatus.mockResolvedValue({ state: "ready", path: "x" });
+    api.shelfCollection.mockResolvedValue(detail);
+    api.shelfCollections.mockResolvedValue([summary]);
   });
 
   it("opens a collection by its old id and shows its works", async () => {
     renderWith(<CollectionPage />, "#/collections/c-old");
     expect(await screen.findByRole("heading", { name: "雨の束" })).toBeInTheDocument();
-    expect(api.libraryV2Collection).toHaveBeenCalledWith("c-old");
+    expect(api.shelfCollection).toHaveBeenCalledWith("c-old");
     // 棚にある回は一覧と同じカード（新しい棚の作品の画面へ）、無い回は未保存の札。
     expect(screen.getByText("前の話")).toBeInTheDocument();
     expect(screen.getByText("後の話")).toBeInTheDocument();
@@ -143,7 +143,7 @@ describe("collections on the shelf", () => {
   });
 
   it("says a collection the new shelf does not have is not found", async () => {
-    api.libraryV2Collection.mockRejectedValue("コレクションが見つかりません");
+    api.shelfCollection.mockRejectedValue("コレクションが見つかりません");
     renderWith(<CollectionPage />, "#/collections/gone");
     expect(await screen.findByText("コレクションが見つかりません")).toBeInTheDocument();
   });
@@ -153,12 +153,12 @@ describe("collections on the shelf", () => {
     expect(await screen.findByText("雨の束")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /雨の束/ })).toHaveAttribute("href", "#/collections/c-old");
     expect(screen.getByText("1件")).toBeInTheDocument();
-    await waitFor(() => expect(api.libraryV2Collections).toHaveBeenCalled());
+    await waitFor(() => expect(api.shelfCollections).toHaveBeenCalled());
   });
 
   describe("editing", () => {
     beforeEach(() => {
-      api.libraryV2EditCollection.mockResolvedValue(detail);
+      api.shelfEditCollection.mockResolvedValue(detail);
       suggest.listCollectionSuggestions.mockResolvedValue([]);
     });
 
@@ -171,7 +171,7 @@ describe("collections on the shelf", () => {
 
       // 並べ替えは作品の鍵で、画面の ID（旧棚の ID）のまま送る。
       fireEvent.click(screen.getByRole("button", { name: "前の話を一つ後へ" }));
-      await waitFor(() => expect(api.libraryV2EditCollection).toHaveBeenCalledWith("c-old", {
+      await waitFor(() => expect(api.shelfEditCollection).toHaveBeenCalledWith("c-old", {
         kind: "reorder",
         works: [{ source: "pixiv", sourceId: "2" }, { source: "pixiv", sourceId: "1" }],
       }));
@@ -179,9 +179,9 @@ describe("collections on the shelf", () => {
       // 削除は確認を経て、新しい棚の一回の編集で消す。
       fireEvent.click(screen.getByRole("button", { name: "このコレクションのその他の操作" }));
       fireEvent.click(await screen.findByRole("menuitem", { name: "コレクションを削除" }));
-      api.libraryV2EditCollection.mockResolvedValueOnce(null);
+      api.shelfEditCollection.mockResolvedValueOnce(null);
       fireEvent.click(await screen.findByRole("button", { name: "削除する" }));
-      await waitFor(() => expect(api.libraryV2EditCollection).toHaveBeenLastCalledWith("c-old", { kind: "delete" }));
+      await waitFor(() => expect(api.shelfEditCollection).toHaveBeenLastCalledWith("c-old", { kind: "delete" }));
     });
 
     it("adds the works found for the collection by their keys", async () => {
@@ -198,7 +198,7 @@ describe("collections on the shelf", () => {
       fireEvent.click(screen.getByRole("button", { name: "合う作品を探す" }));
       await waitFor(() => expect(suggest.suggestCollectionAdditions).toHaveBeenCalledWith("c-old"));
       fireEvent.click(await screen.findByRole("button", { name: "1作品を追加" }));
-      await waitFor(() => expect(api.libraryV2EditCollection).toHaveBeenCalledWith("c-old", {
+      await waitFor(() => expect(api.shelfEditCollection).toHaveBeenCalledWith("c-old", {
         kind: "add", works: [{ source: "pixiv", sourceId: "9" }],
       }));
     });
@@ -220,7 +220,7 @@ describe("collections on the shelf", () => {
       fireEvent.click(screen.getByRole("button", { name: "新しいコレクション" }));
       fireEvent.change(await screen.findByRole("textbox", { name: "名前" }), { target: { value: "新しい束" } });
       fireEvent.click(screen.getByRole("button", { name: "保存" }));
-      await waitFor(() => expect(api.libraryV2EditCollection).toHaveBeenCalledWith(expect.any(String), {
+      await waitFor(() => expect(api.shelfEditCollection).toHaveBeenCalledWith(expect.any(String), {
         kind: "create", title: "新しい束", description: null, ordered: true, works: [],
       }));
     });

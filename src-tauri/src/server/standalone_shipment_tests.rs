@@ -299,7 +299,7 @@ async fn serve(
 ) -> (
     String,
     Arc<ServerStore>,
-    Option<Arc<crate::server::v2::Context>>,
+    Option<Arc<crate::server::reader::Context>>,
     tokio::task::JoinHandle<()>,
 ) {
     apply_pending(paths);
@@ -677,7 +677,7 @@ async fn probe_shipping_a_real_partial_shelf() {
     let status = admin_get(&remote, &admin.token, "status").await.unwrap();
     println!(
         "first send works={:?} sent={} bytes={} time={:?} served={}",
-        first.works, first.sent, first_bytes, first_time, status["libraryV2"]["works"]
+        first.works, first.sent, first_bytes, first_time, status["shelf"]["works"]
     );
     shelf.library().verify().unwrap();
     // 送った棚と手元の棚の作品が同じか。

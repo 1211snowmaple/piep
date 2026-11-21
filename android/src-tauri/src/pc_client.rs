@@ -464,7 +464,7 @@ fn parse_pairing(payload: &str, device_name: &str) -> Result<PairingPayload, Cli
         "admin" => return Err(ClientError::admin_pairing()),
         _ => return Err(ClientError::invalid_pairing()),
     }
-    // 端点は `{url}/api/v2/...` で組み立てるので、末尾の / を落として持つ。
+    // 端点は `{url}/api/...` で組み立てるので、末尾の / を落として持つ。
     pairing.url = validate_url(&pairing.url)?
         .as_str()
         .trim_end_matches('/')
@@ -648,7 +648,7 @@ async fn hello(
     pinned: bool,
 ) -> Result<reqwest::Response, ClientError> {
     let response = client
-        .get(format!("{base}/api/v2/hello"))
+        .get(format!("{base}/api/hello"))
         .send()
         .await
         .map_err(|error| ClientError::from_send(&error, pinned))?;
@@ -696,7 +696,7 @@ pub async fn pc_pair(
         return Err(ClientError::protocol());
     }
     let response = client
-        .post(format!("{}/api/v2/pair", pairing.url))
+        .post(format!("{}/api/pair", pairing.url))
         .json(&serde_json::json!({"secret": pairing.secret, "deviceName": device_name.trim()}))
         .send()
         .await
@@ -764,7 +764,7 @@ pub async fn pc_connection_status(
                 }
                 // /hello は無認証。登録解除された端末を「接続中」と表示しない。
                 let about = client
-                    .get(format!("{}/api/v2/about", saved.url))
+                    .get(format!("{}/api/about", saved.url))
                     .bearer_auth(&saved.token)
                     .timeout(PROBE_TIMEOUT)
                     .send();

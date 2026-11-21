@@ -1,6 +1,6 @@
 import { getAssetUrl } from "@/services/dbApi";
-import { libraryV2Content, libraryV2Outline, libraryV2ReadingPosition, libraryV2SearchContent, libraryV2SetReadingPosition, libraryV2Work, shelfBodyUrl, staleEditBaseOf, type ShelfReading, type ShelfWork } from "@/services/libraryV2Api";
-export { SHELF_WORK_ID } from "@/services/libraryV2Api";
+import { shelfContent, shelfOutline, shelfReadingPosition, shelfSearchContent, shelfSetReadingPosition, shelfWork, shelfBodyUrl, staleEditBaseOf, type ShelfReading, type ShelfWork } from "@/services/shelfApi";
+export { SHELF_WORK_ID } from "@/services/shelfApi";
 import { getDemoReader } from "@/mocks/demoData";
 import { readingKeyOf } from "@/features/library/readingShelf";
 import type { ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit } from "@/types/library";
@@ -44,7 +44,7 @@ export interface ReaderHeadData {
 
 /**
  * 作品の頭の問い合わせ。取ってきたものは作品の画面と同じ鍵・同じ形で持ち（棚は
- * `library-v2-work`、見本は `reader-metadata`）、読む画面は `select` で読み替える。
+ * `shelf-work`、見本は `reader-metadata`）、読む画面は `select` で読み替える。
  */
 export interface ReaderHeadQuery {
   queryKey: readonly unknown[];
@@ -143,7 +143,7 @@ export function shelfReaderSource(id: string): ReaderSource {
   // 版の番号を読み替えるのにも同じ作品の頭を使う。
   let work: Promise<ShelfWork> | null = null;
   const load = () => {
-    work ??= libraryV2Work(id).catch((error: unknown) => { work = null; throw error; });
+    work ??= shelfWork(id).catch((error: unknown) => { work = null; throw error; });
     return work;
   };
   const snapshotOf = async (version: number | null): Promise<string | null> => {
@@ -156,20 +156,20 @@ export function shelfReaderSource(id: string): ReaderSource {
     key: id,
     shelf: true,
     head: {
-      queryKey: ["library-v2-work", id],
+      queryKey: ["shelf-work", id],
       queryFn: load,
       select: (data) => ({ head: shelfHead(data as ShelfWork), legacy: null }),
     },
     page: async (version, page) => {
-      const content = await libraryV2Content(id, await snapshotOf(version), page);
+      const content = await shelfContent(id, await snapshotOf(version), page);
       return { ...content, plainText: "" };
     },
-    outline: async (version) => libraryV2Outline(id, await snapshotOf(version)),
-    search: async (term, version) => libraryV2SearchContent(id, await snapshotOf(version), term),
+    outline: async (version) => shelfOutline(id, await snapshotOf(version)),
+    search: async (term, version) => shelfSearchContent(id, await snapshotOf(version), term),
     assetUrl: shelfBodyUrl,
     shelfReading: {
-      read: async (version) => libraryV2ReadingPosition(id, await snapshotOf(version)),
-      write: async (version, page, ratio, finished) => libraryV2SetReadingPosition(id, await snapshotOf(version), page, ratio, finished),
+      read: async (version) => shelfReadingPosition(id, await snapshotOf(version)),
+      write: async (version, page, ratio, finished) => shelfSetReadingPosition(id, await snapshotOf(version), page, ratio, finished),
     },
   };
 }

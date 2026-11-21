@@ -54,7 +54,7 @@ import {
   saveTemplateSettings,
 } from "@/services/epubApi";
 import type { DownloadEntry, ShelfEntry } from "@/types/library";
-import { searchShelf, shelfEntriesByIds } from "@/features/library/shelfV2";
+import { searchShelf, shelfEntriesByIds } from "@/features/library/shelf";
 import type {
   DataField,
   InfoField,

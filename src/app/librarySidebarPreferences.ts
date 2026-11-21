@@ -16,6 +16,6 @@ export function normalizeLibrarySidebarVisibility(value: unknown): Visibility {
 }
 
 export function useLibrarySidebarVisibility() {
-  const [stored, setStored] = useLocalStorage<Visibility>({ key: "piep.library-sidebar.v1", defaultValue: defaults });
+  const [stored, setStored] = useLocalStorage<Visibility>({ key: "piep.library-sidebar", defaultValue: defaults });
   return [normalizeLibrarySidebarVisibility(stored), (key: OptionalShelf, shown: boolean) => setStored((previous) => ({ ...normalizeLibrarySidebarVisibility(previous), [key]: shown }))] as const;
 }

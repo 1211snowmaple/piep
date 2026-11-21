@@ -8,7 +8,7 @@ import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import { theme } from "@/theme";
 import { searchDemoWorks } from "@/mocks/demoData";
-import type { SearchV2Params } from "@/types/library";
+import type { SearchParams } from "@/types/library";
 import LibraryPage, { parseSavedParams, resolveSortBy, rollbackWorkFlag, searchSuggestionAction, updateWorkFlag } from "./LibraryPage";
 
 describe("LibraryPage search", () => {
@@ -80,7 +80,7 @@ describe("LibraryPage search", () => {
     fireEvent.change(input, { target: { value: "別の言葉" } });
     await waitFor(() => expect(new URLSearchParams(window.location.hash.split("?")[1]).get("q")).toBe("別の言葉"));
     expect(window.location.hash).toContain("intent=exact");
-    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchV2Params).searchMode === "exact")).toBe(true);
+    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchParams).searchMode === "exact")).toBe(true);
   });
 
   it("stages detailed acquisition and revision conditions and exposes their removal before Apply", async () => {
@@ -102,7 +102,7 @@ describe("LibraryPage search", () => {
     await user.click(within(dialog).getByRole("button", { name: "適用" }));
     expect(window.location.hash).toContain("revision=pending_revision");
     expect(window.location.hash).toContain("favorite=0");
-    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchV2Params).favorite === false)).toBe(true);
+    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchParams).favorite === false)).toBe(true);
     expect(window.location.hash).not.toContain("acquisition=");
   });
 
@@ -120,7 +120,7 @@ describe("LibraryPage search", () => {
     await user.click(within(dialog).getByRole("button", { name: "適用" }));
     expect(window.location.hash).toContain("serieskey=220041");
     expect(window.location.hash).toContain("seriessource=pixiv");
-    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchV2Params).seriesKey === "220041")).toBe(true);
+    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchParams).seriesKey === "220041")).toBe(true);
   });
 
   /**
@@ -209,7 +209,7 @@ describe("LibraryPage search", () => {
     await waitFor(() => {
       const query = client.getQueryCache().findAll({ queryKey: ["library"] })
         .find((item) => {
-          const params = item.queryKey[1] as SearchV2Params | undefined;
+          const params = item.queryKey[1] as SearchParams | undefined;
           return params?.sortBy === "asset_count" && params.sortOrder === "asc";
         });
       expect(query).toBeDefined();
@@ -377,7 +377,7 @@ describe("LibraryPage search", () => {
     try {
       await waitFor(() => {
         const library = client.getQueryCache().findAll({ queryKey: ["library"] });
-        expect(library.some((query) => (query.queryKey[1] as SearchV2Params)?.revisionFilter === "revised")).toBe(true);
+        expect(library.some((query) => (query.queryKey[1] as SearchParams)?.revisionFilter === "revised")).toBe(true);
       });
       expect(screen.queryByText("改稿のある作品を確認しています")).toBeNull();
     } finally {
@@ -405,7 +405,7 @@ describe("LibraryPage search", () => {
     expect(screen.getByLabelText("ライブラリを検索")).toHaveAttribute("placeholder", "現在版と過去版を検索");
     await waitFor(() => {
       const query = client.getQueryCache().findAll({ queryKey: ["library"] })
-        .find((item) => (item.queryKey[1] as SearchV2Params | undefined)?.versionScope === "all");
+        .find((item) => (item.queryKey[1] as SearchParams | undefined)?.versionScope === "all");
       expect(query).toBeDefined();
     });
   });
@@ -597,7 +597,7 @@ describe("LibraryPage search", () => {
     await waitFor(() => {
       const query = client.getQueryCache().findAll({ queryKey: ["library"] })
         .find((item) => {
-          const params = item.queryKey[1] as SearchV2Params | undefined;
+          const params = item.queryKey[1] as SearchParams | undefined;
           return params?.revisionFilter === "revised"
             && params.editFilter === "edited"
             && params.coverFilter === "has_cover"
@@ -679,7 +679,7 @@ describe("library optimistic flag rollback", () => {
       pages: [{ ...result, items: [first, second], totalEstimate: 2, searchMeta: { ...result.searchMeta, totalEstimate: 2 } }],
       pageParams: [null],
     };
-    const params: SearchV2Params = { favorite: true };
+    const params: SearchParams = { favorite: true };
 
     // The first operation removes its row from this filtered listing. A second
     // work then succeeds before the first request reports failure.

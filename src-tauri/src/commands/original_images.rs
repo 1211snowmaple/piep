@@ -104,7 +104,7 @@ struct Lookups {
 }
 
 async fn shelf_reduced_works(
-    shelf: Arc<crate::commands::library_v2::LibraryV2>,
+    shelf: Arc<crate::commands::shelf::Shelf>,
 ) -> Result<Vec<crate::library_original_images::ReducedShelfWork>, String> {
     tokio::task::spawn_blocking(move || {
         shelf
@@ -118,11 +118,11 @@ async fn shelf_reduced_works(
 
 /// 新しい棚の、原寸になっていない画像の数と、走っている取り直しの進み具合。
 #[tauri::command]
-pub async fn library_v2_original_image_status(
+pub async fn shelf_original_image_status(
     app: tauri::AppHandle,
 ) -> Result<OriginalImageStatus, String> {
     let shelf = app
-        .state::<Arc<crate::commands::library_v2::LibraryV2>>()
+        .state::<Arc<crate::commands::shelf::Shelf>>()
         .inner()
         .clone();
     let works = shelf_reduced_works(shelf).await?;
@@ -139,7 +139,7 @@ pub async fn library_v2_original_image_status(
 
 /// 一作品の縮小版を原寸に取り直す。原寸が一枚も見つからなければ保存しない。
 async fn upgrade_shelf_work(
-    shelf: &Arc<crate::commands::library_v2::LibraryV2>,
+    shelf: &Arc<crate::commands::shelf::Shelf>,
     library: &Arc<crate::library::Library>,
     client: &reqwest::Client,
     work: crate::library::LibraryId,
@@ -209,11 +209,11 @@ async fn upgrade_shelf_work(
 
 /// 新しい棚で、縮小版で保存された表紙・イラストを原寸に取り直す。
 #[tauri::command]
-pub async fn library_v2_upgrade_pixiv_images_to_original(
+pub async fn shelf_upgrade_pixiv_images_to_original(
     app: tauri::AppHandle,
 ) -> Result<OriginalImageResult, String> {
     let shelf = app
-        .state::<Arc<crate::commands::library_v2::LibraryV2>>()
+        .state::<Arc<crate::commands::shelf::Shelf>>()
         .inner()
         .clone();
     // 書き換えるのは正本に切り替えた棚だけ。

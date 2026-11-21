@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { WorkCard } from "@/components/WorkCard";
 import type { ListedWork, ShelfEntry } from "@/types/library";
-import { isShelfEntry } from "@/features/library/shelfV2";
+import { isShelfEntry } from "@/features/library/shelf";
 
 type WorkListView = "gallery" | "compact";
 

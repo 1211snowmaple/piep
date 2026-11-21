@@ -4033,23 +4033,23 @@ impl Database {
 
     /// Cursor-based library/search entrypoint backed by Tantivy for full text
     /// and SQLite for metadata filters.
-    pub fn search_downloads_v2(&self, params: &SearchV2Params) -> Result<SearchV2Result, String> {
-        self.search_downloads_v2_inner(params, 1_000)
+    pub fn search_downloads(&self, params: &SearchParams) -> Result<SearchResult, String> {
+        self.search_downloads_inner(params, 1_000)
     }
 
-    pub fn search_downloads_v2_internal(
+    pub fn search_downloads_internal(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
         max_limit: i64,
-    ) -> Result<SearchV2Result, String> {
-        self.search_downloads_v2_inner(params, max_limit)
+    ) -> Result<SearchResult, String> {
+        self.search_downloads_inner(params, max_limit)
     }
 
-    fn search_downloads_v2_inner(
+    fn search_downloads_inner(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
         max_limit: i64,
-    ) -> Result<SearchV2Result, String> {
+    ) -> Result<SearchResult, String> {
         let submitted_query = query_text(params).to_string();
         let mut effective_params = normalize_search_params(params);
         let limit = effective_params.limit.unwrap_or(80).clamp(1, max_limit);
@@ -4082,7 +4082,7 @@ impl Database {
             } else {
                 None
             };
-            return Ok(SearchV2Result {
+            return Ok(SearchResult {
                 items,
                 next_cursor,
                 total_estimate,
@@ -4254,7 +4254,7 @@ impl Database {
             &document_map,
         );
 
-        Ok(SearchV2Result {
+        Ok(SearchResult {
             items,
             next_cursor,
             total_estimate,
@@ -4283,7 +4283,7 @@ impl Database {
     fn apply_exact_entity_intent(
         &self,
         submitted_query: &str,
-        params: &mut SearchV2Params,
+        params: &mut SearchParams,
     ) -> Result<Option<SearchEntityIntent>, String> {
         let query = submitted_query.trim();
         if !plain_entity_query(query)
@@ -4386,7 +4386,7 @@ impl Database {
     #[allow(clippy::too_many_arguments)]
     fn search_lexical_page(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
         query: &str,
         submitted_query: &str,
         limit: i64,
@@ -4394,7 +4394,7 @@ impl Database {
         exact_entity: Option<SearchEntityIntent>,
         parsed_query: &ParsedSearchQuery,
         search_mode: &str,
-    ) -> Result<SearchV2Result, String> {
+    ) -> Result<SearchResult, String> {
         let cursor_scope = search_cursor_scope(params);
         let decoded_cursor = decode_cursor(params.cursor.as_deref()).filter(|candidate| {
             candidate.kind == "ranked-search" && candidate.scope.as_deref() == Some(&cursor_scope)
@@ -4481,7 +4481,7 @@ impl Database {
                 .push("現在版と保存済みの過去版を照合し、作品ごとにまとめています".to_string());
         }
 
-        Ok(SearchV2Result {
+        Ok(SearchResult {
             items,
             next_cursor,
             total_estimate,
@@ -4505,7 +4505,7 @@ impl Database {
 
     fn ranked_search_snapshot(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
         query: &str,
         expected_id: Option<&str>,
     ) -> Result<Arc<DiskSearchSnapshot>, String> {
@@ -4548,7 +4548,7 @@ impl Database {
 
     fn ranked_search_snapshot_inner(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
         query: &str,
         expected_id: Option<&str>,
         fail_after_batches: Option<usize>,
@@ -4711,14 +4711,14 @@ impl Database {
     #[allow(clippy::too_many_arguments)]
     fn search_sorted_lexical_page(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
         query: &str,
         submitted_query: &str,
         limit: i64,
         status: &SearchIndexStatus,
         exact_entity: Option<SearchEntityIntent>,
         parsed_query: &ParsedSearchQuery,
-    ) -> Result<SearchV2Result, String> {
+    ) -> Result<SearchResult, String> {
         let semantic_complete = status.semantic_pending_downloads == 0;
         let mut explanations =
             search_explanations(exact_entity.as_ref(), "tantivy", status.is_complete);
@@ -4755,7 +4755,7 @@ impl Database {
         let matched_count = snapshot.row_count;
 
         if matched_count == 0 {
-            return Ok(SearchV2Result {
+            return Ok(SearchResult {
                 items: Vec::new(),
                 next_cursor: None,
                 total_estimate: Some(0),
@@ -4851,7 +4851,7 @@ impl Database {
             &historical_documents,
         );
 
-        Ok(SearchV2Result {
+        Ok(SearchResult {
             items,
             next_cursor,
             total_estimate,
@@ -4872,7 +4872,7 @@ impl Database {
     fn count_sorted_search_matches(
         &self,
         conn: &Connection,
-        params: &SearchV2Params,
+        params: &SearchParams,
     ) -> Result<i64, String> {
         let mut sql = "SELECT COUNT(*)
             FROM search_matches sm
@@ -4893,7 +4893,7 @@ impl Database {
 
     fn sorted_search_snapshot(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
         query: &str,
         expected_id: Option<&str>,
     ) -> Result<Arc<DiskSearchSnapshot>, String> {
@@ -5021,7 +5021,7 @@ impl Database {
 
     fn search_sql_page(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
         limit: i64,
         cursor: Option<&SearchCursor>,
     ) -> Result<Vec<DownloadEntry>, String> {
@@ -5052,7 +5052,7 @@ impl Database {
         query_download_entries(&conn, &sql, &bind_values)
     }
 
-    fn count_sql_matches(&self, params: &SearchV2Params) -> Result<i64, String> {
+    fn count_sql_matches(&self, params: &SearchParams) -> Result<i64, String> {
         let conn = self.read_conn()?;
         let mut sql = "SELECT COUNT(*) FROM downloads d".to_string();
         let mut wheres = Vec::new();
@@ -5070,7 +5070,7 @@ impl Database {
 
     fn fetch_ranked_sql_matches(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
         hits: &[RankedSearchHit],
     ) -> Result<Vec<DownloadEntry>, String> {
         if hits.is_empty() {
@@ -7061,7 +7061,7 @@ impl Database {
             )
         };
 
-        let base_params = SearchV2Params {
+        let base_params = SearchParams {
             text: None,
             query: None,
             source: None,
@@ -7107,7 +7107,7 @@ impl Database {
         let mut list_samples = Vec::with_capacity(7);
         for _ in 0..7 {
             let started = std::time::Instant::now();
-            let _ = self.search_downloads_v2(&base_params)?;
+            let _ = self.search_downloads(&base_params)?;
             list_samples.push(started.elapsed().as_secs_f64() * 1_000.0);
         }
         let list_first_page_ms = list_samples[0];
@@ -7121,7 +7121,7 @@ impl Database {
             let mut samples = Vec::with_capacity(7);
             for _ in 0..7 {
                 let started = std::time::Instant::now();
-                let _ = self.search_downloads_v2(&params)?;
+                let _ = self.search_downloads(&params)?;
                 samples.push(started.elapsed().as_secs_f64() * 1_000.0);
             }
             Some(samples)
@@ -7144,7 +7144,7 @@ impl Database {
                 let mut samples = Vec::with_capacity(7);
                 for _ in 0..7 {
                     let started = std::time::Instant::now();
-                    let _ = self.search_downloads_v2(&params)?;
+                    let _ = self.search_downloads(&params)?;
                     samples.push(started.elapsed().as_secs_f64() * 1_000.0);
                 }
                 let (p50, p95) = benchmark_percentiles(&mut samples);
@@ -8154,7 +8154,7 @@ impl Database {
         drop(conn);
 
         let recent_downloads = self
-            .search_downloads_v2(&SearchV2Params {
+            .search_downloads(&SearchParams {
                 text: None,
                 query: None,
                 source: None,
@@ -8400,7 +8400,7 @@ impl Database {
     /// The same builder the works listing uses, so "お気に入りだけ" means the
     /// same thing on every tab rather than one tab's idea of it.
     fn entity_facet_filters(
-        filters: Option<&SearchV2Params>,
+        filters: Option<&SearchParams>,
     ) -> (Vec<String>, Vec<Box<dyn rusqlite::types::ToSql>>) {
         let mut wheres = Vec::new();
         let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -8419,7 +8419,7 @@ impl Database {
         &self,
         kind: &str,
         query: Option<&str>,
-        filters: Option<&SearchV2Params>,
+        filters: Option<&SearchParams>,
         scope: Option<&EntityFacetScope>,
     ) -> Result<i64, String> {
         let conn = self.read_conn()?;
@@ -8499,7 +8499,7 @@ impl Database {
         query: Option<&str>,
         limit: i64,
         offset: i64,
-        filters: Option<&SearchV2Params>,
+        filters: Option<&SearchParams>,
         sort_by: Option<&str>,
         sort_order: Option<&str>,
         scope: Option<&EntityFacetScope>,
@@ -9245,7 +9245,7 @@ impl Database {
 
     pub fn set_watch_updates_for_search(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
         watch: bool,
     ) -> Result<BulkMutationResult, String> {
         let snapshot = self.collect_search_match_snapshot(params, 1_000)?;
@@ -9295,7 +9295,7 @@ impl Database {
 
     pub fn delete_downloads_for_search(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
     ) -> Result<BulkMutationResult, String> {
         let snapshot = self.collect_search_match_snapshot(params, 1_000)?;
         let matched_count = snapshot.row_count;
@@ -9469,7 +9469,7 @@ impl Database {
 
     fn collect_search_match_snapshot(
         &self,
-        params: &SearchV2Params,
+        params: &SearchParams,
         page_size: i64,
     ) -> Result<Arc<DiskSearchSnapshot>, String> {
         let library_generation = self.library_generation()?;
@@ -9503,7 +9503,7 @@ impl Database {
             bulk_params.projection = Some("bulk".to_string());
             let mut seen_cursors = HashSet::new();
             loop {
-                let result = self.search_downloads_v2_inner(&bulk_params, page_size)?;
+                let result = self.search_downloads_inner(&bulk_params, page_size)?;
                 {
                     let guard = connection
                         .lock()
@@ -11649,7 +11649,7 @@ fn is_plain_directory(entry: &std::fs::DirEntry) -> Result<bool, String> {
     Ok(kind.is_dir() && !kind.is_symlink())
 }
 
-fn query_text(params: &SearchV2Params) -> &str {
+fn query_text(params: &SearchParams) -> &str {
     params
         .query
         .as_deref()
@@ -11658,7 +11658,7 @@ fn query_text(params: &SearchV2Params) -> &str {
         .trim()
 }
 
-fn includes_historical_versions(params: &SearchV2Params) -> bool {
+fn includes_historical_versions(params: &SearchParams) -> bool {
     params.version_scope.as_deref() == Some("all")
 }
 
@@ -11705,7 +11705,7 @@ fn search_explanations(
     explanations
 }
 
-fn effective_search_mode(params: &SearchV2Params) -> String {
+fn effective_search_mode(params: &SearchParams) -> String {
     match params.search_mode.as_deref() {
         Some("exact") => "exact",
         Some("semantic") => "semantic",
@@ -11714,7 +11714,7 @@ fn effective_search_mode(params: &SearchV2Params) -> String {
     .to_string()
 }
 
-fn search_candidate_limit(params: &SearchV2Params, page_limit: i64) -> usize {
+fn search_candidate_limit(params: &SearchParams, page_limit: i64) -> usize {
     let page_limit = page_limit.max(1) as usize;
     let (multiplier, floor) = if params_have_library_filters(params) {
         (4usize, 400usize)
@@ -11724,7 +11724,7 @@ fn search_candidate_limit(params: &SearchV2Params, page_limit: i64) -> usize {
     page_limit.saturating_mul(multiplier).max(floor)
 }
 
-fn params_have_library_filters(params: &SearchV2Params) -> bool {
+fn params_have_library_filters(params: &SearchParams) -> bool {
     params
         .source
         .as_deref()
@@ -11828,7 +11828,7 @@ fn rank_semantic_hits(
         .collect()
 }
 
-fn normalize_search_params(params: &SearchV2Params) -> SearchV2Params {
+fn normalize_search_params(params: &SearchParams) -> SearchParams {
     let mut normalized = params.clone();
     normalized.projection = Some(normalized_projection(
         normalized.projection.as_deref(),
@@ -11873,7 +11873,7 @@ fn normalized_projection(projection: Option<&str>, view_mode: Option<&str>) -> S
 
 fn extract_structured_search_filters(
     query: &str,
-    params: &mut SearchV2Params,
+    params: &mut SearchParams,
 ) -> (String, Vec<String>) {
     let mut clean_terms = Vec::new();
     let mut source_id_terms = Vec::new();
@@ -12099,7 +12099,7 @@ fn decode_entity_series_cursor(raw: Option<&str>) -> Result<Option<EntitySeriesC
         .map_err(|_| "Invalid entity series cursor".to_string())
 }
 
-fn normalized_sort_key(params: &SearchV2Params) -> &'static str {
+fn normalized_sort_key(params: &SearchParams) -> &'static str {
     // Accept both the original UI names and the database-shaped names used by
     // newer screens. The result is a closed internal enum represented as a
     // string, so user input is never interpolated into SQL.
@@ -12122,11 +12122,11 @@ fn normalized_sort_key(params: &SearchV2Params) -> &'static str {
 /// Whether a text search should be ordered by a library column instead of by
 /// relevance. Relevance stays the default, so a caller that does not ask for an
 /// ordering keeps the behaviour it had.
-fn wants_column_sort(params: &SearchV2Params) -> bool {
+fn wants_column_sort(params: &SearchParams) -> bool {
     params.sort_by.is_some() && normalized_sort_key(params) != "relevance"
 }
 
-fn sort_label(params: &SearchV2Params) -> &'static str {
+fn sort_label(params: &SearchParams) -> &'static str {
     let descending = effective_sort_order(params).as_deref() != Some("asc");
     match normalized_sort_key(params) {
         "title" => {
@@ -12202,11 +12202,11 @@ fn sort_label(params: &SearchV2Params) -> &'static str {
     }
 }
 
-fn effective_sort_by(params: &SearchV2Params) -> Option<String> {
+fn effective_sort_by(params: &SearchParams) -> Option<String> {
     Some(normalized_sort_key(params).to_string())
 }
 
-fn effective_sort_order(params: &SearchV2Params) -> Option<String> {
+fn effective_sort_order(params: &SearchParams) -> Option<String> {
     Some(
         match params.sort_order.as_deref() {
             Some("asc") => "asc",
@@ -12216,7 +12216,7 @@ fn effective_sort_order(params: &SearchV2Params) -> Option<String> {
     )
 }
 
-fn encode_sql_cursor(params: &SearchV2Params, item: &DownloadEntry) -> Option<String> {
+fn encode_sql_cursor(params: &SearchParams, item: &DownloadEntry) -> Option<String> {
     encode_cursor(&SearchCursor {
         kind: "sql".to_string(),
         scope: Some(search_cursor_scope(params)),
@@ -12238,7 +12238,7 @@ fn encode_sql_cursor(params: &SearchV2Params, item: &DownloadEntry) -> Option<St
     })
 }
 
-fn encode_search_cursor(params: &SearchV2Params, item: &DownloadEntry) -> Option<String> {
+fn encode_search_cursor(params: &SearchParams, item: &DownloadEntry) -> Option<String> {
     encode_cursor(&SearchCursor {
         kind: "search".to_string(),
         scope: Some(search_cursor_scope(params)),
@@ -12257,7 +12257,7 @@ fn encode_search_cursor(params: &SearchV2Params, item: &DownloadEntry) -> Option
     })
 }
 
-fn search_cursor_scope(params: &SearchV2Params) -> String {
+fn search_cursor_scope(params: &SearchParams) -> String {
     let mut scoped = params.clone();
     scoped.cursor = None;
     scoped.limit = None;
@@ -12287,7 +12287,7 @@ fn search_item_is_after_cursor(item: &DownloadEntry, cursor: &SearchCursor) -> b
     item.id < cursor.id.unwrap_or(i64::MIN)
 }
 
-fn fallback_sort_value(params: &SearchV2Params, item: &DownloadEntry) -> Option<String> {
+fn fallback_sort_value(params: &SearchParams, item: &DownloadEntry) -> Option<String> {
     Some(match effective_sort_by(params).as_deref() {
         Some("title") => item.title.clone(),
         Some("author") => item.author_name.clone(),
@@ -13152,7 +13152,7 @@ fn collect_suggestions(
     Ok(())
 }
 
-fn sort_key_select_expr(params: &SearchV2Params) -> String {
+fn sort_key_select_expr(params: &SearchParams) -> String {
     match effective_sort_by(params).as_deref() {
         Some("title") => format!("CAST({EFFECTIVE_TITLE_SQL} AS TEXT)"),
         Some("author") => "CAST(d.author_name AS TEXT)".to_string(),
@@ -13172,7 +13172,7 @@ fn sort_key_select_expr(params: &SearchV2Params) -> String {
     }
 }
 
-fn sort_compare_expr(params: &SearchV2Params) -> String {
+fn sort_compare_expr(params: &SearchParams) -> String {
     match effective_sort_by(params).as_deref() {
         Some("title") => format!("{EFFECTIVE_TITLE_SQL} COLLATE NOCASE"),
         Some("author") => "d.author_name COLLATE NOCASE".to_string(),
@@ -13190,7 +13190,7 @@ fn sort_compare_expr(params: &SearchV2Params) -> String {
 }
 
 fn append_keyset_filter(
-    params: &SearchV2Params,
+    params: &SearchParams,
     cursor: Option<&SearchCursor>,
     wheres: &mut Vec<String>,
     bind_values: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
@@ -13238,7 +13238,7 @@ const MAX_SAVED_SEARCH_PARAMS_BYTES: usize = 16 * 1024;
 /// Ignored without an explicit column ordering: relevance results are walked
 /// with a score cursor, and an offset into them would silently mean something
 /// different from the page the reader asked for.
-fn page_offset(params: &SearchV2Params) -> Option<i64> {
+fn page_offset(params: &SearchParams) -> Option<i64> {
     let offset = params.offset.unwrap_or(0);
     if offset <= 0 || normalized_sort_key(params) == "relevance" {
         return None;
@@ -13257,7 +13257,7 @@ fn bounded_id_list(ids: &[i64]) -> Vec<i64> {
 }
 
 fn append_library_filters(
-    params: &SearchV2Params,
+    params: &SearchParams,
     wheres: &mut Vec<String>,
     bind_values: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
 ) {
@@ -13716,7 +13716,7 @@ fn upsert_download_in_connection(conn: &Connection, dl: &NewDownload) -> Result<
     Ok(id)
 }
 
-fn sort_clause(params: &SearchV2Params) -> String {
+fn sort_clause(params: &SearchParams) -> String {
     // 「タイトル順」は、読み手が見ている題で並べる。表示だけを差し替えて
     // 並べ替えを元の題のままにすると、あ行の作品が真ん中に紛れて出てくる。
     let title_sort = format!("{EFFECTIVE_TITLE_SQL} COLLATE NOCASE");
@@ -13744,7 +13744,7 @@ fn sort_clause(params: &SearchV2Params) -> String {
     format!(" ORDER BY {} {}, d.id {}", sort_col, sort_order, sort_order)
 }
 
-fn sort_order(params: &SearchV2Params) -> &'static str {
+fn sort_order(params: &SearchParams) -> &'static str {
     match params.sort_order.as_deref() {
         Some("asc") => "ASC",
         _ => "DESC",

@@ -50,7 +50,7 @@ export const defaultReaderBehavior: ReaderBehavior = {
   pageButtons: "always",
 };
 
-const behaviorKey = "piep.android.reader.behavior.v1";
+const behaviorKey = "piep.android.reader.behavior";
 
 function choice<T extends string>(value: unknown, options: readonly T[], fallback: T): T {
   return options.find((option) => option === value) ?? fallback;

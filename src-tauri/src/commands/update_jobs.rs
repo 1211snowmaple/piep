@@ -1358,7 +1358,7 @@ fn current_job_summaries(state: &AppState) -> Result<Vec<UpdateJobSummary>, Stri
 }
 
 fn clear_finished_jobs(state: &AppState, include_shelf: bool) -> Result<usize, String> {
-    let library = state.library_v2.library()?;
+    let library = state.shelf.library()?;
     let hidden = if include_shelf {
         library
             .set_job_history_hidden(crate::library::LibraryId::now_v7(), None, true)
@@ -1434,7 +1434,7 @@ fn snapshot_credentials_missing() -> UpdateCredentials {
 #[tauri::command]
 pub async fn clear_update_job(app: tauri::AppHandle, job_id: String) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
-    let library = state.library_v2.library()?;
+    let library = state.shelf.library()?;
     if let Some(job) = library
         .migrated_job_history_id(&job_id)
         .map_err(|e| e.to_string())?
@@ -1519,7 +1519,7 @@ pub async fn list_incomplete_save_repair_works(
     limit: i64,
 ) -> Result<Vec<IncompleteSaveRepairWork>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let library = state.library_v2.library()?;
+    let library = state.shelf.library()?;
     tokio::task::spawn_blocking(move || {
         library
             .incomplete_save_repairs(limit.clamp(1, 500) as usize)
@@ -1546,7 +1546,7 @@ pub async fn record_incomplete_save_repair_attempts(
     source_ids: Vec<String>,
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let library = state.library_v2.library()?;
+    let library = state.shelf.library()?;
     tokio::task::spawn_blocking(move || {
         library
             .record_incomplete_save_attempts(&source_ids, chrono::Utc::now().timestamp_millis())
@@ -1887,7 +1887,7 @@ pub async fn list_pending_revisions(
 ) -> Result<Vec<PendingRevisionWork>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     tokio::task::spawn_blocking(move || {
-        let library = state.library_v2.library()?;
+        let library = state.shelf.library()?;
         library
             .pending_revisions()
             .map_err(|error| error.to_string())
@@ -1937,7 +1937,7 @@ pub async fn preview_pending_revision(
     let lookup_state = state.clone();
     let lookup_work = work.clone();
     let (source, source_id, base_version) = tokio::task::spawn_blocking(move || {
-        let library = lookup_state.library_v2.library()?;
+        let library = lookup_state.shelf.library()?;
         let id = crate::library::LibraryId::parse_str(&lookup_work)
             .map_err(|_| "作品の指定が不正です".to_string())?;
         if !library
@@ -2576,7 +2576,7 @@ async fn refresh_profiles_for_saved_works(
     credentials: &UpdateCredentials,
 ) {
     // 同じ作者の作品を 10 件保存しても、取りに行くのは 1 回でいい。
-    let library = match state.library_v2.library() {
+    let library = match state.shelf.library() {
         Ok(library) => library,
         Err(error) => {
             log::warn!("保存した作品のプロフィールを照合できません: {error}");
@@ -2694,7 +2694,7 @@ async fn refresh_profiles_for_saved_works(
 
 /// 保存した作品の意味検索の索引を追いつかせる（全文索引は保存のたびに棚が追いつく）。
 fn catch_up_semantic_index(state: &AppState) {
-    if let Ok(library) = state.library_v2.library() {
+    if let Ok(library) = state.shelf.library() {
         super::library_health::schedule_semantic_sync(library);
     }
 }
@@ -2717,7 +2717,7 @@ fn watch_saved_work(app: &tauri::AppHandle, saved: SavedRef) {
     let work = saved;
     let result = (|| {
         let shelf = app
-            .try_state::<Arc<super::library_v2::LibraryV2>>()
+            .try_state::<Arc<super::shelf::Shelf>>()
             .ok_or("棚は開いていません")?;
         let library = shelf.library()?;
         shelf.forget_derived();
