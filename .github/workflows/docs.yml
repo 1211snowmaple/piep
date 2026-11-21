@@ -34,38 +34,20 @@ jobs:
         with:
           node-version: 24
           check-latest: true
-      - name: Install Rust 1.99.1
-        run: |
-          rustup toolchain install 1.99.1 --profile minimal --component clippy,rustfmt
-          rustup default 1.99.1
+      # 版は rust-toolchain.toml が決める。
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          # PR ごとに保存すると上限 10GB を超え、main とリリースの分が押し出される。
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             tools/ipc-extract
             tools/api-types
-      # 境界を守っている当のコードが、いちばん検証されていなかった。抽出器が
-      # `#[tauri::command]` を静かに取りこぼしても、教えてくれるものが何も
-      # 無い。ドリフト検査は「取りこぼしが無い」という前提の上に建っている。
-      - run: cargo test --manifest-path tools/ipc-extract/Cargo.toml
-      - run: cargo clippy --manifest-path tools/ipc-extract/Cargo.toml --all-targets -- -D warnings
-      - run: cargo fmt --manifest-path tools/ipc-extract/Cargo.toml --all -- --check
-      # 携帯へ渡す型。サーバー・携帯の Rust・画面の三者が同じ定義を使う。
-      # 画面の型（shared/mobileApi.ts）は生成物なので、元と食い違っていないかを見る。
-      - run: cargo test --manifest-path crates/piep-mobile-api/Cargo.toml
-      - run: cargo test --manifest-path tools/api-types/Cargo.toml
-      - run: cargo clippy --manifest-path tools/api-types/Cargo.toml --all-targets -- -D warnings
-      - run: cargo fmt --manifest-path tools/api-types/Cargo.toml --all -- --check
-      - run: cargo run --manifest-path tools/api-types/Cargo.toml -- --repo . --check
       - run: npm ci
         working-directory: docs-tools
-      - run: npm run docs:check
-        working-directory: docs-tools
-      # サイトが組めることを PR の時点で確かめる。deploy は main でしか走らない
-      # ので、ここで見ないと配置の直前に初めて分かることになる。実際テーマを
-      # 足したとき、手元では通るのに綺麗な checkout でだけ落ちる壊れ方をした
-      # （Vite が上位の postcss.config.cjs を拾い、アプリ側の依存を要求した）。
-      - run: npm run contract && npm run site:build
-        working-directory: docs-tools
+      # 検査の中身は tools/check.ps1 にある。手元と同じ段を呼ぶ。
+      - run: ./tools/check.ps1 -Stage docs
+        shell: pwsh
 
   # サイトを組んで GitHub Pages へ配置する。main だけ。
   #
@@ -95,6 +77,8 @@ jobs:
           rustup default 1.99.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          # PR ごとに保存すると上限 10GB を超え、main とリリースの分が押し出される。
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             src-tauri
             tools/ipc-extract
