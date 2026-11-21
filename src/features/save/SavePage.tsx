@@ -83,7 +83,7 @@ import {
   fetchPixivUserNovels,
 } from "@/services/downloadApi";
 import { subscribeTauriEvent } from "@/services/eventBus";
-import { store } from "@/store";
+import { getConnectionStatus } from "@/services/authApi";
 import {
   requestOperationCancel,
   startOperation,
@@ -332,11 +332,9 @@ export default function SavePage() {
         if (sourceChanged)
           await destroyEmbeddedBrowser().catch(() => undefined);
         if (cancelled) return;
-        const value = await (source === "pixiv"
-          ? store.get<string>("pixiv_refresh_token")
-          : store.get<string>("fanbox_session_id"));
+        const connection = await getConnectionStatus();
         if (cancelled) return;
-        setAuthConnected(Boolean(value));
+        setAuthConnected(Boolean(connection[source]));
         // **大きいウィンドウは、この画面より長生きする。**
         // 切り離したまま別の画面へ行くと、片付けで閉じるのは埋め込みだけで、
         // 大きいウィンドウはそのまま残る。切り離していたという記憶は
@@ -856,16 +854,9 @@ export default function SavePage() {
         return;
       }
       if (target === "unsupported") return;
-      const pixivToken = (await store.get<string>("pixiv_refresh_token")) || "";
-      const fanboxCookie = (await store.get<string>("fanbox_session_id")) || "";
-      const fanboxUserAgent =
-        (await store.get<string>("fanbox_user_agent")) || "Mozilla/5.0";
       let next: SidebarItem[] = [];
       if (target === "pixiv_single") {
-        const data = await fetchPixivNovelByUrl<PixivNovel>(
-          analysisUrl,
-          pixivToken,
-        );
+        const data = await fetchPixivNovelByUrl<PixivNovel>(analysisUrl);
         const novelId = String(data.id ?? data.detail?.id ?? "");
         next = [
           {
@@ -878,7 +869,7 @@ export default function SavePage() {
         ];
       } else if (target === "pixiv_series") {
         next = (
-          await fetchPixivSeriesNovels<PixivNovel[]>(targetId, pixivToken)
+          await fetchPixivSeriesNovels<PixivNovel[]>(targetId)
         ).map((novel) => ({
           id: String(novel.id),
           title: novel.title,
@@ -888,7 +879,7 @@ export default function SavePage() {
         }));
       } else if (target === "pixiv_user") {
         next = (
-          await fetchPixivUserNovels<PixivNovel[]>(targetId, pixivToken)
+          await fetchPixivUserNovels<PixivNovel[]>(targetId)
         ).map((novel) => ({
           id: String(novel.id),
           title: novel.title,
@@ -898,11 +889,7 @@ export default function SavePage() {
         }));
       } else if (target === "fanbox_single") {
         const data = normalizeFanboxPostPayload<FanboxPost>(
-          await fetchFanboxPost<unknown>(
-            targetId,
-            fanboxCookie,
-            fanboxUserAgent,
-          ),
+          await fetchFanboxPost<unknown>(targetId),
         );
         next = [
           {
@@ -915,11 +902,7 @@ export default function SavePage() {
         ];
       } else if (target === "fanbox_creator") {
         next = (
-          await fetchFanboxCreatorPosts<FanboxPost[]>(
-            targetId,
-            fanboxCookie,
-            fanboxUserAgent,
-          )
+          await fetchFanboxCreatorPosts<FanboxPost[]>(targetId)
         ).map((post) => ({
           id: String(post.id),
           title: post.title,

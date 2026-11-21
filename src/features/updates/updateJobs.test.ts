@@ -27,7 +27,6 @@ vi.mock("@/services/updateJobApi", () => ({
   cancelUpdateJobCommand: vi.fn(),
   clearUpdateJobCommand: vi.fn(),
   getUpdateJobCommand: mocks.getJob,
-  getUpdateJobCredentials: vi.fn(),
   listUpdateJobsCommand: mocks.listJobs,
   pauseUpdateJobCommand: vi.fn(),
   resumeUpdateJobCommand: vi.fn(),

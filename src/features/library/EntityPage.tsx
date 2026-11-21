@@ -73,7 +73,6 @@ import {
   shelfSeriesFacet,
 } from "@/features/library/shelf";
 import { openExternalUrl } from "@/services/openerApi";
-import { store } from "@/store";
 import {
   defaultSortOrderFor,
   COLLECTION_SORT_OPTIONS,
@@ -559,7 +558,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const refreshMutation = useMutation({
     mutationFn: async () => {
       if (!runtime) return {};
-      return refreshEntityProfile({ entityType: kind, source, sourceKey: key, force: true, refreshToken: await store.get<string>("pixiv_refresh_token"), cookie: await store.get<string>("fanbox_session_id"), userAgent: await store.get<string>("fanbox_user_agent") || "Mozilla/5.0" });
+      return refreshEntityProfile({ entityType: kind, source, sourceKey: key, force: true });
     },
     onSuccess: () => { notifications.show({ color: "green", message: "プロフィールを更新しました" }); invalidateShelf(queryClient); },
     onError: (error) => notifications.show({ color: "red", title: "更新できません", message: errorMessage(error) }),

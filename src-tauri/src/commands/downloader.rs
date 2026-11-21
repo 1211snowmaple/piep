@@ -101,9 +101,17 @@ pub async fn fetch_pixiv_novel_metadata(
 /// 型を付けずに返すのは、FANBOX の本文が投稿の種類ごとに別の形をしている
 /// ためである。解釈は保存する側で行う。
 ///
-/// **Cookie と UA は対で渡す。** 片方だけでは通らない。
+/// 鍵は保存してある FANBOX の接続から読む。
 #[tauri::command]
-pub async fn fetch_fanbox_post(
+pub async fn fetch_fanbox_post(post_id: String) -> Result<serde_json::Value, String> {
+    let (cookie, user_agent) = crate::auth::saved::Vault::app().fanbox_session()?;
+    fanbox_post(post_id, cookie, user_agent).await
+}
+
+/// FANBOX の投稿を一件。更新ジョブが自分の持つ鍵で呼ぶ。
+///
+/// **Cookie と UA は対で渡す。** 片方だけでは通らない。
+pub(crate) async fn fanbox_post(
     post_id: String,
     cookie: String,
     user_agent: String,
@@ -119,13 +127,10 @@ pub async fn fetch_fanbox_post(
 /// ことを意味しない** - 支援していない有料の投稿は `isRestricted` が立って返り、
 /// 本文を取りに行っても読めない。`feeRequired` にいくら必要かが入る。
 ///
-/// **Cookie と UA は対で渡す。**
+/// 鍵は保存してある FANBOX の接続から読む。
 #[tauri::command]
-pub async fn fetch_fanbox_creator_posts(
-    creator_id: String,
-    cookie: String,
-    user_agent: String,
-) -> Result<Vec<FanboxPost>, String> {
+pub async fn fetch_fanbox_creator_posts(creator_id: String) -> Result<Vec<FanboxPost>, String> {
+    let (cookie, user_agent) = crate::auth::saved::Vault::app().fanbox_session()?;
     let api = crate::downloader::session::fanbox(cookie, user_agent)
         .map_err(|error| error.to_string())?;
     api.get_all_creator_posts(&creator_id)
@@ -156,8 +161,8 @@ pub(crate) async fn fetch_fanbox_creator_posts_since(
 #[tauri::command]
 pub async fn fetch_pixiv_series_novels(
     series_id: String,
-    refresh_token: String,
 ) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
+    let refresh_token = crate::auth::saved::Vault::app().pixiv_token()?;
     fetch_pixiv_series_novels_since(series_id, refresh_token, None).await
 }
 
@@ -243,8 +248,8 @@ pub(crate) async fn fetch_pixiv_series_novels_since(
 #[tauri::command]
 pub async fn fetch_pixiv_user_novels(
     user_id: String,
-    refresh_token: String,
 ) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
+    let refresh_token = crate::auth::saved::Vault::app().pixiv_token()?;
     fetch_pixiv_user_novels_since(user_id, refresh_token, None).await
 }
 
@@ -334,18 +339,17 @@ pub(crate) async fn fetch_pixiv_user_novels_since(
 ///
 /// **取ってくるだけで、保存はしない。** ライブラリへ入れるのは別の手順。
 #[tauri::command]
-pub async fn fetch_pixiv_novel_by_url(
-    url: String,
-    refresh_token: String,
-    pixiv_cookie: Option<String>,
-    pixiv_user_agent: Option<String>,
-) -> Result<PixivNovelContent, String> {
+pub async fn fetch_pixiv_novel_by_url(url: String) -> Result<PixivNovelContent, String> {
     let novel_id =
         crate::downloader::pixiv::extract_novel_id(&url).ok_or("Invalid Pixiv Novel URL")?;
+    let credentials = crate::auth::saved::Vault::app().update_credentials();
+    let refresh_token = credentials
+        .pixiv_refresh_token
+        .ok_or_else(|| "設定でpixivに接続してください".to_string())?;
     crate::downloader::session::scope(async move {
         crate::downloader::session::set_pixiv_web_session(
-            pixiv_cookie.as_deref(),
-            pixiv_user_agent.as_deref(),
+            credentials.pixiv_cookie.as_deref(),
+            credentials.pixiv_user_agent.as_deref(),
         )
         .map_err(|error| error.to_string())?;
         crate::downloader::pixiv::get_novel_content(&novel_id, &refresh_token)

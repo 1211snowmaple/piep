@@ -2,6 +2,7 @@
 pub mod assist;
 mod auth;
 pub mod commands;
+mod credential_manager;
 /// 実データで規則を確かめる example から触れるように公開している。
 pub mod database;
 mod downloader;
@@ -242,6 +243,17 @@ pub fn run() -> tauri::Result<()> {
             // どれも失敗しうるのに、失敗したことがどこにも残らなかった。
             logging::install(&app_data);
 
+            // 前の版が設定のファイルに平文で置いた鍵を、資格情報マネージャーへ移す。
+            // 画面が設定のファイルを開く前（窓を作る前）でないと、古い中身を書き戻される。
+            match auth::saved::move_from_settings(
+                &auth::saved::Vault::app(),
+                &app_data.join("settings.json"),
+            ) {
+                Ok(true) => log::info!("取得用の接続を資格情報マネージャーへ移しました"),
+                Ok(false) => {}
+                Err(error) => log::error!("取得用の接続を移せません: {error}"),
+            }
+
             // Claim the whole library before SQLite, restore recovery, search
             // sidecars, or downloaded files can be opened by this process.
             let library_process_lock = LibraryProcessLock::acquire(&app_data)
@@ -352,10 +364,12 @@ pub fn run() -> tauri::Result<()> {
             commands::server::server_send_now,
             commands::server::server_send_stop,
             // 認証 (commands::auth)
-            commands::auth::verify_pixiv_token,
-            commands::auth::verify_fanbox_session,
+            commands::auth::connection_status,
             commands::auth::login_pixiv_webview,
+            commands::auth::connect_pixiv_token,
             commands::auth::login_fanbox_webview,
+            commands::auth::connect_fanbox_session,
+            commands::auth::disconnect_account,
             // ブラウザ (commands::browser)
             commands::browser::open_embedded_browser,
             commands::browser::set_embedded_browser_bounds,
