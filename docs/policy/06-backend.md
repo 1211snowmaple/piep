@@ -71,7 +71,7 @@ let _ = app.emit("update-job-progress", snapshot);
 許さない。アプリは起動時にライブラリを一つ開いて排他ロックを取るので、これが
 実際の使われ方と一致する。テストを並列に走らせると一つのプロセスに何十もの
 writer ができ、Windows では "Access is denied" でコミットが失敗する。だから
-`cargo test` は `--test-threads=1` で走らせる。
+Rust の試験は `cargo nextest` でテストごとに別のプロセスに分けて走らせる。
 
 既定の検索対象は現在版で、Tantivyにも現在版の題名・本文・現在版だけの添付を一作品
 一文書で入れる。`versions=all` が明示されたときだけ、保存済みJSONと版ごとのテキスト

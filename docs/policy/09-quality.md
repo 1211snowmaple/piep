@@ -6,23 +6,25 @@
 |---|---|---|
 | フロント静的検査 | tsc + oxlint | 型、hooks の依存、取りこぼした Promise |
 | フロント単体 | Vitest + Testing Library | 純粋な道具（`lib/`）、画面の状態遷移、部品の振る舞い |
-| Rust 単体・結合 | `cargo test` | スキーマ移行、検索、EPUB の組み立てと検証、解析 |
+| Rust 単体・結合 | `cargo nextest` | スキーマ移行、検索、EPUB の組み立てと検証、解析 |
 | 視覚回帰 | Playwright | 3つのウィンドウ幅 × ライト／ダーク × 3段階の DPI |
 | ネイティブ | `e2e/native-window-smoke.ps1` | 実際にビルドしたアプリが起動して窓が出るか |
 | 境界のドリフト | 自作の抽出器 | フロントと Rust の食い違い |
 
 ## 手元で通すもの
 
-コミット前に、CI と同じ内容を先に確認する。**一覧の正本は
-[CONTRIBUTING.md](https://github.com/1211snowmaple/piep/blob/main/CONTRIBUTING.md)
-に一つだけ置く。** 二箇所に書いていたころ、こちらには `cargo fmt --check` と
-境界のドリフト検査が入っておらず、方針書を信じた人だけが CI で落ちた。
+コミット前に、CI と同じ内容を先に確認する。**手順の正本は `tools/check.ps1` に
+一つだけ置き、CI もそれを呼ぶ。**
 
-画面を変えたときは、加えて実際に動かして確認する。視覚回帰は CI と同条件で:
-
-```bash
-npm run build && CI=1 npx playwright test
+```powershell
+pwsh tools/check.ps1                  # frontend・rust・docs
+pwsh tools/check.ps1 -Stage visual    # 画面を変えたとき
 ```
+
+手順を workflow・方針書・手順書の何箇所にも書いていたころ、こちらには
+`cargo fmt --check` と境界のドリフト検査が入っておらず、方針書を信じた人だけが
+CI で落ちた。段の使い分けは
+[CONTRIBUTING.md](https://github.com/1211snowmaple/piep/blob/main/CONTRIBUTING.md)。
 
 ### linter は、意味のある規則だけを門にする
 
@@ -41,15 +43,16 @@ npm run build && CI=1 npx playwright test
 `unicorn/no-useless-spread` は切ってある。反復しながら同じコレクションを変更する
 箇所（ライブ NodeList、Map のイテレータ）で複製は必須で、外すと壊れる。
 
-### `--test-threads=1` の理由
+### Rust の試験をプロセスごとに分ける理由
 
 Tantivy は一つのディレクトリに `IndexWriter` を一つしか許さない。アプリは
-起動時にライブラリを一つ開いて排他ロックを取る。索引を使うテストを並列に走らせると
-一つのプロセスに何十もの writer ができ、Windows では "Access is denied" で
-コミットが失敗する。
+起動時にライブラリを一つ開いて排他ロックを取る。索引を使うテストを同じプロセスで
+並列に走らせると、一つのプロセスに何十もの writer ができ、Windows では
+"Access is denied" でコミットが失敗する。
 
-**直列で走らせるのが実際の使われ方と一致する。** 20分のコンパイルに対して
-20秒の追加で済む。
+以前は `--test-threads=1` で直列にしていた。今は `cargo nextest` でテストごとに
+別のプロセスを立てる。**1プロセスに1つの棚という実際の使われ方のまま並べられる。**
+一時フォルダーは試験ごとに一意の名前にしてある。設定は `src-tauri/.config/nextest.toml`。
 
 ## 境界のドリフト検査
 
