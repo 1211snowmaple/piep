@@ -1,14 +1,16 @@
 # 署名済み ARM64 APK と更新の案内を作り、中身を検査する。
 #
-# 手元でも CI でも同じ手順で動かす。公開は -Publish を付けたときだけ行う。
+# 配布は piep の Release ワークフロー（.github/workflows/release.yml）がデスクトップ版と
+# 同じリリースに載せる。ここは組み立てと検査だけで、手元でも CI でも同じ手順で動く。
 # 署名鍵は src-tauri/gen/android/keystore.properties から読む。Git には入れない。
+# -Unsigned は鍵なしで組めることだけを確かめる（PR の CI 用）。配布には使えない。
 param(
     [Parameter(Mandatory)][string]$Version,
     [string]$OutputDir = 'release-output',
-    [switch]$Publish
+    [switch]$Unsigned
 )
 $ErrorActionPreference = 'Stop'
-$repository = '1211snowmaple/piep-android'
+$repository = '1211snowmaple/piep'
 $applicationId = 'io.github.u1211snowmaple.piep.android'
 
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw '版は X.Y.Z の形にしてください' }
@@ -20,9 +22,11 @@ $cargo = [regex]::Match((Get-Content -LiteralPath src-tauri/Cargo.toml -Raw), '(
 if ($package -ne $Version -or $tauri -ne $Version -or $cargo -ne $Version) {
     throw "版がそろっていません: package.json $package / tauri.conf.json $tauri / Cargo.toml $cargo"
 }
-if (-not (Test-Path -LiteralPath src-tauri/gen/android/keystore.properties)) {
+$hasKeystore = Test-Path -LiteralPath src-tauri/gen/android/keystore.properties
+if (-not $Unsigned -and -not $hasKeystore) {
     throw 'keystore.properties がありません。RELEASING.md を見てください'
 }
+if ($Unsigned -and $hasKeystore) { throw '-Unsigned では keystore.properties を置かないでください' }
 if ($env:PIEP_ANDROID_TEST_UPDATE_SOURCE) { throw '試験用の更新先が設定されたまま配布物を作ろうとしています' }
 
 $env:RUSTFLAGS = "--remap-path-prefix=$env:USERPROFILE=/build"
@@ -31,7 +35,11 @@ if ($LASTEXITCODE -ne 0) { throw 'npm ci に失敗しました' }
 node node_modules/@tauri-apps/cli/tauri.js android build --apk --target aarch64 --ci
 if ($LASTEXITCODE -ne 0) { throw 'APK を組めませんでした' }
 
-$built = 'src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk'
+$built = if ($Unsigned) {
+    'src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk'
+} else {
+    'src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk'
+}
 if (-not (Test-Path -LiteralPath $built)) { throw "$built がありません" }
 
 $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA 'Android/Sdk' }
@@ -46,9 +54,12 @@ if ($match.Groups[1].Value -ne $applicationId) { throw "アプリ ID が違い�
 if ($match.Groups[3].Value -ne $Version) { throw "APK の版が違います: $($match.Groups[3].Value)" }
 $versionCode = [long]$match.Groups[2].Value
 
-& $apksigner verify $built
-if ($LASTEXITCODE -ne 0) { throw 'APK の署名を検証できません' }
-$certificate = & $apksigner verify --print-certs $built | Select-String 'SHA-256' | Select-Object -First 1
+$certificate = '（署名なし）'
+if (-not $Unsigned) {
+    & $apksigner verify $built
+    if ($LASTEXITCODE -ne 0) { throw 'APK の署名を検証できません' }
+    $certificate = & $apksigner verify --print-certs $built | Select-String 'SHA-256' | Select-Object -First 1
+}
 
 # ビルド端末のユーザー名やホームディレクトリを配布物に埋め込まない。
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -88,7 +99,3 @@ Write-Output "署名: $certificate"
 Write-Output "APK: $apk"
 Write-Output "案内: $manifest"
 
-if ($Publish) {
-    gh release create "v$Version" $apk $manifest --repo $repository --title "piep Android v$Version" --notes "ARM64 向けの APK です。すでに入れている場合は、アプリの「設定 → アプリの更新」から更新できます。"
-    if ($LASTEXITCODE -ne 0) { throw '公開できませんでした' }
-}

@@ -31,8 +31,8 @@ import {
 import "@/styles/server.css";
 import { SectionIntro } from "./SectionIntro";
 
-const ANDROID_APP_URL = "https://github.com/1211snowmaple/piep-android/releases/latest";
-const SERVER_DOWNLOAD_URL = "https://github.com/1211snowmaple/piep/releases/latest";
+// 単独サーバーも Android 版も、デスクトップ版と同じリリースに載る。
+const RELEASES_URL = "https://github.com/1211snowmaple/piep/releases/latest";
 const SERVER_GUIDE_URL = "https://1211snowmaple.github.io/piep/guide/05-server";
 const STATUS_KEY = ["server-status"];
 const REMOTE_STATUS_KEY = "server-remote-status";
@@ -453,7 +453,7 @@ function ConnectRemoteCard({ pending, active, perform }: CardProps) {
             <Text size="sm" c="dimmed" mt={2}>いつも動いている PC に piep-server を入れます。</Text>
             <Group gap="md" mt={6}>
               <ExternalLink url={SERVER_GUIDE_URL}>導入の手順</ExternalLink>
-              <ExternalLink url={SERVER_DOWNLOAD_URL}>ダウンロード</ExternalLink>
+              <ExternalLink url={RELEASES_URL}>ダウンロード</ExternalLink>
             </Group>
           </div>
         </div>
@@ -529,7 +529,7 @@ function AddPhoneSteps({ devices, ready, onClose }: { devices: ServerDevice[]; r
       <Stack gap="md">
         <Text fw={600} size="sm">手順 1 / 2　アプリを入れる</Text>
         <Text size="sm">携帯のカメラでこの QR を読むと、Android 版の配布ページが開きます。APK をダウンロードして入れてください。</Text>
-        <QrImage value={ANDROID_APP_URL} label="Android 版の配布ページ" />
+        <QrImage value={RELEASES_URL} label="Android 版の配布ページ" />
         <Text size="xs" c="dimmed">すでに入っている場合は、そのまま次へ進んでください。</Text>
         <Group justify="flex-end">
           <Button onClick={() => { setStep("pairing"); if (!pairing) void issue(); }}>次へ</Button>

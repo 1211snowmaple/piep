@@ -13,12 +13,21 @@ on:
 # ここでは試験を走らせない。同じコミットの main 上の Quality 成功を
 # 下のゲートでQualityとDocsのcontract成功を確認し、同じ試験を二重に走らせない。
 #
+# 一つのタグに、デスクトップ版・単独サーバー・Android 版をまとめて載せる。
+#
+#   desktop        インストーラーと単独サーバーを組んで署名する
+#   android-plan   APK を組み直すか、前の APK を載せ直すかを決める（tools/android-release-plan.ps1）
+#   android-build  組み直すときだけ、署名した APK を組む（android-apk.yml）
+#   publish        品質の確認を待ってから下書きを作り、全部を載せる
+#
+# 組み立ては確認を待たずに並べて始め、配布に関わる操作は publish だけがする。
+# 署名の鍵は release の Environment にあり、v* のタグからしか読めない。
 # 配布は下書きとして作る。公開は別の操作で行う。
 jobs:
-  release:
+  desktop:
+    environment: release
     permissions:
-      contents: write
-      actions: read
+      contents: read
     # 組み立ては利用者の PC（self-hosted、ラベル snow）で、release の途中経過を使い回す。
     # CI_RUNNER が self でなければ GitHub のランナーで素から組む。
     runs-on: ${{ vars.CI_RUNNER == 'self' && fromJSON('["self-hosted","snow"]') || 'windows-latest' }}
@@ -110,6 +119,73 @@ jobs:
             signature = (Get-Content -LiteralPath $signature -Raw).Trim()
           } | ConvertTo-Json | Set-Content -LiteralPath $manifest -Encoding utf8NoBOM
 
+      # 載せる物を一つの場所に平らに集めて publish へ渡す。
+      - name: Collect the desktop assets
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}'.Substring(1)
+          $out = Join-Path $env:RUNNER_TEMP 'desktop-assets'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $setup = "src-tauri/target/release/bundle/nsis/piep_${version}_x64-setup.exe"
+          $server = Join-Path $env:RUNNER_TEMP 'server'
+          $zip = Join-Path $server "piep-server-$version-windows-x64.zip"
+          foreach ($path in @($setup, "$setup.sig", $zip, "$zip.sig", (Join-Path $server 'latest-server.json'))) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "Missing desktop output: $path" }
+            Copy-Item -LiteralPath $path -Destination $out
+          }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop
+          if-no-files-found: error
+          path: ${{ runner.temp }}/desktop-assets/
+
+  android-plan:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      version: ${{ steps.plan.outputs.version }}
+      carry: ${{ steps.plan.outputs.carry }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # 前に APK を出した版のタグとの差分を取る。
+          fetch-depth: 0
+      - id: plan
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./tools/android-release-plan.ps1 -Tag '${{ github.ref_name }}' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  android-build:
+    needs: android-plan
+    if: needs.android-plan.outputs.build == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/android-apk.yml
+    with:
+      version: ${{ needs.android-plan.outputs.version }}
+      sign: true
+    secrets: inherit
+
+  publish:
+    needs: [desktop, android-plan, android-build]
+    # 載せ直しの回は android-build が飛ばされる。それ以外の失敗では載せない。
+    if: >-
+      always() &&
+      needs.desktop.result == 'success' &&
+      needs.android-plan.result == 'success' &&
+      (needs.android-build.result == 'success' || (needs.android-build.result == 'skipped' && needs.android-plan.outputs.build == 'false'))
+    permissions:
+      contents: write
+      actions: read
+    # ここは関門で最長1時間待つだけなので GitHub のランナーで動かす。実行役で待つと、
+    # 関門が待っている当の main の Quality の席を塞ぐ。
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
       - name: Require Quality and contract success on main for the tagged commit
         shell: pwsh
         env:
@@ -141,6 +217,30 @@ jobs:
             Start-Sleep -Seconds 30
           }
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/assets
+
+      - name: Carry the unchanged Android release forward
+        if: needs.android-plan.outputs.build == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 携帯に関わるものが変わっていない。前の版の APK と案内をそのまま載せ直すので、
+          # 案内の版は変わらず、携帯に更新の通知は出ない。配布ページにはいつも APK がある。
+          $carry = '${{ needs.android-plan.outputs.carry }}'
+          $dir = Join-Path $env:RUNNER_TEMP 'assets/android-apk'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          gh release download "v$carry" --pattern latest-android.json --pattern "piep-android-v$carry-arm64.apk" --dir $dir
+          if ($LASTEXITCODE -ne 0) { throw "v$carry の APK を取ってこられませんでした" }
+          $manifest = Get-Content -LiteralPath (Join-Path $dir 'latest-android.json') -Raw | ConvertFrom-Json
+          $apk = Join-Path $dir "piep-android-v$carry-arm64.apk"
+          if ($manifest.version -ne $carry) { throw "案内の版が $($manifest.version) です" }
+          if ((Get-FileHash -LiteralPath $apk -Algorithm SHA256).Hash.ToLowerInvariant() -ne $manifest.sha256) {
+            throw "v$carry の APK が案内の SHA-256 と合いません"
+          }
+
       # 下書きを作って載せるのは、ここから先だけ。
       #
       # 以前は tauri-action が組み立てと下書きの作成を一度にしていた。組み立てを
@@ -160,8 +260,10 @@ jobs:
         run: |
           $tag = '${{ github.ref_name }}'
           $version = $tag.Substring(1)
-          $notes = 'Windows 向けインストーラーは下のアセットからダウンロードできます。'
-          $bundle = 'src-tauri/target/release/bundle/nsis'
+          $notes = 'Windows 向けインストーラー・単独サーバー・Android 版（APK）は下のアセットからダウンロードできます。'
+          $desktop = Join-Path $env:RUNNER_TEMP 'assets/desktop'
+          $android = Join-Path $env:RUNNER_TEMP 'assets/android-apk'
+          $bundle = $desktop
           $setupName = "piep_${version}_x64-setup.exe"
           $setup = Join-Path $bundle $setupName
           $setupSignature = "$setup.sig"
@@ -183,9 +285,17 @@ jobs:
             }
           } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $updater -Encoding utf8NoBOM
 
-          $server = Join-Path $env:RUNNER_TEMP 'server'
-          $zip = Join-Path $server "piep-server-$version-windows-x64.zip"
-          $assets = @($setup, $setupSignature, $updater, $zip, "$zip.sig", (Join-Path $server 'latest-server.json'))
+          $zip = Join-Path $desktop "piep-server-$version-windows-x64.zip"
+          # 携帯の案内が指す版（組み直した回はこの版、載せ直しの回は前の版）の APK を載せる。
+          $androidManifest = Join-Path $android 'latest-android.json'
+          if (-not (Test-Path -LiteralPath $androidManifest)) { throw 'Missing latest-android.json' }
+          $androidVersion = (Get-Content -LiteralPath $androidManifest -Raw | ConvertFrom-Json).version
+          $apk = Join-Path $android "piep-android-v$androidVersion-arm64.apk"
+          $assets = @(
+            $setup, $setupSignature, $updater,
+            $zip, "$zip.sig", (Join-Path $desktop 'latest-server.json'),
+            $apk, $androidManifest
+          )
           foreach ($path in $assets) {
             if (-not (Test-Path -LiteralPath $path)) { throw "Missing release asset: $path" }
           }

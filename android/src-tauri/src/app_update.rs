@@ -10,8 +10,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const MANIFEST_URL: &str =
-    "https://github.com/1211snowmaple/piep-android/releases/latest/download/latest-android.json";
-const DOWNLOAD_PREFIX: &str = "https://github.com/1211snowmaple/piep-android/releases/download/";
+    "https://github.com/1211snowmaple/piep/releases/latest/download/latest-android.json";
+const DOWNLOAD_PREFIX: &str = "https://github.com/1211snowmaple/piep/releases/download/";
 /// `manifest_url|download_prefix`。試験の組み立てだけで効く。
 const TEST_SOURCE: Option<&str> = option_env!("PIEP_ANDROID_TEST_UPDATE_SOURCE");
 const MAX_APK_BYTES: u64 = 512 * 1024 * 1024;

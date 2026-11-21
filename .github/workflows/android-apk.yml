@@ -1,0 +1,102 @@
+name: "Android APK"
+
+# 携帯の APK を android/tools/release.ps1 で組んで検査し、成果物として残す。
+#
+# 呼ぶのは二か所。
+#   - release.yml：署名して配布物を作る（sign: true）。鍵は release の Environment にあり、
+#     v* のタグからしか読めない。
+#   - android.yml：PR と main で、鍵なしで組めることだけを確かめる（sign: false）。
+#
+# 組み立ては利用者の PC（self-hosted、ラベル snow）で動く。SDK・NDK・JDK 17 は利用者の PC に
+# 入っている物を環境変数（ANDROID_HOME・NDK_HOME・JAVA_HOME）ごと使い、ここからは入れない。
+# GitHub のランナーへ回るとき（CI_RUNNER が self でない、よそのフォークからの PR）だけ入れる。
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "組む版（X.Y.Z）。android/ の三つの版のファイルと同じであること。空なら tauri.conf.json の版"
+        required: false
+        default: ""
+        type: string
+      sign:
+        required: true
+        type: boolean
+
+jobs:
+  apk:
+    runs-on: ${{ (vars.CI_RUNNER == 'self' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","snow"]') || 'windows-latest' }}
+    # 空の名前は Environment を使わない意味になる。鍵なしの回には鍵を渡さない。
+    environment: ${{ inputs.sign && 'release' || '' }}
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: android
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          check-latest: true
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
+          cache-dependency-path: android/package-lock.json
+      # 手元と同じ NDK と SDK の版にそろえる。ランナーに最初から入っている版は
+      # イメージの更新で動くので当てにしない。
+      # Gradle は手元と同じ JDK 17 で動かす。ランナーに入っている物を使う。
+      - name: Install the Android SDK packages
+        if: runner.environment == 'github-hosted'
+        run: |
+          "JAVA_HOME=$env:JAVA_HOME_17_X64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $env:JAVA_HOME = $env:JAVA_HOME_17_X64
+          $sdkmanager = Join-Path $env:ANDROID_HOME 'cmdline-tools/latest/bin/sdkmanager.bat'
+          1..30 | ForEach-Object { 'y' } | & $sdkmanager --licenses | Out-Null
+          & $sdkmanager --install 'ndk;30.0.16248370' 'platforms;android-37.0' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Android SDK の部品を入れられませんでした' }
+          "NDK_HOME=$(Join-Path $env:ANDROID_HOME 'ndk/30.0.16248370')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      # android/rust-toolchain.toml が版と Android の target を決める。
+      - name: Install Rust from android/rust-toolchain.toml
+        run: rustup toolchain install
+      - if: runner.environment == 'github-hosted'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: android/src-tauri
+          shared-key: android-apk
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Write the signing settings
+        if: inputs.sign
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          foreach ($name in 'KEYSTORE_BASE64', 'KEYSTORE_PASSWORD', 'KEY_ALIAS', 'KEY_PASSWORD') {
+            if (-not [Environment]::GetEnvironmentVariable($name)) { throw "$name が release の Environment にありません" }
+          }
+          $store = Join-Path $env:RUNNER_TEMP 'piep-android-release.jks'
+          [IO.File]::WriteAllBytes($store, [Convert]::FromBase64String($env:KEYSTORE_BASE64))
+          @(
+            "storeFile=$($store -replace '\\', '/')"
+            "storePassword=$env:KEYSTORE_PASSWORD"
+            "keyAlias=$env:KEY_ALIAS"
+            "keyPassword=$env:KEY_PASSWORD"
+          ) | Set-Content -LiteralPath src-tauri/gen/android/keystore.properties -Encoding utf8NoBOM
+      - name: Build and check the APK
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $version = if ($env:VERSION) { $env:VERSION } else { (Get-Content -LiteralPath src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version }
+          if ('${{ inputs.sign }}' -eq 'true') {
+            ./tools/release.ps1 -Version $version
+          } else {
+            ./tools/release.ps1 -Version $version -Unsigned
+          }
+      - name: Remove the signing settings
+        if: always() && inputs.sign
+        run: |
+          Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath src-tauri/gen/android/keystore.properties
+          Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath (Join-Path $env:RUNNER_TEMP 'piep-android-release.jks')
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: android-apk
+          path: android/release-output/
+          if-no-files-found: error
