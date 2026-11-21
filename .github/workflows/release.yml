@@ -19,7 +19,9 @@ jobs:
     permissions:
       contents: write
       actions: read
-    runs-on: windows-latest
+    # 組み立ては利用者の PC（self-hosted、ラベル snow）で、release の途中経過を使い回す。
+    # CI_RUNNER が self でなければ GitHub のランナーで素から組む。
+    runs-on: ${{ vars.CI_RUNNER == 'self' && fromJSON('["self-hosted","snow"]') || 'windows-latest' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -58,24 +60,11 @@ jobs:
         with:
           node-version: 24
           check-latest: true
-          cache: 'npm'
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
 
-      # clippy と rustfmt はここでは使わない。走らせるのは quality.yml。
-      - name: Install Rust 1.99.1
-        run: |
-          rustup toolchain install 1.99.1 --profile minimal
-          rustup default 1.99.1
-
-      # 依存木に ort・DirectML・tantivy・lindera・画像コーデックが入るので、
-      # 素で組むと13分かかる。タグの実行が保存したキャッシュは同じタグからしか
-      # 読めず、次のリリースでは一度も当たらなかった（毎回 "No cache found"）。
-      # 読むのは release-cache.yml が main で保存した release の成果物だけで、
-      # ここからは保存しない。
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: src-tauri
-          shared-key: release
-          save-if: false
+      # 版は rust-toolchain.toml が決める。既定の版は変えない（self-hosted では利用者の rustup）。
+      - name: Install Rust
+        run: rustup toolchain install
 
       - name: Install frontend dependencies
         run: npm ci
