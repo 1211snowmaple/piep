@@ -1,4 +1,4 @@
-//! 候補の正本を選ぶ。切り替え後の判断と原入力は棚へ、実行中の項目だけは既存のキューへ渡す。
+//! 更新確認で見つけた候補の判断と原入力。棚の `discoveries` に持つ。
 
 use crate::database::{
     UpdateCandidateInput, UpdateCandidateRow, UpdateJobItemInput, UpdateWorkMetadata,
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 pub(crate) struct Candidates<'a> {
     state: &'a AppState,
-    native: Option<Arc<Library>>,
+    library: Option<Arc<Library>>,
 }
 
 #[cfg(test)]
@@ -19,7 +19,7 @@ impl AppState {
     pub(crate) fn candidates(&self) -> Candidates<'_> {
         Candidates {
             state: self,
-            native: self.library_v2.switched(),
+            library: self.library_v2.library().ok(),
         }
     }
 }
@@ -29,55 +29,43 @@ fn date(value: i64) -> Result<String, String> {
         .ok_or("候補の日時が不正です".into())
 }
 impl Candidates<'_> {
-    pub(crate) fn generation(&self, source: &str, key: &str) -> Result<Option<i64>, String> {
-        self.native
+    fn library(&self) -> Result<&Arc<Library>, String> {
+        self.library
             .as_ref()
-            .map(|library| {
-                library
-                    .discovery(source, key)
-                    .map(|v| v.map(|v| v.generation))
-                    .map_err(|e| e.to_string())
-            })
-            .transpose()
-            .map(Option::flatten)
+            .ok_or_else(|| "棚は開いていません".to_string())
+    }
+    pub(crate) fn generation(&self, source: &str, key: &str) -> Result<Option<i64>, String> {
+        self.library()?
+            .discovery(source, key)
+            .map(|v| v.map(|v| v.generation))
+            .map_err(|e| e.to_string())
     }
     pub(crate) fn recheck_available(
         &self,
         input: &UpdateCandidateInput,
         expected: Option<i64>,
     ) -> Result<(), String> {
-        if let Some(library) = &self.native {
-            let expected = expected
-                .ok_or("再確認した候補の判断の世代がありません。再確認をやり直してください")?;
-            return library
-                .recheck_discovery(
-                    LibraryId::now_v7(),
-                    DiscoveryInput {
-                        provider: &input.source,
-                        key: &input.source_id,
-                        kind: &input.kind,
-                        title: &input.title,
-                        payload: &input.payload_json,
-                        target_type: input.target_type.as_deref(),
-                    },
-                    expected,
-                )
-                .map_err(|e| e.to_string());
-        }
-        self.state.db.upsert_update_candidate(input)?;
-        self.state
-            .db
-            .set_update_candidate_status(&input.source, &input.source_id, "pending")
+        let library = self.library()?;
+        let expected =
+            expected.ok_or("再確認した候補の判断の世代がありません。再確認をやり直してください")?;
+        library
+            .recheck_discovery(
+                LibraryId::now_v7(),
+                DiscoveryInput {
+                    provider: &input.source,
+                    key: &input.source_id,
+                    kind: &input.kind,
+                    title: &input.title,
+                    payload: &input.payload_json,
+                    target_type: input.target_type.as_deref(),
+                },
+                expected,
+            )
+            .map_err(|e| e.to_string())
     }
     pub(crate) fn saved(&self, source: &str, key: &str) -> Result<bool, String> {
-        if let Some(library) = &self.native {
-            return super::update_jobs::shelf::saved_card(library, source, key)
-                .map(|v| v.is_some());
-        }
-        self.state
-            .db
-            .get_download_by_source(source, key)
-            .map(|v| v.is_some())
+        let library = self.library()?;
+        super::update_jobs::shelf::saved_card(library, source, key).map(|v| v.is_some())
     }
     fn rows(
         &self,
@@ -85,9 +73,7 @@ impl Candidates<'_> {
         after: Option<(&str, &str)>,
         limit: usize,
     ) -> Result<Vec<Discovery>, String> {
-        self.native
-            .as_ref()
-            .ok_or("新しい棚がありません")?
+        self.library()?
             .discoveries(status, after, limit)
             .map_err(|e| e.to_string())
     }
@@ -111,7 +97,7 @@ impl Candidates<'_> {
         Ok(rows)
     }
     fn convert(&self, entry: Discovery, display: bool) -> Result<UpdateCandidateRow, String> {
-        let library = self.native.as_ref().ok_or("新しい棚がありません")?;
+        let library = self.library()?;
         let payload = if display {
             entry
                 .summary
@@ -175,74 +161,55 @@ impl Candidates<'_> {
         self.record(input, true)
     }
     fn record(&self, input: &UpdateCandidateInput, held: bool) -> Result<(), String> {
-        if let Some(library) = &self.native {
-            return library
-                .record_discovery(
-                    LibraryId::now_v7(),
-                    DiscoveryInput {
-                        provider: &input.source,
-                        key: &input.source_id,
-                        kind: &input.kind,
-                        title: &input.title,
-                        payload: &input.payload_json,
-                        target_type: input.target_type.as_deref(),
-                    },
-                    held,
-                )
-                .map_err(|e| e.to_string());
-        }
-        self.state.db.upsert_update_candidate(input)?;
-        if held
-            && self
-                .state
-                .db
-                .update_candidate_status(&input.source, &input.source_id)?
-                .as_deref()
-                != Some("dismissed")
-        {
-            self.state
-                .db
-                .set_update_candidate_status(&input.source, &input.source_id, "held")?;
-        }
-        Ok(())
+        let library = self.library()?;
+        library
+            .record_discovery(
+                LibraryId::now_v7(),
+                DiscoveryInput {
+                    provider: &input.source,
+                    key: &input.source_id,
+                    kind: &input.kind,
+                    title: &input.title,
+                    payload: &input.payload_json,
+                    target_type: input.target_type.as_deref(),
+                },
+                held,
+            )
+            .map_err(|e| e.to_string())
     }
     pub(crate) fn update_candidate_hold(
         &self,
         source: &str,
         key: &str,
     ) -> Result<Option<(String, Option<String>)>, String> {
-        if let Some(library) = &self.native {
-            let Some(row) = library.discovery(source, key).map_err(|e| e.to_string())? else {
-                return Ok(None);
-            };
-            let value: serde_json::Value = serde_json::from_str(
-                &library
-                    .discovery_payload(row.id)
-                    .map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
-            return Ok(Some((
-                row.decision,
-                value
-                    .get("holdKind")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
-            )));
-        }
-        self.state.db.update_candidate_hold(source, key)
+        let library = self.library()?;
+        let Some(row) = library.discovery(source, key).map_err(|e| e.to_string())? else {
+            return Ok(None);
+        };
+        let value: serde_json::Value = serde_json::from_str(
+            &library
+                .discovery_payload(row.id)
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(Some((
+            row.decision,
+            value
+                .get("holdKind")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        )))
     }
     pub(crate) fn update_candidate_status(
         &self,
         source: &str,
         key: &str,
     ) -> Result<Option<String>, String> {
-        if let Some(library) = &self.native {
-            return library
-                .discovery(source, key)
-                .map(|v| v.map(|v| v.decision))
-                .map_err(|e| e.to_string());
-        }
-        self.state.db.update_candidate_status(source, key)
+        let library = self.library()?;
+        library
+            .discovery(source, key)
+            .map(|v| v.map(|v| v.decision))
+            .map_err(|e| e.to_string())
     }
     pub(crate) fn set_update_candidate_status(
         &self,
@@ -250,63 +217,51 @@ impl Candidates<'_> {
         key: &str,
         status: &str,
     ) -> Result<(), String> {
-        if let Some(library) = &self.native {
-            if status == "held" {
-                let entry = library
-                    .discovery(source, key)
-                    .map_err(|e| e.to_string())?
-                    .ok_or("候補がありません")?;
-                return self.hold(&UpdateCandidateInput {
-                    source: source.into(),
-                    source_id: key.into(),
-                    kind: entry.kind,
-                    title: entry.title,
-                    payload_json: library
-                        .discovery_payload(entry.id)
-                        .map_err(|e| e.to_string())?,
-                    target_type: entry.target_type,
-                });
-            }
-            if !matches!(status, "pending" | "dismissed") {
-                return Err("候補の判断が不正です".into());
-            }
-            return library
-                .decide_discovery(
-                    LibraryId::now_v7(),
-                    source,
-                    key,
-                    None,
-                    status == "dismissed",
-                )
-                .map_err(|e| e.to_string());
+        let library = self.library()?;
+        if status == "held" {
+            let entry = library
+                .discovery(source, key)
+                .map_err(|e| e.to_string())?
+                .ok_or("候補がありません")?;
+            return self.hold(&UpdateCandidateInput {
+                source: source.into(),
+                source_id: key.into(),
+                kind: entry.kind,
+                title: entry.title,
+                payload_json: library
+                    .discovery_payload(entry.id)
+                    .map_err(|e| e.to_string())?,
+                target_type: entry.target_type,
+            });
         }
-        self.state
-            .db
-            .set_update_candidate_status(source, key, status)
+        if !matches!(status, "pending" | "dismissed") {
+            return Err("候補の判断が不正です".into());
+        }
+        library
+            .decide_discovery(
+                LibraryId::now_v7(),
+                source,
+                key,
+                None,
+                status == "dismissed",
+            )
+            .map_err(|e| e.to_string())
     }
     pub(crate) fn clear_update_candidate(&self, source: &str, key: &str) -> Result<(), String> {
-        if let Some(library) = &self.native {
-            return library
-                .clear_discovery(LibraryId::now_v7(), source, key, false)
-                .map_err(|e| e.to_string());
-        }
-        self.state.db.clear_update_candidate(source, key)
+        let library = self.library()?;
+        library
+            .clear_discovery(LibraryId::now_v7(), source, key, false)
+            .map_err(|e| e.to_string())
     }
     pub(crate) fn list_pending_update_candidates_after(
         &self,
         cursor: Option<(&str, &str)>,
         limit: i64,
     ) -> Result<Vec<UpdateCandidateRow>, String> {
-        if self.native.is_some() {
-            return self
-                .rows(Some("pending"), cursor, limit.clamp(1, 1000) as usize)?
-                .into_iter()
-                .map(|v| self.convert(v, false))
-                .collect();
-        }
-        self.state
-            .db
-            .list_pending_update_candidates_after(cursor, limit)
+        self.rows(Some("pending"), cursor, limit.clamp(1, 1000) as usize)?
+            .into_iter()
+            .map(|v| self.convert(v, false))
+            .collect()
     }
     pub(crate) fn list_update_candidates_by_status(
         &self,
@@ -327,75 +282,50 @@ impl Candidates<'_> {
         limit: i64,
         display: bool,
     ) -> Result<Vec<UpdateCandidateRow>, String> {
-        if let Some(library) = &self.native {
-            library
-                .prepare_discovery_summaries()
-                .map_err(|e| e.to_string())?;
-            let mut rows = self.all(Some(status))?;
-            rows.sort_by_key(|row| std::cmp::Reverse((row.updated_at, row.id)));
-            if limit >= 0 {
-                rows.truncate(limit as usize);
-            }
-            return rows.into_iter().map(|v| self.convert(v, display)).collect();
+        let library = self.library()?;
+        library
+            .prepare_discovery_summaries()
+            .map_err(|e| e.to_string())?;
+        let mut rows = self.all(Some(status))?;
+        rows.sort_by_key(|row| std::cmp::Reverse((row.updated_at, row.id)));
+        if limit >= 0 {
+            rows.truncate(limit as usize);
         }
-        if display {
-            self.state
-                .db
-                .list_deferred_update_candidate_summaries(limit)
-        } else {
-            self.state
-                .db
-                .list_update_candidates_by_status(status, limit)
-        }
+        rows.into_iter().map(|v| self.convert(v, display)).collect()
     }
     pub(crate) fn held_update_candidate_keys(
         &self,
     ) -> Result<std::collections::HashSet<(String, String)>, String> {
-        if self.native.is_some() {
-            return Ok(self
-                .all(Some("held"))?
-                .into_iter()
-                .map(|v| (v.provider, v.key))
-                .collect());
-        }
-        self.state.db.held_update_candidate_keys()
+        Ok(self
+            .all(Some("held"))?
+            .into_iter()
+            .map(|v| (v.provider, v.key))
+            .collect())
     }
     pub(crate) fn count_saved_deferred_update_candidates(&self) -> Result<i64, String> {
-        if self.native.is_some() {
-            return self.all(Some("held"))?.into_iter().try_fold(0, |count, v| {
-                Ok(count + i64::from(self.saved(&v.provider, &v.key)?))
-            });
-        }
-        self.state.db.count_saved_deferred_update_candidates()
+        self.all(Some("held"))?.into_iter().try_fold(0, |count, v| {
+            Ok(count + i64::from(self.saved(&v.provider, &v.key)?))
+        })
     }
     pub(crate) fn count_dismissed_update_candidates(&self) -> Result<i64, String> {
-        if self.native.is_some() {
-            return Ok(self.all(Some("dismissed"))?.len() as i64);
-        }
-        self.state.db.count_dismissed_update_candidates()
+        Ok(self.all(Some("dismissed"))?.len() as i64)
     }
     pub(crate) fn restore_dismissed_update_candidates(&self) -> Result<usize, String> {
-        if self.native.is_some() {
-            let rows = self.all(Some("dismissed"))?;
-            let count = rows.len();
-            for row in rows {
-                self.set_update_candidate_status(&row.provider, &row.key, "pending")?;
-            }
-            return Ok(count);
+        let rows = self.all(Some("dismissed"))?;
+        let count = rows.len();
+        for row in rows {
+            self.set_update_candidate_status(&row.provider, &row.key, "pending")?;
         }
-        self.state.db.restore_dismissed_update_candidates()
+        Ok(count)
     }
     pub(crate) fn has_incomplete_save_candidate(
         &self,
         source: &str,
         key: &str,
     ) -> Result<bool, String> {
-        if self.native.is_some() {
-            return Ok(self.update_candidate_hold(source, key)?
-                == Some(("held".into(), Some("incomplete".into())))
-                && self.saved(source, key)?);
-        }
-        self.state.db.has_incomplete_save_candidate(source, key)
+        Ok(self.update_candidate_hold(source, key)?
+            == Some(("held".into(), Some("incomplete".into())))
+            && self.saved(source, key)?)
     }
     pub(crate) fn candidate_acquisition_blocked(
         &self,
@@ -403,20 +333,12 @@ impl Candidates<'_> {
         key: &str,
         repair: bool,
     ) -> Result<bool, String> {
-        if self.native.is_some() {
-            return Ok(matches!(
-                self.update_candidate_status(source, key)?.as_deref(),
-                Some("held" | "dismissed")
-            ) && !(repair && self.has_incomplete_save_candidate(source, key)?));
-        }
-        self.state
-            .db
-            .candidate_acquisition_blocked(source, key, repair)
+        Ok(matches!(
+            self.update_candidate_status(source, key)?.as_deref(),
+            Some("held" | "dismissed")
+        ) && !(repair && self.has_incomplete_save_candidate(source, key)?))
     }
     pub(crate) fn remember_job_candidate(&self, source: &str, key: &str) -> Result<(), String> {
-        if self.native.is_none() {
-            return self.state.db.remember_job_candidate(source, key);
-        }
         if self.update_candidate_status(source, key)?.is_some() {
             return Ok(());
         }
@@ -443,12 +365,7 @@ impl Candidates<'_> {
         source: &str,
         keys: &[String],
     ) -> Result<(), String> {
-        let Some(library) = &self.native else {
-            return self
-                .state
-                .db
-                .clear_resolved_unavailable_candidates(source, keys);
-        };
+        let library = self.library()?;
         for key in keys {
             library
                 .clear_discovery(LibraryId::now_v7(), source, key, true)
@@ -465,12 +382,6 @@ impl Candidates<'_> {
         original: &serde_json::Value,
         reason: &str,
     ) -> Result<bool, String> {
-        if self.native.is_none() {
-            return self
-                .state
-                .db
-                .insert_update_job_unavailable_item(job, item, original, reason);
-        }
         let source = item.source.as_deref().ok_or("取得元がありません")?;
         let key = item.source_id.as_deref().ok_or("作品 ID がありません")?;
         let known = self

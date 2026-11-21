@@ -13,30 +13,19 @@
 //!
 //! → [アーキテクチャ](https://1211snowmaple.github.io/piep/policy/03-architecture)
 
-use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
-    AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionAdditionResult,
-    CollectionNameCandidate, CollectionSuggestion, CollectionSuggestionRequest,
-    CollectionSweepResult, DashboardSummary, DbStats, DownloadEntry, EditorDocument, EntityFacet,
-    EntityFacetScope, EntityProfileRepairStatus, EntitySeriesPage, EntityVersion, FacetCount,
-    FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
-    PersonEntry, ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit,
-    SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams, SearchSuggestResult,
-    SearchV2Params, SearchV2Result, SeriesEntry, UpdateCredentials, UpdateTarget,
-    UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
-    WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision, WorkKey,
+    AcceptCollectionSuggestionInput, CollectionAdditionResult, CollectionNameCandidate,
+    CollectionSuggestion, CollectionSuggestionRequest, CollectionSweepResult,
+    EntityProfileRepairStatus, SearchIndexStatus, UpdateCredentials, UpdateTarget,
+    UpdateTargetInput, WorkKey,
 };
 use crate::AppState;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::Cursor;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Instant;
 use tauri::{Emitter, Manager};
-use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, Duration};
 
@@ -52,8 +41,6 @@ static ENTITY_PROFILE_REPAIR_CANCEL: AtomicBool = AtomicBool::new(false);
 static SEARCH_REBUILD_JOBS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 static SEARCH_REBUILD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-const MAX_COLLECTION_COVER_BYTES: u64 = 20 * 1024 * 1024;
-const MAX_COLLECTION_COVER_PIXELS: u64 = 100_000_000;
 
 async fn run_db_blocking<T, F>(app: tauri::AppHandle, f: F) -> Result<T, String>
 where
@@ -148,7 +135,6 @@ impl Drop for EntityProfileRepairRunGuard {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchRebuildJobOptions {
-    batch_size: Option<i64>,
     include_semantic: Option<bool>,
 }
 
@@ -179,29 +165,6 @@ pub struct SearchRebuildProgress {
     error: Option<String>,
 }
 
-/// 棚を検索する。絞り込み・並べ替え・頁送りをまとめて受ける。
-///
-/// 一覧の唯一の入口である。**画面側で絞り直さないこと** - 件数と頁が合わなくなる。
-#[tauri::command]
-pub async fn search_downloads_v2(
-    app: tauri::AppHandle,
-    params: SearchV2Params,
-) -> Result<SearchV2Result, String> {
-    run_db_blocking(app, move |state| state.db.search_downloads_v2(&params)).await
-}
-
-/// 入力中の語から、検索候補を返す。
-///
-/// 打つたびに呼ばれる前提で軽くしてある。**確定した検索には使わない**（結果を
-/// 返すのは `search_downloads_v2`）。
-#[tauri::command]
-pub async fn search_suggest(
-    app: tauri::AppHandle,
-    params: SearchSuggestParams,
-) -> Result<SearchSuggestResult, String> {
-    run_db_blocking(app, move |state| state.db.search_suggest(&params)).await
-}
-
 /// 検索索引を作り直す。返るのはジョブ番号。
 ///
 /// **すぐには終わらない。** 背景で走るので、返ってきた番号で進み具合を追い、
@@ -215,39 +178,18 @@ pub async fn search_rebuild_index(
     job_options: Option<SearchRebuildJobOptions>,
 ) -> Result<String, String> {
     let options = job_options.unwrap_or(SearchRebuildJobOptions {
-        batch_size: None,
         include_semantic: None,
     });
-    let shelf = app.state::<Arc<AppState>>().library_v2.switched();
-    if let Some(library) = shelf {
-        if let Some(enabled) = options.include_semantic {
-            let target = Arc::clone(&library);
-            tokio::task::spawn_blocking(move || {
-                super::library_health::apply_semantic_enabled(&target, enabled)
-            })
-            .await
-            .map_err(|e| e.to_string())??;
-        }
-        return spawn_shelf_index_job(app, library, "manual");
+    let library = app.state::<Arc<AppState>>().library_v2.library()?;
+    if let Some(enabled) = options.include_semantic {
+        let target = Arc::clone(&library);
+        tokio::task::spawn_blocking(move || {
+            super::library_health::apply_semantic_enabled(&target, enabled)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
     }
-    let semantic_enabled = match options.include_semantic {
-        Some(enabled) => {
-            run_db_blocking(app.clone(), move |state| {
-                state
-                    .db
-                    .set_semantic_index_enabled(enabled)
-                    .map(|_| enabled)
-            })
-            .await?
-        }
-        None => run_db_blocking(app.clone(), |state| state.db.semantic_index_enabled()).await?,
-    };
-    let rebuild_options = crate::database::queries::SearchIndexRebuildOptions {
-        chunk_size: options.batch_size.unwrap_or(64).clamp(8, 512) as usize,
-        include_semantic: semantic_enabled,
-        ..Default::default()
-    };
-    spawn_rebuild_job(app, rebuild_options, "manual")
+    spawn_shelf_index_job(app, library, "manual")
 }
 
 /// Persistent capability switch shared by manual rebuilds, automatic
@@ -258,287 +200,13 @@ pub async fn search_set_semantic_enabled(
     enabled: bool,
 ) -> Result<SearchIndexStatus, String> {
     run_db_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            super::library_health::apply_semantic_enabled(&library, enabled)?;
-            return library
-                .search_index_status(enabled)
-                .map_err(|e| e.to_string());
-        }
-        state.db.set_semantic_index_enabled(enabled)
+        let library = state.library_v2.library()?;
+        super::library_health::apply_semantic_enabled(&library, enabled)?;
+        library
+            .search_index_status(enabled)
+            .map_err(|e| e.to_string())
     })
     .await
-}
-
-/// Brings the search index up to date in the background, without being asked.
-///
-/// The index is derived data: a format change, an interrupted run or a restore
-/// can leave it behind, and there is nothing useful a person can decide about
-/// that. Making them find a button and wait for it is the app failing to do its
-/// own housekeeping, so this runs at launch and only announces itself while it
-/// has work to do.
-pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        // Long enough for the first screen to settle; the work then competes
-        // with nothing the user is waiting on.
-        sleep(Duration::from_millis(1_200)).await;
-
-        // 新しい棚の意味検索の設定がまだなければ、旧棚の設定を一度だけ写す。
-        if !super::library_health::has_settings() {
-            match run_db_blocking(app.clone(), |state| state.db.semantic_index_enabled()).await {
-                Ok(enabled) => {
-                    if let Err(error) = super::library_health::store_semantic_enabled(enabled) {
-                        log::warn!("意味検索の設定を写せません: {error}");
-                    }
-                }
-                Err(error) => log::warn!("旧棚の意味検索の設定を読めません: {error}"),
-            }
-        }
-        // 正本に切り替えた棚は、開いたときと保存のたびに自分で追いつく。旧棚の索引は整えない。
-        if let Some(library) = app.state::<Arc<AppState>>().library_v2.switched() {
-            super::library_health::schedule_semantic_sync(library);
-            return;
-        }
-
-        // 記録より先に実物を見る。索引が消えているのに「索引済み」の記録だけが
-        // 残っていると、待っている件数は 0 と出て、この仕事は何もせずに帰る。
-        let resync_started = Instant::now();
-        match run_db_blocking(app.clone(), |state| state.db.resync_search_index_state()).await {
-            Ok(cleared) if cleared > 0 => {
-                log::info!("全文索引が失われていたため、{cleared}件を作り直しの対象へ戻しました");
-            }
-            Ok(_) => {}
-            Err(error) => log::warn!("索引の記録を実物と突き合わせられません: {error}"),
-        }
-        let resync_elapsed = resync_started.elapsed();
-
-        let status_started = Instant::now();
-        let status =
-            match run_db_blocking(app.clone(), |state| state.db.get_search_index_status()).await {
-                Ok(status) => status,
-                Err(error) => {
-                    log::warn!("Automatic index maintenance skipped: {error}");
-                    return;
-                }
-            };
-        let status_elapsed = status_started.elapsed();
-        let pending = if status.semantic_enabled {
-            status
-                .pending_downloads
-                .max(status.semantic_pending_downloads)
-        } else {
-            status.pending_downloads
-        };
-        log::info!(
-            "Automatic index preflight: resync {:.1} ms, status {:.1} ms, pending {pending}",
-            resync_elapsed.as_secs_f64() * 1_000.0,
-            status_elapsed.as_secs_f64() * 1_000.0,
-        );
-        if pending <= 0 {
-            return;
-        }
-
-        // **何を追いかけているのかを残す。** 起動のたびに重い作業が始まるのに、
-        // 記録が「N件」だけでは、字面の索引なのか意味ベクトルなのか分からない。
-        // 意味ベクトルは 465MB のモデルを起こすので、体感がまるで違う。
-        if status.semantic_enabled && status.semantic_pending_downloads > 0 {
-            log::info!(
-                "索引の自動整備を始めます: 全文 {}件 / 意味 {}件（意味検索が入なので、埋め込みモデルを読み込みます）",
-                status.pending_downloads,
-                status.semantic_pending_downloads
-            );
-        } else {
-            log::info!(
-                "索引の自動整備を始めます: 全文 {}件",
-                status.pending_downloads
-            );
-        }
-        let options = crate::database::queries::SearchIndexRebuildOptions {
-            include_semantic: status.semantic_enabled,
-            ..Default::default()
-        };
-        if let Err(error) = spawn_rebuild_job(app, options, "automatic") {
-            log::warn!("Automatic index maintenance could not start: {error}");
-        }
-    });
-}
-
-/// Backfill searchable acquisition state without delaying library navigation.
-pub fn start_automatic_saved_asset_audit(app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        sleep(Duration::from_secs(2)).await;
-        let state = app.state::<Arc<AppState>>().inner().clone();
-        if let Err(error) = run_library_write_blocking(app.clone(), |state| {
-            state.db.requeue_placeholder_illustrations()
-        })
-        .await
-        {
-            log::warn!("代替画像の再検査を準備できません: {error}");
-            return;
-        }
-        let mut checked = 0;
-        let mut marked = 0;
-        let mut after_id = 0;
-        loop {
-            match state.jobs().has_active_update_job() {
-                Ok(true) => {
-                    sleep(Duration::from_secs(2)).await;
-                    continue;
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    log::warn!("保存画像の検査を開始できません: {error}");
-                    return;
-                }
-            }
-            let guard = state.library_gate.clone().write_owned().await;
-            let batch_state = state.clone();
-            let result = tauri::async_runtime::spawn_blocking(move || {
-                let _guard = guard;
-                batch_state.db.audit_saved_pixiv_assets(after_id, 32)
-            })
-            .await;
-            match result {
-                Ok(Ok((0, _, _))) => break,
-                Ok(Ok((count, ids, cursor))) => {
-                    after_id = cursor;
-                    checked += count;
-                    marked += ids.len();
-                    if !ids.is_empty() {
-                        let _ = app.emit("acquisition-audited", ids);
-                    }
-                }
-                Ok(Err(error)) => {
-                    log::warn!("保存画像の検査を中断します: {error}");
-                    return;
-                }
-                Err(error) => {
-                    log::warn!("保存画像の検査を実行できません: {error}");
-                    return;
-                }
-            }
-            sleep(Duration::from_millis(25)).await;
-        }
-        if checked > 0 {
-            log::info!("保存画像の検査を完了しました: {checked}作品、一部保存の変更{marked}件");
-        }
-    });
-}
-
-/// Replaces Pixiv's R-18 gate icon in older saved works without adding a version.
-/// The web novel endpoint exposes the real cover even when the App API returns
-/// the icon. Work is paced so a large library does not flood Pixiv at launch.
-pub fn start_automatic_cover_repair(app: tauri::AppHandle) {
-    tauri::async_runtime::spawn(async move {
-        sleep(Duration::from_secs(5)).await;
-        let rows =
-            match run_db_blocking(app.clone(), |state| state.db.placeholder_pixiv_covers()).await {
-                Ok(rows) => rows,
-                Err(error) => {
-                    log::warn!("表紙修復の対象を確認できません: {error}");
-                    return;
-                }
-            };
-        if rows.is_empty() {
-            return;
-        }
-        log::info!("R-18代替表紙 {}件の修復を始めます", rows.len());
-        let web = match crate::pixiv_api::web::WebPixivAPI::new() {
-            Ok(web) => web,
-            Err(error) => {
-                log::warn!("表紙修復の接続を作れません: {error}");
-                return;
-            }
-        };
-        let mut changed = Vec::new();
-        let mut repaired_total = 0usize;
-        let mut consecutive_connection_failures = 0usize;
-        let state = app.state::<Arc<AppState>>().inner().clone();
-        for (id, source_id, json_path, old_cover) in rows {
-            loop {
-                match state.jobs().has_active_update_job() {
-                    Ok(false) => break,
-                    Ok(true) => sleep(Duration::from_secs(2)).await,
-                    Err(error) => {
-                        log::warn!("保存処理の状態を確認できないため表紙修復を中断します: {error}");
-                        return;
-                    }
-                }
-            }
-            sleep(Duration::from_millis(600)).await;
-            let result: Result<bool, String> = async {
-                let novel = match web.novel(&source_id).await {
-                    Ok(novel) => novel,
-                    Err(crate::pixiv_api::error::PixivError::NotFound { .. }) => return Ok(false),
-                    Err(error) => return Err(format!("公開元への接続: {error}")),
-                };
-                let Some(url) = novel
-                    .cover_url
-                    .filter(|url| !crate::downloader::pixiv::is_placeholder_cover(url))
-                else {
-                    return Ok(false);
-                };
-                let parent = Path::new(&json_path).parent().ok_or("保存先がありません")?;
-                let mut cover_data = serde_json::json!({ "cover_url": url });
-                crate::downloader::asset_downloader::download_and_link_assets(
-                    &mut cover_data,
-                    &parent.join("data.json"),
-                    false,
-                    None,
-                    None,
-                )
-                .await?;
-                let relative = cover_data["localCoverPath"]
-                    .as_str()
-                    .ok_or("表紙を保存できませんでした")?;
-                let new_path = parent.join(relative.trim_start_matches("./"));
-                let bytes = std::fs::metadata(&new_path)
-                    .map_err(|e| e.to_string())?
-                    .len() as i64;
-                let state = app.state::<Arc<AppState>>().inner().clone();
-                let _guard = state.library_gate.write().await;
-                state.db.replace_placeholder_cover(
-                    id,
-                    &old_cover,
-                    &new_path.to_string_lossy(),
-                    &url,
-                    bytes,
-                )
-            }
-            .await;
-            match result {
-                Ok(true) => {
-                    changed.push(id);
-                    repaired_total += 1;
-                    consecutive_connection_failures = 0;
-                }
-                Ok(false) => {
-                    consecutive_connection_failures = 0;
-                }
-                Err(error) => {
-                    if error.starts_with("公開元への接続:") {
-                        consecutive_connection_failures += 1;
-                    } else {
-                        consecutive_connection_failures = 0;
-                    }
-                    log::warn!("pixiv:{source_id} の表紙を修復できません: {error}");
-                }
-            }
-            if changed.len() >= 10 {
-                let _ = app.emit("covers-repaired", &changed);
-                changed.clear();
-            }
-            if consecutive_connection_failures >= 10 {
-                log::warn!(
-                    "表紙修復で公開元への接続が10件続けて失敗したため、次の起動まで中断します"
-                );
-                break;
-            }
-        }
-        if !changed.is_empty() {
-            let _ = app.emit("covers-repaired", &changed);
-        }
-        log::info!("代替表紙の修復を終了しました: {repaired_total}件");
-    });
 }
 
 /// 正本に切り替えた棚の索引を追いつかせる（全文、続けて意味検索を入れていれば意味の索引）。
@@ -651,157 +319,6 @@ fn spawn_shelf_index_job(
     Ok(job_id)
 }
 
-fn spawn_rebuild_job(
-    app: tauri::AppHandle,
-    rebuild_options: crate::database::queries::SearchIndexRebuildOptions,
-    origin: &'static str,
-) -> Result<String, String> {
-    let job_id = format!(
-        "search-index-{}-{}",
-        chrono::Utc::now().timestamp_millis(),
-        SEARCH_REBUILD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    );
-    let cancel = Arc::new(AtomicBool::new(false));
-    {
-        let mut jobs = SEARCH_REBUILD_JOBS.lock().map_err(|e| e.to_string())?;
-        // Two writers on one index would fight over the same lock, and the
-        // second would simply wait. One run at a time is also what the user
-        // sees, so a manual start during automatic maintenance joins the one
-        // already running instead of queueing behind it.
-        if let Some((existing, _)) = jobs.iter().next() {
-            return Ok(existing.clone());
-        }
-        jobs.insert(job_id.clone(), cancel.clone());
-    }
-
-    let app_for_task = app.clone();
-    let job_id_for_task = job_id.clone();
-
-    tauri::async_runtime::spawn(async move {
-        let started_at = Instant::now();
-        let state = app_for_task.state::<Arc<AppState>>().inner().clone();
-        let gate_wait_started = Instant::now();
-        let library_gate = state.library_gate.clone().write_owned().await;
-        let gate_wait_elapsed = gate_wait_started.elapsed();
-        let gate_hold_started = Instant::now();
-        let progress_app = app_for_task.clone();
-        let progress_job = job_id_for_task.clone();
-
-        // The whole rebuild is one blocking task. Driving it as a sequence of
-        // short async batches meant re-counting the library between every one
-        // of them, and rebuilding the index writer with it.
-        let outcome = tokio::task::spawn_blocking(move || {
-            let result = {
-                let _library_gate = library_gate;
-                let cancel_flag = cancel.clone();
-                let mut last_emit = Instant::now() - Duration::from_secs(1);
-                state.db.rebuild_search_index(
-                    rebuild_options,
-                    &move || cancel_flag.load(Ordering::Relaxed),
-                    |progress| {
-                        // Roughly ten updates a second: enough for a bar that
-                        // visibly moves, far short of flooding the event channel.
-                        let finished = progress.phase != "indexing";
-                        if !finished && last_emit.elapsed() < Duration::from_millis(100) {
-                            return;
-                        }
-                        last_emit = Instant::now();
-                        let throughput = (progress.elapsed_secs > 0.5)
-                            .then(|| progress.processed as f64 / progress.elapsed_secs);
-                        let eta = throughput.filter(|rate| *rate > 0.0).map(|rate| {
-                            ((progress.total - progress.processed).max(0) as f64 / rate).max(0.0)
-                        });
-                        let _ = progress_app.emit(
-                            "search-index-progress",
-                            SearchRebuildProgress {
-                                job_id: progress_job.clone(),
-                                origin: origin.to_string(),
-                                status: "running".to_string(),
-                                total_downloads: 0,
-                                indexed_downloads: 0,
-                                pending_downloads: (progress.total - progress.processed).max(0),
-                                is_complete: false,
-                                phase: progress.phase.to_string(),
-                                processed: progress.processed,
-                                processed_total: progress.total,
-                                failed: progress.failed,
-                                embedding_provider: String::new(),
-                                gpu_enabled: false,
-                                throughput_per_sec: throughput,
-                                eta_seconds: eta,
-                                error: None,
-                            },
-                        );
-                    },
-                )
-            };
-            (result, gate_hold_started.elapsed())
-        })
-        .await;
-
-        let (result, gate_hold_elapsed) = match outcome {
-            Ok((result, elapsed)) => (result, Some(elapsed)),
-            Err(error) => (Err(format!("Search rebuild task failed: {error}")), None),
-        };
-        match gate_hold_elapsed {
-            Some(elapsed) => log::info!(
-                "Search index {origin} job {job_id_for_task}: gate wait {:.1} ms, gate held {:.1} ms, rebuild task elapsed {:.1} ms",
-                gate_wait_elapsed.as_secs_f64() * 1_000.0,
-                elapsed.as_secs_f64() * 1_000.0,
-                started_at.elapsed().as_secs_f64() * 1_000.0,
-            ),
-            None => log::warn!(
-                "Search index {origin} job {job_id_for_task}: gate wait {:.1} ms, gate held unknown (blocking task failed), rebuild task elapsed {:.1} ms",
-                gate_wait_elapsed.as_secs_f64() * 1_000.0,
-                started_at.elapsed().as_secs_f64() * 1_000.0,
-            ),
-        }
-
-        // One final status read, rather than one per batch: the three library
-        // wide COUNT(*) queries behind it are what made progress reporting
-        // itself a measurable share of the rebuild.
-        let status = run_db_blocking(app_for_task.clone(), |state| {
-            state.db.get_search_index_status()
-        })
-        .await;
-
-        match (result, status) {
-            (Ok(outcome), Ok(status)) => emit_search_index_progress(
-                &app_for_task,
-                &job_id_for_task,
-                origin,
-                if outcome.canceled {
-                    "canceled"
-                } else {
-                    "completed"
-                },
-                status,
-                outcome.processed,
-                outcome.failed,
-                started_at.elapsed().as_secs_f64(),
-            ),
-            (Err(error), _) | (_, Err(error)) => {
-                let _ = app_for_task.emit(
-                    "search-index-progress",
-                    serde_json::json!({
-                        "jobId": job_id_for_task,
-                        "origin": origin,
-                        "status": "failed",
-                        "phase": "failed",
-                        "error": error,
-                    }),
-                );
-            }
-        }
-
-        if let Ok(mut jobs) = SEARCH_REBUILD_JOBS.lock() {
-            jobs.remove(&job_id_for_task);
-        }
-    });
-
-    Ok(job_id)
-}
-
 /// 作り直しを止めるよう頼む。
 ///
 /// 知らない番号なら `Err`。**すぐには止まらない** - 印を立てるだけで、切りの
@@ -854,261 +371,12 @@ fn emit_search_index_progress(
     );
 }
 
-/// ID を並べて渡し、作品をまとめて取る。一件ずつ呼ばないこと。
-#[tauri::command]
-pub async fn db_get_downloads(
-    app: tauri::AppHandle,
-    ids: Vec<i64>,
-) -> Result<Vec<DownloadEntry>, String> {
-    run_db_blocking(app, move |state| state.db.get_downloads(&ids)).await
-}
-
-/// 作品に紐づく画像などの資産を返す。本文は含まない。
-#[tauri::command]
-pub async fn db_get_assets(
-    app: tauri::AppHandle,
-    download_id: i64,
-    version: Option<i64>,
-) -> Result<Vec<AssetEntry>, String> {
-    let state = app.state::<Arc<AppState>>();
-    match version {
-        Some(version) => state.db.get_version_assets(download_id, version),
-        None => state.db.get_assets(download_id),
-    }
-}
-
-/// 作品を一件消す。
-///
-/// 書き込みなので、バックアップの書き出し中は終わるまで待つ。
-#[tauri::command]
-pub async fn db_delete_download(app: tauri::AppHandle, id: i64) -> Result<(), String> {
-    run_library_write_blocking(app, move |state| state.db.delete_download(id)).await
-}
-
-/// 作品をまとめて消す。
-///
-/// 返る `matchedCount` は当たった数、`changedCount` は実際に消えた数である。
-/// **二つは一致しないことがある**ので、渡した ID の数と比べないこと。
-///
-/// 書き込みなので、バックアップの書き出し中は待つ。
-#[tauri::command]
-pub async fn db_delete_downloads(
-    app: tauri::AppHandle,
-    ids: Vec<i64>,
-) -> Result<BulkMutationResult, String> {
-    run_library_write_blocking(app, move |state| state.db.delete_downloads(&ids)).await
-}
-
-/// 今の絞り込みに当たる作品を、まとめて消す。
-///
-/// **画面に見えている頁だけではなく、条件に当たるすべてが対象**である。件数を
-/// 確かめてから呼ぶこと。
-///
-/// 返り方は `db_delete_downloads` と同じ。書き込みなので、バックアップの書き出し
-/// 中は待つ。
-#[tauri::command]
-pub async fn db_delete_downloads_for_search(
-    app: tauri::AppHandle,
-    params: SearchV2Params,
-) -> Result<BulkMutationResult, String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.delete_downloads_for_search(&params)
-    })
-    .await
-}
-
-/// ライブラリの件数と容量を返す。歩き回らないので安い。
-#[tauri::command]
-pub async fn db_get_stats(app: tauri::AppHandle) -> Result<DbStats, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_stats()
-}
-
-/// 容量・索引の状態・孤立した資産を測る。
-///
-/// **棚全体を歩くので重い。** 画面を開くたびに呼ばないこと。進み具合は
-/// `library-diagnostics-progress` で流れるので、待たせる間はそれを見せる。
-#[tauri::command]
-pub async fn db_get_library_diagnostics(
-    app: tauri::AppHandle,
-) -> Result<LibraryDiagnostics, String> {
-    let emitter = app.clone();
-    run_db_blocking(app, move |state| {
-        state.db.get_library_diagnostics_with_progress(&|progress| {
-            let _ = emitter.emit(
-                "library-diagnostics-progress",
-                serde_json::json!({
-                    "phase": progress.phase,
-                    "step": progress.step,
-                    "total": progress.total,
-                }),
-            );
-        })
-    })
-    .await
-}
-
-/// データベースを整える。`compact` を立てると容量も詰める。
-///
-/// **詰めるほうは重く、その間ライブラリを書き換えられない。** 進み具合は
-/// `library-maintenance-progress` で流れる（`optimizing` / `compacting` /
-/// `complete` / `failed`）。
-#[tauri::command]
-pub async fn db_maintain_library(
-    app: tauri::AppHandle,
-    compact: bool,
-) -> Result<LibraryMaintenanceResult, String> {
-    let _ = app.emit(
-        "library-maintenance-progress",
-        serde_json::json!({ "phase": if compact { "compacting" } else { "optimizing" } }),
-    );
-    let result = run_library_write_blocking(app.clone(), move |state| {
-        state.db.maintain_library_database(compact)
-    })
-    .await;
-    let _ = app.emit(
-        "library-maintenance-progress",
-        serde_json::json!({
-            "phase": if result.is_ok() { "complete" } else { "failed" },
-            "error": result.as_ref().err(),
-        }),
-    );
-    result
-}
-
-/// 検索索引の断片をまとめる。
-///
-/// 断片が増えると検索が遅くなる。**索引を作り直すわけではない**ので、入って
-/// いない作品が入るようにはならない（それは `search_rebuild_index`）。
-///
-/// 進み具合は `search-index-optimization-progress` で流れる。
-#[tauri::command]
-pub async fn db_optimize_search_index(
-    app: tauri::AppHandle,
-) -> Result<SearchIndexOptimizationResult, String> {
-    let segments = run_db_blocking(app.clone(), |state| state.db.search_index_segment_count())
-        .await
-        .unwrap_or(0);
-    let _ = app.emit(
-        "search-index-optimization-progress",
-        serde_json::json!({ "phase": "preflight", "segments": segments }),
-    );
-    let _ = app.emit(
-        "search-index-optimization-progress",
-        serde_json::json!({ "phase": "merging", "segments": segments }),
-    );
-    let result =
-        run_library_write_blocking(app.clone(), move |state| state.db.optimize_search_index())
-            .await;
-    let _ = app.emit(
-        "search-index-optimization-progress",
-        serde_json::json!({
-            "phase": if result.is_ok() { "complete" } else { "failed" },
-            "segments": segments,
-            "error": result.as_ref().err(),
-        }),
-    );
-    result
-}
-
-/// 棚（すべて・お気に入り・読みかけ・更新監視）の件数を返す。
-///
-/// 「読みかけ」だけは**画面側が持っている**ので、その ID を `readingIds` で渡す。
-/// 渡さないとその棚は 0 になる。
-#[tauri::command]
-pub async fn db_get_library_shelf_counts(
-    app: tauri::AppHandle,
-    reading_ids: Option<Vec<i64>>,
-) -> Result<LibraryShelfCounts, String> {
-    let reading_ids = reading_ids.unwrap_or_default();
-    run_db_blocking(app, move |state| {
-        state.db.get_library_shelf_counts(&reading_ids)
-    })
-    .await
-}
-
-/// 作者に紐づくシリーズを返す。`limit` の既定は 60。
-///
-/// 頁送りが要るなら `db_list_entity_series_paged` を使う。
-#[tauri::command]
-pub async fn db_list_entity_series(
-    app: tauri::AppHandle,
-    source: String,
-    source_key: String,
-    limit: Option<i64>,
-) -> Result<Vec<EntityFacet>, String> {
-    run_db_blocking(app, move |state| {
-        state
-            .db
-            .list_entity_series(&source, &source_key, limit.unwrap_or(60))
-    })
-    .await
-}
-
-/// 作者に紐づくシリーズを、頁で切って返す。
-///
-/// 次の頁は返ってきた `cursor` をそのまま渡す。**中身を解釈しないこと。**
-/// `query` を渡すと名前で絞る。`limit` の既定は 60。
-#[tauri::command]
-// Tauri exposes these as named IPC fields. Wrapping them in a Rust-only
-// options object would silently change the frontend command contract.
-#[allow(clippy::too_many_arguments)]
-pub async fn db_list_entity_series_paged(
-    app: tauri::AppHandle,
-    source: String,
-    source_key: String,
-    query: Option<String>,
-    sort_by: Option<String>,
-    sort_order: Option<String>,
-    limit: Option<i64>,
-    cursor: Option<String>,
-) -> Result<EntitySeriesPage, String> {
-    run_db_blocking(app, move |state| {
-        state.db.list_entity_series_paged(
-            &source,
-            &source_key,
-            query.as_deref(),
-            sort_by.as_deref(),
-            sort_order.as_deref(),
-            limit.unwrap_or(60),
-            cursor.as_deref(),
-        )
-    })
-    .await
-}
-
-/// 作者やシリーズに付いているタグを、多い順に返す。`limit` の既定は 40。
-///
-/// 取得元が付けたタグとモデルが足したタグは**出どころが混ざらない**。
-#[tauri::command]
-pub async fn db_list_entity_tags(
-    app: tauri::AppHandle,
-    kind: String,
-    source: String,
-    source_key: String,
-    limit: Option<i64>,
-) -> Result<Vec<FacetCount>, String> {
-    run_db_blocking(app, move |state| {
-        state
-            .db
-            .list_entity_tags(&kind, &source, &source_key, limit.unwrap_or(40))
-    })
-    .await
-}
-
 /// 保存した検索の一覧を返す。ID は文字列（切り替えた棚では検索の UUID）。
 #[tauri::command]
 pub async fn db_list_saved_searches(app: tauri::AppHandle) -> Result<Vec<SavedSearchView>, String> {
     run_db_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            return saved_search_shelf::list(&library);
-        }
-        Ok(state
-            .db
-            .list_saved_searches()?
-            .into_iter()
-            .map(saved_search_shelf::legacy_view)
-            .collect())
+        let library = state.library_v2.library()?;
+        saved_search_shelf::list(&library)
     })
     .await
 }
@@ -1120,14 +388,8 @@ pub async fn db_upsert_saved_search(
     input: SavedSearchViewInput,
 ) -> Result<SavedSearchView, String> {
     run_library_write_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            return saved_search_shelf::upsert(&library, input);
-        }
-        let input = saved_search_shelf::legacy_input(input)?;
-        state
-            .db
-            .upsert_saved_search(&input)
-            .map(saved_search_shelf::legacy_view)
+        let library = state.library_v2.library()?;
+        saved_search_shelf::upsert(&library, input)
     })
     .await
 }
@@ -1136,200 +398,8 @@ pub async fn db_upsert_saved_search(
 #[tauri::command]
 pub async fn db_delete_saved_search(app: tauri::AppHandle, id: String) -> Result<bool, String> {
     run_library_write_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            return saved_search_shelf::delete(&library, &id);
-        }
-        match id.parse::<i64>() {
-            Ok(id) => state.db.delete_saved_search(id),
-            Err(_) => Ok(false),
-        }
-    })
-    .await
-}
-
-/// コレクションの一覧を、要約だけで返す。
-///
-/// 中の作品は含まない。中身は `db_get_work_collection` で取る。
-#[tauri::command]
-pub async fn db_list_work_collections(
-    app: tauri::AppHandle,
-) -> Result<Vec<WorkCollectionSummary>, String> {
-    run_db_blocking(app, move |state| state.db.list_work_collections()).await
-}
-
-/// コレクションを一つ、中の作品まで含めて返す。
-///
-/// **並びは読む順**で、利用者が決めたものである。画面で並べ直さないこと。
-#[tauri::command]
-pub async fn db_get_work_collection(
-    app: tauri::AppHandle,
-    collection_id: String,
-) -> Result<WorkCollection, String> {
-    run_db_blocking(app, move |state| {
-        state.db.get_work_collection(&collection_id)
-    })
-    .await
-}
-
-fn import_collection_cover(app_data_dir: &Path, source: &Path) -> Result<PathBuf, String> {
-    let metadata = std::fs::metadata(source).map_err(|e| format!("表紙画像を読めません: {e}"))?;
-    if !metadata.is_file() {
-        return Err("表紙画像にファイルを指定してください".to_string());
-    }
-    if metadata.len() > MAX_COLLECTION_COVER_BYTES {
-        return Err("表紙画像は20 MB以下にしてください".to_string());
-    }
-    let bytes = std::fs::read(source).map_err(|e| format!("表紙画像を読めません: {e}"))?;
-    if bytes.len() as u64 > MAX_COLLECTION_COVER_BYTES {
-        return Err("表紙画像は20 MB以下にしてください".to_string());
-    }
-    let reader = image::ImageReader::new(Cursor::new(&bytes))
-        .with_guessed_format()
-        .map_err(|e| format!("表紙画像の形式を確認できません: {e}"))?;
-    let format = reader
-        .format()
-        .ok_or_else(|| "PNG、JPEG、WebPの画像を選んでください".to_string())?;
-    let extension = match format {
-        image::ImageFormat::Png => "png",
-        image::ImageFormat::Jpeg => "jpg",
-        image::ImageFormat::WebP => "webp",
-        _ => return Err("PNG、JPEG、WebPの画像を選んでください".to_string()),
-    };
-    let (width, height) = reader
-        .into_dimensions()
-        .map_err(|e| format!("表紙画像が壊れています: {e}"))?;
-    if u64::from(width).saturating_mul(u64::from(height)) > MAX_COLLECTION_COVER_PIXELS {
-        return Err("表紙画像の縦横サイズが大きすぎます".to_string());
-    }
-
-    let digest = Sha256::digest(&bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let directory = app_data_dir.join("collection-covers");
-    std::fs::create_dir_all(&directory)
-        .map_err(|e| format!("表紙画像の保存先を作れません: {e}"))?;
-    let destination = directory.join(format!("{digest}.{extension}"));
-    if destination.exists() {
-        return Ok(destination);
-    }
-    let staging = directory.join(format!(".{digest}.{:016x}.part", rand::random::<u64>()));
-    let publish = (|| -> Result<(), String> {
-        use std::io::Write;
-        let mut output = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&staging)
-            .map_err(|e| format!("表紙画像の一時ファイルを作れません: {e}"))?;
-        output
-            .write_all(&bytes)
-            .and_then(|_| output.sync_all())
-            .map_err(|e| format!("表紙画像を保存できません: {e}"))?;
-        drop(output);
-        match std::fs::rename(&staging, &destination) {
-            Ok(()) => Ok(()),
-            Err(_) if destination.exists() => {
-                let _ = std::fs::remove_file(&staging);
-                Ok(())
-            }
-            Err(e) => Err(format!("表紙画像を確定できません: {e}")),
-        }
-    })();
-    if publish.is_err() {
-        let _ = std::fs::remove_file(&staging);
-    }
-    publish.map(|_| destination)
-}
-
-/// コレクションを作る、または直す。
-///
-/// 表紙のパスを渡すと、その画像を**アプリの管理下へ複製する**。元のファイルを
-/// 消したり動かしたりしても表紙は残り、バックアップにも入る。渡さなければ
-/// 今の表紙のまま。
-#[tauri::command]
-pub async fn db_upsert_work_collection(
-    app: tauri::AppHandle,
-    mut input: WorkCollectionInput,
-) -> Result<WorkCollection, String> {
-    let source_path = input
-        .cover_image_path_patch()
-        .flatten()
-        .filter(|path| !path.trim().is_empty())
-        .map(str::to_string);
-    if let Some(source_path) = source_path {
-        let app_data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| format!("アプリの保存先を確認できません: {e}"))?;
-        let managed_path = tokio::task::spawn_blocking(move || {
-            import_collection_cover(&app_data_dir, Path::new(&source_path))
-        })
-        .await
-        .map_err(|e| format!("表紙画像の取り込み処理に失敗しました: {e}"))??;
-        input.cover_image_path = Some(managed_path.to_string_lossy().to_string());
-    }
-    run_library_write_blocking(app, move |state| state.db.upsert_work_collection(&input)).await
-}
-
-/// コレクションを消す。**中の作品は消えない。**
-///
-/// 消えるのは束ねていたという事実だけである。
-#[tauri::command]
-pub async fn db_delete_work_collection(
-    app: tauri::AppHandle,
-    collection_id: String,
-) -> Result<(), String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.delete_work_collection(&collection_id)
-    })
-    .await
-}
-
-/// コレクションに作品を足し、足したあとのコレクションを返す。
-///
-/// すでに入っているものを渡しても増えない。返り値の並びが**そのまま読む順**に
-/// なるので、画面はこれを反映すること。
-#[tauri::command]
-pub async fn db_add_work_collection_members(
-    app: tauri::AppHandle,
-    collection_id: String,
-    members: Vec<WorkCollectionMemberInput>,
-) -> Result<WorkCollection, String> {
-    run_library_write_blocking(app, move |state| {
-        state
-            .db
-            .add_work_collection_members(&collection_id, &members)
-    })
-    .await
-}
-
-/// 棚の複数選択から、選んだ作品をそのまま束へ入れる。
-#[tauri::command]
-pub async fn db_add_downloads_to_collection(
-    app: tauri::AppHandle,
-    collection_id: String,
-    download_ids: Vec<i64>,
-) -> Result<WorkCollection, String> {
-    run_library_write_blocking(app, move |state| {
-        state
-            .db
-            .add_downloads_to_collection(&collection_id, &download_ids)
-    })
-    .await
-}
-
-/// 選んだ作品から、新しい束をひとつ作る。
-#[tauri::command]
-pub async fn db_create_collection_from_downloads(
-    app: tauri::AppHandle,
-    name: String,
-    collection_kind: String,
-    download_ids: Vec<i64>,
-) -> Result<WorkCollection, String> {
-    run_library_write_blocking(app, move |state| {
-        state
-            .db
-            .create_collection_from_downloads(&name, &collection_kind, &download_ids)
+        let library = state.library_v2.library()?;
+        saved_search_shelf::delete(&library, &id)
     })
     .await
 }
@@ -1341,11 +411,9 @@ pub async fn db_propose_collection_names(
     collection_id: String,
 ) -> Result<Vec<CollectionNameCandidate>, String> {
     run_db_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            let target = super::library_v2::collection_target(&library, &collection_id)?;
-            return library.collection_name_proposals_on_shelf(target);
-        }
-        state.db.collection_name_proposals(&collection_id)
+        let library = state.library_v2.library()?;
+        let target = super::library_v2::collection_target(&library, &collection_id)?;
+        library.collection_name_proposals_on_shelf(target)
     })
     .await
 }
@@ -1362,11 +430,9 @@ pub async fn db_name_collection_with_model(
 ) -> Result<crate::assist::GeneratedAssist<crate::assist::NamedBundle>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let works = tokio::task::spawn_blocking(move || {
-        if let Some(library) = state.library_v2.switched() {
-            let target = super::library_v2::collection_target(&library, &collection_id)?;
-            return library.collection_naming_works_on_shelf(target);
-        }
-        state.db.collection_naming_works_for(&collection_id)
+        let library = state.library_v2.library()?;
+        let target = super::library_v2::collection_target(&library, &collection_id)?;
+        library.collection_naming_works_on_shelf(target)
     })
     .await
     .map_err(|e| format!("Database task failed: {e}"))??;
@@ -1392,17 +458,12 @@ pub async fn db_try_naming_engine(
 ) -> Result<crate::assist::TrialResult, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let works = tokio::task::spawn_blocking(move || {
-        if let Some(library) = state.library_v2.switched() {
-            return match collection_id {
-                Some(id) => library.collection_naming_works_on_shelf(
-                    super::library_v2::collection_target(&library, &id)?,
-                ),
-                None => library.sample_naming_works_on_shelf(),
-            };
-        }
+        let library = state.library_v2.library()?;
         match collection_id {
-            Some(id) => state.db.collection_naming_works_for(&id),
-            None => state.db.sample_naming_works(),
+            Some(id) => library.collection_naming_works_on_shelf(
+                super::library_v2::collection_target(&library, &id)?,
+            ),
+            None => library.sample_naming_works_on_shelf(),
         }
     })
     .await
@@ -1426,52 +487,11 @@ pub async fn db_name_collection_suggestion(
     // 材料を読むところと、外へ送るところを分ける。送っているあいだ
     // ライブラリの錠を握ったままにしない。
     let state = app.state::<Arc<AppState>>().inner().clone();
-    if let Some(library) = state.library_v2.switched() {
-        let works = {
-            let library = library.clone();
-            let suggestion_id = suggestion_id.clone();
-            tokio::task::spawn_blocking(move || library.suggestion_naming_works(&suggestion_id))
-                .await
-                .map_err(|e| format!("Database task failed: {e}"))??
-        };
-        let provenance = crate::assist::generation_provenance(
-            &engine,
-            crate::assist::FEATURE_COLLECTION_NAMING,
-            &works,
-        )?;
-        let named = crate::assist::name_bundle(&engine, &works).await?;
-        return run_library_write_blocking(app, move |_| {
-            library.attach_llm_name_to_suggestion(&suggestion_id, &named, &provenance)
-        })
-        .await;
-    }
-    let ids = {
-        let suggestion_id = suggestion_id.clone();
-        let state = state.clone();
-        tokio::task::spawn_blocking(move || {
-            state
-                .db
-                .list_collection_suggestions(Some("all"))
-                .map(|values| {
-                    values
-                        .into_iter()
-                        .find(|value| value.id == suggestion_id)
-                        .map(|value| {
-                            value
-                                .members
-                                .into_iter()
-                                .filter_map(|member| member.download_id)
-                                .collect::<Vec<_>>()
-                        })
-                })
-        })
-        .await
-        .map_err(|e| format!("Database task failed: {e}"))??
-        .ok_or_else(|| "Collection suggestion not found".to_string())?
-    };
+    let library = state.library_v2.library()?;
     let works = {
-        let state = state.clone();
-        tokio::task::spawn_blocking(move || state.db.collection_naming_works(&ids))
+        let library = library.clone();
+        let suggestion_id = suggestion_id.clone();
+        tokio::task::spawn_blocking(move || library.suggestion_naming_works(&suggestion_id))
             .await
             .map_err(|e| format!("Database task failed: {e}"))??
     };
@@ -1481,10 +501,8 @@ pub async fn db_name_collection_suggestion(
         &works,
     )?;
     let named = crate::assist::name_bundle(&engine, &works).await?;
-    run_library_write_blocking(app, move |state| {
-        state
-            .db
-            .attach_llm_name_option(&suggestion_id, &named, &provenance)
+    run_library_write_blocking(app, move |_| {
+        library.attach_llm_name_to_suggestion(&suggestion_id, &named, &provenance)
     })
     .await
 }
@@ -1493,10 +511,8 @@ pub async fn db_name_collection_suggestion(
 #[tauri::command]
 pub async fn db_dismiss_swept_suggestions(app: tauri::AppHandle) -> Result<usize, String> {
     run_library_write_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            return library.dismiss_swept_collection_suggestions();
-        }
-        state.db.dismiss_swept_suggestions()
+        let library = state.library_v2.library()?;
+        library.dismiss_swept_collection_suggestions()
     })
     .await
 }
@@ -1510,10 +526,8 @@ pub async fn db_sweep_collection_candidates(
     app: tauri::AppHandle,
 ) -> Result<CollectionSweepResult, String> {
     run_library_write_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            return library.sweep_collection_suggestions();
-        }
-        state.db.sweep_collection_candidates()
+        let library = state.library_v2.library()?;
+        library.sweep_collection_suggestions()
     })
     .await
 }
@@ -1527,97 +541,9 @@ pub async fn db_suggest_collection_additions(
     collection_id: String,
 ) -> Result<CollectionAdditionResult, String> {
     run_db_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            let target = super::library_v2::collection_target(&library, &collection_id)?;
-            return library.collection_additions_on_shelf(target);
-        }
-        state.db.suggest_collection_additions(&collection_id)
-    })
-    .await
-}
-
-/// 束の並びを、投稿日順か題名の連番順に一度で整える。
-#[tauri::command]
-pub async fn db_sort_work_collection_members(
-    app: tauri::AppHandle,
-    collection_id: String,
-    mode: String,
-) -> Result<WorkCollection, String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.sort_work_collection_members(&collection_id, &mode)
-    })
-    .await
-}
-
-/// コレクションから作品を外し、外したあとのコレクションを返す。
-///
-/// **作品そのものは消えない。**
-#[tauri::command]
-pub async fn db_remove_work_collection_members(
-    app: tauri::AppHandle,
-    collection_id: String,
-    members: Vec<WorkKey>,
-) -> Result<WorkCollection, String> {
-    run_library_write_blocking(app, move |state| {
-        state
-            .db
-            .remove_work_collection_members(&collection_id, &members)
-    })
-    .await
-}
-
-/// コレクションの並びを、渡した順に置き直す。
-///
-/// この並びが**読む順**になる。EPUB に書き出したときの章の順でもある。
-#[tauri::command]
-pub async fn db_reorder_work_collection_members(
-    app: tauri::AppHandle,
-    collection_id: String,
-    members: Vec<WorkKey>,
-) -> Result<WorkCollection, String> {
-    run_library_write_blocking(app, move |state| {
-        state
-            .db
-            .reorder_work_collection_members(&collection_id, &members)
-    })
-    .await
-}
-
-/// その作品が入っているコレクションを返す。作品ページで使う。
-#[tauri::command]
-pub async fn db_list_collections_for_work(
-    app: tauri::AppHandle,
-    source: String,
-    source_id: String,
-) -> Result<Vec<WorkCollectionSummary>, String> {
-    run_db_blocking(app, move |state| {
-        state.db.list_collections_for_work(&source, &source_id)
-    })
-    .await
-}
-
-/// その作者の作品を含むコレクションを返す。
-#[tauri::command]
-pub async fn db_list_collections_for_person(
-    app: tauri::AppHandle,
-    source: String,
-    person_key: String,
-) -> Result<Vec<WorkCollectionSummary>, String> {
-    run_db_blocking(app, move |state| {
-        state.db.list_collections_for_person(&source, &person_key)
-    })
-    .await
-}
-
-/// そのシリーズの作品を含むコレクションを返す。
-#[tauri::command]
-pub async fn db_list_collections_for_series(
-    app: tauri::AppHandle,
-    source: String,
-    series_key: String,
-) -> Result<Vec<WorkCollectionSummary>, String> {
-    run_db_blocking(app, move |state| {
-        state.db.list_collections_for_series(&source, &series_key)
+        let library = state.library_v2.library()?;
+        let target = super::library_v2::collection_target(&library, &collection_id)?;
+        library.collection_additions_on_shelf(target)
     })
     .await
 }
@@ -1634,24 +560,22 @@ pub async fn db_generate_collection_suggestion(
     request: CollectionSuggestionRequest,
 ) -> Result<CollectionSuggestion, String> {
     run_library_write_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            let seeds = request
-                .seed_works
-                .iter()
-                .map(|work| {
-                    work.parse::<crate::library::LibraryId>()
-                        .map_err(|_| "基準の作品の ID が不正です".to_string())
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            if seeds.is_empty() {
-                return Err("At least one seed work is required".to_string());
-            }
-            if seeds.len() > 20 {
-                return Err("A suggestion can use at most 20 seed works".to_string());
-            }
-            return library.seed_collection_suggestion(&seeds, request.limit);
+        let library = state.library_v2.library()?;
+        let seeds = request
+            .seed_works
+            .iter()
+            .map(|work| {
+                work.parse::<crate::library::LibraryId>()
+                    .map_err(|_| "基準の作品の ID が不正です".to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if seeds.is_empty() {
+            return Err("At least one seed work is required".to_string());
         }
-        state.db.generate_collection_suggestion(&request)
+        if seeds.len() > 20 {
+            return Err("A suggestion can use at most 20 seed works".to_string());
+        }
+        library.seed_collection_suggestion(&seeds, request.limit)
     })
     .await
 }
@@ -1665,12 +589,8 @@ pub async fn db_list_collection_suggestions(
     state_filter: Option<String>,
 ) -> Result<Vec<CollectionSuggestion>, String> {
     run_db_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            return library.collection_suggestion_views(state_filter.as_deref());
-        }
-        state
-            .db
-            .list_collection_suggestions(state_filter.as_deref())
+        let library = state.library_v2.library()?;
+        library.collection_suggestion_views(state_filter.as_deref())
     })
     .await
 }
@@ -1685,10 +605,8 @@ pub async fn db_dismiss_collection_suggestion(
     suggestion_id: String,
 ) -> Result<bool, String> {
     run_library_write_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            return library.dismiss_collection_suggestion_view(&suggestion_id);
-        }
-        state.db.dismiss_collection_suggestion(&suggestion_id)
+        let library = state.library_v2.library()?;
+        library.dismiss_collection_suggestion_view(&suggestion_id)
     })
     .await
 }
@@ -1713,22 +631,16 @@ pub async fn db_accept_collection_suggestion(
 ) -> Result<AcceptedCollection, String> {
     run_library_write_blocking(app, move |state| {
         let name = input.name.clone();
-        if let Some(library) = state.library_v2.switched() {
-            let id = library.accept_collection_suggestion_view(&input)?;
-            let name = library
-                .collection_detail(id)
-                .map(|detail| detail.summary.name)
-                .or_else(|_| name.ok_or(()))
-                .unwrap_or_default();
-            return Ok(AcceptedCollection {
-                id: id.to_string(),
-                name,
-            });
-        }
-        let collection = state.db.accept_collection_suggestion(&input)?;
+        let library = state.library_v2.library()?;
+        let id = library.accept_collection_suggestion_view(&input)?;
+        let name = library
+            .collection_detail(id)
+            .map(|detail| detail.summary.name)
+            .or_else(|_| name.ok_or(()))
+            .unwrap_or_default();
         Ok(AcceptedCollection {
-            id: collection.summary.id,
-            name: collection.summary.name,
+            id: id.to_string(),
+            name,
         })
     })
     .await
@@ -1745,35 +657,8 @@ pub async fn db_reject_collection_suggestion(
     member_keys: Option<Vec<WorkKey>>,
 ) -> Result<bool, String> {
     run_library_write_blocking(app, move |state| {
-        if let Some(library) = state.library_v2.switched() {
-            return library
-                .reject_collection_suggestion_view(&suggestion_id, member_keys.as_deref());
-        }
-        state
-            .db
-            .reject_collection_suggestion(&suggestion_id, member_keys.as_deref())
-    })
-    .await
-}
-
-/// ホームに出す要約（保存件数、容量、推移、索引の状態）を返す。
-#[tauri::command]
-pub async fn db_get_dashboard_summary(app: tauri::AppHandle) -> Result<DashboardSummary, String> {
-    run_db_blocking(app, move |state| state.db.get_dashboard_summary()).await
-}
-
-/// 絞り込みに出す選択肢と、その件数を返す。
-///
-/// `includeEntities` を false にすると、作者やシリーズの集計を省いて軽くなる。
-/// 既定は true。**件数の要らない画面では落とすこと。**
-#[tauri::command]
-pub async fn db_get_filter_facets(
-    app: tauri::AppHandle,
-    include_entities: Option<bool>,
-) -> Result<FilterFacets, String> {
-    let include_entities = include_entities.unwrap_or(true);
-    run_db_blocking(app, move |state| {
-        state.db.get_filter_facets_with(include_entities)
+        let library = state.library_v2.library()?;
+        library.reject_collection_suggestion_view(&suggestion_id, member_keys.as_deref())
     })
     .await
 }
@@ -1787,181 +672,10 @@ pub async fn db_get_search_index_status(
     app: tauri::AppHandle,
 ) -> Result<SearchIndexStatus, String> {
     run_db_blocking(app, |state| {
-        if let Some(library) = state.library_v2.switched() {
-            return library
-                .search_index_status(super::library_health::semantic_enabled())
-                .map_err(|e| e.to_string());
-        }
-        state.db.get_search_index_status()
-    })
-    .await
-}
-
-/// 作者やシリーズを、名前で探して返す。
-///
-/// `limit` の既定は 60。件数だけが要るなら `db_count_entity_facets` のほうが軽い。
-/// `filters` を渡すと、今の絞り込みの中だけを見る。
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub async fn db_search_entity_facets(
-    app: tauri::AppHandle,
-    kind: String,
-    query: Option<String>,
-    limit: Option<i64>,
-    offset: Option<i64>,
-    filters: Option<SearchV2Params>,
-    sort_by: Option<String>,
-    sort_order: Option<String>,
-    scope: Option<EntityFacetScope>,
-) -> Result<Vec<EntityFacet>, String> {
-    run_db_blocking(app, move |state| {
-        state.db.search_entity_facets(
-            &kind,
-            query.as_deref(),
-            limit.unwrap_or(60),
-            offset.unwrap_or(0),
-            filters.as_ref(),
-            sort_by.as_deref(),
-            sort_order.as_deref(),
-            scope.as_ref(),
-        )
-    })
-    .await
-}
-
-/// 作者やシリーズなどの選択肢が、条件に対して何件あるかだけを返す。
-///
-/// 頁送りの分母に使う。中身は `db_search_entity_facets` で取る。
-#[tauri::command]
-pub async fn db_count_entity_facets(
-    app: tauri::AppHandle,
-    kind: String,
-    query: Option<String>,
-    filters: Option<SearchV2Params>,
-    scope: Option<EntityFacetScope>,
-) -> Result<i64, String> {
-    run_db_blocking(app, move |state| {
-        state
-            .db
-            .count_entity_facets(&kind, query.as_deref(), filters.as_ref(), scope.as_ref())
-    })
-    .await
-}
-
-/// 絞り込みの選択肢を、名前で探して返す。`limit` の既定は 30。
-///
-/// タグの一覧が長い場合に、ドロワーの中で探すためのもの。
-#[tauri::command]
-pub async fn db_search_filter_facets(
-    app: tauri::AppHandle,
-    kind: String,
-    query: Option<String>,
-    limit: Option<i64>,
-) -> Result<Vec<FacetCount>, String> {
-    run_db_blocking(app, move |state| {
-        state
-            .db
-            .search_filter_facets(&kind, query.as_deref(), limit.unwrap_or(30))
-    })
-    .await
-}
-
-fn validate_path_in_storage(path: &str, storage_dir: &std::path::Path) -> Result<(), String> {
-    let p = std::path::Path::new(path);
-    // 物理絶対パスに解決（..の除去と正規化）
-    let canon_p = p
-        .canonicalize()
-        .map_err(|e| format!("Invalid path or file not found: {}", e))?;
-    let canon_storage = storage_dir
-        .canonicalize()
-        .map_err(|e| format!("Storage path resolution failed: {}", e))?;
-    if !canon_p.starts_with(&canon_storage) {
-        return Err("Access Denied: Path is outside of storage directory".to_string());
-    }
-    Ok(())
-}
-
-/// 保存先の中のファイルを、文字列として読む。
-///
-/// **保存先の外を指していたら `Err`。** 取り込んだ書庫が細工されていても、外の
-/// ファイルを読み出せないようにするための門である。
-#[tauri::command]
-pub async fn read_file_content(app: tauri::AppHandle, path: String) -> Result<String, String> {
-    let state = app.state::<Arc<AppState>>();
-    validate_path_in_storage(&path, state.db.storage_dir())?;
-
-    tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|e| format!("Failed to read file: {}", e))
-}
-
-/// 保存先の中のファイルを、OS の既定のアプリで開く。
-///
-/// **場所と種類の両方を見る。** 保存先の中にあるだけでは通さない - 中身は取得元と
-/// 書庫から来たものなので、piep が実際に作る種類だけを許す。
-///
-/// ファイルが無い、種類が許されていない、保存先の外を指している場合は `Err`。
-#[tauri::command]
-pub async fn open_local_asset(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    let state = app.state::<Arc<AppState>>();
-    validate_path_in_storage(&path, state.db.storage_dir())?;
-
-    let target = std::path::Path::new(&path);
-    if !target.is_file() {
-        return Err("File not found or path is not a file".to_string());
-    }
-    // 保存先の中身は、取得元と書庫から来る。**置いてある場所ではなく種類で断る。**
-    if !super::shell::file_extension_is_openable(target) {
-        return Err("この種類のファイルはアプリから開けません".to_string());
-    }
-
-    app.opener()
-        .open_path(path, None::<&str>)
-        .map_err(|e| format!("Failed to open file: {}", e))
-}
-
-/// 作品ごとの更新監視を切り替える。
-///
-/// これは「これだけを見たい」と絞るための道具である。**改稿に気づくための監視は
-/// 作者・シリーズの単位**で、そちらは `db_upsert_update_target` で設定する。
-#[tauri::command]
-pub async fn db_set_watch_updates(
-    app: tauri::AppHandle,
-    download_id: i64,
-    watch: bool,
-) -> Result<(), String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.set_watch_updates(download_id, watch)
-    })
-    .await
-}
-
-/// お気に入りを切り替える。
-#[tauri::command]
-pub async fn db_set_favorite(
-    app: tauri::AppHandle,
-    download_id: i64,
-    favorite: bool,
-) -> Result<(), String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.set_favorite(download_id, favorite)
-    })
-    .await
-}
-
-/// お気に入りと更新監視を、まとめて切り替える。
-///
-/// 渡さなかったほうは触らない（`None` は「変えない」であって false ではない）。
-/// 返る `matchedCount` は当たった数、`changedCount` は実際に変わった数である。
-#[tauri::command]
-pub async fn db_set_flags_for_ids(
-    app: tauri::AppHandle,
-    ids: Vec<i64>,
-    favorite: Option<bool>,
-    watch: Option<bool>,
-) -> Result<BulkMutationResult, String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.set_flags_for_ids(&ids, favorite, watch)
+        let library = state.library_v2.library()?;
+        library
+            .search_index_status(super::library_health::semantic_enabled())
+            .map_err(|e| e.to_string())
     })
     .await
 }
@@ -1974,39 +688,37 @@ pub async fn db_upsert_update_target(
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<UpdateTarget, String> {
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || {
-            let options = target
-                .metadata_json
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()
-                .map_err(|e| e.to_string())?
-                .unwrap_or_else(|| serde_json::json!({}));
-            super::watching::edit(
-                &library,
-                request_id,
-                expected_generation,
-                crate::library::WatchEdit::Upsert {
-                    target_type: target.target_type.clone(),
-                    provider: target.source.clone(),
-                    key: target.source_key.clone(),
-                    name: target.display_name,
-                    enabled: target.enabled,
-                    options,
-                },
-            )?;
-            super::watching::find(
-                &library,
-                &target.target_type,
-                &target.source,
-                &target.source_key,
-            )?
-            .ok_or("監視対象が見つかりません".into())
-        })
-        .await;
-    }
-    run_library_write_blocking(app, move |state| state.db.upsert_update_target(&target)).await
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || {
+        let options = target
+            .metadata_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or_else(|| serde_json::json!({}));
+        super::watching::edit(
+            &library,
+            request_id,
+            expected_generation,
+            crate::library::WatchEdit::Upsert {
+                target_type: target.target_type.clone(),
+                provider: target.source.clone(),
+                key: target.source_key.clone(),
+                name: target.display_name,
+                enabled: target.enabled,
+                options,
+            },
+        )?;
+        super::watching::find(
+            &library,
+            &target.target_type,
+            &target.source,
+            &target.source_key,
+        )?
+        .ok_or("監視対象が見つかりません".into())
+    })
+    .await
 }
 
 /// 更新監視の設定を一つ引く。監視していなければ `None`。
@@ -2017,16 +729,9 @@ pub async fn db_get_update_target(
     source: String,
     source_key: String,
 ) -> Result<Option<UpdateTarget>, String> {
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || {
-            super::watching::find(&library, &target_type, &source, &source_key)
-        })
-        .await;
-    }
-    run_db_blocking(app, move |state| {
-        state
-            .db
-            .find_update_target(&target_type, &source, &source_key)
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || {
+        super::watching::find(&library, &target_type, &source, &source_key)
     })
     .await
 }
@@ -2041,20 +746,15 @@ pub async fn db_list_update_targets(
     target_type: Option<String>,
     enabled_only: Option<bool>,
 ) -> Result<Vec<UpdateTarget>, String> {
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || {
-            super::watching::targets(
-                &library,
-                target_type.as_deref(),
-                enabled_only.unwrap_or(false),
-            )
-        })
-        .await;
-    }
-    let state = app.state::<Arc<AppState>>();
-    state
-        .db
-        .list_update_targets(target_type.as_deref(), enabled_only.unwrap_or(false))
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || {
+        super::watching::targets(
+            &library,
+            target_type.as_deref(),
+            enabled_only.unwrap_or(false),
+        )
+    })
+    .await
 }
 
 /// 更新監視を止める／再開する。
@@ -2072,35 +772,25 @@ pub async fn db_set_update_target_enabled(
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<(), String> {
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || {
-            let key = target_id
-                .or(
-                    super::watching::find(&library, &target_type, &source, &source_key)?
-                        .map(|v| v.id),
-                )
-                .ok_or("監視対象が見つかりません")?;
-            let id = match key {
-                crate::database::WatchId::Shelf(id) => id,
-                key => super::watching::target_id(&library, key)?,
-            };
-            super::watching::edit(
-                &library,
-                request_id,
-                expected_generation,
-                crate::library::WatchEdit::Enable {
-                    target: id,
-                    enabled,
-                },
-            )
-            .map(|_| ())
-        })
-        .await;
-    }
-    run_library_write_blocking(app, move |state| {
-        state
-            .db
-            .set_update_target_enabled(&target_type, &source, &source_key, enabled)
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || {
+        let key = target_id
+            .or(super::watching::find(&library, &target_type, &source, &source_key)?.map(|v| v.id))
+            .ok_or("監視対象が見つかりません")?;
+        let id = match key {
+            crate::database::WatchId::Shelf(id) => id,
+            key => super::watching::target_id(&library, key)?,
+        };
+        super::watching::edit(
+            &library,
+            request_id,
+            expected_generation,
+            crate::library::WatchEdit::Enable {
+                target: id,
+                enabled,
+            },
+        )
+        .map(|_| ())
     })
     .await
 }
@@ -2118,32 +808,22 @@ pub async fn db_delete_update_target(
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<(), String> {
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || {
-            let key = target_id
-                .or(
-                    super::watching::find(&library, &target_type, &source, &source_key)?
-                        .map(|v| v.id),
-                )
-                .ok_or("監視対象が見つかりません")?;
-            let id = match key {
-                crate::database::WatchId::Shelf(id) => id,
-                key => super::watching::target_id(&library, key)?,
-            };
-            super::watching::edit(
-                &library,
-                request_id,
-                expected_generation,
-                crate::library::WatchEdit::RemoveTarget { target: id },
-            )
-            .map(|_| ())
-        })
-        .await;
-    }
-    run_library_write_blocking(app, move |state| {
-        state
-            .db
-            .delete_update_target(&target_type, &source, &source_key)
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || {
+        let key = target_id
+            .or(super::watching::find(&library, &target_type, &source, &source_key)?.map(|v| v.id))
+            .ok_or("監視対象が見つかりません")?;
+        let id = match key {
+            crate::database::WatchId::Shelf(id) => id,
+            key => super::watching::target_id(&library, key)?,
+        };
+        super::watching::edit(
+            &library,
+            request_id,
+            expected_generation,
+            crate::library::WatchEdit::RemoveTarget { target: id },
+        )
+        .map(|_| ())
     })
     .await
 }
@@ -2153,10 +833,8 @@ pub async fn db_delete_update_target(
 pub async fn db_list_watch_groups(
     app: tauri::AppHandle,
 ) -> Result<Vec<crate::database::WatchGroup>, String> {
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || super::watching::groups(&library)).await;
-    }
-    app.state::<Arc<AppState>>().db.list_watch_groups()
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || super::watching::groups(&library)).await
 }
 
 /// 監視グループを一番下に作り、その ID を返す。同じ名前があれば `Err`。
@@ -2167,20 +845,15 @@ pub async fn db_create_watch_group(
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<crate::database::WatchId, String> {
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || {
-            super::watching::edit(
-                &library,
-                request_id,
-                expected_generation,
-                crate::library::WatchEdit::CreateGroup { name },
-            )
-            .map(|v| crate::database::WatchId::Shelf(v.id))
-        })
-        .await;
-    }
-    run_library_write_blocking(app, move |state| {
-        state.db.create_watch_group(&name).map(Into::into)
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || {
+        super::watching::edit(
+            &library,
+            request_id,
+            expected_generation,
+            crate::library::WatchEdit::CreateGroup { name },
+        )
+        .map(|v| crate::database::WatchId::Shelf(v.id))
     })
     .await
 }
@@ -2194,25 +867,19 @@ pub async fn db_rename_watch_group(
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<(), String> {
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || {
-            let id = match group_id {
-                crate::database::WatchId::Shelf(id) => id,
-                key => super::watching::group_id(&library, key)?,
-            };
-            super::watching::edit(
-                &library,
-                request_id,
-                expected_generation,
-                crate::library::WatchEdit::RenameGroup { group: id, name },
-            )
-            .map(|_| ())
-        })
-        .await;
-    }
-    let group_id = group_id.legacy()?;
-    run_library_write_blocking(app, move |state| {
-        state.db.rename_watch_group(group_id, &name)
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || {
+        let id = match group_id {
+            crate::database::WatchId::Shelf(id) => id,
+            key => super::watching::group_id(&library, key)?,
+        };
+        super::watching::edit(
+            &library,
+            request_id,
+            expected_generation,
+            crate::library::WatchEdit::RenameGroup { group: id, name },
+        )
+        .map(|_| ())
     })
     .await
 }
@@ -2225,24 +892,21 @@ pub async fn db_delete_watch_group(
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<(), String> {
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || {
-            let id = match group_id {
-                crate::database::WatchId::Shelf(id) => id,
-                key => super::watching::group_id(&library, key)?,
-            };
-            super::watching::edit(
-                &library,
-                request_id,
-                expected_generation,
-                crate::library::WatchEdit::RemoveGroup { group: id },
-            )
-            .map(|_| ())
-        })
-        .await;
-    }
-    let group_id = group_id.legacy()?;
-    run_library_write_blocking(app, move |state| state.db.delete_watch_group(group_id)).await
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || {
+        let id = match group_id {
+            crate::database::WatchId::Shelf(id) => id,
+            key => super::watching::group_id(&library, key)?,
+        };
+        super::watching::edit(
+            &library,
+            request_id,
+            expected_generation,
+            crate::library::WatchEdit::RemoveGroup { group: id },
+        )
+        .map(|_| ())
+    })
+    .await
 }
 
 /// 監視対象を監視グループに入れる（`add`）か、外す。変わった件数を返す。
@@ -2255,166 +919,32 @@ pub async fn db_set_watch_group_members(
     request_id: Option<crate::library::LibraryId>,
     expected_generation: Option<i64>,
 ) -> Result<usize, String> {
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || {
-            let group = match group_id {
-                crate::database::WatchId::Shelf(id) => id,
-                key => super::watching::group_id(&library, key)?,
-            };
-            let targets = target_ids
-                .into_iter()
-                .map(|v| match v {
-                    crate::database::WatchId::Shelf(id) => Ok(id),
-                    key => super::watching::target_id(&library, key),
-                })
-                .collect::<Result<_, _>>()?;
-            super::watching::edit(
-                &library,
-                request_id,
-                expected_generation,
-                crate::library::WatchEdit::Members {
-                    group,
-                    targets,
-                    add,
-                },
-            )
-            .map(|v| v.changed)
-        })
-        .await;
-    }
-    let group_id = group_id.legacy()?;
-    let target_ids = target_ids
-        .into_iter()
-        .map(crate::database::WatchId::legacy)
-        .collect::<Result<Vec<_>, _>>()?;
-    run_library_write_blocking(app, move |state| {
-        state.db.set_watch_group_members(group_id, &target_ids, add)
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || {
+        let group = match group_id {
+            crate::database::WatchId::Shelf(id) => id,
+            key => super::watching::group_id(&library, key)?,
+        };
+        let targets = target_ids
+            .into_iter()
+            .map(|v| match v {
+                crate::database::WatchId::Shelf(id) => Ok(id),
+                key => super::watching::target_id(&library, key),
+            })
+            .collect::<Result<_, _>>()?;
+        super::watching::edit(
+            &library,
+            request_id,
+            expected_generation,
+            crate::library::WatchEdit::Members {
+                group,
+                targets,
+                add,
+            },
+        )
+        .map(|v| v.changed)
     })
     .await
-}
-
-/// 作者を一人引く。棚に無ければ `Err`。
-#[tauri::command]
-pub async fn db_get_person(
-    app: tauri::AppHandle,
-    source: String,
-    source_key: String,
-) -> Result<PersonEntry, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_person(&source, &source_key)
-}
-
-/// シリーズを一つ引く。棚に無ければ `Err`。
-#[tauri::command]
-pub async fn db_get_series(
-    app: tauri::AppHandle,
-    source: String,
-    source_key: String,
-) -> Result<SeriesEntry, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_series(&source, &source_key)
-}
-
-/// 作者やシリーズを取得した履歴を、新しい順に返す。
-///
-/// 先頭が最後に取った版である。
-#[tauri::command]
-pub async fn db_list_entity_versions(
-    app: tauri::AppHandle,
-    entity_type: String,
-    source: String,
-    source_key: String,
-) -> Result<Vec<EntityVersion>, String> {
-    let state = app.state::<Arc<AppState>>();
-    state
-        .db
-        .list_entity_versions(&entity_type, &source, &source_key)
-}
-
-/// 作者やシリーズについて、最後に取得した生の JSON を返す。
-///
-/// 一度も取っていない、または記録に本体のパスが無ければ `None`。**画面に出す用
-/// ではなく、取得元が何を返したかを確かめるためのもの**である。
-#[tauri::command]
-pub async fn db_get_latest_entity_profile_json(
-    app: tauri::AppHandle,
-    entity_type: String,
-    source: String,
-    source_key: String,
-) -> Result<Option<serde_json::Value>, String> {
-    let state = app.state::<Arc<AppState>>();
-    let versions = state
-        .db
-        .list_entity_versions(&entity_type, &source, &source_key)?;
-    let Some(version) = versions.first() else {
-        return Ok(None);
-    };
-    if version.json_path.trim().is_empty() {
-        return Ok(None);
-    }
-
-    let app_data = state
-        .db
-        .storage_dir()
-        .parent()
-        .unwrap_or_else(|| state.db.storage_dir())
-        .to_path_buf();
-    let json_path = std::path::Path::new(&version.json_path);
-    let canon_json = json_path
-        .canonicalize()
-        .map_err(|e| format!("Entity profile path resolution failed: {}", e))?;
-    let canon_app_data = app_data
-        .canonicalize()
-        .map_err(|e| format!("App data path resolution failed: {}", e))?;
-    if !canon_json.starts_with(&canon_app_data) {
-        return Err(
-            "Access Denied: Entity profile path is outside of app data directory".to_string(),
-        );
-    }
-
-    let raw = tokio::fs::read_to_string(&canon_json)
-        .await
-        .map_err(|e| format!("Failed to read entity profile JSON: {}", e))?;
-    let value = serde_json::from_str(&raw)
-        .map_err(|e| format!("Failed to parse entity profile JSON: {}", e))?;
-    Ok(Some(value))
-}
-
-fn safe_entity_segment(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| match c {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect::<String>()
-        .trim()
-        .trim_matches('.')
-        .to_string()
-}
-
-fn hash_json(value: &serde_json::Value) -> Result<String, String> {
-    let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect())
-}
-
-fn json_string_at<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
-    let mut cursor = value;
-    for key in path {
-        cursor = cursor.get(*key)?;
-    }
-    cursor.as_str().filter(|s| !s.trim().is_empty())
-}
-
-fn first_json_string_at<'a>(value: &'a serde_json::Value, paths: &[&[&str]]) -> Option<&'a str> {
-    paths.iter().find_map(|path| json_string_at(value, path))
 }
 
 fn collect_profile_links(
@@ -2444,333 +974,6 @@ fn collect_profile_links(
     links
 }
 
-/// シリーズの横顔を組み立てる。
-///
-/// 相手はひとつでも、口はふたつある。
-///
-/// - アプリAPI（`/v2/novel/series`）は各話の一覧を持っている。題はここの
-///   各話が名乗るものがいちばん確かで、話数もここで数えられる。ただし
-///   トークンが要る。
-/// - web（`/ajax/novel/series/{id}`）はシリーズ自身の表紙・公開話数・完結の
-///   有無を持っている。ログインは要らず、R-18 でも読める。
-///
-/// 片方が黙っても、もう片方まで諦めない。トークンが無いときでも、web だけで
-/// 題・説明・表紙は埋まる。
-async fn fetch_pixiv_series_profile_json(
-    source_key: &str,
-    refresh_token: Option<&str>,
-    existing_title: &str,
-    existing_description: Option<&str>,
-) -> Result<Option<serde_json::Value>, String> {
-    if source_key.trim().is_empty() {
-        return Err("Invalid Pixiv series ID".to_string());
-    }
-    // web は認証が要らないので、先に聞く。失敗しても続ける。
-    let web_series = match crate::pixiv_api::web::WebPixivAPI::new() {
-        Ok(api) => match api.novel_series(source_key).await {
-            Ok(series) => Some(series),
-            Err(error) => {
-                log::warn!("pixiv web series {source_key} unavailable: {error}");
-                None
-            }
-        },
-        Err(error) => {
-            log::warn!("pixiv web client unavailable: {error}");
-            None
-        }
-    };
-
-    let value = match refresh_token
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-    {
-        Some(token) => {
-            let series_id: u64 = source_key.parse().map_err(|_| "Invalid Pixiv series ID")?;
-            let api = crate::downloader::session::pixiv(token.to_string())
-                .map_err(|error| error.to_string())?;
-            match api.novel_series(series_id, None, None, true).await {
-                Ok(value) => Some(value),
-                // web から取れているなら、アプリAPIの失敗で全部を捨てない。
-                Err(error) if web_series.is_some() => {
-                    log::warn!("pixiv app-api series {source_key} unavailable: {error}");
-                    None
-                }
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-        None if web_series.is_some() => None,
-        None => return Ok(None),
-    };
-    let value = value.unwrap_or_else(|| serde_json::json!({}));
-
-    let novels = value
-        .get("novels")
-        .and_then(|novels| novels.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let title = novels
-        .iter()
-        .find_map(|novel| {
-            first_json_string_at(
-                novel,
-                &[&["series", "title"], &["seriesTitle"], &["series_title"]],
-            )
-        })
-        .map(str::to_string)
-        .or_else(|| web_series.as_ref().and_then(|series| series.title.clone()))
-        .unwrap_or_else(|| existing_title.to_string());
-    // シリーズ自身の表紙を最優先する。1話目の表紙は、それが取れなかった
-    // ときの間に合わせでしかない。
-    let cover_url = web_series
-        .as_ref()
-        .and_then(|series| series.cover_url.as_deref())
-        .or_else(|| {
-            first_json_string_at(
-                &value,
-                &[
-                    &["novel_series_detail", "cover_image_urls", "large"],
-                    &["novelSeriesDetail", "coverImageUrls", "large"],
-                    &["novel_series_detail", "cover_image_urls", "medium"],
-                    &["novelSeriesDetail", "coverImageUrls", "medium"],
-                    &["novel_series_detail", "cover_url"],
-                    &["novelSeriesDetail", "coverUrl"],
-                ],
-            )
-        })
-        .or_else(|| {
-            novels.iter().find_map(|novel| {
-                first_json_string_at(
-                    novel,
-                    &[
-                        &["image_urls", "large"],
-                        &["imageUrls", "large"],
-                        &["image_urls", "medium"],
-                        &["imageUrls", "medium"],
-                        &["coverUrl"],
-                        &["cover_url"],
-                    ],
-                )
-            })
-        });
-    let description = first_json_string_at(
-        &value,
-        &[
-            &["novel_series_detail", "caption"],
-            &["novelSeriesDetail", "caption"],
-            &["series", "caption"],
-            &["series", "description"],
-        ],
-    )
-    .map(str::to_string)
-    .or_else(|| {
-        web_series
-            .as_ref()
-            .and_then(|series| series.caption.clone())
-    })
-    .or_else(|| existing_description.map(str::to_string));
-
-    Ok(Some(serde_json::json!({
-        "source": "pixiv",
-        "sourceKey": source_key,
-        "title": title,
-        "description": description,
-        "coverUrl": cover_url,
-        "sampleNovelCount": novels.len(),
-        // web だけが知っていること。聞けなかったときは null のままにして、
-        // 手元の値を上書きしない。
-        "isConcluded": web_series.as_ref().and_then(|series| series.is_concluded),
-        "publishedContentCount": web_series
-            .as_ref()
-            .and_then(|series| series.published_content_count),
-    })))
-}
-
-async fn save_entity_json(
-    app_data: &std::path::Path,
-    entity_type: &str,
-    source: &str,
-    source_key: &str,
-    version: i64,
-    value: &serde_json::Value,
-) -> Result<(String, i64), String> {
-    let root = if entity_type == "series" {
-        "series"
-    } else {
-        "profiles"
-    };
-    let dir = app_data
-        .join(root)
-        .join(safe_entity_segment(source))
-        .join(safe_entity_segment(source_key))
-        .join(format!("v{}", version));
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| e.to_string())?;
-    let path = dir.join("original.json");
-    let content = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    let len = content.len() as i64;
-    tokio::fs::write(&path, content)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok((path.to_string_lossy().to_string(), len))
-}
-
-async fn download_entity_image(
-    app_data: &std::path::Path,
-    entity_type: &str,
-    source: &str,
-    source_key: &str,
-    version: i64,
-    kind: &str,
-    url: Option<&str>,
-) -> Result<Option<(String, i64)>, String> {
-    let Some(url) = url else { return Ok(None) };
-    let url = url.trim();
-    if url.is_empty() {
-        return Ok(None);
-    }
-    // 取得先を https に限る。
-    //
-    // この一本だけ、取得元の応答に入っていた URL をそのまま `reqwest` へ
-    // 渡していた。ほかの外向きの要求は例外なく宛先を絞ってある
-    // （`allowed_next_url` / `allowed_api_url`）。ここは資格情報を付けないので
-    // 漏れる情報は無いが、`file:` や `http:` を踏みに行く筋を残す理由も無い。
-    //
-    // ホスト名までは固定しない。表紙とアイコンは取得元の CDN が配るもので、
-    // その名前は向こうの都合で変わる。固定すると、変わった日に**画像が黙って
-    // 出なくなる**。
-    //
-    // 綴りの大小は問わない。scheme は RFC 3986 で大小を区別しないので、
-    // 厳密に小文字だけを通すと、`HTTPS://` を返してきた日に**画像が黙って
-    // 出なくなる**。守りたいのは scheme の種類であって、綴りではない。
-    if !url
-        .get(..8)
-        .is_some_and(|head| head.eq_ignore_ascii_case("https://"))
-    {
-        log::warn!("Entity image skipped, not an https URL: {kind}");
-        return Ok(None);
-    }
-    let root = if entity_type == "series" {
-        "series"
-    } else {
-        "profiles"
-    };
-    let dir = app_data
-        .join(root)
-        .join(safe_entity_segment(source))
-        .join(safe_entity_segment(source_key))
-        .join(format!("v{}", version))
-        .join("assets");
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| e.to_string())?;
-    let filename = url
-        .split('/')
-        .next_back()
-        .and_then(|s| s.split('?').next())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(kind);
-    let path = dir.join(format!("{}_{}", kind, safe_entity_segment(filename)));
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .build()
-        .map_err(|e| format!("Profile image client creation failed: {e}"))?;
-    let response = client
-        .get(url)
-        .header(
-            "referer",
-            if source == "fanbox" {
-                "https://www.fanbox.cc/"
-            } else {
-                "https://www.pixiv.net/"
-            },
-        )
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
-    let len = crate::downloader::asset_downloader::save_response_atomically(
-        response,
-        &path,
-        crate::downloader::asset_downloader::MAX_PROFILE_IMAGE_BYTES,
-        true,
-    )
-    .await? as i64;
-    Ok(Some((path.to_string_lossy().to_string(), len)))
-}
-
-async fn copy_file_atomically_bounded(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-    max_bytes: u64,
-) -> Result<u64, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let parent = destination
-        .parent()
-        .ok_or_else(|| "Import destination has no parent".to_string())?;
-    let filename = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("asset");
-    let (part_path, mut output) = {
-        let mut opened = None;
-        for _ in 0..16 {
-            let path = parent.join(format!(".{filename}.{:016x}.part", rand::random::<u64>()));
-            match tokio::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&path)
-                .await
-            {
-                Ok(file) => {
-                    opened = Some((path, file));
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(format!("Import staging creation failed: {error}")),
-            }
-        }
-        opened.ok_or_else(|| "Could not allocate an import staging file".to_string())?
-    };
-
-    let result = async {
-        let input = tokio::fs::File::open(source)
-            .await
-            .map_err(|error| format!("Import source open failed: {error}"))?;
-        let mut limited = input.take(max_bytes.saturating_add(1));
-        let copied = tokio::io::copy(&mut limited, &mut output)
-            .await
-            .map_err(|error| format!("Import copy failed: {error}"))?;
-        if copied > max_bytes {
-            return Err(format!(
-                "Import source exceeded the {max_bytes} byte safety limit"
-            ));
-        }
-        output
-            .flush()
-            .await
-            .map_err(|error| format!("Import flush failed: {error}"))?;
-        output
-            .sync_all()
-            .await
-            .map_err(|error| format!("Import sync failed: {error}"))?;
-        drop(output);
-        tokio::fs::rename(&part_path, destination)
-            .await
-            .map_err(|error| format!("Import publish failed: {error}"))?;
-        Ok(copied)
-    }
-    .await;
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&part_path).await;
-    }
-    result
-}
-
 /// 作者やシリーズの情報を取得元から取り直す。
 ///
 /// **呼びすぎないよう間隔を空けてある。** 前回から間が空いていなければ待たされる。
@@ -2792,447 +995,8 @@ pub async fn refresh_entity_profile(
     *last_refresh = Some(Instant::now());
 
     let state = app.state::<Arc<AppState>>().inner().clone();
-    if let Some(library) = state.library_v2.switched() {
-        return profile_shelf::refresh(state, library, params).await;
-    }
-    let RefreshEntityProfileParams {
-        entity_type,
-        source,
-        source_key,
-        force,
-        refresh_token,
-        cookie,
-        user_agent,
-    } = params;
-    let force = force.unwrap_or(false);
-    let app_data = state
-        .db
-        .storage_dir()
-        .parent()
-        .unwrap_or_else(|| state.db.storage_dir())
-        .to_path_buf();
-
-    if entity_type == "person" {
-        if !force {
-            if let Ok(person) = state.db.get_person(&source, &source_key) {
-                if recently_checked(person.last_checked_at.as_deref()) {
-                    return serde_json::to_value(person).map_err(|e| e.to_string());
-                }
-            }
-        }
-
-        let normalized = if source == "pixiv" {
-            let token = refresh_token
-                .ok_or("pixivのプロフィールを更新するには、設定でpixivに接続してください")?;
-            let user_id: u64 = source_key.parse().map_err(|_| "Invalid Pixiv user ID")?;
-            let api =
-                crate::downloader::session::pixiv(token).map_err(|error| error.to_string())?;
-            let detail = api
-                .user_detail(user_id, None, true)
-                .await
-                .map_err(|e| e.to_string())?;
-            let links = collect_profile_links(
-                [
-                    format!("https://www.pixiv.net/users/{}", detail.user.id),
-                    detail.profile.webpage.clone().unwrap_or_default(),
-                    detail.profile.twitter_url.clone().unwrap_or_default(),
-                    detail
-                        .profile
-                        .twitter_account
-                        .as_ref()
-                        .map(|account| format!("https://x.com/{}", account.trim_start_matches('@')))
-                        .unwrap_or_default(),
-                    detail.profile.pawoo_url.clone().unwrap_or_default(),
-                ],
-                detail.user.comment.as_deref(),
-            );
-            serde_json::json!({
-                "source": source,
-                "sourceKey": source_key,
-                "displayName": detail.user.name,
-                "account": detail.user.account,
-                "iconUrl": detail.user.profile_image_urls.medium,
-                "coverUrl": detail.profile.background_image_url,
-                "description": detail.user.comment,
-                "links": links,
-                "stats": {
-                    "totalIllusts": detail.profile.total_illusts.unwrap_or(0),
-                    "totalManga": detail.profile.total_manga.unwrap_or(0),
-                    "totalNovels": detail.profile.total_novels.unwrap_or(0),
-                    "totalNovelSeries": detail.profile.total_novel_series.unwrap_or(0)
-                },
-            })
-        } else if source == "fanbox" {
-            let cookie = cookie
-                .ok_or("FANBOXのプロフィールを更新するには、設定でFANBOXに接続してください")?;
-            let user_agent = user_agent.unwrap_or_else(|| "Mozilla/5.0".to_string());
-            let api = crate::downloader::session::fanbox(cookie, user_agent)
-                .map_err(|error| error.to_string())?;
-            let detail = api
-                .get_creator(&source_key)
-                .await
-                .map_err(|e| e.to_string())?;
-            let links = collect_profile_links(
-                std::iter::once(format!("https://www.fanbox.cc/@{}", source_key))
-                    .chain(detail.profile_links.iter().cloned()),
-                Some(&detail.description),
-            );
-            serde_json::json!({
-                "source": source,
-                "sourceKey": source_key,
-                "displayName": detail.user.name,
-                "iconUrl": detail.user.icon_url,
-                "coverUrl": detail.cover_image_url,
-                "description": detail.description,
-                "links": links,
-                "profileItems": detail.profile_items,
-            })
-        } else {
-            return Err("Unsupported person source".to_string());
-        };
-
-        let profile_lock = super::downloader::profile_save_mutex("person", &source, &source_key);
-        let _profile_guard = profile_lock.lock().await;
-        let _library_write_guard = state.library_gate.clone().write_owned().await;
-        let hash = hash_json(&normalized)?;
-        let existing = state.db.get_person(&source, &source_key).ok();
-        let changed =
-            existing.as_ref().and_then(|p| p.content_hash.as_deref()) != Some(hash.as_str());
-        let next_version = existing
-            .as_ref()
-            .map(|p| p.current_version + 1)
-            .unwrap_or(1);
-        let mut pending_version = None;
-        let (json_path, json_size, icon_path, cover_path, asset_size, asset_count) = if changed {
-            let version_dir = app_data
-                .join("profiles")
-                .join(safe_entity_segment(&source))
-                .join(safe_entity_segment(&source_key))
-                .join(format!("v{next_version}"));
-            pending_version = Some(super::downloader::PendingProfileVersion::create(
-                version_dir,
-            )?);
-            let (json_path, json_size) = save_entity_json(
-                &app_data,
-                "person",
-                &source,
-                &source_key,
-                next_version,
-                &normalized,
-            )
-            .await?;
-            let icon = download_entity_image(
-                &app_data,
-                "person",
-                &source,
-                &source_key,
-                next_version,
-                "icon",
-                normalized.get("iconUrl").and_then(|v| v.as_str()),
-            )
-            .await?;
-            let cover = download_entity_image(
-                &app_data,
-                "person",
-                &source,
-                &source_key,
-                next_version,
-                "cover",
-                normalized.get("coverUrl").and_then(|v| v.as_str()),
-            )
-            .await?;
-            let asset_size = icon.as_ref().map(|(_, n)| *n).unwrap_or(0)
-                + cover.as_ref().map(|(_, n)| *n).unwrap_or(0);
-            let asset_count =
-                (if icon.is_some() { 1 } else { 0 }) + (if cover.is_some() { 1 } else { 0 });
-            (
-                json_path,
-                json_size,
-                icon.map(|(p, _)| p),
-                cover.map(|(p, _)| p),
-                asset_size,
-                asset_count,
-            )
-        } else {
-            (
-                String::new(),
-                0,
-                existing.as_ref().and_then(|p| p.icon_path.clone()),
-                existing.as_ref().and_then(|p| p.cover_path.clone()),
-                0,
-                0,
-            )
-        };
-        let links_json = serde_json::to_string(
-            normalized
-                .get("links")
-                .unwrap_or(&serde_json::Value::Array(vec![])),
-        )
-        .ok();
-        let person = state.db.upsert_person_profile(
-            &source,
-            &source_key,
-            normalized
-                .get("displayName")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&source_key),
-            icon_path.as_deref(),
-            cover_path.as_deref(),
-            normalized.get("description").and_then(|v| v.as_str()),
-            links_json.as_deref(),
-            &hash,
-            &json_path,
-            asset_count,
-            json_size + asset_size,
-            EntityProfileFreshness::RemoteChecked,
-        )?;
-        if let Some(pending) = pending_version.as_mut() {
-            pending.commit();
-        }
-        return serde_json::to_value(person).map_err(|e| e.to_string());
-    }
-
-    if entity_type == "series" {
-        let mut existing = state.db.get_series(&source, &source_key).ok();
-        if !force {
-            if let Some(series) = existing.as_ref() {
-                if recently_checked(series.last_checked_at.as_deref()) {
-                    return serde_json::to_value(series).map_err(|e| e.to_string());
-                }
-            }
-        }
-        let title = existing
-            .as_ref()
-            .map(|s| s.title.clone())
-            .unwrap_or_else(|| source_key.clone());
-        let description = existing.as_ref().and_then(|s| s.description.clone());
-        let normalized = if source == "pixiv" {
-            match fetch_pixiv_series_profile_json(
-                &source_key,
-                refresh_token.as_deref(),
-                &title,
-                description.as_deref(),
-            )
-            .await
-            {
-                Ok(Some(value)) => value,
-                // `None` means neither the web endpoint nor the app API yielded
-                // series data. A save-time snapshot is still useful, but it is
-                // not a completed remote refresh and must stay retryable.
-                Ok(None) => {
-                    return Err(format!(
-                        "pixivのシリーズ情報を取得できませんでした ({source_key})"
-                    ))
-                }
-                Err(error) => return Err(error),
-            }
-        } else {
-            serde_json::json!({
-                "source": source,
-                "sourceKey": source_key,
-                "title": title,
-                "description": description,
-                "coverUrl": null,
-            })
-        };
-        let profile_lock = super::downloader::profile_save_mutex("series", &source, &source_key);
-        let _profile_guard = profile_lock.lock().await;
-        let _library_write_guard = state.library_gate.clone().write_owned().await;
-        existing = state.db.get_series(&source, &source_key).ok();
-        let hash = hash_json(&normalized)?;
-        let changed =
-            existing.as_ref().and_then(|s| s.content_hash.as_deref()) != Some(hash.as_str());
-        let next_version = existing
-            .as_ref()
-            .map(|s| s.current_version + 1)
-            .unwrap_or(1);
-        let mut pending_version = None;
-        let (json_path, json_size) = if changed {
-            let version_dir = app_data
-                .join("series")
-                .join(safe_entity_segment(&source))
-                .join(safe_entity_segment(&source_key))
-                .join(format!("v{next_version}"));
-            pending_version = Some(super::downloader::PendingProfileVersion::create(
-                version_dir,
-            )?);
-            save_entity_json(
-                &app_data,
-                "series",
-                &source,
-                &source_key,
-                next_version,
-                &normalized,
-            )
-            .await?
-        } else {
-            (String::new(), 0)
-        };
-        let current_version = existing
-            .as_ref()
-            .map(|s| s.current_version)
-            .unwrap_or(1)
-            .max(1);
-        let asset_version = if changed {
-            next_version
-        } else {
-            current_version
-        };
-        let cover_url = normalized.get("coverUrl").and_then(|v| v.as_str());
-        let should_download_cover = cover_url.filter(|url| !url.trim().is_empty()).is_some()
-            && (changed
-                || existing
-                    .as_ref()
-                    .and_then(|s| s.cover_path.as_ref())
-                    .is_none());
-        let cover = if should_download_cover {
-            match download_entity_image(
-                &app_data,
-                "series",
-                &source,
-                &source_key,
-                asset_version,
-                "cover",
-                cover_url,
-            )
-            .await
-            {
-                Ok(value) => value,
-                Err(error) => {
-                    log::warn!("Failed to download series cover {}: {}", source_key, error);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let mut pending_cover = if changed {
-            None
-        } else {
-            cover
-                .as_ref()
-                .map(|(path, _)| super::downloader::PendingProfileAsset::new(PathBuf::from(path)))
-        };
-        let cover_path = cover
-            .as_ref()
-            .map(|(path, _)| path.clone())
-            .or_else(|| existing.as_ref().and_then(|s| s.cover_path.clone()));
-        let cover_size = cover.as_ref().map(|(_, size)| *size).unwrap_or(0);
-        let series = state.db.upsert_series_profile(
-            &source,
-            &source_key,
-            normalized
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&source_key),
-            normalized.get("description").and_then(|v| v.as_str()),
-            cover_path.as_deref(),
-            &hash,
-            &json_path,
-            if cover.is_some() { 1 } else { 0 },
-            json_size + cover_size,
-            EntityProfileFreshness::RemoteChecked,
-            normalized.get("isConcluded").and_then(|v| v.as_bool()),
-            normalized
-                .get("publishedContentCount")
-                .and_then(|v| v.as_i64()),
-        )?;
-        if let Some(pending) = pending_version.as_mut() {
-            pending.commit();
-        }
-        if let Some(pending) = pending_cover.as_mut() {
-            pending.commit();
-        }
-        return serde_json::to_value(series).map_err(|e| e.to_string());
-    }
-
-    Err("Unsupported entity type".to_string())
-}
-
-/// 取りこぼした FANBOX の添付を数えた結果。
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FanboxRepairScan {
-    /// 取り直しの対象になる作品の id。そのまま更新ジョブへ渡せる。
-    pub work_ids: Vec<i64>,
-    /// 手元に無い添付の総数。
-    pub missing_files: i64,
-    /// そのうち、支援していないと取れない投稿の数。
-    pub restricted_works: i64,
-    /// 走査した FANBOX の行数。
-    pub scanned_works: i64,
-}
-
-/// 原本JSONが求める添付を、実際に持っているかどうかで数える。
-///
-/// 旧プログラムから取り込んだ投稿には、JSONに画像があるのに実ファイルが
-/// 一つも無いものがある。本文も更新日時も同じなので、従来の更新確認では
-/// 素通りしていた。しかも**これらは一件も監視対象になっていない**ので、
-/// 更新ジョブは触りに行かない。数えて、id を渡せる形にして返す。
-///
-/// 読むだけで、棚には何も書かない。
-#[tauri::command]
-pub async fn db_scan_fanbox_asset_gaps(app: tauri::AppHandle) -> Result<FanboxRepairScan, String> {
-    run_db_blocking(app, |state| {
-        let rows = state.db.fanbox_rows_with_json()?;
-        let scanned_works = rows.len() as i64;
-        let mut work_ids = Vec::new();
-        let mut missing_files = 0i64;
-        let mut restricted_works = 0i64;
-
-        for (download_id, json_path) in rows {
-            let Ok(text) = std::fs::read_to_string(&json_path) else {
-                continue;
-            };
-            let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) else {
-                continue;
-            };
-            let assets = state.db.get_assets(download_id)?;
-            if crate::commands::downloader::fanbox_assets_are_complete(&data, &assets) {
-                continue;
-            }
-            let mut targets = Vec::new();
-            crate::downloader::asset_downloader::extract_download_targets(
-                &data,
-                true,
-                &mut targets,
-            );
-            let held = assets
-                .iter()
-                .filter(|asset| {
-                    std::fs::metadata(&asset.local_path)
-                        .map(|meta| meta.is_file() && meta.len() > 0)
-                        .unwrap_or(false)
-                })
-                .filter_map(|asset| asset.original_url.as_deref())
-                .collect::<std::collections::HashSet<_>>();
-            let missing = targets
-                .iter()
-                .filter(|target| !held.contains(target.url.as_str()))
-                .count();
-            if missing == 0 {
-                continue;
-            }
-            missing_files += missing as i64;
-            work_ids.push(download_id);
-            let post = crate::fanbox_api::payload::post_or_self(&data);
-            if post
-                .get("isRestricted")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-            {
-                restricted_works += 1;
-            }
-        }
-
-        Ok(FanboxRepairScan {
-            work_ids,
-            missing_files,
-            restricted_works,
-            scanned_works,
-        })
-    })
-    .await
+    let library = state.library_v2.library()?;
+    profile_shelf::refresh(state, library, params).await
 }
 
 /// 取り直しの進み具合を返す。走っていないときの姿も返る。
@@ -3240,9 +1004,9 @@ pub async fn db_scan_fanbox_asset_gaps(app: tauri::AppHandle) -> Result<FanboxRe
 pub async fn db_get_entity_profile_repair_status(
     app: tauri::AppHandle,
 ) -> Result<EntityProfileRepairView, String> {
-    let status = run_db_blocking(app, |state| match state.library_v2.switched() {
-        Some(library) => library.profile_repair_status().map_err(|e| e.to_string()),
-        None => state.db.entity_profile_repair_status(),
+    let status = run_db_blocking(app, |state| {
+        let library = state.library_v2.library()?;
+        library.profile_repair_status().map_err(|e| e.to_string())
     })
     .await?;
     Ok(EntityProfileRepairView {
@@ -3270,9 +1034,9 @@ pub async fn repair_incomplete_entity_profiles(
     let _run_guard = EntityProfileRepairRunGuard;
     ENTITY_PROFILE_REPAIR_CANCEL.store(false, Ordering::Release);
 
-    let targets = run_db_blocking(app.clone(), |state| match state.library_v2.switched() {
-        Some(library) => library.incomplete_profiles().map_err(|e| e.to_string()),
-        None => state.db.incomplete_entity_profiles(),
+    let targets = run_db_blocking(app.clone(), |state| {
+        let library = state.library_v2.library()?;
+        library.incomplete_profiles().map_err(|e| e.to_string())
     })
     .await?;
     let total = targets.len();
@@ -3371,9 +1135,9 @@ pub async fn repair_incomplete_entity_profiles(
     }
 
     let canceled = ENTITY_PROFILE_REPAIR_CANCEL.load(Ordering::Acquire);
-    let remaining = run_db_blocking(app.clone(), |state| match state.library_v2.switched() {
-        Some(library) => library.profile_repair_status().map_err(|e| e.to_string()),
-        None => state.db.entity_profile_repair_status(),
+    let remaining = run_db_blocking(app.clone(), |state| {
+        let library = state.library_v2.library()?;
+        library.profile_repair_status().map_err(|e| e.to_string())
     })
     .await?
     .total_count;
@@ -3419,346 +1183,9 @@ pub fn cancel_entity_profile_repair() -> bool {
     true
 }
 
-fn recently_checked(value: Option<&str>) -> bool {
-    let Some(value) = value else { return false };
-    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) else {
-        return false;
-    };
-    chrono::Utc::now().signed_duration_since(dt.with_timezone(&chrono::Utc))
-        < chrono::Duration::hours(24)
-}
-
-/// 取得元と向こうの ID から作品を引く。
-///
-/// 保存済みかどうかの判定に使う。無ければ `None` で、これは誤りではない。
-#[tauri::command]
-pub async fn db_get_download_by_source(
-    app: tauri::AppHandle,
-    source: String,
-    source_id: String,
-) -> Result<Option<DownloadEntry>, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_download_by_source(&source, &source_id)
-}
-
-/// リーダーが最初に要るもの（題名、版、頁数、しおりの位置）を返す。
-///
-/// 本文は含まない。本文は `db_get_reader_content_page` で頁ごとに取る。
-#[tauri::command]
-pub async fn db_get_reader_metadata(
-    app: tauri::AppHandle,
-    download_id: i64,
-) -> Result<ReaderMetadata, String> {
-    run_db_blocking(app, move |state| state.db.get_reader_metadata(download_id)).await
-}
-
-/// 本文を一頁分だけ返す。
-///
-/// **丸ごとは読まない。** 長編を一度に渡すと画面が止まるので、頁で切る。
-/// `version` を省くと今使っている版になる。
-///
-/// `includePlainText` を立てると、装飾を落とした文字列も付く。本文内検索に使う
-/// もので、**表示には要らない**（重くなる）。
-#[tauri::command]
-pub async fn db_get_reader_content_page(
-    app: tauri::AppHandle,
-    download_id: i64,
-    version: Option<i64>,
-    page: usize,
-    include_plain_text: Option<bool>,
-) -> Result<ReaderContentPage, String> {
-    let include_plain_text = include_plain_text.unwrap_or(false);
-    run_db_blocking(app, move |state| {
-        state
-            .db
-            .get_reader_content_page(download_id, version, page, include_plain_text)
-    })
-    .await
-}
-
-/// 目次を返す。`version` を省くと今使っている版。
-///
-/// 見出しの無い作品では空が返る。**誤りではない。**
-#[tauri::command]
-pub async fn db_get_reader_outline(
-    app: tauri::AppHandle,
-    download_id: i64,
-    version: Option<i64>,
-) -> Result<Vec<ReaderOutlineEntry>, String> {
-    run_db_blocking(app, move |state| {
-        state.db.get_reader_outline(download_id, version)
-    })
-    .await
-}
-
-/// 本文の中を検索して、見つかった位置を返す。`limit` の既定は 50。
-///
-/// かな・カナ・全角半角の違いを吸収する。**頁をまたいで探す**ので、今開いている
-/// 頁だけを見ているわけではない。
-#[tauri::command]
-pub async fn db_search_reader_content(
-    app: tauri::AppHandle,
-    download_id: i64,
-    version: Option<i64>,
-    query: String,
-    limit: Option<usize>,
-) -> Result<Vec<ReaderSearchHit>, String> {
-    run_db_blocking(app, move |state| {
-        state
-            .db
-            .search_reader_content(download_id, version, &query, limit.unwrap_or(50))
-    })
-    .await
-}
-
-/// 編集画面が使う形で本文を返す。ブロックに割ってある。
-///
-/// 下書きがあれば下書き、無ければ取り込んだままの本文が返る。
-#[tauri::command]
-pub async fn db_get_editor_document(
-    app: tauri::AppHandle,
-    download_id: i64,
-) -> Result<EditorDocument, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_editor_document(download_id)
-}
-
-/// 編集中の本文を下書きとして保存し、その版を返す。
-///
-/// `baseVersion` は**どの版を元に編集したか**である。その間に元が変わっていれば
-/// 弾かれるので、保存のたびに返り値の版を持ち直すこと。
-///
-/// 取り込んだままの本文は変わらない。
-#[tauri::command]
-pub async fn db_save_work_draft(
-    app: tauri::AppHandle,
-    download_id: i64,
-    base_version: i64,
-    title: Option<String>,
-    blocks: Vec<WorkBlockInput>,
-) -> Result<WorkEditRevision, String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.save_work_draft(
-            download_id,
-            base_version,
-            title.as_deref(),
-            blocks.as_slice(),
-        )
-    })
-    .await
-}
-
-/// 編集中の下書きを捨てる。
-///
-/// **取り込んだ本文は元から変わっていない。** 捨てるのは下書きだけである。
-#[tauri::command]
-pub async fn db_discard_work_draft(app: tauri::AppHandle, download_id: i64) -> Result<(), String> {
-    run_library_write_blocking(app, move |state| state.db.discard_work_draft(download_id)).await
-}
-
-/// 編集した版を、読む・書き出すときの本文として使うようにする。
-///
-/// **取り込んだ本文は残る。** いつでも `db_deactivate_work_edit` で戻せる。
-#[tauri::command]
-pub async fn db_activate_work_edit(
-    app: tauri::AppHandle,
-    edit_revision_id: i64,
-) -> Result<WorkEditRevision, String> {
-    let revision = run_library_write_blocking(app.clone(), move |state| {
-        state.db.activate_work_edit(edit_revision_id)
-    })
-    .await?;
-    reaudit_edited_work(&app, revision.download_id).await;
-    Ok(revision)
-}
-
-/// 編集が保存版の欠けた挿絵を埋めたかどうかで、要確認に残すかが決まる。
-/// だから反映・取り消しのたびに、その場で見直す。
-async fn reaudit_edited_work(app: &tauri::AppHandle, download_id: i64) {
-    match run_library_write_blocking(app.clone(), move |state| {
-        state.db.audit_saved_pixiv_work(download_id)
-    })
-    .await
-    {
-        Ok(ids) if !ids.is_empty() => {
-            let _ = app.emit("acquisition-audited", ids);
-        }
-        Ok(_) => {}
-        Err(error) => log::warn!("編集した作品の取得状態を見直せません: {error}"),
-    }
-}
-
-/// 以前の編集版を消す。`edit_revision_id` を省くと、その作品の以前の版をすべて消す。
-///
-/// いま反映している版・下書き・取り込んだ本文は残る。消した版は戻せない。
-#[tauri::command]
-pub async fn db_delete_archived_work_edits(
-    app: tauri::AppHandle,
-    download_id: i64,
-    edit_revision_id: Option<i64>,
-) -> Result<usize, String> {
-    run_library_write_blocking(app, move |state| {
-        state
-            .db
-            .delete_archived_work_edits(download_id, edit_revision_id)
-    })
-    .await
-}
-
-/// 編集した版を使うのをやめ、取り込んだままの本文へ戻す。
-///
-/// **編集は消えない。** また `db_activate_work_edit` で戻せる。
-#[tauri::command]
-pub async fn db_deactivate_work_edit(
-    app: tauri::AppHandle,
-    download_id: i64,
-) -> Result<(), String> {
-    run_library_write_blocking(app.clone(), move |state| {
-        state.db.deactivate_work_edit(download_id)
-    })
-    .await?;
-    reaudit_edited_work(&app, download_id).await;
-    Ok(())
-}
-
-/// 手元の画像を、作品の資産として取り込む。
-///
-/// リンクや、ファイルでないものは `Err`。取得したものと同じ**大きさの上限**が
-/// 掛かる。
-///
-/// 取り込んだファイルは管理下へ複製されるので、元を消しても残る。
-#[tauri::command]
-pub async fn import_work_asset(
-    app: tauri::AppHandle,
-    download_id: i64,
-    source_path: String,
-) -> Result<AssetEntry, String> {
-    let source = std::path::PathBuf::from(&source_path);
-    let source_metadata = tokio::fs::symlink_metadata(&source)
-        .await
-        .map_err(|error| format!("Failed to inspect import source: {error}"))?;
-    if source_metadata.file_type().is_symlink() || !source_metadata.file_type().is_file() {
-        return Err("Import source is not a file".to_string());
-    }
-    if source_metadata.len() > crate::downloader::asset_downloader::MAX_ASSET_DOWNLOAD_BYTES {
-        return Err(format!(
-            "Import source exceeds the {} byte safety limit",
-            crate::downloader::asset_downloader::MAX_ASSET_DOWNLOAD_BYTES
-        ));
-    }
-
-    let state = app.state::<Arc<AppState>>().inner().clone();
-    let _library_write_guard = state.library_gate.clone().write_owned().await;
-
-    state.db.get_download(download_id)?;
-
-    let original_name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("asset");
-    let filename = crate::downloader::asset_downloader::sanitize_filename(original_name);
-    let target_dir = state
-        .db
-        .storage_dir()
-        .join("editor-assets")
-        .join(download_id.to_string());
-    tokio::fs::create_dir_all(&target_dir)
-        .await
-        .map_err(|e| format!("Failed to create editor asset directory: {}", e))?;
-    let canonical_storage = tokio::fs::canonicalize(state.db.storage_dir())
-        .await
-        .map_err(|error| format!("Failed to resolve library storage: {error}"))?;
-    let canonical_target_dir = tokio::fs::canonicalize(&target_dir)
-        .await
-        .map_err(|error| format!("Failed to resolve editor asset directory: {error}"))?;
-    if !canonical_target_dir.starts_with(&canonical_storage) {
-        return Err("Editor asset directory escapes library storage".to_string());
-    }
-
-    let mut target_path = target_dir.join(&filename);
-    if target_path.exists() {
-        let stem = target_path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .unwrap_or("asset");
-        let ext = target_path
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|value| format!(".{}", value))
-            .unwrap_or_default();
-        target_path = target_dir.join(format!(
-            "{}-{}{}",
-            stem,
-            chrono::Utc::now().timestamp_millis(),
-            ext
-        ));
-    }
-
-    let copied = copy_file_atomically_bounded(
-        &source,
-        &target_path,
-        crate::downloader::asset_downloader::MAX_ASSET_DOWNLOAD_BYTES,
-    )
-    .await?;
-    let mime_type = target_path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|ext| match ext.to_ascii_lowercase().as_str() {
-            "jpg" | "jpeg" => "image/jpeg",
-            "png" => "image/png",
-            "webp" => "image/webp",
-            "gif" => "image/gif",
-            _ => "application/octet-stream",
-        })
-        .map(str::to_string);
-
-    let local_path = target_path.to_string_lossy().to_string();
-    let asset = NewAsset {
-        download_id,
-        asset_type: crate::database::queries::EDITOR_IMAGE_ASSET_TYPE.to_string(),
-        filename: target_path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or(&filename)
-            .to_string(),
-        local_path: local_path.clone(),
-        original_url: None,
-        mime_type: mime_type.clone(),
-        file_size_bytes: copied as i64,
-    };
-    let id = match state.db.insert_asset(&asset) {
-        Ok(id) => id,
-        Err(error) => {
-            if let Err(cleanup_error) = tokio::fs::remove_file(&target_path).await {
-                log::warn!(
-                    "Failed to roll back imported asset {:?}: {}",
-                    target_path,
-                    cleanup_error
-                );
-            }
-            return Err(error);
-        }
-    };
-
-    Ok(AssetEntry {
-        id,
-        download_id,
-        asset_type: asset.asset_type,
-        filename: asset.filename,
-        local_path,
-        original_url: None,
-        mime_type,
-        file_size_bytes: asset.file_size_bytes,
-    })
-}
-
 #[cfg(test)]
 mod profile_link_tests {
-    use super::{
-        collect_profile_links, copy_file_atomically_bounded, import_collection_cover,
-        validate_path_in_storage, MAX_COLLECTION_COVER_BYTES,
-    };
-    use std::fs;
+    use super::collect_profile_links;
 
     #[test]
     fn profile_links_are_deduplicated_and_extracted_from_text() {
@@ -3779,84 +1206,6 @@ mod profile_link_tests {
                 "https://example.com/work",
             ]
         );
-    }
-
-    #[test]
-    fn collection_cover_is_validated_and_copied_into_app_data() {
-        let root = std::env::temp_dir().join(format!(
-            "piep_collection_cover_test_{}",
-            rand::random::<u64>()
-        ));
-        let app_data = root.join("app-data");
-        fs::create_dir_all(&root).unwrap();
-        let source = root.join("chosen.png");
-        image::RgbImage::from_pixel(2, 2, image::Rgb([20, 40, 60]))
-            .save(&source)
-            .unwrap();
-
-        let imported = import_collection_cover(&app_data, &source).unwrap();
-        assert!(imported.starts_with(app_data.join("collection-covers")));
-        assert_eq!(fs::read(&imported).unwrap(), fs::read(&source).unwrap());
-        assert_eq!(
-            import_collection_cover(&app_data, &source).unwrap(),
-            imported
-        );
-
-        let invalid = root.join("not-an-image.png");
-        fs::write(&invalid, b"not an image").unwrap();
-        assert!(import_collection_cover(&app_data, &invalid).is_err());
-
-        let oversized = root.join("oversized.png");
-        let file = fs::File::create(&oversized).unwrap();
-        file.set_len(MAX_COLLECTION_COVER_BYTES + 1).unwrap();
-        assert!(import_collection_cover(&app_data, &oversized).is_err());
-        fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn bounded_atomic_import_never_publishes_oversize_or_partial_files() {
-        let root =
-            std::env::temp_dir().join(format!("piep_editor_asset_test_{}", rand::random::<u64>()));
-        fs::create_dir_all(&root).unwrap();
-        let source = root.join("source.bin");
-        let destination = root.join("destination.bin");
-        fs::write(&source, b"12345").unwrap();
-
-        let error = copy_file_atomically_bounded(&source, &destination, 4)
-            .await
-            .unwrap_err();
-        assert!(error.contains("4 byte"));
-        assert!(!destination.exists());
-        assert!(fs::read_dir(&root).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .ends_with(".part")));
-
-        assert_eq!(
-            copy_file_atomically_bounded(&source, &destination, 5)
-                .await
-                .unwrap(),
-            5
-        );
-        assert_eq!(fs::read(&destination).unwrap(), b"12345");
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn file_commands_cannot_read_sibling_app_data_files() {
-        let root = std::env::temp_dir().join(format!("piep_path_scope_{}", rand::random::<u64>()));
-        let storage = root.join("downloads");
-        let allowed = storage.join("pixiv").join("work.json");
-        let sibling = root.join("piep.db");
-        fs::create_dir_all(allowed.parent().unwrap()).unwrap();
-        fs::write(&allowed, "{}").unwrap();
-        fs::write(&sibling, "secret").unwrap();
-
-        assert!(validate_path_in_storage(allowed.to_str().unwrap(), &storage).is_ok());
-        assert!(validate_path_in_storage(sibling.to_str().unwrap(), &storage).is_err());
-
-        let _ = fs::remove_dir_all(root);
     }
 }
 
@@ -3887,41 +1236,4 @@ mod entity_image_url_tests {
         // 短すぎて scheme が入りきらない文字列で落ちない。
         assert!(!allowed("http"));
     }
-}
-
-/// 選んだ保存版の本文・作品情報・アセットを比較用に読む。通信や保存は行わない。
-#[tauri::command]
-pub async fn get_revision_snapshot(
-    app: tauri::AppHandle,
-    download_id: i64,
-    version: i64,
-) -> Result<crate::database::queries::RevisionSnapshot, String> {
-    run_db_blocking(app, move |state| {
-        state.db.get_revision_snapshot(download_id, version)
-    })
-    .await
-}
-
-/// 反映中の編集を、もとにした保存版と比べられる形で読む。編集が無ければ `None`。
-#[tauri::command]
-pub async fn get_active_edit_snapshot(
-    app: tauri::AppHandle,
-    download_id: i64,
-) -> Result<Option<crate::database::queries::RevisionSnapshot>, String> {
-    run_db_blocking(app, move |state| {
-        state.db.get_active_edit_snapshot(download_id)
-    })
-    .await
-}
-
-/// 要確認の理由と、取得できなかった挿絵の本文上の位置を読む。
-#[tauri::command]
-pub async fn get_work_acquisition_details(
-    app: tauri::AppHandle,
-    download_id: i64,
-) -> Result<Option<crate::database::queries::WorkAcquisitionDetails>, String> {
-    run_db_blocking(app, move |state| {
-        state.db.get_work_acquisition_details(download_id)
-    })
-    .await
 }

@@ -51,7 +51,7 @@ npm --prefix docs-tools run docs:build
 |---|---|---|
 | [IPC コマンド契約](../reference/ipc.md) | `#[tauri::command]` と `invoke()` | 自作の抽出器 |
 | [イベント契約](../reference/events.md) | `emit()` と `subscribeTauriEvent()` | 同上 |
-| [スキーマ](../reference/schema.md) | `schema.rs` の `CREATE TABLE` | 同上 |
+| [スキーマ](../reference/schema.md) | `library/schema.rs` が並べた SQL を当てた結果 | 同上 |
 | Rust API | `src-tauri/src/` の `///` `//!` | `cargo doc` |
 
 **LLM は使っていない。** すべて構文解析による決定論的な変換である。だから
@@ -71,7 +71,7 @@ npm --prefix docs-tools run docs:build
 だから数の置き場を一つにする。文の中では次のように書く。
 
 ```markdown
-コマンドは <!--stat:commands.total-->276<!--/stat--> 個ある
+コマンドは <!--stat:commands.total-->191<!--/stat--> 個ある
 ```
 
 HTML コメントは GitHub でも VitePress でも描画されないので、読む人には数字しか
@@ -176,8 +176,8 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 
 | | 残り |
 |---|---:|
-| Rust の `///` `//!` | <!--stat:comments.rust.english-->695<!--/stat--> 行 |
-| TS の JSDoc | <!--stat:comments.ts.english-->459<!--/stat--> 行 |
+| Rust の `///` `//!` | <!--stat:comments.rust.english-->635<!--/stat--> 行 |
+| TS の JSDoc | <!--stat:comments.ts.english-->437<!--/stat--> 行 |
 
 この数は日本語の文字を含まない説明コメントの行数で、目安である（URL だけの行や
 `# Errors` のような見出しも混ざる）。厳密ではないが、**手で書いた見積もりが古く
@@ -208,9 +208,9 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 
 | | |
 |---|---:|
-| コマンド | <!--stat:commands.total-->276<!--/stat--> |
-| `///` があるもの | <!--stat:commands.documented-->276<!--/stat--> |
-| 節の前書き（`//!`）があるモジュール | <!--stat:modules.documented-->35<!--/stat--> / <!--stat:modules.total-->42<!--/stat--> |
+| コマンド | <!--stat:commands.total-->191<!--/stat--> |
+| `///` があるもの | <!--stat:commands.documented-->191<!--/stat--> |
+| 節の前書き（`//!`）があるモジュール | <!--stat:modules.documented-->31<!--/stat--> / <!--stat:modules.total-->38<!--/stat--> |
 
 **全部埋まっている。** ラチェット検査（[品質](09-quality.md#境界のドリフト検査)）は
 この数字を守るので、`///` の無いコマンドを足すと CI が落ちる。数を戻すのではなく、

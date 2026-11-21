@@ -1,10 +1,9 @@
-//! サーバーが本棚を借りる先。
+//! サーバーが旧 API で配る本棚。
 //!
-//! 内蔵サーバーはデスクトップ版が開いている本棚を借りる。単独サーバーは自分で
-//! 開き、送信の確定のときに世代を入れ替える。
+//! 単独サーバーは送られた本棚を自分で開き、送信の確定のときに世代を入れ替える。
+//! 内蔵サーバーには旧 API で配る本棚が無い（デスクトップ版は旧棚を持たない）。
 
 use crate::database::Database;
-use crate::AppState;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -13,35 +12,28 @@ use std::time::{Duration, Instant};
 /// 入れ替えのとき、読んでいる途中の要求が終わるのを待つ長さ。
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub enum DbLease {
-    App(Arc<AppState>),
-    Direct(Arc<Database>),
-}
+pub struct DbLease(Arc<Database>);
 
 impl Deref for DbLease {
     type Target = Database;
 
     fn deref(&self) -> &Database {
-        match self {
-            Self::App(state) => &state.db,
-            Self::Direct(db) => db,
-        }
+        &self.0
     }
 }
 
 #[derive(Clone)]
-pub enum Library {
-    App(Arc<AppState>),
-    Swappable(Arc<SwappableDb>),
-}
+pub struct Library(pub Arc<SwappableDb>);
 
 impl Library {
+    /// 旧 API で配る本棚を持たない。内蔵サーバーはこれで、旧 API には「準備中」と答える。
+    pub fn none() -> Self {
+        Self(Arc::new(SwappableDb::new(PathBuf::new(), PathBuf::new())))
+    }
+
     /// 本棚がまだ無い、または入れ替えの途中なら `None`。
     pub fn lease(&self) -> Option<DbLease> {
-        match self {
-            Self::App(state) => Some(DbLease::App(Arc::clone(state))),
-            Self::Swappable(slot) => slot.current().map(DbLease::Direct),
-        }
+        self.0.current().map(DbLease)
     }
 }
 
@@ -63,6 +55,16 @@ impl SwappableDb {
 
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// 開いてある本棚をそのまま持たせる（試験で、作った本棚を配るとき）。
+    #[cfg(test)]
+    pub fn holding(db_path: PathBuf, storage_dir: PathBuf, db: Arc<Database>) -> Self {
+        Self {
+            slot: RwLock::new(Some(db)),
+            db_path,
+            storage_dir,
+        }
     }
 
     pub fn current(&self) -> Option<Arc<Database>> {

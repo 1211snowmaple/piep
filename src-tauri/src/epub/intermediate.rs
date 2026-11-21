@@ -274,22 +274,8 @@ pub struct ExportBatchResult {
     pub skipped_ids: Vec<EpubWork>,
 }
 
-/// 書き出す作品。旧棚は番号、新しい棚は作品の ID（文字列）。JSON ではそのまま数か文字列。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum EpubWork {
-    Legacy(i64),
-    Shelf(crate::library::LibraryId),
-}
-
-impl std::fmt::Display for EpubWork {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Legacy(id) => write!(f, "{id}"),
-            Self::Shelf(id) => write!(f, "{id}"),
-        }
-    }
-}
+/// 書き出す作品。棚の作品の ID（JSON では文字列）。
+pub type EpubWork = crate::library::LibraryId;
 
 /// テンプレート情報
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -40,40 +40,26 @@ import { useWorkspace } from "@/app/WorkspaceContext";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ExpandableText } from "@/components/ExpandableText";
 import { WorkCover } from "@/components/WorkCover";
-import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { BoundedJsonView } from "@/components/BoundedJsonView";
-import { WorkAcquisitionCard } from "./WorkAcquisitionCard";
 import { EditStatusStrip } from "./EditStatusStrip";
-import { getActiveEditSnapshot, getRevisionSnapshot, type MissingImageLocation, type RevisionSnapshot } from "@/services/workInspectionApi";
+import type { MissingImageLocation, RevisionSnapshot } from "@/services/workInspectionApi";
 import { RevisionDiff } from "@/components/RevisionDiff";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
 import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatFreshness, formatNumber } from "@/lib/format";
 import { hasSourceRevision } from "@/lib/workFreshness";
-import { listPendingRevisionsCommand, previewPendingRevisionCommand } from "@/services/updateJobApi";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
 import { WorkAssist } from "@/features/assist/WorkAssist";
-import { addWorkCollectionMembers, listCollectionsForWork, listWorkCollections } from "@/services/collectionApi";
+import type { WorkCollectionSummary } from "@/types/collections";
 import {
-  activateWorkEdit,
-  deactivateWorkEdit,
-  deleteArchivedWorkEdits,
-  deleteDownload,
   getAssetUrl,
-  getAssets,
-  getReaderContentPage,
-  getReaderMetadata,
   isTauriRuntime,
-  openLocalAsset,
-  readFileContent,
-  setFavorite,
-  setWatchUpdates,
 } from "@/services/dbApi";
-import { openExternalUrl, revealPathInFileManager } from "@/services/openerApi";
 import { getDemoReader } from "@/mocks/demoData";
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import type { ReaderMetadata } from "@/types/library";
+import type { PendingRevision } from "@/services/updateJobApi";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import { ShelfWorkPage } from "@/features/library/ShelfWorkPage";
 import { SHELF_WORK_ID } from "@/services/libraryV2Api";
@@ -99,13 +85,16 @@ function locationsFor(client: object) {
 
 export default function WorkPage() {
   const { workId } = useRouteParams("/works/:workId");
-  // 新しい棚の一覧（試験中）から来た作品は、新しい棚の ID（UUID）で指される。旧棚の作品の
-  // 画面とは読む先も操作も違うので、別の画面にする。
+  // 作品は棚の ID（UUID）で指す。番号で指すのはプレビューの見本だけ。
   if (SHELF_WORK_ID.test(workId ?? "")) return <ShelfWorkPage key={workId} workId={workId!.toLowerCase()} />;
-  return <LegacyWorkPage />;
+  if (isTauriRuntime()) return <div className="page"><ErrorState error="作品が見つかりません" /></div>;
+  return <PreviewWorkPage />;
 }
 
-function LegacyWorkPage() {
+const PREVIEW_ONLY = "プレビューでは変更できません";
+
+/** プレビューの見本の作品の画面。棚には触らない（見本は番号で指す）。 */
+function PreviewWorkPage() {
   const navigate = useAppNavigate();
   const returnTo = useReturnTo();
   // Links inside a caption or the body often name something already in the
@@ -114,7 +103,6 @@ function LegacyWorkPage() {
   const { workId } = useRouteParams("/works/:workId");
   const id = Number(workId);
   const validId = Number.isSafeInteger(id) && id > 0;
-  const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
   const { historyIndex, navigationType } = useAppRouter();
   const locations = locationsFor(queryClient);
@@ -166,11 +154,10 @@ function LegacyWorkPage() {
   const [visibleAssetCount, setVisibleAssetCount] = useState(80);
   const [assetVersion, setAssetVersion] = useState<number | null>(null);
   useEffect(() => { setAssetVersion(null); setVisibleAssetCount(80); }, [id]);
-  const [pdfOriginal, setPdfOriginal] = useState<PdfOriginalTarget | null>(null);
   useEffect(() => setVisibleAssetCount(80), [id]);
   const documentQuery = useQuery({
     queryKey: ["reader-metadata", id],
-    queryFn: () => runtime ? getReaderMetadata(id) : Promise.resolve((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision, draftEditRevision: null }; })()),
+    queryFn: () => Promise.resolve<ReaderMetadata>((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision, draftEditRevision: null }; })()),
     enabled: validId,
   });
   const historyVersions = useMemo(
@@ -186,20 +173,16 @@ function LegacyWorkPage() {
   useEffect(() => setSelectedVersion(null), [id]);
   const allCollectionsQuery = useQuery({
     queryKey: ["work-collections"],
-    queryFn: () => runtime ? listWorkCollections() : Promise.resolve([]),
+    queryFn: () => Promise.resolve<WorkCollectionSummary[]>([]),
     enabled: validId,
   });
   const workCollectionsQuery = useQuery({
     queryKey: ["collections-for-work", documentQuery.data?.download.source, documentQuery.data?.download.sourceId],
-    queryFn: () => listCollectionsForWork(documentQuery.data!.download.source, documentQuery.data!.download.sourceId),
-    enabled: runtime && Boolean(documentQuery.data),
+    queryFn: () => Promise.resolve<WorkCollectionSummary[]>([]),
+    enabled: Boolean(documentQuery.data),
   });
   const addToCollectionMutation = useMutation({
-    mutationFn: (collectionId: string) => addWorkCollectionMembers(collectionId, [{
-      source: documentQuery.data!.download.source,
-      sourceId: documentQuery.data!.download.sourceId,
-      addedBy: "manual",
-    }]),
+    mutationFn: (_collectionId: string) => Promise.reject(new Error(PREVIEW_ONLY)),
     onSuccess: (_value, collectionId) => {
       queryClient.invalidateQueries({ queryKey: ["work-collections"] });
       queryClient.invalidateQueries({ queryKey: ["collections-for-work"] });
@@ -212,7 +195,7 @@ function LegacyWorkPage() {
   // 作品の行には入っていない。画面側で一度だけ引いて突き合わせる。
   const pendingRevisions = useQuery({
     queryKey: ["pending-revisions"],
-    queryFn: () => runtime ? listPendingRevisionsCommand() : Promise.resolve([]),
+    queryFn: () => Promise.resolve<PendingRevision[]>([]),
     // 無効化は更新確認の側から届く（invalidateAfterUpdateJob）。
     // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
     staleTime: 30_000,
@@ -235,18 +218,18 @@ function LegacyWorkPage() {
   // 足した絵は件数にも入らない、という見え方になっていた。
   const editSnapshot = useQuery({
     queryKey: ["active-edit-snapshot", id, documentQuery.data?.activeEditRevision?.id],
-    queryFn: () => getActiveEditSnapshot(id),
-    enabled: runtime && validId && Boolean(documentQuery.data?.activeEditRevision),
+    queryFn: () => Promise.resolve<RevisionSnapshot | null>(null),
+    enabled: false,
   });
   const addedImages = editSnapshot.data?.addedImages ?? [];
   const assetsQuery = useQuery({
     queryKey: ["work-assets", id, assetVersion ?? documentQuery.data?.download.currentVersion],
-    queryFn: () => runtime ? getAssets(id, assetVersion ?? documentQuery.data!.download.currentVersion) : Promise.resolve(getDemoReader(id).assets),
+    queryFn: () => Promise.resolve(getDemoReader(id).assets),
     enabled: validId && tab === "assets" && Boolean(documentQuery.data),
   });
   const contentQuery = useQuery({
     queryKey: ["reader-content-page", id, contentSourceVersion, contentPage - 1],
-    queryFn: () => runtime ? getReaderContentPage(id, contentSourceVersion, contentPage - 1) : Promise.resolve((() => { const demo = getDemoReader(id); return { page: 0, pageCount: 1, html: demo.html, plainText: demo.plainText, totalPlainTextChars: demo.plainText.length }; })()),
+    queryFn: () => Promise.resolve((() => { const demo = getDemoReader(id); return { page: 0, pageCount: 1, html: demo.html, plainText: demo.plainText, totalPlainTextChars: demo.plainText.length }; })()),
     enabled: validId && tab === "content",
     placeholderData: (previous) => previous,
   });
@@ -260,7 +243,7 @@ function LegacyWorkPage() {
   }, [contentPage, contentSourceVersion, contentQuery.data?.page, id, queryClient]);
   const rawJson = useQuery({
     queryKey: ["work-json", id, documentQuery.data?.download.jsonPath],
-    queryFn: () => runtime && documentQuery.data ? readFileContent(documentQuery.data.download.jsonPath) : Promise.resolve(JSON.stringify(documentQuery.data?.download ?? {}, null, 2)),
+    queryFn: () => Promise.resolve(JSON.stringify(documentQuery.data?.download ?? {}, null, 2)),
     enabled: tab === "json" && Boolean(documentQuery.data),
   });
   // 表紙はカードの頭ではなく、保存元・種類の印から始まる。操作列の高さや
@@ -308,21 +291,19 @@ function LegacyWorkPage() {
     queryKey: ["reader-version-text", id, selectedVersion],
     queryFn: () => typeof selectedVersion !== "number"
       ? Promise.resolve<RevisionSnapshot>({ text: "" })
-      : runtime ? getRevisionSnapshot(id, selectedVersion) : Promise.resolve<RevisionSnapshot>({ text: getDemoReader(id).plainText }),
+      : Promise.resolve<RevisionSnapshot>({ text: getDemoReader(id).plainText }),
     enabled: validId && tab === "history" && typeof selectedVersion === "number",
   });
   const comparisonVersionText = useQuery({
     queryKey: ["reader-version-text", id, comparisonVersion],
     queryFn: () => comparisonVersion === null
       ? Promise.resolve<RevisionSnapshot>({ text: "" })
-      : runtime ? getRevisionSnapshot(id, comparisonVersion) : Promise.resolve<RevisionSnapshot>({ text: getDemoReader(id).plainText }),
+      : Promise.resolve<RevisionSnapshot>({ text: getDemoReader(id).plainText }),
     enabled: validId && tab === "history" && comparisonVersion !== null,
   });
   const pendingRevisionPreview = useQuery({
     queryKey: ["pending-revision-preview", id],
-    queryFn: () => runtime
-      ? previewPendingRevisionCommand(String(id))
-      : Promise.resolve<import("@/services/updateJobApi").PendingRevisionPreview>({ work: String(id), baseVersion: documentQuery.data?.download.currentVersion ?? 1, text: getDemoReader(id).plainText, textLength: getDemoReader(id).plainText.length }),
+    queryFn: () => Promise.resolve<import("@/services/updateJobApi").PendingRevisionPreview>({ work: String(id), baseVersion: documentQuery.data?.download.currentVersion ?? 1, text: getDemoReader(id).plainText, textLength: getDemoReader(id).plainText.length }),
     enabled: validId && tab === "history" && selectedVersion === "pending" && Boolean(pendingRevision),
     staleTime: 0,
   });
@@ -330,7 +311,7 @@ function LegacyWorkPage() {
   // 消えない ―― これが無かったころは、一度反映すると元の本文へ戻る道が
   // どこにも無かった。
   const revertEdit = useMutation({
-    mutationFn: () => runtime ? deactivateWorkEdit(id) : Promise.resolve(),
+    mutationFn: () => Promise.reject(new Error(PREVIEW_ONLY)),
     onSuccess: () => {
       notifications.show({ color: "green", title: "取り込んだ本文に戻しました", message: "編集した版は履歴に残っています" });
       queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
@@ -345,7 +326,7 @@ function LegacyWorkPage() {
   // 下ろした編集版をもう一度使う。「戻しても選び直せる」と書いてあったのに、
   // 選び直す口がどこにも無かった。
   const reapplyEdit = useMutation({
-    mutationFn: (revisionId: number) => runtime ? activateWorkEdit(revisionId) : Promise.resolve(null),
+    mutationFn: (_revisionId: number) => Promise.reject(new Error(PREVIEW_ONLY)),
     onSuccess: () => {
       notifications.show({ color: "green", title: "編集版を反映しました", message: "読書画面とEPUBに、この編集版が使われます" });
       for (const key of [["reader-metadata", id], ["reader-content-page", id], ["reader-content-search", id], ["editor-document", id], ["library"], ["entity-works"]]) queryClient.invalidateQueries({ queryKey: key });
@@ -354,7 +335,7 @@ function LegacyWorkPage() {
   });
   // 反映するたびに以前の版が積もるので、要らなくなったものを消せるようにする。
   const deleteEdits = useMutation({
-    mutationFn: (revisionId: number | null) => runtime ? deleteArchivedWorkEdits(id, revisionId ?? undefined) : Promise.resolve(0),
+    mutationFn: (_revisionId: number | null) => Promise.reject<number>(new Error(PREVIEW_ONLY)),
     onSuccess: (count) => {
       notifications.show({ color: "green", message: `以前の編集版を${formatNumber(count)}件消しました` });
       queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
@@ -370,9 +351,8 @@ function LegacyWorkPage() {
   });
   const mutate = useMutation({
     mutationFn: async (input: { favorite?: boolean; watch?: boolean }) => {
-      if (!runtime) return;
-      if (typeof input.favorite === "boolean") await setFavorite(id, input.favorite);
-      if (typeof input.watch === "boolean") await setWatchUpdates(id, input.watch);
+      // プレビューは画面の上だけで切り替える。
+      void input;
     },
     onMutate: (input) => {
       const key = ["reader-metadata", id] as const;
@@ -438,13 +418,6 @@ function LegacyWorkPage() {
    * 画面によって違う振る舞いをする**（[設計原則 2](../../../docs/policy/02-principles.md)）。
    */
   const handleContentClick = (event: React.MouseEvent<HTMLElement>) => {
-    const original = (event.target as HTMLElement).closest<HTMLElement>("button.attachment-original");
-    const originalPath = original?.dataset.localPath;
-    if (originalPath) {
-      event.preventDefault();
-      setPdfOriginal({ workId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
-      return;
-    }
     void openContentLink(event);
   };
   useEffect(() => {
@@ -478,7 +451,7 @@ function LegacyWorkPage() {
     onConfirm: async () => {
       try {
         await deleteThenCleanup(
-          () => runtime ? deleteDownload(work.id) : Promise.resolve(),
+          () => Promise.resolve(),
           { queryClient, ids: [work.id], removeFromEpubQueue },
         );
         navigate("/library");
@@ -487,15 +460,11 @@ function LegacyWorkPage() {
       catch (error) { notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) }); }
     },
   });
-  const openSavedFolder = async () => {
-    if (!runtime) return notifications.show({ color: "piep", message: "保存フォルダーはデスクトップアプリで開けます" });
-    try { await revealPathInFileManager(work.jsonPath); }
-    catch (error) { notifications.show({ color: "red", title: "保存フォルダーを開けません", message: errorMessage(error) }); }
-  };
+  const openSavedFolder = () => notifications.show({ color: "piep", message: "保存フォルダーはデスクトップアプリで開けます" });
   const openSource = async () => {
     const url = sourceUrl(work.source, work.sourceId, work.contentType, work.personId || work.authorId);
     if (!url) return;
-    if (runtime) await openExternalUrl(url); else window.open(url, "_blank", "noopener,noreferrer");
+    window.open(url, "_blank", "noopener,noreferrer");
   };
   // 内蔵ブラウザで開けば、その場から保存にも進める。外部ブラウザとの違いを
   // 名前で示すため、メニューは2項目に分けている。
@@ -514,7 +483,7 @@ function LegacyWorkPage() {
       // radius on the body and clipping it keeps all four corners round.
       radius: "lg",
       classNames: { content: "asset-preview-modal" },
-      children: <div className="asset-preview"><div className="asset-preview__canvas"><Image src={url} alt={asset.filename} fit="contain" /></div><Group className="asset-preview__footer" justify="space-between"><Text size="sm" c="dimmed">{formatBytes(asset.fileSizeBytes)} · {asset.mimeType?.replace("image/", "").toUpperCase()}</Text><Button size="sm" variant="light" leftSection={<Icons.externalLink size={IconSize.menu} />} onClick={() => runtime && openLocalAsset(asset.localPath)}>画像を開く</Button></Group></div>,
+      children: <div className="asset-preview"><div className="asset-preview__canvas"><Image src={url} alt={asset.filename} fit="contain" /></div><Group className="asset-preview__footer" justify="space-between"><Text size="sm" c="dimmed">{formatBytes(asset.fileSizeBytes)} · {asset.mimeType?.replace("image/", "").toUpperCase()}</Text><Button size="sm" variant="light" leftSection={<Icons.externalLink size={IconSize.menu} />} disabled>画像を開く</Button></Group></div>,
     });
   };
 
@@ -617,8 +586,6 @@ function LegacyWorkPage() {
         </Grid>
       </Card>
 
-      <WorkAcquisitionCard id={id} source={work.source} sourceId={work.sourceId} runtime={runtime} onLocate={(location, version) => { setImageTarget(location); setContentSourceVersion(version); goToContentPage(location.page); setTab("content"); }} />
-
       <Tabs value={tab} onChange={setTab} mt="lg" keepMounted={false}>
         <Tabs.List>
           <Tabs.Tab value="overview">概要</Tabs.Tab>
@@ -629,7 +596,7 @@ function LegacyWorkPage() {
         </Tabs.List>
         <Tabs.Panel value="overview" pt="lg">
           {/* モデルの手伝い。設定していなければ何も出ない。 */}
-          <Box mb="lg"><WorkAssist downloadId={work.id} /></Box>
+          <Box mb="lg"><WorkAssist downloadId={String(work.id)} /></Box>
           {/* Two columns from the medium breakpoint - the previous large one
               left this stacked at ordinary window sizes - and both stretch so
               the section reads as a single block rather than three cards of
@@ -668,17 +635,13 @@ function LegacyWorkPage() {
           {assetsQuery.isLoading ? <LoadingState label="画像・添付を読み込んでいます" /> : assetsQuery.error ? <ErrorState error={assetsQuery.error} retry={() => assetsQuery.refetch()} /> : assets.length ? <Stack gap="lg"><SimpleGrid cols={{ base: 2, sm: 3, lg: 4, xl: 5 }} spacing="md">{visibleAssets.map((asset) => {
             const url = getAssetUrl(asset.localPath);
             const image = asset.mimeType?.startsWith("image/") && url;
-            // PDF は外のアプリへ渡さない方針なので、アプリの中で紙面を見せる。
-            const pdf = runtime && /\.pdf$/i.test(asset.filename);
             const original = Boolean(asset.originalUrl && (/original/i.test(asset.originalUrl) || !/\/c\//.test(asset.originalUrl)));
             const openTarget = () => {
               if (image) previewAsset(asset);
-              else if (pdf) setPdfOriginal({ workId: id, localPath: asset.localPath, fileName: asset.filename });
             };
             return <Card key={asset.id} p={0} className="asset-card surface--interactive" onClick={openTarget}>
               <Box className="asset-card__preview">
                 {image ? <Image src={url} alt={asset.filename} className="asset-card__image" loading="lazy" decoding="async" /> : <ThemeIcon size={56} variant="light" color="gray"><Icons.file size={IconSize.feature} /></ThemeIcon>}
-                {pdf && <Badge className="asset-card__badge" size="xs" color="gray" variant="filled">原本を見る</Badge>}
                 {original && <Badge className="asset-card__badge" size="xs" color="green" variant="filled">原寸</Badge>}
                 {asset.assetType === "editor_image" && <Badge className="asset-card__badge" size="xs" color="blue" variant="filled">編集で追加</Badge>}
               </Box>
@@ -783,9 +746,8 @@ function LegacyWorkPage() {
               </Card>
           </div>
         </Tabs.Panel>
-        <Tabs.Panel value="json" pt="lg">{rawJson.isLoading ? <LoadingState /> : rawJson.error ? <ErrorState error={rawJson.error} retry={() => rawJson.refetch()} /> : <BoundedJsonView jsonText={rawJson.data ?? "{}"} description="取得元から保存したデータを表示します（JSON形式）" actions={<Button size="xs" variant="default" disabled={!runtime} onClick={() => openLocalAsset(work.jsonPath)}>保存データを開く</Button>} />}</Tabs.Panel>
+        <Tabs.Panel value="json" pt="lg">{rawJson.isLoading ? <LoadingState /> : rawJson.error ? <ErrorState error={rawJson.error} retry={() => rawJson.refetch()} /> : <BoundedJsonView jsonText={rawJson.data ?? "{}"} description="取得元から保存したデータを表示します（JSON形式）" actions={<Button size="xs" variant="default" disabled>保存データを開く</Button>} />}</Tabs.Panel>
       </Tabs>
-      <PdfOriginalViewer target={pdfOriginal} onClose={() => setPdfOriginal(null)} />
     </div>
   );
 }

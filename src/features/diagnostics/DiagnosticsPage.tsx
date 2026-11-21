@@ -29,19 +29,13 @@ import { RuntimeNotice } from "@/components/RuntimeNotice";
 import { useAppNavigate } from "@/app/router";
 import { requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
-import { getStoragePath } from "@/services/archiveApi";
 import {
   cancelEntityProfileRepair,
   getEntityProfileRepairStatus,
   isTauriRuntime,
-  maintainLibrary,
-  optimizeSearchIndex,
   repairIncompleteEntityProfiles,
-  scanAndReimportDownloads,
-  scanFanboxAssetGaps,
   type EntityProfileRepairProgress,
 } from "@/services/dbApi";
-import { startUpdateJobCommand } from "@/services/updateJobApi";
 import { getUpdateJobCredentials } from "@/services/updateJobApi";
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
@@ -50,7 +44,6 @@ import { useLibraryDiagnostics } from "./useLibraryDiagnostics";
 import { OriginalImagesCard } from "./OriginalImagesCard";
 import { MaintenanceTaskCard, MetricCard } from "./diagnosticsParts";
 import { ShelfDiagnosticsSection } from "./ShelfDiagnostics";
-import { useShelfMode, useShelfWritable } from "@/features/library/shelfV2";
 
 export const previewDiagnostics: LibraryDiagnostics = {
   measuredAt: "2026-08-09T12:00:00.000Z", totalDownloads: 1284, totalAssets: 8241, totalVersions: 1392, totalTextLength: 31_400_000,
@@ -99,12 +92,6 @@ const MEASURE_PHASE_LABEL: Record<string, string> = {
   "index-size": "索引と保存領域のサイズを集計しています",
 };
 
-const OPTIMIZE_PHASE_LABEL: Record<string, string> = {
-  preflight: "空き容量を検査しています",
-  merging: "セグメントを統合しています",
-  complete: "完了しました",
-  failed: "失敗しました",
-};
 
 const FILE_ISSUE_LABEL: Record<string, string> = {
   missing: "参照先がありません",
@@ -164,7 +151,6 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
   const runtime = isTauriRuntime();
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
-  const operationRef = useRef<OperationController | null>(null);
   const profileRepairOperationRef = useRef<OperationController | null>(null);
   /**
    * 中止は、ほかの操作と同じ道を通す。
@@ -179,61 +165,17 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     void cancelEntityProfileRepair().catch((error) =>
       notifications.show({ color: "red", title: "中止できません", message: errorMessage(error) }));
   };
-  const retryRef = useRef<(compact: boolean) => void>(() => undefined);
-  const indexRetryRef = useRef<() => void>(() => undefined);
-  const reimportRetryRef = useRef<() => void>(() => undefined);
   const profileRepairRetryRef = useRef<() => void>(() => undefined);
-  const [optimizePhase, setOptimizePhase] = useState<{ phase: string; segments: number } | null>(null);
   const [profileRepairProgress, setProfileRepairProgress] = useState<EntityProfileRepairProgress | null>(null);
   // Never on arrival. Measuring walks the whole storage folder and runs three
   // benchmarks against the real library; on a large one that is seconds of work
   // and disk, started by nothing more than opening a screen. A result already
   // in the cache is still shown - it is the *running* that waits to be asked
   // for, not the reading.
-  const diagnostics = useLibraryDiagnostics(runtime, previewData);
-  // 新しい棚を見ているあいだは、計測・照合・手入れを新しい棚の仕組みで行う（保存フォルダーの
-  // 照合は旧棚だけのもの。棚への再取り込みは設定の「保存とバックアップ」から）。作者・シリーズ情報の
-  // 修復はそのまま。原寸画像の取り直しは見ている棚で行う。
-  const { shelfMode, deciding: shelfDeciding } = useShelfMode(runtime);
-  const shelfWritable = useShelfWritable(runtime && shelfMode);
-  const legacyView = !shelfMode && !shelfDeciding;
+  const diagnostics = useLibraryDiagnostics(previewData);
+  // 計測・照合・手入れは棚の仕組みで行う。下の計測の表はプレビューの見本だけに出す。
+  const legacyView = !runtime;
   const measurePhase = diagnostics.progress;
-  /**
-   * 取りこぼした FANBOX の添付。
-   *
-   * これらは**一件も監視対象になっていない**ので、更新確認では永久に触られない。
-   * 数えたうえで、id を名指しして取り直しの仕事を起こす。
-   */
-  const fanboxGaps = useQuery({
-    queryKey: ["fanbox-asset-gaps"],
-    queryFn: scanFanboxAssetGaps,
-    enabled: runtime && !shelfMode && !shelfDeciding,
-    staleTime: 60_000,
-  });
-  const repairFanboxAssets = useMutation({
-    mutationFn: async () => {
-      const ids = fanboxGaps.data?.workIds ?? [];
-      if (ids.length === 0) return null;
-      // 監視対象ではないので、id を名指しして始める。`save` で実際に取り直す
-      // ところまで走らせる（確認だけでは添付は埋まらない）。
-      return startUpdateJobCommand({ scope: "work", mode: "save", workIds: ids });
-    },
-    onSuccess: (snapshot) => {
-      if (!snapshot) return;
-      notifications.show({
-        color: "green",
-        title: "添付の取り直しを始めました",
-        message: "アクティビティで進み具合を確認できます",
-      });
-      void fanboxGaps.refetch();
-    },
-    onError: (error) => notifications.show({
-      color: "red",
-      title: "添付を取り直せません",
-      message: errorMessage(error),
-    }),
-  });
-
   const profileRepairStatus = useQuery({
     queryKey: ["entity-profile-repair-status"],
     queryFn: () => runtime
@@ -251,96 +193,6 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     });
   }, [runtime, refetchProfileRepairStatus]);
   const measureElapsed = useElapsedSeconds(diagnostics.isFetching, measurePhase?.startedAt);
-  const optimizeElapsed = useElapsedSeconds(Boolean(optimizePhase) && optimizePhase?.phase !== "complete" && optimizePhase?.phase !== "failed");
-  const maintenance = useMutation({
-    mutationFn: async (compact: boolean) => {
-      operationRef.current = startOperation({ kind: "maintenance", label: compact ? "データベースを圧縮" : "ライブラリを最適化", detail: compact ? "使われていない領域を片付けて、ファイルを小さくします" : "データベースの統計と一時ログを整理します", onRetry: () => retryRef.current(compact) });
-      let dispose: (() => void) | undefined;
-      if (runtime) dispose = await onTauriEvent<{ phase: string; error?: string | null }>("library-maintenance-progress", ({ payload }) => operationRef.current?.log(payload.error || `フェーズ: ${payload.phase}`, payload.error ? "error" : "info"));
-      try { return await maintainLibrary(compact); }
-      catch (error) { operationRef.current?.fail(error); throw error; }
-      finally { dispose?.(); }
-    },
-    onSuccess: (result) => {
-      operationRef.current?.complete(result.compacted ? `${formatBytes(result.reclaimedBytes)}を回収しました` : "最適化が完了しました");
-      operationRef.current = null;
-      // 計測クエリは enabled: false なので、invalidate しても再取得は起きない。
-      // 印だけ古くなって、画面には最適化前の容量が残りつづける。取り込み直しの
-      // 側（下の refetch）と同じく、ここも明示的に取り直す。
-      diagnostics.refetch();
-      notifications.show({ color: "green", title: result.compacted ? "データベースを圧縮しました" : "ライブラリを最適化しました", message: result.compacted ? `${formatBytes(result.beforeBytes)} → ${formatBytes(result.afterBytes)}` : "検索統計とWALを整理しました" });
-    },
-    onError: (error) => { operationRef.current = null; notifications.show({ color: "red", title: "保守操作に失敗しました", message: errorMessage(error) }); },
-  });
-  retryRef.current = (compact) => maintenance.mutate(compact);
-  const indexOptimization = useMutation({
-    mutationFn: async () => {
-      operationRef.current = startOperation({ kind: "maintenance", label: "全文検索索引を最適化", detail: "分割された索引を安全に統合しています", onRetry: () => indexRetryRef.current() });
-      setOptimizePhase({ phase: "preflight", segments: diagnostics.data?.lexicalIndexSegmentCount ?? 0 });
-      let dispose: (() => void) | undefined;
-      if (runtime) dispose = await onTauriEvent<{ phase: string; segments?: number; error?: string | null }>("search-index-optimization-progress", ({ payload }) => {
-        setOptimizePhase({ phase: payload.phase, segments: payload.segments ?? 0 });
-        operationRef.current?.log(payload.error || OPTIMIZE_PHASE_LABEL[payload.phase] || payload.phase, payload.error ? "error" : "info");
-      });
-      try { return await optimizeSearchIndex(); }
-      catch (error) { operationRef.current?.fail(error); throw error; }
-      finally { dispose?.(); setOptimizePhase(null); }
-    },
-    onSuccess: (result) => {
-      const detail = result.optimized ? `${formatNumber(result.beforeSegments)} → ${formatNumber(result.afterSegments)}セグメント · ${formatBytes(result.reclaimedBytes)}回収` : "索引はすでに最適です";
-      operationRef.current?.complete(detail);
-      operationRef.current = null;
-      diagnostics.refetch();
-      queryClient.invalidateQueries({ queryKey: ["library"] });
-      notifications.show({ color: "green", title: result.optimized ? "全文検索索引を最適化しました" : "最適化は不要でした", message: detail });
-    },
-    onError: (error) => { operationRef.current = null; notifications.show({ color: "red", title: "索引を最適化できません", message: errorMessage(error) }); },
-  });
-  indexRetryRef.current = () => indexOptimization.mutate();
-  const reimport = useMutation({
-    mutationFn: async () => {
-      const operation = startOperation({
-        kind: "maintenance",
-        label: "保存フォルダーから再取り込み",
-        detail: "データベースから消えていて、保存フォルダーが欠けずに残っている作品だけを調べます",
-        onRetry: () => reimportRetryRef.current(),
-      });
-      try {
-        const outcome = await scanAndReimportDownloads();
-        outcome.skipped.forEach((reason) => operation.log(reason, "warn"));
-        operation.complete(outcome.imported > 0 ? `${formatNumber(outcome.imported)}件を再取り込みしました` : "再取り込み対象はありませんでした");
-        return outcome;
-      } catch (error) {
-        operation.fail(error);
-        throw error;
-      }
-    },
-    onSuccess: async (outcome) => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
-        queryClient.invalidateQueries({ queryKey: ["library"] }),
-        queryClient.invalidateQueries({ queryKey: ["stats"] }),
-      ]);
-      await diagnostics.refetch();
-      // 飛ばした作品があることは、件数と同じ行で伝える。黙っていると
-      // 「全部戻ったはずなのに数が合わない」だけが残る。
-      const skippedNote = outcome.skipped.length
-        ? `${formatNumber(outcome.skipped.length)}件は読めずに飛ばしました。詳しい理由は操作の記録に出しています。`
-        : "";
-      notifications.show({
-        color: outcome.skipped.length ? "yellow" : outcome.imported > 0 ? "green" : "blue",
-        title: outcome.imported > 0 ? "再取り込みが完了しました" : "再取り込み対象はありませんでした",
-        message: [
-          outcome.imported > 0
-            ? `${formatNumber(outcome.imported)}件をライブラリへ戻しました。診断結果も更新しました。`
-            : "データベースにある作品は上書きしません。ファイルが見つからない作品は、バックアップから戻すか、取得元から保存し直してください。",
-          skippedNote,
-        ].filter(Boolean).join(" "),
-      });
-    },
-    onError: (error) => notifications.show({ color: "red", title: "再取り込みできませんでした", message: errorMessage(error) }),
-  });
-  reimportRetryRef.current = () => reimport.mutate();
   const profileRepair = useMutation({
     mutationFn: async () => {
       profileRepairOperationRef.current = startOperation({
@@ -410,42 +262,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
   const profileRunning = profileRepair.isPending || Boolean(profileRepairStatus.data?.running);
   const data = diagnostics.data;
   const indexRatio = data?.searchIndex.totalDownloads ? data.searchIndex.indexedDownloads / data.searchIndex.totalDownloads * 100 : 100;
-  const reclaimable = data ? Math.max(0, data.databaseSizeBytes - data.liveDatabaseBytes) : 0;
   const fileIntegrityIssues = data ? data.missingJsonFiles + data.missingAssetFiles + data.missingProfileFiles + data.unsafeReferencedFiles + data.unreadableReferencedFiles + data.emptyReferencedFiles + data.mismatchedAssetFiles + data.transientFiles : 0;
-
-  const confirmCompact = () => data && modals.openConfirmModal({
-    title: "データベースの空き領域を回収しますか？",
-    children: <Stack gap="sm"><Text size="sm">処理中はライブラリを操作できません。開始前に必要な空き容量を検査し、安全に実行できない場合は何も変更せず中止します。</Text><Alert color="piep" icon={<Icons.storage size={IconSize.action} />}>現在 {formatBytes(data.databaseSizeBytes)} / 推定回収可能 {formatBytes(reclaimable)}</Alert></Stack>,
-    labels: { confirm: "検査して圧縮", cancel: "キャンセル" }, confirmProps: { color: "yellow" },
-    onConfirm: () => maintenance.mutate(true),
-  });
-
-  const confirmIndexOptimization = () => data && modals.openConfirmModal({
-    title: "全文検索索引を統合しますか？",
-    children: <Stack gap="sm"><Text size="sm">{formatNumber(data.lexicalIndexSegmentCount)}個のセグメントを1個へ安全に統合します。処理中も既存索引は保持され、開始前に一時領域の空き容量を検査します。大規模ライブラリでは数分以上かかる場合があります。</Text><Alert color="piep" icon={<Icons.search size={IconSize.action} />}>索引 {formatBytes(data.lexicalIndexSizeBytes)} · {formatNumber(data.lexicalIndexFileCount)}ファイル</Alert></Stack>,
-    labels: { confirm: "検査して索引を最適化", cancel: "キャンセル" },
-    confirmProps: { color: "yellow" },
-    onConfirm: () => indexOptimization.mutate(),
-  });
-
-  const confirmReimport = () => modals.openConfirmModal({
-    title: "保存フォルダーから再取り込みしますか？",
-    children: <Stack gap="sm">
-      <Text size="sm">DBから消えた一方、完全な保存フォルダーが残っている作品だけを1件ずつ検証して戻します。お気に入りや編集を守るため、DBに登録済みの作品は上書きしません。</Text>
-      <Alert color="blue" title="この操作で直せないもの">登録済み作品の保存データ・画像が欠けている場合は、バックアップ復元または元サービスからの再保存が必要です。</Alert>
-    </Stack>,
-    labels: { confirm: "検査して再取り込み", cancel: "キャンセル" },
-    onConfirm: () => reimport.mutate(),
-  });
-
-
-  const openStorageFolder = async () => {
-    try {
-      await openFilesystemPath(await getStoragePath());
-    } catch (error) {
-      notifications.show({ color: "red", title: "保存先を開けません", message: errorMessage(error) });
-    }
-  };
 
   const openIssueParent = async (issue: LibraryFileIssue) => {
     const parent = parentDirectory(issue.path);
@@ -503,50 +320,18 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     {/* Settings already carries one at the top of the screen. */}
     {!embedded && <RuntimeNotice />}
 
-    {shelfMode && <ShelfDiagnosticsSection runtime={runtime} busy={profileRunning} />}
+    {runtime && <ShelfDiagnosticsSection runtime={runtime} busy={profileRunning} />}
     {legacyView && <Card p="lg" mt="lg">
       <Group justify="space-between" align="center" wrap="wrap">
         <Group gap="sm"><ThemeIcon variant="light" size={40}><Icons.diagnostics size={IconSize.feature} /></ThemeIcon><Box>
           <Text fw={700}>ライブラリの状態</Text>
           <Text size="xs" c="dimmed" mt={3}>{diagnostics.isFetching ? "診断中です。ほかの画面に移動しても続けます。" : data ? "最終確認: " + new Date(data.measuredAt).toLocaleString("ja-JP") : "まだ診断していません。保存ファイルと登録情報を照合します。"}</Text>
         </Box></Group>
-        <Button size="sm" leftSection={<Icons.retry size={IconSize.menu} />} loading={diagnostics.isFetching} disabled={maintenance.isPending || indexOptimization.isPending} onClick={() => diagnostics.refetch()}>{data ? "再確認" : "診断する"}</Button>
+        <Button size="sm" leftSection={<Icons.retry size={IconSize.menu} />} loading={diagnostics.isFetching} onClick={() => diagnostics.refetch()}>{data ? "再確認" : "診断する"}</Button>
       </Group>
       <Text size="xs" c="dimmed" mt="sm">診断は読み取りだけを行います。作品数が多い場合は時間がかかります。</Text>
     </Card>}
 
-    {legacyView && Boolean(fanboxGaps.error || fanboxGaps.data?.workIds.length) && <Box mt="lg">        <MaintenanceTaskCard
-          icon={Icons.epub}
-          title="FANBOXの添付"
-          description="保存データに記録された画像・添付が、実際に保存されているか確認します。"
-          status={fanboxGaps.isLoading
-            ? <Badge color="gray" variant="light">数えています</Badge>
-            : fanboxGaps.error
-              ? <Text size="sm" c="red">{errorMessage(fanboxGaps.error)}</Text>
-              : !fanboxGaps.data || fanboxGaps.data.workIds.length === 0
-                ? <Badge color="green" variant="light">欠けはありません</Badge>
-                : <>
-                    <Badge color="yellow" variant="light">
-                      {formatNumber(fanboxGaps.data.workIds.length)}作品 · {formatNumber(fanboxGaps.data.missingFiles)}ファイル
-                    </Badge>
-                    <Text size="xs" c="dimmed" mt={6}>
-                      これらは監視対象ではないので、更新確認では取り直されません。
-                      {fanboxGaps.data.restrictedWorks > 0
-                        && `うち${formatNumber(fanboxGaps.data.restrictedWorks)}件は、支援中のアカウントでないと取得できません。`}
-                    </Text>
-                  </>}
-          action={fanboxGaps.error ? <Button size="xs" variant="default" onClick={() => fanboxGaps.refetch()}>再確認</Button> : <Button
-            variant="light"
-            color="yellow"
-            leftSection={<Icons.retry size={IconSize.menu} />}
-            loading={repairFanboxAssets.isPending}
-            disabled={!runtime || !fanboxGaps.data || fanboxGaps.data.workIds.length === 0}
-            onClick={() => repairFanboxAssets.mutate()}
-          >
-            欠けた添付を取り直す
-          </Button>}
-        />
-</Box>}
     {profileRepairStatus.error && <Alert mt="lg" color="red" icon={<Icons.warning size={IconSize.nav} />} title="作者・シリーズ情報の状態を確認できません">
       <Group justify="space-between"><Text size="sm">{errorMessage(profileRepairStatus.error)}</Text><Button size="xs" variant="default" onClick={() => profileRepairStatus.refetch()}>再確認</Button></Group>
     </Alert>}
@@ -565,7 +350,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         </Group>
         {profileRepairStatus.data.totalCount > 0 && (profileRunning
           ? <DangerButton leftSection={<Icons.stop size={IconSize.menu} />} onClick={cancelProfileRepair}>中止</DangerButton>
-          : <Button leftSection={<Icons.retry size={IconSize.menu} />} disabled={!runtime || maintenance.isPending || indexOptimization.isPending} onClick={() => profileRepair.mutate()}>残件を修復</Button>)}
+          : <Button leftSection={<Icons.retry size={IconSize.menu} />} disabled={!runtime} onClick={() => profileRepair.mutate()}>残件を修復</Button>)}
       </Group>
       {repairProgress && <Box mt="md">
         <Group justify="space-between" mb={6} wrap="nowrap"><Text size="xs" c="dimmed" className="line-clamp-1" title={repairProgress.activeLabel ?? undefined}>{repairProgress.activeLabel ? `${repairProgress.phase === "checked" ? "確認済み" : "確認中"}: ${repairProgress.activeLabel}` : profileRunning ? "修復を準備しています" : repairProgress.phase === "canceled" ? "停止しました" : repairProgress.phase === "paused" ? "一時停止しました" : "今回の修復が完了しました"}</Text><Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>{formatNumber(repairProgress.completed)} / {formatNumber(repairProgress.total)}</Text></Group>
@@ -575,8 +360,8 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         {repairProgress.failed > 0 && <Button size="xs" variant="subtle" mt={6} onClick={() => navigate("/operations")}>失敗の詳細</Button>}
       </Box>}
     </Card>}
-    {!shelfDeciding && <OriginalImagesCard key={shelfMode ? "v2" : "legacy"} runtime={runtime} disabled={maintenance.isPending || indexOptimization.isPending} shelf={shelfMode} writable={shelfWritable} />}
-    {legacyView && (diagnostics.isFetching || optimizePhase) && (
+    <OriginalImagesCard runtime={runtime} disabled={false} />
+    {legacyView && diagnostics.isFetching && (
       <Card p="md" mt="md">
         {diagnostics.isFetching && (
           <JobProgress
@@ -587,21 +372,11 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
             unit="工程"
           />
         )}
-        {optimizePhase && (
-          <Box mt={diagnostics.isFetching ? "md" : undefined}>
-            <JobProgress
-              phase={`${OPTIMIZE_PHASE_LABEL[optimizePhase.phase] ?? optimizePhase.phase}${optimizePhase.segments ? `（${formatNumber(optimizePhase.segments)}セグメント）` : ""}`}
-              elapsedSeconds={optimizeElapsed}
-              color="yellow"
-              note="統合の途中でも既存の索引はそのまま検索できます。"
-            />
-          </Box>
-        )}
       </Card>
     )}
     {!legacyView ? null : diagnostics.error ? <Box mt="lg"><ErrorState error={diagnostics.error} retry={() => diagnostics.refetch()} /></Box> : data && <Stack gap="lg" mt="xl">
       {data.fragmentationPercent >= 20 && <Alert color={data.fragmentationPercent >= 70 ? "red" : "yellow"} icon={<Icons.warning size={IconSize.nav} />} title={`DBの${data.fragmentationPercent.toFixed(2)}%が使われていない領域です`}>
-        <Group justify="space-between" align="flex-end"><Text size="sm" maw={720}>中身は約{formatBytes(data.liveDatabaseBytes)}ですが、ファイルは{formatBytes(data.databaseSizeBytes)}あります。検索結果には影響しませんが、バックアップの容量と読み書きが増えます。</Text><Button color="yellow" loading={maintenance.isPending} disabled={!runtime} onClick={confirmCompact}>空き容量を検査して圧縮</Button></Group>
+        <Group justify="space-between" align="flex-end"><Text size="sm" maw={720}>中身は約{formatBytes(data.liveDatabaseBytes)}ですが、ファイルは{formatBytes(data.databaseSizeBytes)}あります。検索結果には影響しませんが、バックアップの容量と読み書きが増えます。</Text><Button color="yellow" disabled>空き容量を検査して圧縮</Button></Group>
       </Alert>}
 
       <Alert
@@ -630,8 +405,8 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
               <ActionRow>
                 <Button size="xs" variant="default" leftSection={<Icons.save size={IconSize.menu} />} onClick={() => navigate("/save")}>元サービスから再保存</Button>
                 <Button size="xs" variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => navigate("/settings?section=library")}>バックアップ復元へ</Button>
-                <Button size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} loading={reimport.isPending} disabled={!runtime || maintenance.isPending || indexOptimization.isPending} onClick={confirmReimport}>残ったフォルダーを再取り込み</Button>
-                <Button size="xs" variant="default" leftSection={<Icons.openFolder size={IconSize.menu} />} disabled={!runtime} onClick={openStorageFolder}>保存先を開く</Button>
+                <Button size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} disabled>残ったフォルダーを再取り込み</Button>
+                <Button size="xs" variant="default" leftSection={<Icons.openFolder size={IconSize.menu} />} disabled>保存先を開く</Button>
                 <Button size="xs" variant="filled" leftSection={<Icons.read size={IconSize.menu} />} disabled={!data.fileIssueSamples.length} onClick={() => showFileIssues()}>対象ファイルを確認</Button>
               </ActionRow>
               <Text size="xs" c="dimmed">
@@ -663,7 +438,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
           title="データベース"
           description="検索統計と一時ログを軽く整理します。計測なしでも実行できます。"
           status={<Badge color="blue" variant="light">日常的な保守</Badge>}
-          action={<Button variant="light" leftSection={<Icons.optimize size={IconSize.menu} />} loading={maintenance.isPending} disabled={!runtime || indexOptimization.isPending || profileRunning} onClick={() => maintenance.mutate(false)}>DBを最適化</Button>}
+          action={<Button variant="light" leftSection={<Icons.optimize size={IconSize.menu} />} disabled>DBを最適化</Button>}
         />
         <MaintenanceTaskCard
           icon={Icons.search}
@@ -674,7 +449,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
             : data.lexicalIndexSegmentCount <= 1
               ? <Badge color="green" variant="light">最適です</Badge>
               : <Badge color={data.lexicalIndexSegmentCount >= 16 ? "yellow" : "blue"} variant="light">{formatNumber(data.lexicalIndexSegmentCount)}セグメント</Badge>}
-          action={<Button variant="light" color={data && data.lexicalIndexSegmentCount >= 16 ? "yellow" : "piep"} leftSection={<Icons.search size={IconSize.menu} />} loading={indexOptimization.isPending} disabled={!runtime || maintenance.isPending || profileRunning || !data || data.lexicalIndexSegmentCount <= 1} onClick={confirmIndexOptimization}>検索索引を最適化</Button>}
+          action={<Button variant="light" color={data && data.lexicalIndexSegmentCount >= 16 ? "yellow" : "piep"} leftSection={<Icons.search size={IconSize.menu} />} disabled>検索索引を最適化</Button>}
         />
       </SimpleGrid>
     </Accordion.Panel></Accordion.Item></Accordion>}

@@ -50,9 +50,10 @@ const MODEL_DIR_NAME: &str = "models";
 /// なので、中に入れると 465MB が「身元不明のファイル」か「索引の大きさ」に
 /// 化ける。モデルはそのどちらでもない。
 ///
-/// 起動時に一度だけ呼ぶ。呼ばれなかったときは fastembed の既定のままにする。
-pub fn set_model_cache_dir(storage_dir: &Path) {
-    let target = model_cache_dir_for(storage_dir);
+/// `app_data` はアプリのデータの置き場（その下の `models`）。起動時に一度だけ呼ぶ。
+/// 呼ばれなかったときは fastembed の既定のままにする。
+pub fn set_model_cache_dir(app_data: &Path) {
+    let target = model_cache_dir_in(app_data);
     if MODEL_CACHE_DIR.set(target.clone()).is_err() {
         return;
     }
@@ -86,11 +87,8 @@ fn hf_hub_dir_name(model_id: &str) -> String {
     format!("models--{}", model_id.replace('/', "--"))
 }
 
-fn model_cache_dir_for(storage_dir: &Path) -> PathBuf {
-    storage_dir
-        .parent()
-        .unwrap_or(storage_dir)
-        .join(MODEL_DIR_NAME)
+fn model_cache_dir_in(app_data: &Path) -> PathBuf {
+    app_data.join(MODEL_DIR_NAME)
 }
 
 #[cfg(not(test))]
@@ -1475,7 +1473,7 @@ mod tests {
     #[test]
     fn the_model_sits_beside_the_shelf_not_inside_it() {
         let storage = Path::new("C:/data/piep/downloads");
-        let model = model_cache_dir_for(storage);
+        let model = model_cache_dir_in(storage.parent().unwrap());
         assert_eq!(model, Path::new("C:/data/piep/models"));
         assert!(!model.starts_with(storage), "棚の中にモデルを置いている");
         let index_root = index_path(storage)

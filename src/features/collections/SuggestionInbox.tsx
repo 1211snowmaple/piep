@@ -16,9 +16,9 @@ import { getProvider } from "@/lib/providers";
 import { demoSuggestions, getDemoReader } from "@/mocks/demoData";
 import { nameCollectionSuggestion } from "@/services/assistApi";
 import { acceptCollectionSuggestion, listCollectionSuggestions, rejectCollectionSuggestion, suggestionNameOverride } from "@/services/collectionApi";
-import { getReaderContentPage, isTauriRuntime } from "@/services/dbApi";
+import { isTauriRuntime } from "@/services/dbApi";
 import { libraryV2Content, shelfFileUrl } from "@/services/libraryV2Api";
-import { invalidateShelf, useShelfMode } from "@/features/library/shelfV2";
+import { invalidateShelf } from "@/features/library/shelfV2";
 import type { CollectionSuggestion, CollectionSuggestionMember, SavedSearchSuggestion, WorkKey } from "@/types/collections";
 import "./discovery.css";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
@@ -114,7 +114,6 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
   const { engine } = useAssist("collection_naming");
-  const { shelfMode } = useShelfMode(runtime);
   const [track, setTrack] = useState<Track>("sequence");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -160,9 +159,7 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange
     setDrafts((current) => ({ ...current, [suggestion.id]: change(current[suggestion.id] ?? initialDraft(suggestion)) }));
   };
   const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ["collection-suggestions"] });
-    if (shelfMode) void invalidateShelf(queryClient);
-    else queryClient.invalidateQueries({ queryKey: ["work-collections"] });
+    void invalidateShelf(queryClient);
   };
   const finish = (id: string) => {
     setResolved((current) => new Set([...current, id]));
@@ -316,7 +313,7 @@ function SuggestionReview({ suggestion, draft, busy, accepting, runtime, deferre
               <div className="discovery-member__body"><Text size="sm" fw={650} className="discovery-member__title">{member.title}</Text><div className="discovery-member__meta"><span>{getProvider(member.source).label}</span><span>{member.authorName}</span><span>{member.textLength > 0 ? `${formatNumber(member.textLength)}字` : "本文未取得"}</span></div>
                 {evidence.length > 0 && <ul className="discovery-member__evidence">{evidence.slice(0, 2).map((label) => <li key={label}>{label}</li>)}</ul>}
                 {evidence.length > 2 && <details className="discovery-member__more"><summary>ほかの根拠 {evidence.length - 2}件</summary><ul>{evidence.slice(2).map((label) => <li key={label}>{label}</li>)}</ul></details>}
-                <Button variant="subtle" color="gray" size="compact-xs" className="discovery-member__preview" leftSection={<Icons.read size={IconSize.inline} />} disabled={busy || (member.downloadId === null && !member.work)} onClick={() => setPreview(member)}>本文を確認</Button>
+                <Button variant="subtle" color="gray" size="compact-xs" className="discovery-member__preview" leftSection={<Icons.read size={IconSize.inline} />} disabled={busy || (runtime ? !member.work : member.downloadId === null)} onClick={() => setPreview(member)}>本文を確認</Button>
               </div>
               {ordered && <div className="discovery-member__order"><Tooltip label="一つ前へ"><ActionIcon variant="subtle" color="gray" aria-label={`${member.title}を一つ前へ`} disabled={busy || index === 0} onClick={() => move(index, -1)}><Icons.up size={IconSize.menu} /></ActionIcon></Tooltip><Tooltip label="一つ後へ"><ActionIcon variant="subtle" color="gray" aria-label={`${member.title}を一つ後へ`} disabled={busy || index === members.length - 1} onClick={() => move(index, 1)}><Icons.down size={IconSize.menu} /></ActionIcon></Tooltip></div>}
             </li>;
@@ -346,11 +343,11 @@ function ReaderPreview({ member, runtime, onBack }: { member: CollectionSuggesti
         const shelfPage = await libraryV2Content(member.work, null, page);
         return { ...shelfPage, plainText: htmlText(shelfPage.html) };
       }
-      if (runtime) return getReaderContentPage(member.downloadId!, null, page, true);
       const demo = getDemoReader(member.downloadId!);
       return Promise.resolve({ page: 0, pageCount: 1, plainText: demo.plainText, html: demo.html, totalPlainTextChars: demo.plainText.length, sourcePageStarts: [0] });
     },
-    enabled: member.downloadId !== null || Boolean(member.work),
+    // 棚の候補は作品の ID で、プレビューの見本は番号で読む。
+    enabled: runtime ? Boolean(member.work) : member.downloadId !== null,
     staleTime: 60_000,
   });
   useEffect(() => { if (content.data) setKnownPageCount(content.data.pageCount); }, [content.data]);

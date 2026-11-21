@@ -190,10 +190,6 @@ async fn asset_file_is_valid(
     .unwrap_or(false)
 }
 
-pub(crate) async fn asset_path_is_valid_image(path: &Path, max_bytes: u64) -> bool {
-    asset_file_is_valid(path, path, max_bytes, true).await
-}
-
 struct PendingAssetFile {
     path: PathBuf,
     file: Option<File>,

@@ -1,278 +1,48 @@
 import { MantineProvider } from "@mantine/core";
 import { ModalsProvider } from "@mantine/modals";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AppRouter, useAppRouter } from "@/app/router";
+import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import { getDemoReader } from "@/mocks/demoData";
-import type { ReaderContentPage } from "@/types/library";
 import WorkPage from "./WorkPage";
 
-const dbApi = vi.hoisted(() => ({
-  getReaderMetadata: vi.fn(),
-  getReaderContentPage: vi.fn(),
-  getAssets: vi.fn(),
-}));
-const inspectionApi = vi.hoisted(() => ({ getRevisionSnapshot: vi.fn(), getActiveEditSnapshot: vi.fn(), getWorkAcquisitionDetails: vi.fn() }));
-const scrollToContent = vi.fn();
-vi.mock("@/services/workInspectionApi", () => inspectionApi);
-const updateJobApi = vi.hoisted(() => ({
-  listPendingRevisionsCommand: vi.fn(),
-  previewPendingRevisionCommand: vi.fn(),
-}));
-
+const runtime = vi.hoisted(() => ({ tauri: true }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
-  isTauriRuntime: () => true,
-  getReaderMetadata: dbApi.getReaderMetadata,
-  getReaderContentPage: dbApi.getReaderContentPage,
-  getAssets: dbApi.getAssets,
-  getAssetUrl: (path: string | null) => path,
+  isTauriRuntime: () => runtime.tauri,
 }));
-vi.mock("@/services/updateJobApi", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/updateJobApi")>()),
-  listPendingRevisionsCommand: updateJobApi.listPendingRevisionsCommand,
-  previewPendingRevisionCommand: updateJobApi.previewPendingRevisionCommand,
+vi.mock("@/features/library/ShelfWorkPage", () => ({
+  ShelfWorkPage: ({ workId }: { workId: string }) => <p>棚の作品 {workId}</p>,
 }));
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+function renderWork(hash: string) {
+  window.location.hash = hash;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 }
 
-function content(page: number, html: string): ReaderContentPage {
-  return { page, pageCount: 2, html, plainText: html.replace(/<[^>]+>/g, ""), totalPlainTextChars: 200, sourcePageStarts: [0, 1] };
-}
+describe("WorkPage", () => {
+  beforeEach(() => { runtime.tauri = true; });
 
-describe("WorkPage content preview", () => {
-  beforeEach(() => {
-    HTMLElement.prototype.scrollIntoView = scrollToContent;
-    scrollToContent.mockClear();
-    window.location.hash = "#/works/101?tab=content";
-    inspectionApi.getWorkAcquisitionDetails.mockResolvedValue(null);
-    inspectionApi.getRevisionSnapshot.mockImplementation(async (id: number, version: number) => ({ text: (await dbApi.getReaderContentPage(id, version, 0, true)).plainText }));
-    updateJobApi.listPendingRevisionsCommand.mockResolvedValue([]);
-    const demo = getDemoReader(101);
-    dbApi.getAssets.mockResolvedValue(demo.assets);
-    dbApi.getReaderMetadata.mockResolvedValue({
-      download: demo.download,
-      versions: demo.versions,
-      assetCount: demo.assets.length,
-      isEdited: demo.isEdited,
-      activeEditRevision: demo.activeEditRevision,
-    });
+  it("opens a work of the shelf by its id", async () => {
+    renderWork("#/works/0195F1C2-0000-7000-8000-000000000001");
+    expect(await screen.findByText("棚の作品 0195f1c2-0000-7000-8000-000000000001")).toBeInTheDocument();
   });
 
-  it("opens the current version's images and names the image action correctly", async () => {
-    window.location.hash = "#/works/101?tab=assets";
-    const demo = getDemoReader(101);
-    dbApi.getAssets.mockResolvedValue([{ id: 91, downloadId: 101, assetType: "cover", filename: "cover.jpg", localPath: "C:/library/v2/cover.jpg", originalUrl: null, mimeType: "image/jpeg", fileSizeBytes: 100, downloadedAt: "2026-10-01" }]);
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
-    expect(await screen.findByText("cover.jpg")).toBeInTheDocument();
-    expect(dbApi.getAssets).toHaveBeenCalledWith(101, demo.download.currentVersion);
-    fireEvent.click(screen.getByAltText("cover.jpg"));
-    expect(await screen.findByRole("button", { name: "画像を開く" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /JSONを開く/ })).not.toBeInTheDocument();
+  // 作品を番号で指すのは、旧棚のころのリンクとプレビューの見本だけ。アプリでは旧棚を開かない。
+  it("does not open a work by an old number in the app", async () => {
+    renderWork("#/works/101");
+    expect(await screen.findByText("作品が見つかりません")).toBeInTheDocument();
   });
 
-  it("does not display or operate the previous page while the requested page loads", async () => {
-    const pageTwo = deferred<ReaderContentPage>();
-    dbApi.getReaderContentPage.mockImplementation((_id: number, _version: number | null, page: number) => (
-      page === 0 ? Promise.resolve(content(0, '<a href="https://example.com/old">1ページ本文</a>')) : pageTwo.promise
-    ));
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
-
-    expect(await screen.findByText("1ページ本文")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "2" }));
-    await waitFor(() => expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, null, 1));
-    expect(screen.queryByText("1ページ本文")).toBeNull();
-    expect(screen.getByText("本文を読み込んでいます")).toBeInTheDocument();
-
-    await act(async () => { pageTwo.resolve(content(1, "<p>2ページ本文</p>")); });
-    await waitFor(() => expect(screen.getByText("2ページ本文")).toBeInTheDocument());
-  });
-
-  it("restores the content page and its inner scroll position after navigating away and back", async () => {
-    dbApi.getReaderContentPage.mockImplementation((_id: number, _version: number | null, page: number) =>
-      Promise.resolve(content(page, `<p>${page + 1}ページ本文</p>`))
-    );
-    function Routes() {
-      const { pathname, navigate } = useAppRouter();
-      return pathname === "/outside"
-        ? <button onClick={() => navigate(-1)}>戻る</button>
-        : <><button onClick={() => navigate("/outside")}>移動</button><WorkPage /></>;
-    }
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const { container } = render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><Routes /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
-
-    expect(await screen.findByText("1ページ本文")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "2" }));
-    expect(await screen.findByText("2ページ本文")).toBeInTheDocument();
-    const frame = container.querySelector<HTMLElement>(".content-frame")!;
-    frame.scrollTop = 157;
-    fireEvent.scroll(frame);
-
-    fireEvent.click(screen.getByRole("button", { name: "移動" }));
-    expect(await screen.findByRole("button", { name: "戻る" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "戻る" }));
-
-    expect(await screen.findByText("2ページ本文")).toBeInTheDocument();
-    expect(container.querySelector<HTMLElement>(".content-frame")?.scrollTop).toBe(157);
-    expect(screen.getByRole("button", { name: "2", current: "page" })).toBeInTheDocument();
-  });
-
-  it("shows the complete primary title on the detail page", async () => {
-    const longTitle = "マイナーキャラ妄想短編集　陵辱物　とても長い正式な作品名";
-    const demo = getDemoReader(101);
-    dbApi.getReaderMetadata.mockResolvedValue({
-      download: { ...demo.download, title: longTitle },
-      versions: demo.versions,
-      assetCount: demo.assets.length,
-      isEdited: demo.isEdited,
-      activeEditRevision: demo.activeEditRevision,
-    });
-    dbApi.getReaderContentPage.mockResolvedValue(content(0, "<p>本文</p>"));
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
-
-    const heading = await screen.findByRole("heading", { name: longTitle });
+  it("shows the sample work by its number in the browser preview", async () => {
+    runtime.tauri = false;
+    renderWork("#/works/101");
+    const title = getDemoReader(101).download.title;
+    const heading = await screen.findByRole("heading", { name: title });
     expect(heading).toHaveClass("work-hero__title");
     expect(heading).not.toHaveClass("line-clamp-2");
-  });
-
-  it("distinguishes the active local edit from source metadata and source version history", async () => {
-    window.location.hash = "#/works/101?tab=overview";
-    const demo = getDemoReader(101);
-    const baseVersion = demo.download.currentVersion;
-    dbApi.getReaderMetadata.mockResolvedValue({
-      download: demo.download,
-      versions: demo.versions,
-      assetCount: demo.assets.length,
-      isEdited: true,
-      activeEditRevision: { id: 7, downloadId: 101, baseVersion, status: "active", title: null, contentHash: null, createdAt: "2026-10-31T06:00:00Z", updatedAt: "2026-10-31T06:28:00Z" },
-    });
-    inspectionApi.getRevisionSnapshot.mockResolvedValue({ text: "前\n[pixivimage:42]\n後" });
-    inspectionApi.getActiveEditSnapshot.mockResolvedValue({
-      text: "前\n後",
-      addedImages: [{ id: 900, downloadId: 101, assetType: "editor_image", filename: "42_p0.png", localPath: "C:/edit/42_p0.png", originalUrl: null, mimeType: "image/png", fileSizeBytes: 5, createdAt: "2026-10-31T06:00:00Z" }],
-    });
-    dbApi.getReaderContentPage.mockResolvedValue(content(0, "<p>ローカル編集版</p>"));
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
-
-    expect(await screen.findByText("取得元の文字数")).toBeInTheDocument();
-    expect(screen.getByText("取得元の容量")).toBeInTheDocument();
-    // 足した絵はどの保存版にも属さないが、作品の画像・添付としては数える。
-    expect(await screen.findByText(/編集で追加 1件/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("tab", { name: "履歴" }));
-    expect(await screen.findByText(/編集しても取得元の版は増えません/)).toBeInTheDocument();
-    expect(screen.getByText("取得元の最新版")).toBeInTheDocument();
-    // 編集は版の一覧に並び、開くとまず元の版との差が出る。
-    expect(screen.getByRole("button", { name: /編集版/ })).toHaveAttribute("data-active");
-    expect(await screen.findByText(`保存済み v${baseVersion} → 編集版 の変更`)).toBeInTheDocument();
-  });
-
-  it("keeps an already loaded tab ready while the same work stays open", async () => {
-    dbApi.getReaderContentPage.mockResolvedValue(content(0, "<p>再表示する本文</p>"));
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
-
-    expect(await screen.findByText("再表示する本文")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("tab", { name: "概要" }));
-    await waitFor(() => expect(screen.queryByText("再表示する本文")).toBeNull());
-    fireEvent.click(screen.getByRole("tab", { name: "本文" }));
-
-    expect(await screen.findByText("再表示する本文")).toBeInTheDocument();
-    expect(screen.queryByText("本文を読み込んでいます")).toBeNull();
-  });
-
-  it("compares the selected saved version with the version immediately before it", async () => {
-    window.location.hash = "#/works/101?tab=history";
-    const demo = getDemoReader(101);
-    const versionOne = { ...demo.versions[0], id: 1, version: 1, textLength: 12, changeSummary: "初回保存" };
-    const versionTwo = { ...demo.versions[0], id: 2, version: 2, textLength: 15, changeSummary: "本文を更新" };
-    dbApi.getReaderMetadata.mockResolvedValue({
-      download: { ...demo.download, currentVersion: 2 },
-      versions: [versionTwo, versionOne],
-      assetCount: demo.assets.length,
-      isEdited: demo.isEdited,
-      activeEditRevision: demo.activeEditRevision,
-    });
-    dbApi.getReaderContentPage.mockImplementation((_id: number, version: number) => Promise.resolve({
-      page: 0,
-      pageCount: 1,
-      html: "",
-      plainText: version === 1 ? "冒頭。古い文章。結末。" : "冒頭。新しい文章と追記。結末。",
-      totalPlainTextChars: 20,
-    }));
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
-
-    expect(await screen.findByText("v1 → v2 の変更")).toBeInTheDocument();
-    await waitFor(() => expect(Array.from(document.querySelectorAll('ins[data-kind="added"]')).map((node) => node.textContent).join("")).toContain("新しい"));
-    expect(Array.from(document.querySelectorAll('ins[data-kind="added"]')).map((node) => node.textContent).join("")).toContain("追記");
-    expect(Array.from(document.querySelectorAll('del[data-kind="removed"]')).map((node) => node.textContent).join("")).toContain("古い");
-    // 平文は既定では運ばれない（読書画面が使わないため）。版を比べるここだけが
-    // 明示して頼む。頼み忘れると差分が黙って空になる。
-    expect(inspectionApi.getRevisionSnapshot).toHaveBeenCalledWith(101, 2);
-    expect(inspectionApi.getRevisionSnapshot).toHaveBeenCalledWith(101, 1);
-
-    fireEvent.click(screen.getByRole("radio", { name: "v2全文" }));
-    expect(screen.getByText("冒頭。新しい文章と追記。結末。")).toBeInTheDocument();
-  });
-
-  it("opens the missing-image location in the saved source", async () => {
-    window.location.hash = "#/works/101";
-    inspectionApi.getWorkAcquisitionDetails.mockResolvedValue({ kind: "incomplete", status: "held", reason: "画像が非公開です", recordedAt: "2026-10-29T00:00:00Z", version: 2, missingImages: [{ reference: "[pixivimage:42-2]", page: 2, occurrence: 0, excerpt: "前の文章 画像 後の文章" }] });
-    dbApi.getReaderContentPage.mockImplementation((_id: number, _version: number, page: number) => Promise.resolve(content(page, '<div data-image-reference="[pixivimage:42-2]" data-image-missing="true">取得できなかった画像</div>')));
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
-    fireEvent.click(await screen.findByRole("button", { name: /理由と本文の位置/ }));
-    expect(await screen.findByRole("button",{name:"参照先の画像を開く：[pixivimage:42-2]"})).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: /本文 2ページ/ }));
-    await waitFor(() => expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, 2, 1));
-    await waitFor(() => expect(document.querySelector('[data-image-reference="[pixivimage:42-2]"]')).toHaveAttribute("data-image-target", "true"));
-    expect(scrollToContent).toHaveBeenCalledWith({ block: "nearest" });
-    expect(window.location.hash).toContain("tab=content");
-  });
-
-  it("fetches an unsaved provider revision and compares it with the current saved version", async () => {
-    window.location.hash = "#/works/101?tab=history&compare=pending";
-    const demo = getDemoReader(101);
-    const versionOne = { ...demo.versions[0], id: 1, version: 1, textLength: 12, changeSummary: "初回保存" };
-    const versionTwo = { ...demo.versions[0], id: 2, version: 2, textLength: 15, changeSummary: "前回の改稿" };
-    dbApi.getReaderMetadata.mockResolvedValue({
-      download: { ...demo.download, currentVersion: 2 },
-      versions: [versionTwo, versionOne],
-      assetCount: demo.assets.length,
-      isEdited: demo.isEdited,
-      activeEditRevision: demo.activeEditRevision,
-    });
-    dbApi.getReaderContentPage.mockImplementation((_id: number, version: number) => Promise.resolve({
-      page: 0,
-      pageCount: 1,
-      html: "",
-      plainText: version === 2 ? "保存済みの本文。" : "最初の本文。",
-      totalPlainTextChars: 20,
-    }));
-    updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ work: "101", foundAt: "2026-09-01T00:00:00Z" }]);
-    updateJobApi.previewPendingRevisionCommand.mockResolvedValue({
-      work: "101",
-      baseVersion: 2,
-      text: "取得元で直された本文と追記。",
-      textLength: 14,
-    });
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
-
-    expect(await screen.findByText("保存済み v2 → 取得元の改稿（未保存） の変更")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /取得元の改稿/ })).toHaveAttribute("data-active");
-    await waitFor(() => expect(updateJobApi.previewPendingRevisionCommand).toHaveBeenCalledWith("101"));
-    expect(Array.from(document.querySelectorAll('ins[data-kind="added"]')).map((node) => node.textContent).join("")).toContain("取得元");
-    expect(screen.getByRole("radio", { name: "取得元の改稿（未保存）全文" })).toBeInTheDocument();
   });
 });

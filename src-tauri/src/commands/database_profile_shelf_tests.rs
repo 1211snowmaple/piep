@@ -60,17 +60,9 @@ impl Drop for Fixture {
 }
 fn state(root: &std::path::Path, library: Arc<Library>) -> Arc<AppState> {
     std::fs::create_dir_all(root.join("runtime")).unwrap();
-    let mut state = AppState::new(
-        crate::database::Database::open(
-            &root.join("runtime/piep.db"),
-            &root.join("runtime/downloads"),
-        )
-        .unwrap(),
-    );
-    state.library_v2 = Arc::new(crate::commands::library_v2::LibraryV2::with_test_library(
-        library,
-    ));
-    Arc::new(state)
+    Arc::new(AppState::new(Arc::new(
+        crate::commands::library_v2::LibraryV2::with_test_library(library),
+    )))
 }
 fn params(force: bool) -> RefreshEntityProfileParams {
     RefreshEntityProfileParams {
@@ -159,12 +151,6 @@ async fn the_refresh_coordinator_saves_only_to_the_switched_shelf_and_uses_its_f
     .await
     .unwrap();
     assert_eq!(cached, head);
-    assert!(state.db.get_person("pixiv", "77").is_err());
-    assert!(state
-        .db
-        .list_entity_versions("person", "pixiv", "77")
-        .unwrap()
-        .is_empty());
     assert!(!fixture.0.join("runtime/profiles").exists());
     library.verify().unwrap();
     let old_snapshot = person.snapshot;

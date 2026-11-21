@@ -3,7 +3,6 @@ import { renderHook } from "@testing-library/react";
 
 const listUpdateTargets = vi.fn();
 const listWatchGroups = vi.fn();
-const searchDownloadsV2 = vi.fn();
 const listUpdateJobsCommand = vi.fn();
 const startUpdateJobCommand = vi.fn();
 const libraryV2Status = vi.fn();
@@ -19,7 +18,6 @@ vi.mock("@/services/dbApi", () => ({
   isTauriRuntime: () => true,
   listUpdateTargets: (...args: unknown[]) => listUpdateTargets(...args),
   listWatchGroups: () => listWatchGroups(),
-  searchDownloadsV2: (...args: unknown[]) => searchDownloadsV2(...args),
 }));
 vi.mock("@/services/updateJobApi", () => ({
   listUpdateJobsCommand: () => listUpdateJobsCommand(),
@@ -57,26 +55,23 @@ beforeEach(() => {
   storeValues.set("update_schedule", { onStartup: true, intervalHours: 0, mode: "check_only", watchSaved: false, notify: false });
   listUpdateTargets.mockReset().mockResolvedValue([]);
   listWatchGroups.mockReset().mockResolvedValue([]);
-  searchDownloadsV2.mockReset().mockResolvedValue({ items: [] });
   listUpdateJobsCommand.mockReset().mockResolvedValue([]);
   startUpdateJobCommand.mockReset().mockResolvedValue({ totals: 1 });
-  libraryV2Status.mockReset().mockResolvedValue({ state: "absent", path: "unused" });
+  libraryV2Status.mockReset().mockResolvedValue({ state: "ready", path: "x" });
   libraryV2Search.mockReset().mockResolvedValue({ cards: [] });
 });
 
 describe("automatic update checks", () => {
-  it("checks the switched shelf when only a newly saved work is watched", async () => {
-    libraryV2Status.mockResolvedValue({ state: "ready", switched: true });
+  // 監視対象が空でも、作品の監視は棚の作品の旗として残っている。
+  it("checks the shelf when only a saved work is watched", async () => {
     libraryV2Search.mockResolvedValue({ cards: [{ id: "019ad000-0000-7000-8000-000000000001" }] });
     await runStartupTick();
-    expect(searchDownloadsV2).not.toHaveBeenCalled();
     expect(startUpdateJobCommand).toHaveBeenCalledWith(expect.objectContaining({ scope: "all" }));
   });
 
   it("adopts the migrated group UUID and sends only its enabled targets", async () => {
     const id = "019ad000-0000-7000-8000-000000000001";
     const member = "019ad000-0000-7000-8000-000000000002";
-    libraryV2Status.mockResolvedValue({ state: "ready", switched: true });
     storeValues.set("update_schedule", { onStartup: true, groupId: 7 });
     listWatchGroups.mockResolvedValue([{ id, legacyId: 7, name: "毎日", targetIds: [member] }]);
     listUpdateTargets.mockResolvedValue([{ id: member }]);
@@ -86,18 +81,11 @@ describe("automatic update checks", () => {
   });
 
   it("waits for the authoritative shelf to open before scheduling a job", async () => {
-    libraryV2Status.mockResolvedValue({ state: "indexing" });
+    libraryV2Status.mockResolvedValue({ state: "indexing", path: "x" });
     listUpdateTargets.mockResolvedValue([{ id: 1 }]);
     await runStartupTick();
     expect(startUpdateJobCommand).not.toHaveBeenCalled();
     expect(storeValues.has("update_schedule_last_run")).toBe(false);
-  });
-  // 監視対象が空でも、作品の監視は downloads 側の旗として残っている。
-  // update_targets だけを見ていた頃は、この人の自動確認が一度も走らなかった。
-  it("runs when only individual works are watched", async () => {
-    searchDownloadsV2.mockResolvedValue({ items: [{ id: 5 }] });
-    await runStartupTick();
-    expect(startUpdateJobCommand).toHaveBeenCalledTimes(1);
   });
 
   it("stays quiet when there is nothing to check at all", async () => {

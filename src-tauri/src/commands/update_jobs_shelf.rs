@@ -17,9 +17,10 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-pub(super) fn switched_library(app: &tauri::AppHandle) -> Option<Arc<Library>> {
-    app.try_state::<Arc<super::super::library_v2::LibraryV2>>()?
-        .switched()
+pub(super) fn library(app: &tauri::AppHandle) -> Result<Arc<Library>, String> {
+    app.try_state::<Arc<super::super::library_v2::LibraryV2>>()
+        .ok_or_else(|| "棚は開いていません".to_string())?
+        .library()
 }
 
 pub(crate) fn saved_card(
@@ -544,21 +545,11 @@ pub(super) async fn process_work(
         fetched,
         source.to_owned(),
         key.to_owned(),
-        card.title.clone(),
-        card.author_name.clone(),
-        String::new(),
-        card.content_type.clone(),
-        None,
-        None,
-        None,
         cookie,
         user_agent,
     )
     .await?;
-    let super::super::downloader::SavedWork::Shelf(saved) = saved else {
-        return Err("保存先の棚が変わりました".into());
-    };
-    let reference = SavedRef::Shelf(saved.work);
+    let reference = saved.work;
     if !saved.missing_references.is_empty() {
         return Ok(ItemOutcome::PartialSaved(
             reference,
@@ -586,34 +577,32 @@ pub(super) async fn process_work(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    use crate::database::{AdhocUpdateTarget, Database};
+    use crate::database::AdhocUpdateTarget;
     use crate::library::{LibraryId, UserStateChange, WorkSave};
     use serde_json::json;
     use std::path::PathBuf;
 
-    pub(super) struct Temp(pub(super) PathBuf);
+    pub(in crate::commands) struct Temp(pub(super) PathBuf);
     impl Drop for Temp {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
-    pub(super) fn fixture() -> (Temp, Arc<AppState>, Arc<Library>) {
+    pub(in crate::commands) fn fixture() -> (Temp, Arc<AppState>, Arc<Library>) {
         let root = std::env::temp_dir().join(format!("piep-update-shelf-{}", LibraryId::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
-        let mut state =
-            AppState::new(Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap());
         let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
         library.switch_over().unwrap();
-        state.library_v2 = Arc::new(
+        let state = AppState::new(Arc::new(
             super::super::super::library_v2::LibraryV2::with_test_library(library.clone()),
-        );
+        ));
         (Temp(root), Arc::new(state), library)
     }
 
-    pub(super) fn request(scope: &str) -> StartUpdateJobRequest {
+    pub(in crate::commands) fn request(scope: &str) -> StartUpdateJobRequest {
         StartUpdateJobRequest {
             scope: scope.into(),
             mode: "check_only".into(),
@@ -626,7 +615,7 @@ mod tests {
         }
     }
 
-    pub(super) fn data(source: &str, text: &str, author: &str) -> Value {
+    pub(in crate::commands) fn data(source: &str, text: &str, author: &str) -> Value {
         if source == "fanbox" {
             json!({ "title": "投稿", "creatorId": author, "user": { "name": "作者" }, "type": "text",
                 "updatedDatetime": "2026-11-01T00:00:00Z", "body": { "text": text } })
@@ -636,7 +625,7 @@ mod tests {
         }
     }
 
-    pub(super) fn save(
+    pub(in crate::commands) fn save(
         library: &Library,
         source: &str,
         key: &str,
@@ -725,7 +714,7 @@ mod tests {
             })
             .unwrap();
         let keys = |scope: &str| {
-            build_initial_items(&state, &request(scope), Some(&library))
+            build_initial_items(&state, &request(scope), &library)
                 .unwrap()
                 .into_iter()
                 .filter_map(|i| i.source_id)
@@ -739,7 +728,7 @@ mod tests {
             new_works_only: Some(true),
             ..request("favorite")
         };
-        assert!(build_initial_items(&state, &req, Some(&library))
+        assert!(build_initial_items(&state, &req, &library)
             .unwrap()
             .is_empty());
     }
@@ -779,9 +768,7 @@ mod tests {
                     .unwrap(),
             )
             .unwrap();
-        // 旧棚には作品を一つも作らない。棚で新しく保存した作品だけでジョブになる。
-        assert!(state.db.get_watched_downloads().unwrap().is_empty());
-        let items = build_initial_items(&state, &request("all"), Some(&library)).unwrap();
+        let items = build_initial_items(&state, &request("all"), &library).unwrap();
         let keys: HashSet<_> = items
             .iter()
             .filter_map(|i| i.source_id.as_deref())
@@ -814,7 +801,7 @@ mod tests {
                 new_works_only: Some(true),
                 ..request("all")
             },
-            Some(&library)
+            &library
         )
         .unwrap()
         .is_empty());
@@ -855,13 +842,9 @@ mod tests {
         let request: StartUpdateJobRequest = serde_json::from_value(serde_json::json!({
             "scope":"work","mode":"check_only","workIds":[wanted.id,wanted.id,person,LibraryId::now_v7()]
         })).unwrap();
-        let items = build_initial_items(&state, &request, Some(&library)).unwrap();
+        let items = build_initial_items(&state, &request, &library).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].source_id.as_deref(), Some("wanted"));
-        assert!(state.db.get_watched_downloads().unwrap().is_empty());
-        assert!(build_initial_items(&state, &request, None)
-            .unwrap_err()
-            .contains("UUID"));
         for id in [person, LibraryId::now_v7(), other.id] {
             if id == other.id {
                 library
@@ -876,7 +859,7 @@ mod tests {
                 work_ids: Some(vec![crate::database::WorkId::Shelf(id)]),
                 ..request.clone()
             };
-            assert!(build_initial_items(&state, &request, Some(&library))
+            assert!(build_initial_items(&state, &request, &library)
                 .unwrap()
                 .is_empty());
         }
@@ -900,7 +883,7 @@ mod tests {
             }]),
             ..request("author")
         };
-        let items = build_initial_items(&state, &req, Some(&library)).unwrap();
+        let items = build_initial_items(&state, &req, &library).unwrap();
         let work_keys: Vec<_> = items
             .iter()
             .filter(|i| i.item_type == "work")
@@ -1139,17 +1122,6 @@ mod tests {
     #[test]
     fn registered_watch_scope_and_series_deduplication_use_only_the_authoritative_catalogue() {
         let (_temp, state, library) = fixture();
-        state
-            .db
-            .upsert_update_target(&crate::database::UpdateTargetInput {
-                target_type: "author".into(),
-                source: "pixiv".into(),
-                source_key: "old-only".into(),
-                display_name: "旧棚だけ".into(),
-                enabled: true,
-                metadata_json: None,
-            })
-            .unwrap();
         let mut response = data("pixiv", "本文", "77");
         response["detail"]["series_id"] = json!(7);
         save(&library, "pixiv", "11", &response, false);
@@ -1179,7 +1151,7 @@ mod tests {
             ]),
             ..request("targets")
         };
-        let items = build_initial_items(&state, &req, Some(&library)).unwrap();
+        let items = build_initial_items(&state, &req, &library).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].source_id.as_deref(), Some("77"));
         let payload: Value = serde_json::from_str(&items[0].payload_json).unwrap();
@@ -1188,11 +1160,8 @@ mod tests {
             target_ids: Some(vec![crate::database::WatchId::Shelf(series)]),
             ..request("targets")
         };
-        let items = build_initial_items(&state, &req, Some(&library)).unwrap();
+        let items = build_initial_items(&state, &req, &library).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].source_id.as_deref(), Some("7"));
-        assert!(items
-            .iter()
-            .all(|i| i.source_id.as_deref() != Some("old-only")));
     }
 }

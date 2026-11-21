@@ -6,7 +6,6 @@ import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { WorkCard } from "@/components/WorkCard";
 import { formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
-import { searchDownloadsV2 } from "@/services/dbApi";
 import { searchShelf } from "@/features/library/shelfV2";
 import type { WorkCollection } from "@/types/collections";
 import type { ListedWork, SearchV2Params } from "@/types/library";
@@ -31,21 +30,19 @@ type Scope = "recent" | "authors" | "tags" | "series" | "favorite";
  * 絞り込みは「この束の続きを探している」という状況に合わせる。だいたいの場合、
  * 入れたい作品は同じ作者か、同じタグか、同じシリーズにいる。
  *
- * `shelf` のときは新しい棚から探す（作品は取得元の ID で指して渡す）。
+ * 棚から探す（作品は取得元の ID で指して渡す）。
  */
 export function CollectionAddWorksModal({
   opened,
   onClose,
   collection,
   busy,
-  shelf = false,
   onAdd,
 }: {
   opened: boolean;
   onClose: () => void;
   collection: WorkCollection;
   busy: boolean;
-  shelf?: boolean;
   onAdd: (works: ListedWork[]) => void;
 }) {
   const [scope, setScope] = useState<Scope>("authors");
@@ -120,11 +117,9 @@ export function CollectionAddWorksModal({
   }, [authors, debouncedQuery, scope, seriesKey, sharedTags]);
 
   const searchQuery = useQuery({
-    queryKey: [shelf ? "library-v2-collection-add-works" : "collection-add-works", collection.id, params],
-    // 新しい棚は検索語を `text` で受ける。
-    queryFn: (): Promise<{ items: ListedWork[] }> => shelf
-      ? searchShelf({ ...params, text: params.query, query: null })
-      : searchDownloadsV2(params),
+    queryKey: ["library-v2-collection-add-works", collection.id, params],
+    // 棚は検索語を `text` で受ける。
+    queryFn: (): Promise<{ items: ListedWork[] }> => searchShelf({ ...params, text: params.query, query: null }),
     enabled: opened,
   });
 

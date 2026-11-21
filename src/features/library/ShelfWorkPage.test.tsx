@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import type { ShelfWork } from "@/services/libraryV2Api";
-import { SHELF_V2_PREFERENCE_KEY } from "@/features/library/shelfV2";
 import WorkPage from "./WorkPage";
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
@@ -115,15 +114,12 @@ describe("ShelfWorkPage", () => {
     }));
   });
 
-  it("opens a work of the new shelf by its id and reads the body's images by their fingerprint", async () => {
+  it("opens a work of the shelf by its id and reads the body's images by their fingerprint", async () => {
     renderPage(`#/works/${WORK}?tab=content`);
     expect(await screen.findByText("1ページ本文")).toBeInTheDocument();
     expect(api.libraryV2Work).toHaveBeenCalledWith(WORK);
     expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, null, 0);
     expect(screen.getByAltText("挿絵")).toHaveAttribute("src", `http://piep-library.localhost/${IMAGE}`);
-    // 読むだけ。変える操作は押せない。
-    expect(screen.getByRole("button", { name: "お気に入り（新しい棚では変えられません）" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "更新を確認（新しい棚では変えられません）" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "2" }));
     expect(await screen.findByText("2ページ本文")).toBeInTheDocument();
@@ -208,9 +204,8 @@ describe("ShelfWorkPage", () => {
     expect(await screen.findByText(/現在の原本/)).toBeInTheDocument();
   });
 
-  it("checks just this work by its shelf UUID after switching over", async () => {
-    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+  it("checks just this work by its shelf UUID", async () => {
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     renderPage(`#/works/${WORK}`);
     const button = await screen.findByRole("button", { name: "更新を確認" });
     await waitFor(() => expect(button).toBeEnabled());
@@ -218,9 +213,8 @@ describe("ShelfWorkPage", () => {
     await waitFor(() => expect(runSingleCheck).toHaveBeenCalledWith({ kind: "work", workId: WORK, label: work.title }, expect.any(Function)));
   });
 
-  it("adds this work to a collection of the switched shelf and seeds a suggestion from it", async () => {
-    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+  it("adds this work to a collection and seeds a suggestion from it", async () => {
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     const summary = (id: string, name: string) => ({
       id, legacy_id: null, name, description: null, ordered: true, cover: null, cover_image: null, cover_mode: "mosaic",
       name_source: "manual", track: "manual", tiles: [], revision: 1, member_count: 1, available_count: 1,
@@ -243,8 +237,7 @@ describe("ShelfWorkPage", () => {
   });
 
   it("seeds a collection suggestion from this work by its shelf UUID", async () => {
-    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     api.libraryV2Collections.mockResolvedValue([]);
     api.libraryV2WorkCollections.mockResolvedValue([]);
     renderPage(`#/works/${WORK}`);
@@ -255,15 +248,9 @@ describe("ShelfWorkPage", () => {
     await waitFor(() => expect(window.location.hash).toBe(`#/library?tab=collections&suggest=${WORK}`));
   });
 
-  it("keeps the collection menu shut on a read-only copy", async () => {
-    renderPage(`#/works/${WORK}`);
-    expect(await screen.findByRole("button", { name: "コレクションに追加（新しい棚では変えられません）" })).toHaveAttribute("data-disabled", "true");
-    expect(api.libraryV2Collections).not.toHaveBeenCalled();
-  });
 
-  it("changes this work's watching flag on the switched shelf and reloads the saved state", async () => {
-    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+  it("changes this work's watching flag and reloads the saved state", async () => {
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     api.libraryV2SetUserState.mockImplementation(async (_id: string, { watching }: { watching: boolean }) => {
       api.libraryV2Work.mockResolvedValue({ ...work, watching });
       return { watching, favorite: false, generation: 1 };
@@ -280,17 +267,9 @@ describe("ShelfWorkPage", () => {
     await waitFor(() => { expect(toggle).toBeEnabled(); expect(toggle).not.toBeChecked(); });
   });
 
-  it("prevents watching changes on a read-only copy", async () => {
-    renderPage(`#/works/${WORK}`);
-    const readonly = await screen.findByRole("switch", { name: "更新監視（新しい棚では変えられません）" });
-    expect(readonly).toBeDisabled();
-    fireEvent.click(readonly);
-    expect(api.libraryV2SetUserState).not.toHaveBeenCalled();
-  });
 
   it("restores the current watching flag if a write fails", async () => {
-    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     api.libraryV2SetUserState.mockRejectedValue(new Error("競合"));
     renderPage(`#/works/${WORK}`);
     const toggle = await screen.findByRole("switch", { name: "更新監視" });
@@ -305,9 +284,8 @@ describe("ShelfWorkPage", () => {
     expect(await screen.findByText("v1 をもとに編集した本文です。取り込み済みの v2 は表示されていません。")).toBeInTheDocument();
   });
 
-  it("re-publishes an earlier edit and takes one off the list on a switched shelf", async () => {
-    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+  it("re-publishes an earlier edit and takes one off the list", async () => {
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     const OLD = "0195f1c2-0000-7000-8000-0000000000e1";
     const OLDER = "0195f1c2-0000-7000-8000-0000000000e2";
     api.libraryV2EditHistory.mockResolvedValue({
@@ -337,18 +315,6 @@ describe("ShelfWorkPage", () => {
     expect(await screen.findByText("以前の編集版を2件すべて一覧から外しますか？")).toBeInTheDocument();
   });
 
-  it("keeps the earlier edits read-only before the shelf is switched", async () => {
-    api.libraryV2EditHistory.mockResolvedValue({
-      generation: 1,
-      active: null,
-      draft: null,
-      archived: [{ id: "0195f1c2-0000-7000-8000-0000000000e1", baseVersion: 2, title: null, createdAt: Date.UTC(2026, 0, 3) }],
-    });
-    renderPage(`#/works/${WORK}?tab=history`);
-    expect(await screen.findByText("以前の編集版")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "もう一度反映" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "一覧から外す" })).not.toBeInTheDocument();
-  });
 
   it("opens a PDF attachment's pages from the body and from the attachment list", async () => {
     const pdf = "cd".repeat(32);

@@ -5,7 +5,6 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
-import { SHELF_V2_PREFERENCE_KEY } from "@/features/library/shelfV2";
 import type { ShelfCard } from "@/services/libraryV2Api";
 import LibraryPage from "./LibraryPage";
 
@@ -83,8 +82,7 @@ describe("新しい棚の一覧の操作", () => {
   });
   beforeEach(() => {
     window.location.hash = "#/library";
-    localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
-    v2.libraryV2Status.mockResolvedValue({ state: "ready", path: "C:/shelf", unresolved: [], switched: true });
+    v2.libraryV2Status.mockResolvedValue({ state: "ready", path: "C:/shelf" });
     v2.libraryV2Search.mockResolvedValue({ page: { items: [], next: null, total: 2 }, intent: null, matches: [], cards: [card(1), card(2)] });
     v2.libraryV2SetUserState.mockResolvedValue({ favorite: true, watching: false, generation: 2 });
     v2.libraryV2RemoveWork.mockResolvedValue(undefined);
@@ -127,12 +125,6 @@ describe("新しい棚の一覧の操作", () => {
     expect(legacy.deleteDownloads).not.toHaveBeenCalled();
   });
 
-  it("切り替える前の棚では複数選択を押せず、理由を添える", async () => {
-    v2.libraryV2Status.mockResolvedValue({ state: "ready", path: "C:/shelf", unresolved: [], switched: false });
-    view();
-    const button = await screen.findByRole("button", { name: "複数選択（新しい棚では変えられません）" });
-    expect(button.getAttribute("aria-disabled")).toBe("true");
-  });
 
   it("絞り込みの選択肢を新しい棚から数える", async () => {
     view();

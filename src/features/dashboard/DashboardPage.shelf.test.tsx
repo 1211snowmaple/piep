@@ -4,7 +4,6 @@ import { render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
-import { SHELF_V2_PREFERENCE_KEY } from "@/features/library/shelfV2";
 import type { ShelfCard } from "@/services/libraryV2Api";
 import type { DashboardSummary } from "@/types/library";
 import DashboardPage from "./DashboardPage";
@@ -73,8 +72,7 @@ const summary: DashboardSummary = {
 
 describe("新しい棚のホーム", () => {
   beforeEach(() => {
-    localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
-    v2.libraryV2Status.mockResolvedValue({ state: "ready", path: "C:/shelf", unresolved: [], switched: true });
+    v2.libraryV2Status.mockResolvedValue({ state: "ready", path: "C:/shelf" });
     v2.libraryV2Search.mockResolvedValue({ page: { items: [], next: null, total: 1 }, intent: null, matches: [], cards: [card] });
     health.libraryV2Dashboard.mockResolvedValue(summary);
     health.libraryV2SearchIndexStatus.mockResolvedValue({ totalDownloads: 27, indexedDownloads: 27, pendingDownloads: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 0, semanticIndexedDownloads: 0, semanticPendingDownloads: 0, semanticEnabled: false, semanticModelReady: false, embeddingProvider: "cpu", gpuEnabled: false });

@@ -20,7 +20,7 @@ function counts(job: StoredJobHistory): string {
 /** 再開できる実行中の記録と、棚に封をした以前の記録を、同じ履歴タブで開く。 */
 export function StoredJobHistoryPanel({ runtime, current, hasCurrent, onShelfReady }: { runtime: boolean; current: ReactNode; hasCurrent: boolean; onShelfReady: () => Promise<void> }) {
   const status = useLibraryV2Status(runtime);
-  const active = runtime && status.data?.state === "ready" && status.data.switched;
+  const active = runtime && status.data?.state === "ready";
   const queryClient = useQueryClient();
   const [selected, setSelected] = useState<StoredJobHistory | null>(null);
   const history = useInfiniteQuery({

@@ -1,7 +1,5 @@
 //! 実行項目の入力・表示用の写し・集計を、一つの確定で更新する。
 use super::*;
-#[path = "job_queue_native_import.rs"]
-mod import;
 fn known_hold(payload: &str) -> Result<bool, String> {
     Ok(
         serde_json::from_str::<serde_json::Value>(payload).map_err(|e| e.to_string())?["knownHold"]

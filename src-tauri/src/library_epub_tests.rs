@@ -230,13 +230,14 @@ fn added_path(manifest: &crate::epub::intermediate::EpubManifest) -> String {
 }
 
 #[test]
-fn the_queue_sends_numbers_for_the_old_shelf_and_ids_for_the_new_one() {
+fn the_queue_sends_shelf_ids_and_refuses_old_numbers() {
     use crate::epub::intermediate::EpubWork;
     let id = LibraryId::now_v7();
-    let works: Vec<EpubWork> = serde_json::from_value(json!([7, id.to_string()])).unwrap();
-    assert_eq!(works, vec![EpubWork::Legacy(7), EpubWork::Shelf(id)]);
+    let works: Vec<EpubWork> = serde_json::from_value(json!([id.to_string()])).unwrap();
+    assert_eq!(works, vec![id]);
     assert_eq!(
         serde_json::to_value(&works).unwrap(),
-        json!([7, id.to_string()])
+        json!([id.to_string()])
     );
+    assert!(serde_json::from_value::<Vec<EpubWork>>(json!([7])).is_err());
 }

@@ -9,35 +9,34 @@ import { isTauriRuntime } from "@/services/dbApi";
 /**
  * 対象作品のタグ件数をまとめる。本文の文体や作者全作品への推測はしない。
  */
-export function AuthorAssist({ source, personKey, shelf = false }: { source: string; personKey: string; shelf?: boolean }) {
-  return <AuthorAssistForPerson key={`${shelf ? "v2" : "v1"}:${source}:${personKey}`} source={source} personKey={personKey} shelf={shelf} />;
+export function AuthorAssist({ source, personKey }: { source: string; personKey: string }) {
+  return <AuthorAssistForPerson key={`${source}:${personKey}`} source={source} personKey={personKey} />;
 }
 
-/** `shelf` なら新しい棚の作品から作り、覚え書きも新しい棚に残す（切り替える前の棚には残さない）。 */
-function AuthorAssistForPerson({ source, personKey, shelf }: { source: string; personKey: string; shelf: boolean }) {
+function AuthorAssistForPerson({ source, personKey }: { source: string; personKey: string }) {
   const { engine, settings } = useAssist("author_style");
   const queryClient = useQueryClient();
   const subjectKey = `${source}:${personKey}`;
-  const key = ["assist-note", "person", subjectKey, "style", shelf] as const;
+  const key = ["assist-note", "person", subjectKey, "style"] as const;
   const noteEngine = settings ? toEngine(settings, "author_style") : null;
 
   // 保存してあるものを読むだけ。ここではモデルを呼ばない。
   const note = useQuery({
     queryKey: [...key, noteEngine],
-    queryFn: () => loadNote("person", subjectKey, "style", noteEngine, shelf),
+    queryFn: () => loadNote("person", subjectKey, "style", noteEngine),
     enabled: isTauriRuntime(),
   });
 
   const run = useMutation({
     mutationFn: () => {
       if (!engine) return Promise.reject(new Error("作者の題材メモが設定されていません"));
-      return describeAuthor(engine, source, personKey, shelf);
+      return describeAuthor(engine, source, personKey);
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: key }),
     onError: (error) => notifications.show({ color: "red", title: "題材をまとめられません", message: errorMessage(error) }),
   });
   const discard = useMutation({
-    mutationFn: () => deleteNote("person", subjectKey, "style", shelf),
+    mutationFn: () => deleteNote("person", subjectKey, "style"),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: key }),
   });
 

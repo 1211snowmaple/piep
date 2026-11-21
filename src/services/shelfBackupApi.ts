@@ -79,7 +79,7 @@ export function libraryV2ImportArchive(path: string): Promise<ShelfArchiveImport
 }
 
 /**
- * 旧棚の保存フォルダーを調べ、棚にまだ一度も入っていない作品を版ごと棚へ戻す。
+ * `downloads` の保存フォルダーを調べ、棚にまだ一度も入っていない作品を版ごと棚へ戻す。
  * 棚にある作品・棚から外した作品には触れない。
  */
 export function libraryV2ReimportFolders(): Promise<ReimportOutcome> {

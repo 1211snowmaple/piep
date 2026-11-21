@@ -7,16 +7,10 @@ import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate } from "@/app/router";
 import { requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
 import { errorMessage, formatNumber } from "@/lib/format";
-import {
-  cancelOriginalImageUpgrade,
-  getOriginalImageStatus,
-  upgradePixivImagesToOriginal,
-  type OriginalImageProgress,
-} from "@/services/dbApi";
+import { cancelOriginalImageUpgrade, type OriginalImageProgress } from "@/services/dbApi";
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
 import { libraryV2OriginalImageStatus, libraryV2UpgradePixivImagesToOriginal } from "@/services/shelfHealthApi";
-import { invalidateShelf, SHELF_READ_ONLY } from "@/features/library/shelfV2";
-import { Locked } from "@/components/Locked";
+import { invalidateShelf } from "@/features/library/shelfV2";
 
 /**
  * 縮小版で保存された pixiv の表紙・挿絵を、原寸に取り直す。
@@ -24,19 +18,16 @@ import { Locked } from "@/components/Locked";
  * 以前の保存は表紙を 240x480 の縮小版で、本文から参照したイラストを
  * 1200px の版で持っていた。取りに行くのは画像サーバーだけで、
  * アカウントの通信は増えない。
- *
- * `shelf` は一覧を新しい棚から出しているとき。数と取り直しは新しい棚に対して行い、書き換えは
- * 正本に切り替えた棚（`writable`）だけで押せる。
  */
-export function OriginalImagesCard({ runtime, disabled, shelf = false, writable = false }: { runtime: boolean; disabled: boolean; shelf?: boolean; writable?: boolean }) {
+export function OriginalImagesCard({ runtime, disabled }: { runtime: boolean; disabled: boolean }) {
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
   const operationRef = useRef<OperationController | null>(null);
   const retryRef = useRef<() => void>(() => undefined);
   const [liveProgress, setLiveProgress] = useState<OriginalImageProgress | null>(null);
   const status = useQuery({
-    queryKey: ["original-image-status", shelf ? "v2" : "legacy"],
-    queryFn: shelf ? libraryV2OriginalImageStatus : getOriginalImageStatus,
+    queryKey: ["original-image-status"],
+    queryFn: libraryV2OriginalImageStatus,
     enabled: runtime,
     staleTime: 0,
     refetchInterval: (query) => query.state.data?.running ? 2_000 : false,
@@ -78,7 +69,7 @@ export function OriginalImagesCard({ runtime, disabled, shelf = false, writable 
         if (payload.error) operationRef.current?.log(`${payload.activeLabel ?? "画像"}: ${payload.error}`, "warn");
       });
       try {
-        return await (shelf ? libraryV2UpgradePixivImagesToOriginal() : upgradePixivImagesToOriginal());
+        return await libraryV2UpgradePixivImagesToOriginal();
       } catch (error) {
         operationRef.current?.fail(error);
         throw error;
@@ -96,8 +87,8 @@ export function OriginalImagesCard({ runtime, disabled, shelf = false, writable 
       operationRef.current = null;
       setLiveProgress(null);
       await status.refetch();
-      // 新しい棚では、取り直した作品の表紙が一覧と作品の画面に出るよう、棚の問い合わせを捨てる。
-      if (shelf && result.upgraded > 0) await invalidateShelf(queryClient);
+      // 取り直した作品の表紙が一覧と作品の画面に出るよう、棚の問い合わせを捨てる。
+      if (result.upgraded > 0) await invalidateShelf(queryClient);
       notifications.show({
         color: result.stoppedReason ? "yellow" : result.canceled ? "gray" : "green",
         title: result.stoppedReason ? "取り直しを一時停止しました" : result.canceled ? "取り直しを中止しました" : "画像の取り直しが終わりました",
@@ -134,7 +125,7 @@ export function OriginalImagesCard({ runtime, disabled, shelf = false, writable 
       </Group>
       {remaining > 0 && (running
         ? <DangerButton style={{ flexShrink: 0 }} leftSection={<Icons.stop size={IconSize.menu} />} onClick={cancel}>中止</DangerButton>
-        : <Locked reason={shelf && !writable ? SHELF_READ_ONLY : null} label="原寸に取り直す"><Button style={{ flexShrink: 0 }} leftSection={<Icons.retry size={IconSize.menu} />} disabled={!runtime || disabled} onClick={() => upgrade.mutate()}>原寸に取り直す</Button></Locked>)}
+        : <Button style={{ flexShrink: 0 }} leftSection={<Icons.retry size={IconSize.menu} />} disabled={!runtime || disabled} onClick={() => upgrade.mutate()}>原寸に取り直す</Button>)}
     </Group>
     {progress && <Box mt="md">
       <Group justify="space-between" mb={6} wrap="nowrap">

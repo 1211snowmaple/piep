@@ -7,9 +7,7 @@
 //! そこで「どこなら開いてよいか」をアプリ自身に判断させる。Rust 側の API は
 //! コマンド層のスコープを通らないので、ここが唯一の門になる。
 
-use crate::AppState;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 
@@ -61,15 +59,14 @@ fn resolve_allowed_path(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, S
         .map_err(|error| format!("この場所を開けません（{error}）: {path}"))?;
     let is_dir = canonical.is_dir();
 
-    let state = app.state::<Arc<AppState>>();
-    let storage = state.db.storage_dir().to_path_buf();
+    // アプリのフォルダー（棚・取り込み用の保存フォルダー・書き出し先の既定を含む）と、
+    // 環境変数で外に置いた棚。
     let mut roots = Vec::new();
-    if let Ok(resolved) = storage.canonicalize() {
-        roots.push(resolved);
-    }
     if let Ok(app_data) = app.path().app_data_dir() {
-        if let Ok(resolved) = app_data.canonicalize() {
-            roots.push(resolved);
+        for root in [app_data.clone(), super::library_v2::library_dir(&app_data)] {
+            if let Ok(resolved) = root.canonicalize() {
+                roots.push(resolved);
+            }
         }
     }
     if !open_request_is_allowed(&canonical, is_dir, &roots) {

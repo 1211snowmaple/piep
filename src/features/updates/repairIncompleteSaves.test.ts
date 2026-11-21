@@ -2,10 +2,9 @@ import { act, renderHook } from "@testing-library/react";
 import { createElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
-const api = vi.hoisted(() => ({ jobs:vi.fn(),credentials:vi.fn(),list:vi.fn(),record:vi.fn(),start:vi.fn(),getJob:vi.fn(),listen:vi.fn() }));
+const api = vi.hoisted(() => ({ jobs:vi.fn(),credentials:vi.fn(),list:vi.fn(),record:vi.fn(),start:vi.fn(),getJob:vi.fn() }));
 vi.mock("@/services/dbApi", () => ({ isTauriRuntime:()=>true }));
 vi.mock("@/services/updateJobApi", () => ({ listUpdateJobsCommand:api.jobs,getUpdateJobCredentials:api.credentials,listIncompleteSaveRepairWorksCommand:api.list,recordIncompleteSaveRepairAttemptsCommand:api.record,startSaveJobCommand:api.start,getUpdateJobCommand:api.getJob }));
-vi.mock("@/services/eventBus",()=>({subscribeTauriEvent:api.listen}));
 import { REPAIR_BATCH_SIZE, startIncompleteSaveRepair, useIncompleteSaveRepair } from "./repairIncompleteSaves";
 
 // DB の代わり。一部保存の作品と、今の版で試した作品を覚える。
@@ -68,7 +67,6 @@ it("coalesces concurrent startup requests into one durable job", async () => {
 
 it("works through a large backlog in short jobs with a pause between them",async()=>{
   vi.useFakeTimers();
-  api.listen.mockImplementation(()=>()=>undefined);
   const count=REPAIR_BATCH_SIZE+3;
   incomplete = Array.from({length:count},(_,index)=>String(index));
   api.getJob.mockResolvedValue({jobId:"repair-job",status:"completed"});
@@ -87,23 +85,3 @@ it("works through a large backlog in short jobs with a pause between them",async
   } finally { hook.unmount();vi.useRealTimers(); }
 });
 
-it("picks up newly audited placeholders after the initial startup check finished",async()=>{
-  vi.useFakeTimers();
-  let onAudit!:(event:{payload:number[]})=>void;
-  api.listen.mockImplementation((_name,handler)=>{onAudit=handler;return()=>undefined;});
-  api.getJob.mockResolvedValue({jobId:"repair-job",status:"completed"});
-  incomplete = [];
-  const client=new QueryClient();
-  const hook=renderHook(()=>useIncompleteSaveRepair(),{wrapper:({children})=>createElement(QueryClientProvider,{client},children)});
-  try {
-    await act(()=>vi.advanceTimersByTimeAsync(5_000));
-    expect(api.start).not.toHaveBeenCalled();
-    incomplete = ["1"];
-    act(()=>onAudit({payload:[1]}));
-    await act(()=>vi.advanceTimersByTimeAsync(1_000));
-    expect(api.start).toHaveBeenCalledOnce();
-    act(()=>onAudit({payload:[1]}));
-    await act(()=>vi.advanceTimersByTimeAsync(4_000));
-    expect(api.start).toHaveBeenCalledOnce();
-  } finally { hook.unmount();vi.useRealTimers(); }
-});

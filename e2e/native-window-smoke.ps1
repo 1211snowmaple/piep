@@ -17,6 +17,9 @@ $resolvedArtifacts = (Resolve-Path -LiteralPath $ArtifactDirectory).Path
 # its Tauri identifier before initializing plugins, the library, or WebView2.
 $previousRunId = $env:PIEP_SMOKE_TEST_ID
 $env:PIEP_SMOKE_TEST_ID = [guid]::NewGuid().ToString('N')
+# The shelf's own override would send the run to whatever library it names.
+$previousLibraryDir = $env:PIEP_LIBRARY_V2_DIR
+$env:PIEP_LIBRARY_V2_DIR = $null
 $identifier = "io.github.u1211snowmaple.piep.smoke.$($env:PIEP_SMOKE_TEST_ID)"
 $appDataRoot = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath('ApplicationData'))
 $localAppDataRoot = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath('LocalApplicationData'))
@@ -67,8 +70,9 @@ public static class PiepNativeWindow {
   if ($width -lt 900 -or $height -lt 600) { throw "Initial window is smaller than 900x600: ${width}x${height}" }
 
   # Do not send global keystrokes: focus can belong to the user's normal app.
-  $database = Join-Path $appData 'piep.db'
-  while (-not (Test-Path -LiteralPath $database)) {
+  # A fresh shelf writes its manifest when it is created on the way up.
+  $manifest = Join-Path (Join-Path $appData 'library') 'library.json'
+  while (-not (Test-Path -LiteralPath $manifest)) {
     if ($process.HasExited -or [DateTime]::UtcNow -gt $deadline) {
       throw "Smoke test did not initialize its isolated library"
     }
@@ -114,4 +118,5 @@ finally {
     }
   }
   $env:PIEP_SMOKE_TEST_ID = $previousRunId
+  $env:PIEP_LIBRARY_V2_DIR = $previousLibraryDir
 }

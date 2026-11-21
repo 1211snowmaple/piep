@@ -167,24 +167,20 @@ describe("assist settings safety", () => {
   });
 });
 
-describe("どちらの棚へ頼むか", () => {
+describe("棚へ頼む", () => {
   const engine = toEngine(settings({}), "reader_recap");
-  it("作品の番号は旧棚、棚の ID は新しい棚の同じ仕事へ送る", async () => {
+  it("作品は棚の ID で頼む", async () => {
     vi.mocked(invoke).mockResolvedValue([]);
-    await acceptRelatedTags(7, ["雨"]);
-    expect(invoke).toHaveBeenLastCalledWith("assist_accept_related_tags", { downloadId: 7, tags: ["雨"] });
     await acceptRelatedTags("w1", ["雨"]);
     expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_accept_related_tags", { work: "w1", tags: ["雨"] });
   });
-  it("覚え書き・前回のあらすじ・分け方も新しい棚を選べる", async () => {
+  it("覚え書き・前回のあらすじ・分け方も棚へ頼む", async () => {
     vi.mocked(invoke).mockResolvedValue({ value: null, provenance: null });
-    await loadNote("work", "w2:w1", "recap", null, true);
+    await loadNote("work", "w2:w1", "recap", null);
     expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_load_note", { subjectType: "work", subjectKey: "w2:w1", noteKind: "recap", engine: null });
     await recapPrevious(engine, "w1", "w2");
     expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_recap_previous", { engine, previous: "w1", current: "w2" });
-    await recapPrevious(engine, 1, 2);
-    expect(invoke).toHaveBeenLastCalledWith("assist_recap_previous", { engine, previousDownloadId: 1, currentDownloadId: 2 });
-    await proposeSplits(engine, "c1", true);
+    await proposeSplits(engine, "c1");
     expect(invoke).toHaveBeenLastCalledWith("library_v2_assist_propose_splits", { engine, collection: "c1" });
   });
 });

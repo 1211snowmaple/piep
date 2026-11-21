@@ -42,10 +42,10 @@ import { WorkAssist } from "@/features/assist/WorkAssist";
 const proposal = { tag: "園芸", reason: "花壇の手入れが描かれています" };
 const relatedCandidate = { tag: "料理", reason: "他作品のタグ併用から見つかった候補", matchingWorkCount: 12, cooccurringWorkCount: 4 };
 
-function view(downloadId: number | string, client = new QueryClient({ defaultOptions: { queries: { retry: false } } }), writable = true) {
+function view(downloadId: string, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return {
     client,
-    element: <MantineProvider><QueryClientProvider client={client}><WorkAssist downloadId={downloadId} writable={writable} /></QueryClientProvider></MantineProvider>,
+    element: <MantineProvider><QueryClientProvider client={client}><WorkAssist downloadId={downloadId} /></QueryClientProvider></MantineProvider>,
   };
 }
 
@@ -76,7 +76,7 @@ describe("WorkAssist downloadId switch", () => {
   it("shows separately stored source context without parsing labels in the note", async () => {
     const text = "保存済みの主欄。\n\n［本文の末尾・確認用の原文］\n\n本文内の欄名。";
     mocks.loadNote.mockResolvedValue({ text, sourceTail: "保存された末尾原文。", modelId: "test-model", promptVersion: "work_synopsis/v11" });
-    render(view(1).element);
+    render(view("w-1").element);
     expect(await screen.findByText((_, element) => element?.textContent === text)).toBeVisible();
     expect(screen.getByText("本文末尾の原文を確認").closest("details")).not.toHaveAttribute("open");
     expect(screen.getByText("保存された末尾原文。")).not.toBeVisible();
@@ -87,14 +87,14 @@ describe("WorkAssist downloadId switch", () => {
     let resolveOld!: (value: typeof proposal[]) => void;
     mocks.suggestTags.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const first = view(1, client);
+    const first = view("w-1", client);
     const rendered = render(first.element);
 
     await openTagModal(user);
     await user.click(screen.getByRole("button", { name: "タグを提案してもらう" }));
-    expect(mocks.suggestTags).toHaveBeenCalledWith({ model: "test-model" }, 1);
+    expect(mocks.suggestTags).toHaveBeenCalledWith({ model: "test-model" }, "w-1");
 
-    rendered.rerender(view(2, client).element);
+    rendered.rerender(view("w-2", client).element);
     await act(async () => { resolveOld([proposal]); });
 
     await openTagModal(user);
@@ -107,7 +107,7 @@ describe("WorkAssist downloadId switch", () => {
     const user = userEvent.setup();
     mocks.suggestTags.mockResolvedValueOnce([proposal]);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const rendered = render(view(1, client).element);
+    const rendered = render(view("w-1", client).element);
 
     await openTagModal(user);
     await user.click(screen.getByRole("button", { name: "タグを提案してもらう" }));
@@ -115,7 +115,7 @@ describe("WorkAssist downloadId switch", () => {
     await user.click(oldProposal);
     expect(screen.getByRole("button", { name: "選んだ1件を付ける" })).toBeEnabled();
 
-    rendered.rerender(view(2, client).element);
+    rendered.rerender(view("w-2", client).element);
     await openTagModal(user);
 
     expect(screen.queryByRole("checkbox", { name: /園芸/ })).not.toBeInTheDocument();
@@ -126,7 +126,7 @@ describe("WorkAssist downloadId switch", () => {
   it("offers shelf co-occurrence when AI is disabled, and only saves after explicit selection", async () => {
     const user = userEvent.setup();
     mocks.useAssist.mockImplementation(() => ({ engine: null, settings: undefined, body: false, loading: false }));
-    render(view(11).element);
+    render(view("w-11").element);
 
     const action = screen.getByRole("button", { name: "一緒に付くタグ" });
     expect(action).toBeEnabled();
@@ -137,12 +137,12 @@ describe("WorkAssist downloadId switch", () => {
 
     await user.click(screen.getByRole("button", { name: "候補を読み込む" }));
     expect(await screen.findByRole("checkbox", { name: /料理/ })).toBeInTheDocument();
-    expect(mocks.relatedTagCandidates).toHaveBeenCalledWith(11);
+    expect(mocks.relatedTagCandidates).toHaveBeenCalledWith("w-11");
     expect(mocks.acceptRelatedTags).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("checkbox", { name: /料理/ }));
     await user.click(screen.getByRole("button", { name: "選んだ1件を手動で付ける" }));
-    expect(mocks.acceptRelatedTags).toHaveBeenCalledWith(11, ["料理"]);
+    expect(mocks.acceptRelatedTags).toHaveBeenCalledWith("w-11", ["料理"]);
   });
 
   it("refreshes the saved tag list when manual adoption errors after a possible commit", async () => {
@@ -151,7 +151,7 @@ describe("WorkAssist downloadId switch", () => {
       { name: relatedCandidate.tag, source: "manual" },
     ]);
     mocks.acceptRelatedTags.mockRejectedValueOnce(new Error("タグは保存済みですが索引更新に失敗しました"));
-    render(view(12).element);
+    render(view("w-12").element);
 
     await user.click(screen.getByRole("button", { name: "一緒に付くタグ" }));
     await user.click(await screen.findByRole("button", { name: "候補を読み込む" }));
@@ -168,13 +168,13 @@ describe("WorkAssist downloadId switch", () => {
     let resolveOld!: (value: typeof relatedCandidate[]) => void;
     mocks.relatedTagCandidates.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const rendered = render(view(21, client).element);
+    const rendered = render(view("w-21", client).element);
 
     await user.click(screen.getByRole("button", { name: "一緒に付くタグ" }));
     await user.click(await screen.findByRole("button", { name: "候補を読み込む" }));
-    expect(mocks.relatedTagCandidates).toHaveBeenCalledWith(21);
+    expect(mocks.relatedTagCandidates).toHaveBeenCalledWith("w-21");
 
-    rendered.rerender(view(22, client).element);
+    rendered.rerender(view("w-22", client).element);
     await act(async () => { resolveOld([relatedCandidate]); });
     await user.click(screen.getByRole("button", { name: "一緒に付くタグ" }));
 
@@ -186,14 +186,14 @@ describe("WorkAssist downloadId switch", () => {
     const user = userEvent.setup();
     mocks.relatedTagCandidates.mockResolvedValueOnce([relatedCandidate]);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const rendered = render(view(25, client).element);
+    const rendered = render(view("w-25", client).element);
 
     await user.click(screen.getByRole("button", { name: "一緒に付くタグ" }));
     await user.click(await screen.findByRole("button", { name: "候補を読み込む" }));
     await user.click(await screen.findByRole("checkbox", { name: /料理/ }));
     expect(screen.getByRole("button", { name: "選んだ1件を手動で付ける" })).toBeEnabled();
 
-    rendered.rerender(view(26, client).element);
+    rendered.rerender(view("w-26", client).element);
     await user.click(screen.getByRole("button", { name: "一緒に付くタグ" }));
     expect(screen.queryByRole("checkbox", { name: /料理/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /選んだ\d+件を手動で付ける/ })).not.toBeInTheDocument();
@@ -207,7 +207,7 @@ describe("WorkAssist downloadId switch", () => {
     mocks.relatedTagCandidates.mockImplementationOnce(() => new Promise((_, reject) => {
       failReload = () => reject(new Error("試験エラー"));
     }));
-    render(view(27).element);
+    render(view("w-27").element);
 
     await user.click(screen.getByRole("button", { name: "一緒に付くタグ" }));
     await user.click(await screen.findByRole("button", { name: "候補を読み込む" }));
@@ -229,14 +229,14 @@ describe("WorkAssist downloadId switch", () => {
     const user = userEvent.setup();
     mocks.relatedTagCandidates.mockResolvedValueOnce([relatedCandidate]);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(view(28, client).element);
+    render(view("w-28", client).element);
 
     await user.click(screen.getByRole("button", { name: "一緒に付くタグ" }));
     await user.click(await screen.findByRole("button", { name: "候補を読み込む" }));
     await user.click(await screen.findByRole("checkbox", { name: /料理/ }));
     expect(screen.getByRole("button", { name: "選んだ1件を手動で付ける" })).toBeEnabled();
 
-    act(() => client.setQueryData(["assist-tags", 28], [{ name: "料理", source: "manual" }]));
+    act(() => client.setQueryData(["assist-tags", "w-28"], [{ name: "料理", source: "manual" }]));
     expect(await screen.findByText("新しく追加できる候補はありません。再読み込みできます。")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /手動で付ける/ })).not.toBeInTheDocument();
     expect(mocks.acceptRelatedTags).not.toHaveBeenCalled();
@@ -250,34 +250,34 @@ describe("WorkAssist downloadId switch", () => {
       { name: "取得タグ", source: "origin" },
     ]);
     mocks.removeManualTag.mockResolvedValueOnce([{ name: "モデル候補", source: "llm" }]);
-    render(view(31).element);
+    render(view("w-31").element);
 
     expect(await screen.findByText("手動で追加したタグ")).toBeInTheDocument();
     expect(screen.getByText("モデルの案から採ったタグ")).toBeInTheDocument();
     expect(screen.getByText("モデル候補")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "手動タグ「手動候補」を外す" }));
-    expect(mocks.removeManualTag).toHaveBeenCalledWith(31, "手動候補");
+    expect(mocks.removeManualTag).toHaveBeenCalledWith("w-31", "手動候補");
     await user.click(screen.getByRole("button", { name: "モデルの案から付けたタグ「モデル候補」を外す" }));
-    expect(mocks.removeAssistedTag).toHaveBeenCalledWith(31, "モデル候補");
-    expect(mocks.removeManualTag).not.toHaveBeenCalledWith(31, "取得タグ");
+    expect(mocks.removeAssistedTag).toHaveBeenCalledWith("w-31", "モデル候補");
+    expect(mocks.removeManualTag).not.toHaveBeenCalledWith("w-31", "取得タグ");
   });
 
-  it("新しい棚の作品は棚の ID で頼み、切り替える前は候補を見せても付けさせない", async () => {
+  it("棚の作品は棚の ID で頼む", async () => {
     const user = userEvent.setup();
     const shelfWork = "0195f1c2-0000-7000-8000-000000000001";
     mocks.useAssist.mockImplementation(() => ({ engine: null, settings: undefined, body: false, loading: false }));
     mocks.workTags.mockResolvedValue([{ name: "手で付けた", source: "manual" }]);
-    render(view(shelfWork, undefined, false).element);
+    render(view(shelfWork).element);
 
-    expect(await screen.findByRole("button", { name: "手動タグ「手で付けた」（新しい棚では変えられません）" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "手動タグ「手で付けた」を外す" })).toBeEnabled();
     expect(mocks.workTags).toHaveBeenCalledWith(shelfWork);
-    expect(mocks.loadNote).toHaveBeenCalledWith("work", shelfWork, "synopsis", null, true);
+    expect(mocks.loadNote).toHaveBeenCalledWith("work", shelfWork, "synopsis", null);
 
     await user.click(screen.getByRole("button", { name: "一緒に付くタグ" }));
     await user.click(await screen.findByRole("button", { name: "候補を読み込む" }));
     expect(mocks.relatedTagCandidates).toHaveBeenCalledWith(shelfWork);
     await user.click(await screen.findByRole("checkbox", { name: /料理/ }));
-    expect(screen.getByRole("button", { name: "選んだ1件を手動で付ける（新しい棚では変えられません）" })).toBeDisabled();
-    expect(mocks.acceptRelatedTags).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "選んだ1件を手動で付ける" }));
+    expect(mocks.acceptRelatedTags).toHaveBeenCalledWith(shelfWork, ["料理"]);
   });
 });

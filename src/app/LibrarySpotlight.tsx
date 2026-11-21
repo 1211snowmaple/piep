@@ -5,13 +5,14 @@ import { Spotlight, type SpotlightActionData } from "@mantine/spotlight";
 import { useQuery } from "@tanstack/react-query";
 import { useAppNavigate } from "@/app/router";
 import { Icons, IconSize } from "@/lib/icons";
-import { isTauriRuntime, searchDownloadsV2 } from "@/services/dbApi";
+import { isTauriRuntime } from "@/services/dbApi";
+import { searchShelf } from "@/features/library/shelfV2";
 import { searchDemoWorks } from "@/mocks/demoData";
 import { useDefaultSearchMode } from "@/lib/searchPreferences";
 import { SearchMethodMenu } from "@/components/SearchMethodMenu";
 import { ProviderMark } from "@/lib/providers";
 import { formatDateNumeric, formatNumber } from "@/lib/format";
-import type { LibrarySearchMode } from "@/types/library";
+import type { LibrarySearchMode, ListedWork } from "@/types/library";
 
 /** Library search comes first; commands have their own explicit mode. */
 export function LibrarySpotlight({ actions }: { actions: SpotlightActionData[] }) {
@@ -29,7 +30,7 @@ export function LibrarySpotlight({ actions }: { actions: SpotlightActionData[] }
   const current = query.trim().slice(0, 500) === debounced;
   const results = useQuery({
     queryKey: ["launcher-library", debounced, searchMode, includeHistory],
-    queryFn: () => isTauriRuntime() ? searchDownloadsV2({ text: debounced, limit: 6, searchMode, versionScope: includeHistory ? "all" : "current", projection: "libraryCompact" }) : Promise.resolve(searchDemoWorks(debounced)),
+    queryFn: (): Promise<{ items: ListedWork[] }> => isTauriRuntime() ? searchShelf({ text: debounced, limit: 6, searchMode, versionScope: includeHistory ? "all" : "current" }) : Promise.resolve(searchDemoWorks(debounced)),
     enabled: opened && mode === "library" && Boolean(debounced) && !composing,
     staleTime: 30_000, gcTime: 60_000,
   });

@@ -6,10 +6,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: tauri.invoke,
 }));
 
-import { createElement, type ReactNode } from "react";
-import { renderHook, waitFor } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { encodeShelfCursor, searchShelfEntities, SHELF_V2_PREFERENCE_KEY, shelfCollectionSummary, shelfEntry, shelfFilter, shelfRequest, ShelfUnsupportedError, usePinShelfAfterSwitch } from "@/features/library/shelfV2";
+import { encodeShelfCursor, searchShelfEntities, shelfCollectionSummary, shelfEntry, shelfFilter, shelfRequest, ShelfUnsupportedError } from "@/features/library/shelfV2";
 import type { ShelfCard, ShelfCollectionSummary, ShelfEntityRow } from "@/services/libraryV2Api";
 
 const card: ShelfCard = {
@@ -262,25 +259,3 @@ describe("shelfCollectionSummary", () => {
   });
 });
 
-describe("usePinShelfAfterSwitch", () => {
-  const wrapper = ({ children }: { children: ReactNode }) =>
-    createElement(QueryClientProvider, { client: new QueryClient({ defaultOptions: { queries: { retry: false } } }) }, children);
-
-  it("keeps the library on the new shelf once the shelf is the primary one", async () => {
-    localStorage.removeItem(SHELF_V2_PREFERENCE_KEY);
-    tauri.invoke.mockImplementation(async (command: string) =>
-      command === "library_v2_status" ? { state: "ready", path: "x", unresolved: [], switched: true } : null);
-    renderHook(() => usePinShelfAfterSwitch(true), { wrapper });
-    await waitFor(() => expect(localStorage.getItem(SHELF_V2_PREFERENCE_KEY)).toBe("true"));
-  });
-
-  it("leaves the choice alone while the new shelf is only a copy", async () => {
-    localStorage.removeItem(SHELF_V2_PREFERENCE_KEY);
-    tauri.invoke.mockImplementation(async (command: string) =>
-      command === "library_v2_status" ? { state: "ready", path: "x", unresolved: [], switched: false } : null);
-    renderHook(() => usePinShelfAfterSwitch(true), { wrapper });
-    await waitFor(() => expect(tauri.invoke).toHaveBeenCalledWith("library_v2_status"));
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(localStorage.getItem(SHELF_V2_PREFERENCE_KEY)).not.toBe("true");
-  });
-});

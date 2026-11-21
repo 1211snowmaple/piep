@@ -51,7 +51,6 @@ describe("WorkCard", () => {
     shelfApi.libraryV2Status.mockReset();
     shelfApi.libraryV2SetUserState.mockReset();
     shelfApi.libraryV2RemoveWork.mockReset();
-    window.localStorage.removeItem("piep.library-shelf-v2");
   });
 
   it("is keyboard accessible and opens the work route", () => {
@@ -257,7 +256,7 @@ describe("WorkCard", () => {
     expect(screen.queryByText("FANBOX")).toBeNull();
   });
 
-  it("shows a work of the new shelf read-only, by its own id and cover", async () => {
+  it("shows a work of the shelf by its own id and cover", async () => {
     updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ work: "101", foundAt: "2026-09-01T00:00:00Z" }]);
     window.location.hash = "#/library";
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
@@ -265,10 +264,7 @@ describe("WorkCard", () => {
     renderCard({ work: { ...rest, id: shelfId, shelf: "v2", coverUrl: "http://piep-library.localhost/abc", coverPath: null, legacyId: null } });
 
     expect(screen.getByAltText("雨上がりの図書室での表紙")).toHaveAttribute("src", "http://piep-library.localhost/abc");
-    // 書き換える操作は押せない。改稿の印は棚の作品 ID で照らすので、旧棚の番号の改稿は出さない。
-    expect(screen.getByRole("button", { name: /お気に入り（新しい棚では変えられません）/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /更新監視（新しい棚では変えられません）/ })).toBeDisabled();
-    // EPUB のキューは棚を書き換えないので積める。新しい棚の作品は ID で積む。
+    // 改稿の印は棚の作品 ID で照らすので、旧棚の番号の改稿は出さない。EPUB のキューには棚の作品の ID で積む。
     const queue = screen.getByRole("button", { name: /雨上がりの図書室で：EPUBキューに追加/ });
     expect(queue).toBeEnabled();
     fireEvent.click(queue);
@@ -281,10 +277,9 @@ describe("WorkCard", () => {
     expect(window.location.hash).toBe(`#/works/${shelfId}`);
   });
 
-  it("writes the flags of a work once the new shelf is switched over", async () => {
+  it("writes the flags of a work on the shelf", async () => {
     window.location.hash = "#/library";
-    window.localStorage.setItem("piep.library-shelf-v2", "true");
-    shelfApi.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    shelfApi.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     shelfApi.libraryV2SetUserState.mockResolvedValue({ favorite: true, watching: false, generation: 2 });
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     const { id: _legacy, ...rest } = demoWorks[0];
@@ -296,15 +291,4 @@ describe("WorkCard", () => {
     expect(shelfApi.libraryV2SetUserState).toHaveBeenCalledWith(shelfId, { watching: true });
   });
 
-  it("keeps the flags locked while the new shelf is still a copy of the old one", async () => {
-    window.localStorage.setItem("piep.library-shelf-v2", "true");
-    shelfApi.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: false });
-    const shelfId = "0195f1c2-0000-7000-8000-000000000001";
-    const { id: _legacy, ...rest } = demoWorks[0];
-    renderCard({ work: { ...rest, id: shelfId, shelf: "v2", coverUrl: null, coverPath: null, legacyId: null } });
-
-    await vi.waitFor(() => expect(shelfApi.libraryV2Status).toHaveBeenCalled());
-    expect(screen.getByRole("button", { name: /お気に入り（新しい棚では変えられません）/ })).toBeDisabled();
-    expect(shelfApi.libraryV2SetUserState).not.toHaveBeenCalled();
-  });
 });

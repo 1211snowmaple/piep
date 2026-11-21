@@ -167,9 +167,6 @@ impl LegacyAssetRepairMemo {
             },
         }
     }
-    pub fn encode(&self) -> String {
-        format!("{}|{}", self.fingerprint, self.attempts)
-    }
 }
 
 pub(crate) fn legacy_fingerprint(expected: &[String], held: &[String]) -> String {

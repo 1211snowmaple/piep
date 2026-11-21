@@ -5,16 +5,88 @@
 //! 記録も同じ順に並ぶ。棚にある作品・棚から外した作品には触れない（外した作品を勝手に戻さない）。
 //! 保存フォルダーを手で組んで戻す使い方（削除された作品を EPUB から戻すなど）も同じ道を通る。
 
-use crate::commands::archive::{
-    archive_metadata_is_link, canonical_reimport_directory, canonical_reimport_json,
-    ReimportOutcome, MAX_REIMPORT_VERSIONS_PER_WORK,
-};
 use crate::commands::library_v2::LibraryV2;
 use crate::library::{EntityKind, Library};
-use crate::AppState;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::Manager;
+
+const MAX_BACKUP_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_REIMPORT_VERSIONS_PER_WORK: usize = 10_000;
+
+pub(crate) fn archive_metadata_is_link(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn canonical_reimport_directory(path: &Path, root: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("Reimport directory metadata failed: {error}"))?;
+    if archive_metadata_is_link(&metadata) || !metadata.file_type().is_dir() {
+        return Err("Reimport directory must be a real directory, not a link".to_string());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("Reimport directory resolution failed: {error}"))?;
+    if !canonical.starts_with(root) {
+        return Err("Reimport directory escapes the library storage".to_string());
+    }
+    Ok(canonical)
+}
+
+pub(crate) fn canonical_reimport_json(path: &Path, version_root: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("Reimport JSON metadata failed: {error}"))?;
+    if archive_metadata_is_link(&metadata) || !metadata.file_type().is_file() {
+        return Err("Reimport JSON must be a real regular file, not a link".to_string());
+    }
+    if metadata.len() > MAX_BACKUP_METADATA_BYTES {
+        return Err(format!(
+            "Reimport JSON is too large: {} bytes (limit {})",
+            metadata.len(),
+            MAX_BACKUP_METADATA_BYTES
+        ));
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("Reimport JSON resolution failed: {error}"))?;
+    if !canonical.starts_with(version_root) {
+        return Err("Reimport JSON escapes its version directory".to_string());
+    }
+    Ok(canonical)
+}
+
+/// 保存フォルダーを走査した結果。
+///
+/// **件数だけでは足りない。** 途中で読めないものがあっても取り込みは続くので、
+/// 何件入って何件を飛ばしたのかを両方返す。飛ばした理由は画面に出す。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReimportOutcome {
+    pub imported: i64,
+    pub skipped: Vec<String>,
+}
+
+/// 取り込む保存フォルダー。アプリのフォルダーの中の `downloads`（旧棚の保存先と同じ場所・同じ形）。
+pub(crate) const FOLDER: &str = "downloads";
+
+fn folder(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join(FOLDER))
+        .map_err(|e| e.to_string())
+}
 
 /// 保存フォルダーに残った一作品（版は番号の順）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,9 +270,8 @@ pub(crate) async fn reimport_into_shelf(
 #[tauri::command]
 pub async fn library_v2_reimport_folders(app: tauri::AppHandle) -> Result<ReimportOutcome, String> {
     let shelf = app.state::<Arc<LibraryV2>>().inner().clone();
-    let library = shelf.writable()?;
-    let state = app.state::<Arc<AppState>>().inner().clone();
-    let storage = state.db.storage_dir().to_path_buf();
+    let library = shelf.library()?;
+    let storage = folder(&app)?;
     let outcome = reimport_into_shelf(library, storage).await?;
     shelf.forget_derived();
     Ok(outcome)

@@ -20,6 +20,8 @@ pub mod store;
 pub mod sync_receive;
 pub mod sync_send;
 #[cfg(test)]
+mod sync_send_v1;
+#[cfg(test)]
 mod tests;
 pub mod tls;
 pub mod update;

@@ -241,7 +241,7 @@ pub fn run(old_db: &Path, work: &Path, new_root: &Path) -> Result<Value, Error> 
     let started = Instant::now();
     let old_storage = work.join("old").join("downloads");
     std::fs::create_dir_all(&old_storage)?;
-    semantic_index::set_model_cache_dir(&work.join("old-semantic").join("downloads"));
+    semantic_index::set_model_cache_dir(&work.join("old-semantic"));
     let old = Database::open(old_db, &old_storage)?;
     let t = Instant::now();
     old.rebuild_search_index(

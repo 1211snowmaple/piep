@@ -16,3 +16,5 @@ serde_json = "1"
 walkdir = "2"
 regex = "1"
 anyhow = "1"
+# 台帳のスキーマは移行を当てた結果なので、メモリ上で当てて読む（ファイルには書かない）。
+rusqlite = { version = "0.40.2", features = ["bundled"] }

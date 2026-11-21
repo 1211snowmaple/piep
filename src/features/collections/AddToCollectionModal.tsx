@@ -19,8 +19,7 @@ import { EmptyState } from "@/components/AsyncState";
 import { CollectionCover } from "@/components/CollectionCover";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
-import { addDownloadsToCollection, createCollectionFromDownloads } from "@/services/collectionApi";
-import { invalidateCollectionViews, workCollectionsQueryOptions } from "./collectionQueries";
+import { workCollectionsQueryOptions } from "./collectionQueries";
 import { isTauriRuntime } from "@/services/dbApi";
 import { editShelfCollection, invalidateShelf } from "@/features/library/shelfV2";
 import type { ShelfWorkKey } from "@/services/libraryV2Api";
@@ -33,20 +32,18 @@ import type { CollectionKind } from "@/types/collections";
  * 詳細画面を開いて題名で検索するしかなかった — つまり**入れたい作品の題名を
  * 思い出せることが前提**になっていた。2,000作の棚で成り立つ前提ではない。
  *
- * 渡すのは行の id だけで、識別子への解決と投稿日順の整列は保存側がやる。
+ * 渡すのは作品の鍵（取得元と作品の番号）だけで、新しく作るときは投稿日順に並べる。
  */
 export function AddToCollectionModal({
   opened,
   onClose,
-  downloadIds,
-  shelfWorks = null,
+  works,
   defaultName = "",
 }: {
   opened: boolean;
   onClose: () => void;
-  downloadIds: number[];
-  /** 新しい棚の作品（取得元と作品の番号）。渡すと新しい棚のコレクションへ入れる。 */
-  shelfWorks?: ShelfWorkKey[] | null;
+  /** 入れる作品（取得元と作品の番号）。 */
+  works: ShelfWorkKey[];
   /** 新規作成の名前の初期値。作者ページなら作者名など。 */
   defaultName?: string;
 }) {
@@ -57,9 +54,8 @@ export function AddToCollectionModal({
   const [name, setName] = useState("");
   const [kind, setKind] = useState<CollectionKind>("ordered");
 
-  const shelf = shelfWorks !== null;
-  const count = shelfWorks?.length ?? downloadIds.length;
-  const collectionsQuery = useQuery({ ...workCollectionsQueryOptions(shelf), enabled: opened });
+  const count = works.length;
+  const collectionsQuery = useQuery({ ...workCollectionsQueryOptions(), enabled: opened });
   const collections = collectionsQuery.data ?? [];
 
   useEffect(() => {
@@ -71,26 +67,18 @@ export function AddToCollectionModal({
     setTarget("__new__");
   }, [opened, defaultName]);
 
-  const invalidate = () => shelf ? void invalidateShelf(queryClient) : invalidateCollectionViews(queryClient);
-
   const mutation = useMutation({
     mutationFn: async () => {
-      if (shelfWorks) {
-        // 新しく作るときも旧棚と同じく投稿日順に並べて入れる。
-        const saved = target === "__new__"
-          ? await editShelfCollection(crypto.randomUUID(), { kind: "create", title: name.trim(), description: null, ordered: kind === "ordered", works: shelfWorks })
-              .then((created) => created && kind === "ordered" ? editShelfCollection(created.id, { kind: "sort", by: "published" }) : created)
-          : await editShelfCollection(target, { kind: "add", works: shelfWorks });
-        if (!saved) throw new Error("コレクションが見つかりません");
-        return saved;
-      }
-      if (target === "__new__") {
-        return createCollectionFromDownloads(name.trim(), kind, downloadIds);
-      }
-      return addDownloadsToCollection(target, downloadIds);
+      // 新しく作るときは投稿日順に並べて入れる。
+      const saved = target === "__new__"
+        ? await editShelfCollection(crypto.randomUUID(), { kind: "create", title: name.trim(), description: null, ordered: kind === "ordered", works })
+            .then((created) => created && kind === "ordered" ? editShelfCollection(created.id, { kind: "sort", by: "published" }) : created)
+        : await editShelfCollection(target, { kind: "add", works });
+      if (!saved) throw new Error("コレクションが見つかりません");
+      return saved;
     },
     onSuccess: (collection) => {
-      invalidate();
+      void invalidateShelf(queryClient);
       onClose();
       notifications.show({
         color: "green",

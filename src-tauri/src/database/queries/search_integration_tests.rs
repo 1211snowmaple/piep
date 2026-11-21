@@ -290,22 +290,6 @@ fn version_asset_lists_separate_identical_filenames_and_preserve_history() {
         assert!(assets[0].local_path.contains(&format!("v{version}")));
     }
     assert!(db.get_version_assets(id, 99).is_err());
-    // A pre-fix content hash does not by itself manufacture a new revision.
-    fs::create_dir_all(Path::new(&download.json_path).parent().unwrap()).unwrap();
-    fs::write(
-        &download.json_path,
-        r#"{"detail":{"tags":[{"name":"タグ"}]},"text":"本文"}"#,
-    )
-    .unwrap();
-    let stored = db.get_download(id).unwrap();
-    let canonical = crate::commands::downloader::saved_content_hash(&stored).unwrap();
-    assert_ne!(canonical, "legacy-hash");
-    let source: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&download.json_path).unwrap()).unwrap();
-    assert_eq!(
-        canonical,
-        crate::commands::downloader::compute_content_details(&source, "pixiv").0
-    );
 }
 
 #[test]
@@ -9171,24 +9155,6 @@ fn an_edited_work_keeps_its_illustrations_in_the_epub() {
     let source = db.active_edit_source_form(download_id).unwrap().unwrap();
     assert!(source.pixiv_text.contains("[pixivimage:555-1]"));
     assert!(!source.pixiv_text.contains("[uploadedimage:["));
-
-    let (manifest, _, _) = crate::commands::epub::load_manifest(&db, download_id).unwrap();
-    let html: String = manifest
-        .content
-        .pages
-        .iter()
-        .map(|page| page.html_content.as_str())
-        .collect();
-    assert!(html.contains("images/555_p0.jpg"), "{html}");
-    assert!(html.contains("images/added.jpg"), "{html}");
-    let ids: Vec<&str> = manifest
-        .content
-        .illustrations
-        .iter()
-        .map(|image| image.id.as_str())
-        .collect();
-    assert!(ids.contains(&"img-555-1_p0"), "{ids:?}");
-    assert!(ids.contains(&"img-added"), "{ids:?}");
 }
 
 /// 下書きは何度でも上書きできる。

@@ -3,9 +3,8 @@ import type { MouseEvent } from "react";
 import { useAppNavigate } from "@/app/router";
 import { contentLinkTarget, normalizeContentLinkUrl } from "@shared/contentLinkTarget";
 import type { ContentLinkTarget } from "@shared/contentLinkTarget";
-import { getDownloadBySource, getPerson, getSeries, isTauriRuntime } from "@/services/dbApi";
+import { isTauriRuntime } from "@/services/dbApi";
 import { libraryV2Entity, libraryV2FindWork } from "@/services/libraryV2Api";
-import { SHELF_V2_PREFERENCE_KEY } from "@/features/library/shelfV2";
 import { openExternalUrl } from "@/services/openerApi";
 
 /**
@@ -19,24 +18,15 @@ import { openExternalUrl } from "@/services/openerApi";
  */
 /** 手元にあると分かったもの。作品だけは、行き先が画面によって変わる。 */
 type ResolvedLink =
-  | { kind: "work"; downloadId: number | string; title: string }
+  | { kind: "work"; downloadId: string; title: string }
   | { kind: "path"; path: string }
   | null;
 
-/** 一覧を新しい棚から出しているか（端末ごとの好み）。 */
-function shelfPreferred(): boolean {
-  try {
-    return localStorage.getItem(SHELF_V2_PREFERENCE_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
 /**
- * 新しい棚で引く。作品は棚の ID、作者・シリーズは同じ画面の住所。棚がまだ開けなければ
- * `undefined`（旧棚で引く）。
+ * 棚で引く。作品は棚の ID、作者・シリーズは同じ画面の住所。手元に無いか、引けなければ null
+ * （外のアドレスのままで用は足りるので、誤りとしては出さない）。
  */
-async function resolveOnShelf(target: ContentLinkTarget): Promise<ResolvedLink | undefined> {
+async function resolveTarget(target: ContentLinkTarget): Promise<ResolvedLink> {
   try {
     if (target.kind === "work") {
       const found = await libraryV2FindWork(target.source, target.sourceId);
@@ -46,30 +36,6 @@ async function resolveOnShelf(target: ContentLinkTarget): Promise<ResolvedLink |
     const route = target.kind === "person" ? "people" : "series";
     return head ? { kind: "path", path: `/${route}/${encodeURIComponent(target.source)}/${encodeURIComponent(target.sourceKey)}` } : null;
   } catch {
-    return undefined;
-  }
-}
-
-/** Whether the library actually holds it, without turning a miss into an error. */
-async function resolveTarget(target: ContentLinkTarget): Promise<ResolvedLink> {
-  if (shelfPreferred()) {
-    const onShelf = await resolveOnShelf(target);
-    if (onShelf !== undefined) return onShelf;
-  }
-  try {
-    if (target.kind === "work") {
-      const saved = await getDownloadBySource<{ id: number; title?: string }>(target.source, target.sourceId);
-      return saved ? { kind: "work", downloadId: saved.id, title: saved.title ?? "" } : null;
-    }
-    const route = target.kind === "person" ? "people" : "series";
-    const path = `/${route}/${encodeURIComponent(target.source)}/${encodeURIComponent(target.sourceKey)}`;
-    const entry = target.kind === "person"
-      ? await getPerson<unknown>(target.source, target.sourceKey)
-      : await getSeries<unknown>(target.source, target.sourceKey);
-    return entry ? { kind: "path", path } : null;
-  } catch {
-    // Not saved, or the lookup failed - either way the outside address is still
-    // a working answer, so this is not worth an error message.
     return null;
   }
 }
@@ -91,8 +57,7 @@ const RESOLVE_TTL_MS = 120_000;
 const resolveCache = new Map<string, { at: number; value: Promise<ResolvedLink> }>();
 
 function cachedResolve(target: ContentLinkTarget): Promise<ResolvedLink> {
-  // どちらの棚で引いた答えかも鍵に含める（棚を切り替えたら引き直す）。
-  const key = `${shelfPreferred() ? "v2" : "v1"}:${contentLinkKey(target)}`;
+  const key = contentLinkKey(target);
   const hit = resolveCache.get(key);
   if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return hit.value;
   const value = resolveTarget(target);

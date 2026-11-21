@@ -5,7 +5,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import type { StoredJobHistory } from "@/services/jobHistoryApi";
 
-const mocks=vi.hoisted(()=>({history:vi.fn(),items:vi.fn(),logs:vi.fn(),hidden:vi.fn(),confirm:vi.fn(),notify:vi.fn(),status:{state:"ready",switched:true} as {state:string;switched?:boolean}}));
+const mocks=vi.hoisted(()=>({history:vi.fn(),items:vi.fn(),logs:vi.fn(),hidden:vi.fn(),confirm:vi.fn(),notify:vi.fn(),status:{state:"ready",path:"x"} as {state:string;path?:string}}));
 vi.mock("@/features/library/shelfV2",()=>({useLibraryV2Status:()=>({data:mocks.status})}));
 vi.mock("@/services/jobHistoryApi",async(importOriginal)=>({...await importOriginal<typeof import("@/services/jobHistoryApi")>(),storedJobHistory:mocks.history,storedJobItems:mocks.items,storedJobLogs:mocks.logs,setStoredJobHidden:mocks.hidden}));
 vi.mock("@mantine/modals",()=>({modals:{openConfirmModal:mocks.confirm}}));
@@ -15,7 +15,7 @@ import { StoredJobHistoryPanel } from "./StoredJobHistoryPanel";
 const id="019ad000-0000-7000-8000-000000000001";
 const job:StoredJobHistory={id,origin:"legacy-update-v1",scope:"author",mode:"check_only",status:"completed",watch_saved:false,new_works_only:false,totals:100,processed:7,candidate_count:3,saved_count:1,error_count:2,active_label:null,started_at:1_700_000_000_000,updated_at:1_700_000_000_100,finished_at:null};
 const reload=vi.fn(async()=>{});
-beforeEach(()=>{vi.clearAllMocks();mocks.status={state:"ready",switched:true};mocks.history.mockResolvedValue([job]);mocks.items.mockResolvedValue([{id:"item-uuid",sequence:40,title:"当時の題名",status:"held",error:"当時の保留理由",result_work:null}]);mocks.logs.mockResolvedValue([{id:"log-uuid",sequence:90,log_type:"future-type",message:"当時の原文",created_at:job.started_at}]);mocks.hidden.mockResolvedValue(1);});
+beforeEach(()=>{vi.clearAllMocks();mocks.status={state:"ready",path:"x"};mocks.history.mockResolvedValue([job]);mocks.items.mockResolvedValue([{id:"item-uuid",sequence:40,title:"当時の題名",status:"held",error:"当時の保留理由",result_work:null}]);mocks.logs.mockResolvedValue([{id:"log-uuid",sequence:90,log_type:"future-type",message:"当時の原文",created_at:job.started_at}]);mocks.hidden.mockResolvedValue(1);});
 function open(){render(<MantineProvider><QueryClientProvider client={new QueryClient({defaultOptions:{queries:{retry:false},mutations:{retry:false}}})}><AppRouter><StoredJobHistoryPanel runtime current={<div>現在の記録</div>} hasCurrent={false} onShelfReady={reload}/></AppRouter></QueryClientProvider></MantineProvider>);}
 
 it("opens original counts, items and logs using the shelf UUID without starting a job",async()=>{
@@ -46,6 +46,6 @@ it("confirms hiding one record and allows undo without changing the original rec
   fireEvent.click(screen.getByRole("button",{name:"元に戻す"}));await waitFor(()=>expect(mocks.hidden).toHaveBeenCalledWith(id,false));
 });
 
-it("keeps the existing history when the shelf has not been switched",async()=>{
-  mocks.status={state:"ready",switched:false};open();expect(screen.getByText("現在の記録")).toBeInTheDocument();await Promise.resolve();expect(mocks.history).not.toHaveBeenCalled();
+it("keeps the existing history while the shelf is still opening",async()=>{
+  mocks.status={state:"opening",path:"x"};open();expect(screen.getByText("現在の記録")).toBeInTheDocument();await Promise.resolve();expect(mocks.history).not.toHaveBeenCalled();
 });

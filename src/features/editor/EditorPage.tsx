@@ -37,8 +37,7 @@ import { useAssist } from "@/features/assist/useAssist";
 import { usePageAssist } from "@/app/PageAssistContext";
 import { PROOFREAD_BATCH_CHARS } from "@/services/assistApi";
 import { isTauriRuntime } from "@/services/dbApi";
-import { SHELF_WORK_ID } from "@/services/libraryV2Api";
-import { editorAssetUrl, legacyEditorSource, shelfEditorSource } from "@/features/editor/editorSource";
+import { editorAssetUrl, previewEditorSource, shelfEditorSource } from "@/features/editor/editorSource";
 import { openSingleDialog } from "@/services/dialogApi";
 import type { AssetEntry, WorkBlockInput } from "@/types/library";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
@@ -163,9 +162,9 @@ export default function EditorPage() {
   const returnTo = useReturnTo();
   const { workId } = useRouteParams("/editor/:workId");
   const runtime = isTauriRuntime();
-  // 新しい棚の作品（UUID）は新しい棚で開いて書く。旧棚の作品は番号で。
+  // 棚の作品（UUID）は棚で開いて書く。プレビューは番号で見本を開く。
   const source = useMemo(
-    () => (runtime && SHELF_WORK_ID.test(workId ?? "") ? shelfEditorSource(workId!) : legacyEditorSource(Number(workId), runtime)),
+    () => (runtime ? shelfEditorSource(workId ?? "") : previewEditorSource(Number(workId))),
     [runtime, workId],
   );
   const id = source.key;

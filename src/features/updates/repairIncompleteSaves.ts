@@ -4,7 +4,6 @@ import { notifications } from "@mantine/notifications";
 import { isTauriRuntime } from "@/services/dbApi";
 import { getUpdateJobCommand, getUpdateJobCredentials, listIncompleteSaveRepairWorksCommand, listUpdateJobsCommand, recordIncompleteSaveRepairAttemptsCommand, startSaveJobCommand, type UpdateJobSnapshot } from "@/services/updateJobApi";
 import { invalidateAfterUpdateJob, isUpdateJobActive } from "./updateJobs";
-import { subscribeTauriEvent } from "@/services/eventBus";
 
 // 以前は試した作品をここ（画面側の保存領域）に控えていた。入れ直すと消えて
 // 全件を取り直し、版が進んでも二度と試さなかった。いまはDBが版ごとに覚える。
@@ -54,7 +53,6 @@ export function useIncompleteSaveRepair() {
     let running = false;
     let finished = false;
     let jobId: string | undefined;
-    let discovered = false;
     let announced = false;
     let timer: number;
     const tick = async () => {
@@ -68,26 +66,19 @@ export function useIncompleteSaveRepair() {
           if (!isUpdateJobActive(job.status)) { invalidateAfterUpdateJob(client); jobId = undefined; }
           return;
         }
-        discovered = false;
         const result = await startIncompleteSaveRepair(() => !disposed);
         if (result.job) {
           jobId = result.job.jobId;
           if (!announced) notifications.show({ color: "blue", title: "保存済み作品を補完しています", message: "不足していた挿絵や作品情報を少しずつ再確認します。進捗は操作履歴で確認できます。" });
           announced = true;
-        } else if (!result.waiting && !discovered) finished = true;
+        } else if (!result.waiting) finished = true;
       } catch (error) { console.error("保存済み作品の補完を開始できませんでした", error); }
       finally {
         running = false;
-        if (!disposed && !finished) timer = window.setTimeout(() => void tick(), jobId ? 2_000 : discovered ? 1_000 : 60_000);
+        if (!disposed && !finished) timer = window.setTimeout(() => void tick(), jobId ? 2_000 : 60_000);
       }
     };
-    const unlisten = subscribeTauriEvent<number[]>("acquisition-audited", ({ payload }) => {
-      if (!payload.length) return;
-      discovered = true;
-      finished = false;
-      if (!running) { window.clearTimeout(timer); timer = window.setTimeout(() => void tick(), 1_000); }
-    });
     timer = window.setTimeout(() => void tick(), 5_000);
-    return () => { disposed = true; window.clearTimeout(timer); unlisten(); };
+    return () => { disposed = true; window.clearTimeout(timer); };
   }, [client]);
 }

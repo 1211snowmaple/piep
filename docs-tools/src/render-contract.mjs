@@ -357,13 +357,14 @@ function renderEvents(contract, frontend) {
 
 function renderSchema(contract) {
   const out = [];
-  out.push("# データベーススキーマ");
+  out.push("# 棚の台帳のスキーマ");
   out.push("");
   out.push("> この頁はソースから生成している。");
   out.push("");
   out.push(
-    "`src-tauri/src/database/schema.rs` が作るテーブル。**今のコードが作る姿**であって、" +
-      "利用者の手元にあるデータベースの実際の姿ではない。試験用に作る旧世代のテーブルは載せていない。",
+    "棚の台帳（`library.db`）のテーブル。`src-tauri/src/library/schema.rs` が並べた SQL を順に当てた結果で、" +
+      "**今のコードが新しく作る台帳の姿**であって、利用者の手元の台帳の実際の姿ではない。" +
+      "場所は、そのテーブルを最後に作った SQL の行を指す。",
   );
   out.push("");
   out.push(`テーブル ${contract.tables.length} 件。`);

@@ -9,8 +9,8 @@ test("generated AI requests are recognized as live IPC calls", () => {
     resolve(import.meta.dirname, "scan-frontend.mjs"), "--repo", repo,
   ], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }));
   for (const command of [
-    "assist_suggest_tags", "assist_interpret_search", "assist_describe_author",
-    "assist_propose_splits", "assist_summarize_work", "assist_recap_previous",
+    "library_v2_assist_suggest_tags", "library_v2_assist_interpret_search", "library_v2_assist_describe_author",
+    "library_v2_assist_propose_splits", "library_v2_assist_summarize_work", "library_v2_assist_recap_previous",
   ]) {
     assert.ok(result.invocations.some((site) => site.name === command && !site.isTest && site.callerUsed),
       `${command} must be linked to its frontend caller`);

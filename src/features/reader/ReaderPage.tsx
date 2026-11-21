@@ -38,19 +38,17 @@ import { useAppNavigate, useAppSearchParams, useReturnTo, useRouteParams } from 
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
-import { errorMessage, formatDate, formatNumber } from "@/lib/format";
+import { formatDate, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
-import { getWorkCollection, listCollectionsForWork } from "@/services/collectionApi";
-import { getDownloads, isTauriRuntime, searchDownloadsV2 } from "@/services/dbApi";
-import { openExternalUrl, revealPathInFileManager } from "@/services/openerApi";
-import { legacyReaderSource, shelfReaderSource, SHELF_WORK_ID, type ReaderSource } from "@/features/reader/readerSource";
+import { isTauriRuntime } from "@/services/dbApi";
+import { openExternalUrl } from "@/services/openerApi";
+import { previewReaderSource, shelfReaderSource, SHELF_WORK_ID, type ReaderSource } from "@/features/reader/readerSource";
 import { RecapPanel } from "@/features/assist/RecapPanel";
 import { NeighborPlaceholder, NeighborTile, formatReadingTime } from "@/features/reader/ReaderNextUp";
-import type { WorkCollection } from "@/types/collections";
-import type { DownloadEntry, SearchV2Params, SearchV2Result, ShelfEntry } from "@/types/library";
+import type { DownloadEntry, ShelfEntry } from "@/types/library";
 import { libraryV2Neighbors, type ShelfCard, type ShelfNeighbors } from "@/services/libraryV2Api";
-import { shelfEntry, shelfWritable, useLibraryV2Status } from "@/features/library/shelfV2";
+import { shelfEntry } from "@/features/library/shelfV2";
 
 interface ReadingContextRow {
   key: string;
@@ -69,7 +67,8 @@ interface ReadingContextRow {
 }
 
 /** 旧棚の作品は番号、新しい棚の作品は UUID。 */
-type ReaderWorkKey = number | string;
+/** 前後の作品は棚の作品だけ（UUID）。 */
+type ReaderWorkKey = string;
 interface NeighborRef { id: ReaderWorkKey; title: string }
 
 /**
@@ -100,52 +99,6 @@ function shelfReadingContexts(rows: ShelfNeighbors[], currentId: string, authorN
     return { ...base, sequential: false, label: `${row.title || authorName}の作品`, detail: `${row.total}作品の公開順` };
   });
   return { contexts, neighbors };
-}
-
-function adjacentWorks(items: { id: number; title: string }[], currentId: number) {
-  const index = items.findIndex((item) => item.id === currentId);
-  return {
-    position: index >= 0 ? index + 1 : null,
-    total: items.length,
-    previous: index > 0 ? items[index - 1] : null,
-    next: index >= 0 && index + 1 < items.length ? items[index + 1] : null,
-  };
-}
-
-interface ReaderSequenceResult extends SearchV2Result {
-  truncated: boolean;
-}
-
-/**
- * Walks an ordered search until the current work and its following neighbour
- * are both known. Most series finish in one request; long-running series keep
- * following the opaque cursor instead of pretending item 200 is the end.
- */
-async function loadReaderSequence(params: SearchV2Params, currentId: number): Promise<ReaderSequenceResult> {
-  const items: SearchV2Result["items"] = [];
-  const seenCursors = new Set<string>();
-  let cursor: string | null = null;
-  let first: SearchV2Result | null = null;
-  const maxPages = 25;
-
-  for (let page = 0; page < maxPages; page += 1) {
-    const result = await searchDownloadsV2({ ...params, limit: 200, cursor });
-    first ??= result;
-    const knownIds = new Set(items.map((item) => item.id));
-    items.push(...result.items.filter((item) => !knownIds.has(item.id)));
-    const position = items.findIndex((item) => item.id === currentId);
-    if (position >= 0 && (position < items.length - 1 || !result.nextCursor)) {
-      return { ...first, items, nextCursor: result.nextCursor, truncated: false };
-    }
-    if (!result.nextCursor || seenCursors.has(result.nextCursor)) {
-      return { ...first, items, nextCursor: null, truncated: false };
-    }
-    seenCursors.add(result.nextCursor);
-    cursor = result.nextCursor;
-  }
-
-  if (!first) throw new Error("作品の並びを読み込めませんでした");
-  return { ...first, items, nextCursor: cursor, truncated: true };
 }
 
 /** One continuation route offered at the end of a work.
@@ -181,7 +134,7 @@ function ReadingContextCard({ context, neighbors, onOpen }: {
         {/* 読む順があって、前の話があるときだけ。順序なしのまとまりで
             「前回のあらすじ」を出すと、無い連続性をあるように見せてしまう。 */}
         {/* 前回のあらすじは、読む話と前の話が同じ棚の作品のときだけ（覚え書きはその棚に残る）。 */}
-        {context.sequential && context.previous && typeof context.currentId === typeof context.previous.id && (
+        {context.sequential && context.previous && (
           <RecapPanel currentId={context.currentId} previous={{ id: context.previous.id, title: context.previous.title }} />
         )}
         {/* 題だけのボタンだったころは、どれが何の話か、どれだけの長さか、
@@ -312,9 +265,9 @@ const EDITED_VERSION = "edit";
 
 export default function ReaderPage() {
   const { workId } = useRouteParams("/reader/:workId");
-  // 新しい棚（試験中）の作品は UUID で来る。読む先だけを差し替え、画面は同じものを使う。
+  // 棚の作品は UUID で来る。番号で来るのはプレビューの見本だけ。
   const shelfId = SHELF_WORK_ID.test(workId ?? "") ? workId!.toLowerCase() : null;
-  const source = useMemo(() => shelfId ? shelfReaderSource(shelfId) : legacyReaderSource(Number(workId)), [shelfId, workId]);
+  const source = useMemo(() => shelfId ? shelfReaderSource(shelfId) : previewReaderSource(Number(workId)), [shelfId, workId]);
   return <Reader source={source} />;
 }
 
@@ -334,7 +287,6 @@ function Reader({ source }: { source: ReaderSource }) {
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
   const requestedVersion = Number(searchParams.get("version"));
-  const requestedCollectionId = searchParams.get("collection")?.trim() || null;
   const normalizedRequestedVersion = Number.isFinite(requestedVersion) && requestedVersion > 0 ? requestedVersion : null;
   const [version, setVersion] = useState<number | null>(normalizedRequestedVersion);
   const [settings, setSettings] = useLocalStorage<ReaderSettings>({ key: "piep.reader-settings.v4", defaultValue: defaults });
@@ -375,10 +327,9 @@ function Reader({ source }: { source: ReaderSource }) {
   // 読書位置・しおりの鍵。新しい棚の作品でも、旧棚から移したものは旧棚の番号で引く（両方の棚で
   // 同じ記録）。頭が届くまでは分からないので、位置を戻すのも書くのも頭が届いてから。
   const readingId = metadataQuery.data?.head.readingKey ?? null;
-  // 正本に切り替えた新しい棚では、読書位置を棚にも書く（携帯と同じ形：ページとその中の割合）。
-  // 端末の記録（何行目か）はこの端末で開き直すための控えとして残す。
-  const shelfStatus = useLibraryV2Status(runtime && source.shelf);
-  const shelfReading = source.shelf && shelfWritable(shelfStatus.data) ? source.shelfReading ?? null : null;
+  // 読書位置を棚にも書く（携帯と同じ形：ページとその中の割合）。端末の記録（何行目か）は
+  // この端末で開き直すための控えとして残す。
+  const shelfReading = runtime && source.shelf ? source.shelfReading ?? null : null;
   const shelfReadingQuery = useQuery({
     queryKey: ["library-v2-reading", id, version],
     queryFn: () => shelfReading!.read(version),
@@ -386,12 +337,11 @@ function Reader({ source }: { source: ReaderSource }) {
     staleTime: Infinity,
     gcTime: 0,
   });
-  // 棚の状態と棚の位置が届くまでは位置を戻さない。ほかの端末で読み進めた位置を飛ばさない。
-  const shelfReadingPending = runtime && source.shelf && (shelfStatus.isPending || (Boolean(shelfReading) && shelfReadingQuery.isPending));
+  // 棚の位置が届くまでは位置を戻さない。ほかの端末で読み進めた位置を飛ばさない。
+  const shelfReadingPending = Boolean(shelfReading) && shelfReadingQuery.isPending;
   const remoteReading = shelfReadingQuery.data ?? null;
   const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(readingId ?? id, version);
   // 前後の作品・保存フォルダーは旧棚の作品だけ。
-  const legacyWork = metadataQuery.data?.legacy?.download;
   const contentQuery = useQuery({
     queryKey: ["reader-content-page", id, version, sourcePage - 1],
     queryFn: () => source.page(version, sourcePage - 1),
@@ -427,46 +377,6 @@ function Reader({ source }: { source: ReaderSource }) {
     () => (markedPagesQuery.data ?? []).map((hit) => hit.page).sort((a, b) => a - b),
     [markedPagesQuery.data],
   );
-  const explicitCollectionQuery = useQuery({
-    // 取得関数はコレクション詳細と同じ getWorkCollection なので、キーも同じに
-    // する。別名で持っていたため、束から作品を外した直後にリーダーへ戻ると、
-    // 前後移動が外したはずの作品を指したままだった。
-    queryKey: ["work-collection", requestedCollectionId],
-    queryFn: () => getWorkCollection(requestedCollectionId!),
-    enabled: runtime && !source.shelf && Boolean(requestedCollectionId),
-  });
-  const memberCollectionsQuery = useQuery({
-    queryKey: ["reader-member-collections", legacyWork?.source, legacyWork?.sourceId],
-    queryFn: async () => {
-      const summaries = await listCollectionsForWork(legacyWork!.source, legacyWork!.sourceId);
-      const collections: WorkCollection[] = [];
-      // Avoid one unbounded Promise.all while still loading every membership;
-      // otherwise the 21st collection silently disappeared from reading context.
-      for (let index = 0; index < summaries.length; index += 8) {
-        collections.push(...await Promise.all(summaries.slice(index, index + 8).map((summary) => getWorkCollection(summary.id))));
-      }
-      return collections;
-    },
-    enabled: runtime && Boolean(legacyWork),
-    staleTime: 30_000,
-  });
-  const officialSeriesQuery = useQuery({
-    // `id` belongs in the key: loadReaderSequence stops walking once this work
-    // and its neighbour are known, so the cached list is an answer to "where is
-    // this work", not "what is in this series". Without it, opening episode 1
-    // of a long series cached the first 200 items and episode 250 read that
-    // cache, found itself missing, and dropped the continuation row entirely.
-    queryKey: ["reader-official-series", legacyWork?.source, legacyWork?.seriesId, id],
-    queryFn: () => loadReaderSequence({ seriesSource: legacyWork!.source, seriesKey: legacyWork!.seriesId!, sortBy: "series_order", sortOrder: "asc", projection: "bulk" }, legacyWork!.id),
-    enabled: runtime && Boolean(legacyWork?.seriesId),
-    staleTime: 60_000,
-  });
-  const authorWorksQuery = useQuery({
-    queryKey: ["reader-author-sequence", legacyWork?.source, legacyWork?.personId ?? legacyWork?.authorId, id],
-    queryFn: () => loadReaderSequence({ personSource: legacyWork!.source, personKey: legacyWork!.personId || legacyWork!.authorId, sortBy: "source_created_at", sortOrder: "asc", projection: "bulk" }, legacyWork!.id),
-    enabled: runtime && Boolean(legacyWork?.personId || legacyWork?.authorId),
-    staleTime: 60_000,
-  });
   const shelfNeighborsQuery = useQuery({
     queryKey: ["library-v2-neighbors", id],
     queryFn: () => libraryV2Neighbors(String(id)),
@@ -477,68 +387,8 @@ function Reader({ source }: { source: ReaderSource }) {
     () => shelfNeighborsQuery.data ? shelfReadingContexts(shelfNeighborsQuery.data, String(id), metadataQuery.data?.head.authorName ?? "") : null,
     [id, metadataQuery.data?.head.authorName, shelfNeighborsQuery.data],
   );
-  const legacyContexts = useMemo<ReadingContextRow[]>(() => {
-    const work = legacyWork;
-    if (!work) return [];
-    const rows: ReadingContextRow[] = [];
-    const seenCollections = new Set<string>();
-    // 読み始めた文脈を先に積む。以降は重複を弾くので、同じコレクションが
-    // 二重に並ぶことなく、開始文脈が常に先頭に来る。
-    const addCollection = (collection: WorkCollection | undefined) => {
-      if (!collection || seenCollections.has(collection.id)) return;
-      const missing = collection.memberCount - collection.availableCount;
-      const items = collection.members.flatMap((member) => member.downloadId ? [{ id: member.downloadId, title: member.title }] : []);
-      const adjacent = adjacentWorks(items, work.id);
-      if (!adjacent.previous && !adjacent.next) return;
-      seenCollections.add(collection.id);
-      const sequential = collection.collectionKind === "ordered";
-      const progress = sequential && adjacent.position
-        ? `${adjacent.position} / ${adjacent.total}`
-        : `${adjacent.total}作品`;
-      rows.push({
-        key: `collection:${collection.id}`,
-        // 公式シリーズの行と同じく、常に何のまとまりかを名乗る。作品から直接
-        // 開いた場合に名前だけが並ぶと、シリーズとの区別がつかなくなる。
-        label: `コレクション「${collection.name}」`,
-        // 順序なしは「並び」と呼ばない。表示上の並びがあるだけで、読む順ではない。
-        detail: [progress, sequential ? "読む順あり" : "順序なし", missing > 0 ? `未保存${missing}作品は除外` : null]
-          .filter(Boolean)
-          .join(" · "),
-        collectionId: collection.id,
-        sequential,
-        currentId: work.id,
-        ...adjacent,
-      });
-    };
-    addCollection(explicitCollectionQuery.data);
-    for (const collection of memberCollectionsQuery.data ?? []) addCollection(collection);
-    if (officialSeriesQuery.data) {
-      const items = officialSeriesQuery.data.items.map((item) => ({ id: item.id, title: item.title }));
-      const adjacent = adjacentWorks(items, work.id);
-      const total = officialSeriesQuery.data.totalEstimate ?? adjacent.total;
-      if (adjacent.previous || adjacent.next) rows.push({ key: `series:${work.source}:${work.seriesId}`, label: work.seriesTitle ? `公式シリーズ「${work.seriesTitle}」` : "公式シリーズ", detail: `${adjacent.position ?? "-"} / ${total} · 公式順`, sequential: true, currentId: work.id, ...adjacent });
-    }
-    if (authorWorksQuery.data) {
-      const items = authorWorksQuery.data.items.map((item) => ({ id: item.id, title: item.title }));
-      const adjacent = adjacentWorks(items, work.id);
-      const total = authorWorksQuery.data.totalEstimate ?? adjacent.total;
-      // 作者の投稿順は「物語の次」ではないため、続きとしては案内しない。
-      if (adjacent.previous || adjacent.next) rows.push({ key: `author:${work.source}:${work.authorId}`, label: `${work.authorName}の作品`, detail: `${total}作品の公開順`, sequential: false, currentId: work.id, ...adjacent });
-    }
-    return rows;
-  }, [authorWorksQuery.data, explicitCollectionQuery.data, legacyWork, memberCollectionsQuery.data, officialSeriesQuery.data]);
-  const readingContexts = shelfContexts?.contexts ?? legacyContexts;
-  // 読了の札に表紙・作者・分量を出すため、隣の作品だけ詳しく読む。並びは
-  // 軽い形（題と番号だけ）で引いているので、そこには表紙が無い。
-  const neighborIds = useMemo(() => [...new Set(legacyContexts.flatMap((context) => [context.previous?.id, context.next?.id]).filter((value): value is number => typeof value === "number"))].sort((a, b) => a - b), [legacyContexts]);
-  const neighborsQuery = useQuery({
-    queryKey: ["reader-neighbors", neighborIds],
-    queryFn: () => getDownloads(neighborIds),
-    enabled: runtime && neighborIds.length > 0,
-    staleTime: 60_000,
-  });
-  const legacyNeighbors = useMemo(() => new Map<ReaderWorkKey, DownloadEntry>((neighborsQuery.data ?? []).map((entry) => [entry.id, entry])), [neighborsQuery.data]);
-  const neighbors: ReadonlyMap<ReaderWorkKey, DownloadEntry | ShelfEntry> = shelfContexts?.neighbors ?? legacyNeighbors;
+  const readingContexts = shelfContexts?.contexts ?? [];
+  const neighbors: ReadonlyMap<ReaderWorkKey, DownloadEntry | ShelfEntry> = shelfContexts?.neighbors ?? new Map();
   // Only while reading: an address you cannot follow is noise here, whereas the
   // detail screen deliberately shows the work as its author wrote it.
   const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === sourcePage - 1;
@@ -555,7 +405,6 @@ function Reader({ source }: { source: ReaderSource }) {
   const positionKey = `piep.reader-position.${readingId ?? "pending"}.${version ?? "current"}`;
   // 残り時間の目安に使う全体の字数。編集版なら編集版の字数になる。
   const totalChars = contentQuery.data?.totalPlainTextChars || metadataQuery.data?.head.textLength || 0;
-  const sequenceContextLimited = Boolean(officialSeriesQuery.data?.truncated || authorWorksQuery.data?.truncated);
 
   useEffect(() => { setVersion(normalizedRequestedVersion); }, [normalizedRequestedVersion]);
   useEffect(() => {
@@ -965,7 +814,6 @@ function Reader({ source }: { source: ReaderSource }) {
   if (metadataQuery.isLoading || contentQuery.isLoading) return <div className="page"><LoadingState label="リーダーを準備しています" /></div>;
   if (metadataQuery.error || contentQuery.error || !metadataQuery.data || !contentQuery.data) return <div className="page"><ErrorState error={metadataQuery.error ?? contentQuery.error ?? "作品が見つかりません"} retry={() => { metadataQuery.refetch(); contentQuery.refetch(); }} /></div>;
   const work = metadataQuery.data.head;
-  const legacy = metadataQuery.data.legacy;
   const currentVersion = version ?? work.currentVersion;
   // 反映中の編集が、いま手元にある版より古い本文の上に載っているか。
   const staleEditBase = work.staleEditBase;
@@ -973,13 +821,6 @@ function Reader({ source }: { source: ReaderSource }) {
     const url = sourceUrl(work.source, work.sourceId, work.contentType, work.authorKey);
     if (!url) return;
     if (runtime) await openExternalUrl(url); else window.open(url, "_blank", "noopener,noreferrer");
-  };
-  // 保存した JSON を既定のアプリで開いていたので、名前と違ってフォルダーが出なかった。
-  // 作品ページと同じく、保存フォルダーで JSON を選んだ状態にする。
-  const openSavedFolder = async () => {
-    if (!runtime || !legacy) return;
-    try { await revealPathInFileManager(legacy.download.jsonPath); }
-    catch (error) { notifications.show({ color: "red", title: "保存フォルダーを開けません", message: errorMessage(error) }); }
   };
   /** pixiv の原稿ページ番号を、実際に運ばれてくるページ番号へ直す。
    *
@@ -998,7 +839,7 @@ function Reader({ source }: { source: ReaderSource }) {
     const originalPath = original?.dataset.localPath;
     if (originalPath) {
       event.preventDefault();
-      setPdfOriginal({ workId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
+      setPdfOriginal({ workId: String(id), localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
       return;
     }
     const image = (event.target as HTMLElement).closest<HTMLImageElement>("img.novel-image, .reader-content img");
@@ -1120,8 +961,6 @@ function Reader({ source }: { source: ReaderSource }) {
             <Text component="span" ref={progressTextRef} size="xs" c="dimmed" className="reader-progress-text" aria-live="off" />
           </Group>
           <Group gap="xs" wrap="nowrap">
-            {/* 新しい棚の作品は、そう名乗る。読むだけの写しで、旧棚と中身が違うことがある。 */}
-            {source.shelf && <Tooltip label={shelfReading ? "新しい棚（試験中）から読んでいます。読書位置はこの棚に書きます。" : "新しい棚（試験中）から読んでいます。読むだけで、ここからは何も書き換えません。"}><Badge color="gray" variant="light">新しい棚（試験中）</Badge></Tooltip>}
             {/* 編集版が古い版の上に載っているときは、そう名乗る。取り込み直した
                 本文があるのに、読み手にはそれが見えないままだった。 */}
             {/* 狭い窓でも隠さない。隠していたころは、版の選択のいちばん上の
@@ -1160,9 +999,7 @@ function Reader({ source }: { source: ReaderSource }) {
             />
             <Tooltip label="表示設定"><ActionIcon variant="subtle" color="gray" aria-label="リーダーの表示設定" onClick={settingsDrawer.open}><Icons.readerSettings size={IconSize.nav} /></ActionIcon></Tooltip>
             <Tooltip label={fullscreen ? "全画面を終了" : "全画面で読む"}><ActionIcon variant="subtle" color="gray" aria-label={fullscreen ? "全画面を終了" : "全画面表示"} onClick={() => fullscreen ? document.exitFullscreen() : document.documentElement.requestFullscreen()}>{fullscreen ? <Icons.fullscreenExit size={IconSize.nav} /> : <Icons.fullscreenEnter size={IconSize.nav} />}</ActionIcon></Tooltip>
-            {source.shelf
-              ? <Tooltip label="新しい棚の作品は、まだ編集できません"><Button variant="subtle" color="gray" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} disabled>編集</Button></Tooltip>
-              : <Button variant="subtle" color="gray" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>}
+            <Button variant="subtle" color="gray" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>
           </Group>
         </Group>
         <div ref={progressRef} className="reader-progress" role="progressbar" aria-label="読書進捗" aria-valuemin={0} aria-valuemax={100}>
@@ -1192,14 +1029,12 @@ function Reader({ source }: { source: ReaderSource }) {
           >
             {!contentReady ? <LoadingState label="読書位置のページを読み込んでいます" /> : <>
               {sourcePage === 1 && <Box className="reader-title-page">
-              {/* Source on the left, the two places this work lives on the
-                  right - both were once called "保存元" - all on one line above
-                  the title. */}
+              {/* Source on the left, the source page on the right, all on one
+                  line above the title. */}
               <Group justify="space-between" align="center" gap="sm" wrap="nowrap" className="reader-title-page__head">
                 <ProviderMark provider={work.source} />
                 <Group gap={2} wrap="nowrap">
                   <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.externalLink size={IconSize.inline} />} onClick={openSource}>元ページをブラウザで</Button>
-                  <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime || !legacy} onClick={openSavedFolder}>保存フォルダー</Button>
                 </Group>
               </Group>
               <Title order={1} className="reader-title-page__title">{work.title}</Title>
@@ -1214,7 +1049,7 @@ function Reader({ source }: { source: ReaderSource }) {
                 <Text size="sm" c="dimmed">{sourcePage} / {pageCount} ページ</Text>
                 <Button variant="light" rightSection={<Icons.next size={IconSize.menu} />} onClick={() => goToSourcePage(sourcePage + 1)}>次のページを読む</Button>
               </Box>}
-              {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text>{sequenceContextLimited && <Alert color="yellow" mt="md" maw={620}>作品数が非常に多いため、前後の作品を特定できない並びがあります。作品詳細からシリーズまたは作者一覧を開いてください。</Alert>}{readingContexts.length > 0 && <Stack gap="sm" w="100%" maw={620} mt="md">{readingContexts.map((context) => <ReadingContextCard key={context.key} context={context} neighbors={neighbors} onOpen={navigate} />)}</Stack>}<Button variant="light" mt="md" onClick={() => returnTo(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
+              {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text>{readingContexts.length > 0 && <Stack gap="sm" w="100%" maw={620} mt="md">{readingContexts.map((context) => <ReadingContextCard key={context.key} context={context} neighbors={neighbors} onOpen={navigate} />)}</Stack>}<Button variant="light" mt="md" onClick={() => returnTo(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
             </>}
           </Box>
         </Box>

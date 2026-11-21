@@ -12,7 +12,7 @@ import { isTauriRuntime } from "@/services/dbApi";
 import { rememberWindowColorScheme } from "@/services/startupApi";
 import { useIncompleteSaveRepair } from "@/features/updates/repairIncompleteSaves";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
-import { invalidateShelf, useAdoptReadingKeys, usePinShelfAfterSwitch } from "@/features/library/shelfV2";
+import { invalidateShelf, useAdoptReadingKeys } from "@/features/library/shelfV2";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 const DashboardPage = lazy(() => import("@/features/dashboard/DashboardPage"));
@@ -85,7 +85,6 @@ function confirmDiscardOnNavigation(): Promise<boolean> {
 function AppContent() {
   useIncompleteSaveRepair();
   useAdoptReadingKeys(isTauriRuntime());
-  usePinShelfAfterSwitch(isTauriRuntime());
   const { pathname } = useAppRouter();
   const queryClient = useQueryClient();
   const { colorScheme } = useMantineColorScheme();
@@ -94,30 +93,6 @@ function AppContent() {
     // changes nothing on screen now.
     rememberWindowColorScheme(colorScheme).catch(() => undefined);
   }, [colorScheme]);
-  useEffect(() => {
-    if (!isTauriRuntime()) return;
-    return subscribeTauriEvent<number[]>("acquisition-audited", () => {
-      queryClient.invalidateQueries({ queryKey: ["library"] });
-      queryClient.invalidateQueries({ queryKey: ["work-acquisition"] });
-      queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] });
-      queryClient.invalidateQueries({ queryKey: ["deferred-candidate-count"] });
-      queryClient.invalidateQueries({ queryKey: ["deferred-candidates"] });
-    });
-  }, [queryClient]);
-  useEffect(() => {
-    if (!isTauriRuntime()) return;
-    return subscribeTauriEvent<number[]>("covers-repaired", ({ payload }) => {
-      queryClient.invalidateQueries({ queryKey: ["library"] });
-      queryClient.invalidateQueries({ queryKey: ["entity-works"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      queryClient.invalidateQueries({ queryKey: ["epub-queue-works"] });
-      // 原寸への取り直しは挿絵の拡張子も変える。開いている本文の画像の参照も読み直す。
-      payload.forEach((id) => {
-        queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
-        queryClient.invalidateQueries({ queryKey: ["reader-content-page", id] });
-      });
-    });
-  }, [queryClient]);
   useEffect(() => {
     if (!isTauriRuntime()) return;
     // 携帯がサーバー越しにお気に入りを付け外しした（新しい棚では読書位置も届く）。同じハートを
