@@ -1399,3 +1399,84 @@ fn a_removed_work_leaves_the_list_and_counts_but_keeps_its_history_and_comes_bac
     );
     library.verify().unwrap();
 }
+
+#[test]
+fn a_card_names_its_author_and_carries_the_author_icon() {
+    let temp = Temp::new();
+    let library = Library::create(&temp.0).unwrap();
+    let mut person = capture(&Work {
+        provider: "pixiv",
+        key: "p1",
+        title: "",
+        author: "",
+        created: None,
+        updated: None,
+        acquired: 500,
+        body: "",
+    });
+    person.kind = EntityKind::Person;
+    person.metadata = BTreeMap::from([("display_name".into(), json!("作者"))]);
+    person.body = None;
+    person.media.push(CapturedMedia {
+        slot: "icon".into(),
+        role: "icon".into(),
+        source_key: Some("icon".into()),
+        source_url: Some("https://example.invalid/icon.png".into()),
+        quality: "original".into(),
+        original_name: "icon.png".into(),
+        mime_type: "image/png".into(),
+        bytes: Some(b"icon-bytes".to_vec().into()),
+    });
+    library.capture(person).unwrap();
+    let mut with_icon = capture(&Work {
+        provider: "pixiv",
+        key: "a",
+        title: "一",
+        author: "作者",
+        created: None,
+        updated: None,
+        acquired: 1_000,
+        body: "本文",
+    });
+    with_icon.metadata.insert("author_key".into(), json!("p1"));
+    let with_icon = library.capture(with_icon).unwrap().entity_id;
+    let mut without = capture(&Work {
+        provider: "pixiv",
+        key: "b",
+        title: "二",
+        author: "別人",
+        created: None,
+        updated: None,
+        acquired: 2_000,
+        body: "本文",
+    });
+    without.metadata.insert("author_key".into(), json!("p2"));
+    let without = library.capture(without).unwrap().entity_id;
+    let unknown = library
+        .capture(capture(&Work {
+            provider: "pixiv",
+            key: "c",
+            title: "三",
+            author: "名無し",
+            created: None,
+            updated: None,
+            acquired: 3_000,
+            body: "本文",
+        }))
+        .unwrap()
+        .entity_id;
+
+    let card = library.work_card(with_icon).unwrap();
+    assert_eq!(card.author_key.as_deref(), Some("p1"));
+    assert_eq!(card.author_icon, Some(Fingerprint::of(b"icon-bytes")));
+    let card = library.work_card(without).unwrap();
+    assert_eq!(card.author_key.as_deref(), Some("p2"));
+    assert_eq!(card.author_icon, None);
+    let card = library.work_card(unknown).unwrap();
+    assert_eq!(card.author_key, None);
+    assert_eq!(card.author_icon, None);
+    // 一覧のページも同じ値を持つ。
+    let listed = all(&library, &WorkListQuery::default());
+    let first = listed.iter().find(|c| c.id == with_icon).unwrap();
+    assert_eq!(first.author_icon, Some(Fingerprint::of(b"icon-bytes")));
+}

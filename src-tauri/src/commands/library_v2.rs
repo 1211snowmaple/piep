@@ -141,6 +141,7 @@ impl LibraryV2 {
         Ok(CardView {
             card: card.clone(),
             cover_file: card.cover.map(|cover| cover.to_string()),
+            author_icon_file: card.author_icon.map(|icon| icon.to_string()),
             legacy_id: self.legacy_numbers(library)?.get(&card.id).copied(),
         })
     }
@@ -777,6 +778,8 @@ pub struct CardView {
     pub card: WorkCard,
     /// 表紙のファイルの識別子（16 進）。`convertFileSrc(…, "piep-library")` で URL になる。
     pub cover_file: Option<String>,
+    /// 作者のアイコンのファイルの識別子（16 進）。表紙と同じく URL にする。
+    pub author_icon_file: Option<String>,
     /// 旧棚から移した作品の、旧棚での番号。端末の読書位置・しおりはこの番号で引く（旧棚と共有）。
     pub legacy_id: Option<i64>,
 }
