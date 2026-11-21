@@ -223,3 +223,50 @@ fn report(app: &tauri::AppHandle) {
     assert!(names.contains(&"search-index-progress"), "{names:?}");
     assert!(events.iter().all(|event| event.line > 0));
 }
+
+/// 台帳のスキーマは、並べた順に移行を当てた結果で読む。足した列・作り直し・消したテーブルが
+/// 今の姿に出ること、注釈が列に紛れないこと、場所が最後に作ったファイルを指すことを確かめる。
+#[test]
+fn the_ledger_schema_is_what_the_migrations_leave_behind() {
+    let dir = TempDir::new("ledger");
+    dir.write(
+        "schema.sql",
+        "-- 最初の形\nCREATE TABLE works (\n  id BLOB PRIMARY KEY, -- 作品の ID, 16 バイト\n  title TEXT NOT NULL,\n  UNIQUE(id,title)\n);\nCREATE TABLE gone (id INTEGER);\nCREATE TABLE rebuilt (old TEXT);\n",
+    );
+    dir.write(
+        "migration_002_more.sql",
+        "ALTER TABLE works ADD COLUMN watching INTEGER NOT NULL DEFAULT 0;\nDROP TABLE gone;\nDROP TABLE rebuilt;\n\nCREATE TABLE rebuilt (\n  fresh TEXT NOT NULL CHECK (fresh IN ('a', 'b'))\n);\n",
+    );
+    let schema_rs = dir.write(
+        "schema.rs",
+        "const SQL: &str = include_str!(\"schema.sql\");\nconst MIGRATIONS: &[&str] = &[SQL, include_str!(\"migration_002_more.sql\")];\n",
+    );
+
+    let tables = super::sql_scan::scan_tables(&schema_rs, dir.path()).unwrap();
+    let names: Vec<_> = tables.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, ["rebuilt", "works"]);
+
+    let works = &tables[1];
+    let columns: Vec<_> = works
+        .columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.definition.as_str()))
+        .collect();
+    assert_eq!(
+        columns,
+        [
+            ("id", "BLOB PRIMARY KEY"),
+            ("title", "TEXT NOT NULL"),
+            ("watching", "INTEGER NOT NULL DEFAULT 0"),
+        ]
+    );
+    assert_eq!((works.file.as_str(), works.line), ("schema.sql", 2));
+
+    let rebuilt = &tables[0];
+    assert_eq!(rebuilt.columns.len(), 1);
+    assert_eq!(rebuilt.columns[0].name, "fresh");
+    assert_eq!(
+        (rebuilt.file.as_str(), rebuilt.line),
+        ("migration_002_more.sql", 5)
+    );
+}

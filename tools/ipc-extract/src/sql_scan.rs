@@ -1,86 +1,98 @@
-//! `schema.rs` の中の SQL からテーブル定義を読む。
+//! 棚の台帳（`library.db`）のテーブル定義を読む。
 //!
-//! スキーマは Rust の文字列リテラルとして書かれているので、構文木を辿っても
-//! 中身は一つの文字列にしかならない。`CREATE TABLE` を直接探すほうが素直である。
+//! 台帳のスキーマは `src-tauri/src/library/schema.rs` が `include_str!` で並べた SQL で、最初の
+//! `schema.sql` のあとに移行が続く。移行には `ALTER TABLE` や作り直し（`DROP TABLE` のあと同じ名前で
+//! `CREATE TABLE`）があるので、`CREATE TABLE` の文を拾うだけでは今の姿にならない。そこで、並んだ順に
+//! 空のメモリ上のデータベースへ当て、出来上がった `sqlite_master` から定義を読む。SQLite は
+//! `ALTER TABLE` のたびに保存した `CREATE TABLE` の文を書き換えるので、それが今の姿である。
 //!
-//! ここで読むのは「今のコードが作るテーブル」であって、利用者の手元にある
-//! データベースの実際の姿ではない。移行の履歴は追わない。
+//! ここで読むのは「今のコードが新しく作る台帳」であって、利用者の手元の台帳の実際の姿ではない。
 
 use crate::model::{Column, Table};
-use std::path::Path;
-use syn::spanned::Spanned;
+use std::path::{Path, PathBuf};
 
-/// `CREATE TABLE [IF NOT EXISTS] 名前 (` を探し、対応する `)` までを列として読む。
+/// `schema_rs` が並べた SQL を順に当て、出来上がったテーブルを名前の順に返す。
 ///
-/// `#[cfg(test)]` の中は見ない。移行の試験は「旧番号のライブラリ」を再現するため
-/// 意図的に古い形のテーブルを作っており、それを現行スキーマとして載せると嘘になる。
+/// 各テーブルの場所は、そのテーブルを最後に `CREATE TABLE` した SQL ファイルの行にする。
 pub fn scan_tables(schema_rs: &Path, repo_root: &Path) -> anyhow::Result<Vec<Table>> {
-    let text = std::fs::read_to_string(schema_rs)?;
-    let rel = crate::rust_scan::relative(schema_rs, repo_root);
-    let skip = test_line_ranges(&text);
-    let re = regex::Regex::new(
-        r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+    let files = migration_files(schema_rs)?;
+    anyhow::ensure!(
+        !files.is_empty(),
+        "{} に include_str! の SQL が無い",
+        schema_rs.display()
+    );
+    let mut sources = Vec::new();
+    for file in &files {
+        let text = std::fs::read_to_string(file)
+            .map_err(|e| anyhow::anyhow!("{} を読めない: {e}", file.display()))?;
+        sources.push((file.clone(), text));
+    }
+
+    let conn = rusqlite::Connection::open_in_memory()?;
+    for (file, text) in &sources {
+        conn.execute_batch(text)
+            .map_err(|e| anyhow::anyhow!("{} を当てられない: {e}", file.display()))?;
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT name, sql FROM sqlite_master \
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY name",
     )?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut out = Vec::new();
-    for m in re.captures_iter(&text) {
-        let whole = m.get(0).unwrap();
-        let line = text[..whole.start()].lines().count() + 1;
-        if skip.iter().any(|(s, e)| line >= *s && line <= *e) {
-            continue;
-        }
-        let name = m[1].to_string();
-        let open = whole.end() - 1; // `(` の位置
-        let Some(close) = matching_paren(&text, open) else {
+    for (name, sql) in rows {
+        let sql = strip_comments(&sql);
+        let Some(open) = sql.find('(') else { continue };
+        let Some(close) = matching_paren(&sql, open) else {
             continue;
         };
-        let body = &text[open + 1..close];
+        let (file, line) = created_at(&name, &sources)
+            .map(|(file, line)| (crate::rust_scan::relative(file, repo_root), line))
+            .unwrap_or_else(|| (crate::rust_scan::relative(schema_rs, repo_root), 1));
         out.push(Table {
             name,
-            file: rel.clone(),
+            file,
             line,
-            columns: parse_columns(body),
+            columns: parse_columns(&sql[open + 1..close]),
         });
     }
-    out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
 
-/// `#[cfg(test)]` が付いた項目が占める行の範囲。
-fn test_line_ranges(text: &str) -> Vec<(usize, usize)> {
-    let Ok(file) = syn::parse_file(text) else {
-        return Vec::new();
-    };
-    file.items
-        .iter()
-        .filter(|item| {
-            let attrs: &[syn::Attribute] = match item {
-                syn::Item::Mod(m) => &m.attrs,
-                syn::Item::Fn(f) => &f.attrs,
-                _ => &[],
-            };
-            attrs.iter().any(is_cfg_test)
-        })
-        .map(|item| {
-            let span = item.span();
-            (span.start().line, span.end().line)
-        })
-        .collect()
+/// `schema_rs` の `include_str!("…")` を、書かれた順に `schema_rs` からの位置で返す。
+fn migration_files(schema_rs: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let text = std::fs::read_to_string(schema_rs)?;
+    let dir = schema_rs.parent().unwrap_or(Path::new("."));
+    let re = regex::Regex::new(r#"include_str!\(\s*"([^"]+\.sql)"\s*\)"#)?;
+    Ok(re.captures_iter(&text).map(|m| dir.join(&m[1])).collect())
 }
 
-/// `#[cfg(test)]` かどうか。`#[cfg(feature = "x")]` などは対象外。
-fn is_cfg_test(attr: &syn::Attribute) -> bool {
-    if !attr.path().is_ident("cfg") {
-        return false;
-    }
-    let mut found = false;
-    let _ = attr.parse_nested_meta(|meta| {
-        if meta.path.is_ident("test") {
-            found = true;
-        }
-        Ok(())
-    });
-    found
+/// テーブルを最後に `CREATE TABLE` したファイルと行。
+fn created_at<'a>(name: &str, sources: &'a [(PathBuf, String)]) -> Option<(&'a Path, usize)> {
+    let re = regex::Regex::new(&format!(
+        r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?{}\s*\(",
+        regex::escape(name)
+    ))
+    .ok()?;
+    sources.iter().rev().find_map(|(file, text)| {
+        let found = re.find_iter(text).last()?;
+        Some((file.as_path(), text[..found.start()].lines().count() + 1))
+    })
+}
+
+/// `--` から行末までを落とす。保存された定義には、書いたときの注釈がそのまま残る。
+/// 文字列の中の `--` は台帳のスキーマに無いので、区別しない。
+fn strip_comments(sql: &str) -> String {
+    sql.lines()
+        .map(|line| match line.find("--") {
+            Some(at) => &line[..at],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// `open` にある `(` に対応する `)` の位置。見つからなければ `None`。
@@ -141,7 +153,12 @@ fn parse_columns(body: &str) -> Vec<Column> {
         .map(|p| collapse(p))
         .filter(|p| !p.is_empty())
         .filter(|p| {
-            let head = p.split_whitespace().next().unwrap_or("").to_uppercase();
+            // `UNIQUE(a,b)` のように括弧を詰めて書いた表制約もあるので、先頭の語だけを見る。
+            let head: String = p
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect::<String>()
+                .to_uppercase();
             !CONSTRAINTS.contains(&head.as_str())
         })
         .filter_map(|p| {

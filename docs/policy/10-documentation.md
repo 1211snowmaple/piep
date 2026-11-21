@@ -51,7 +51,7 @@ npm --prefix docs-tools run docs:build
 |---|---|---|
 | [IPC コマンド契約](../reference/ipc.md) | `#[tauri::command]` と `invoke()` | 自作の抽出器 |
 | [イベント契約](../reference/events.md) | `emit()` と `subscribeTauriEvent()` | 同上 |
-| [スキーマ](../reference/schema.md) | `schema.rs` の `CREATE TABLE` | 同上 |
+| [スキーマ](../reference/schema.md) | `library/schema.rs` が並べた SQL を当てた結果 | 同上 |
 | Rust API | `src-tauri/src/` の `///` `//!` | `cargo doc` |
 
 **LLM は使っていない。** すべて構文解析による決定論的な変換である。だから

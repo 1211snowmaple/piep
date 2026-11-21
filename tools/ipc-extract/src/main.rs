@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
     let commands_dir = repo.join("src-tauri/src/commands");
     let lib_rs = repo.join("src-tauri/src/lib.rs");
     let src_dir = repo.join("src-tauri/src");
-    let schema_rs = repo.join("src-tauri/src/database/schema.rs");
+    let schema_rs = repo.join("src-tauri/src/library/schema.rs");
 
     for p in [&commands_dir, &lib_rs, &src_dir, &schema_rs] {
         anyhow::ensure!(p.exists(), "{} が見つからない", p.display());
