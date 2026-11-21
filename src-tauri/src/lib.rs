@@ -35,7 +35,6 @@ mod smoke_test;
 mod source_assets;
 mod source_time;
 
-use database::Database;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -89,33 +88,33 @@ impl LibraryProcessLock {
     }
 }
 
-/// アプリ全体で共有されるDB状態
+/// アプリ全体で共有される状態。
 pub struct AppState {
-    pub db: Database,
-    /// 起動時に登録した棚の状態を、取得ワーカーも同じ口から参照する。
+    /// 起動時に開いた棚。取得ワーカーも同じ口から参照する。
     pub(crate) library_v2: Arc<commands::library_v2::LibraryV2>,
     /// Export holds a read guard while every library mutation holds a write
     /// guard, giving backups one coherent DB/filesystem generation.
     pub library_gate: Arc<tokio::sync::RwLock<()>>,
     // Keep this last: struct fields are dropped in declaration order, so the
-    // database and its workers are gone before process ownership is released.
+    // library and its workers are gone before process ownership is released.
     _library_process_lock: Option<LibraryProcessLock>,
 }
 
 impl AppState {
-    pub fn new(db: Database) -> Self {
+    pub fn new(library_v2: Arc<commands::library_v2::LibraryV2>) -> Self {
         Self {
-            db,
-            library_v2: Arc::new(commands::library_v2::LibraryV2::default()),
+            library_v2,
             library_gate: Arc::new(tokio::sync::RwLock::new(())),
             _library_process_lock: None,
         }
     }
 
-    fn new_with_library_lock(db: Database, library_process_lock: LibraryProcessLock) -> Self {
+    fn new_with_library_lock(
+        library_v2: Arc<commands::library_v2::LibraryV2>,
+        library_process_lock: LibraryProcessLock,
+    ) -> Self {
         Self {
-            db,
-            library_v2: Arc::new(commands::library_v2::LibraryV2::default()),
+            library_v2,
             library_gate: Arc::new(tokio::sync::RwLock::new(())),
             _library_process_lock: Some(library_process_lock),
         }
@@ -130,12 +129,9 @@ fn prepare_library(
     app_data: &Path,
     library_process_lock: LibraryProcessLock,
 ) -> Result<(), String> {
-    let db_path = app_data.join("piep.db");
-    let storage_dir = app_data.join("downloads");
-
     // 埋め込みモデルの置き場は、開く前に決めておく。既定は起動した場所
     // なので、決めないと起動場所ごとに 465MB を落として置き去りにする。
-    database::semantic_index::set_model_cache_dir(&storage_dir);
+    database::semantic_index::set_model_cache_dir(app_data);
 
     // 添付 PDF を読むための pdfium。配布物では実行ファイルの隣に配られる
     // （`tauri.conf.json` の `bundle.resources`）。見つからなくても起動は
@@ -155,36 +151,15 @@ fn prepare_library(
         Err(error) => log::warn!("pdfium の置き場所を決められない: {error}"),
     }
 
-    let db = Database::open(&db_path, &storage_dir)
-        .map_err(|e| format!("Failed to open database: {e}"))?;
-    let mut state = AppState::new_with_library_lock(db, library_process_lock);
-    state.library_v2 = app
+    let library_v2 = app
         .state::<Arc<commands::library_v2::LibraryV2>>()
         .inner()
         .clone();
-    let state = Arc::new(state);
-    // 中断した復元の後始末は、起動の条件にしない。片付かなかった分は
-    // 控えを残したまま次の起動でもう一度試せる。ここで止めると、読める
-    // 棚を持っている人が窓を開けられなくなる。
-    for unresolved in commands::archive::recover_interrupted_restores(&state) {
-        log::error!("前回の復元を回復できていません: {unresolved}");
-    }
-    // 分割復元はパートをまたぐと原子的にならない。途中で終わっていれば
-    // 棚は「書庫由来」と「元のまま」が混ざった状態なので、黙っていない。
-    match state.db.unfinished_restore_manifests() {
-        Ok(unfinished) => {
-            for (path, done, total) in unfinished {
-                log::warn!(
-                    "分割バックアップの復元が途中で終わっています（{done}/{total} パート）。同じマニフェストをもう一度開くと続きから再開します: {path}"
-                );
-            }
-        }
-        Err(error) => log::warn!("分割復元の記録を読めません: {error}"),
-    }
-    state
-        .jobs()
-        .import_previous_queue()
-        .map_err(|e| format!("以前の実行キューを引き継げません: {e}"))?;
+    commands::library_v2::open_for_startup(Arc::clone(&library_v2), app_data)?;
+    let state = Arc::new(AppState::new_with_library_lock(
+        library_v2,
+        library_process_lock,
+    ));
     if let Err(e) = state.jobs().recover_update_jobs_on_startup() {
         log::warn!("Failed to recover update jobs: {}", e);
     }
@@ -221,13 +196,6 @@ fn prepare_library(
         Err(e) => log::error!("サーバーの機能を初期化できません: {e}"),
     }
     app.manage(state);
-    log::info!("Database initialized at {:?}", db_path);
-    // The search index is derived data and has to look after itself:
-    // anything that left it behind is caught up in the background
-    // rather than waiting for someone to notice and press a button.
-    commands::database::start_automatic_index_maintenance(app.clone());
-    commands::database::start_automatic_cover_repair(app.clone());
-    commands::database::start_automatic_saved_asset_audit(app.clone());
     Ok(())
 }
 
@@ -300,12 +268,6 @@ pub fn run() -> tauri::Result<()> {
             tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
                 .background_color(commands::startup::window_background(&app_data))
                 .build()?;
-
-            // 新しい棚（あれば）は旧棚の準備と別に開く。画面は旧棚の準備だけを待つ。
-            commands::library_v2::open_in_background(
-                Arc::clone(&app.state::<Arc<commands::library_v2::LibraryV2>>()),
-                &app_data,
-            );
 
             // ここから先は棚の規模に比例して時間がかかる。`setup` はメインスレッド
             // なので、ここで待つと窓が固まり、Windows が「応答なし」を付ける。
@@ -430,36 +392,12 @@ pub fn run() -> tauri::Result<()> {
             commands::downloader::fetch_fanbox_post,
             commands::downloader::fetch_fanbox_creator_posts,
             // DB検索・閲覧 (commands::database)
-            commands::database::search_downloads_v2,
-            commands::database::search_suggest,
             commands::database::search_rebuild_index,
             commands::database::search_set_semantic_enabled,
             commands::database::search_cancel_rebuild_index,
-            commands::database::db_get_downloads,
-            commands::database::db_get_assets,
-            commands::database::db_delete_download,
-            commands::database::db_delete_downloads,
-            commands::database::db_delete_downloads_for_search,
-            commands::database::db_get_stats,
-            commands::database::db_get_library_diagnostics,
-            commands::database::db_maintain_library,
-            commands::database::db_optimize_search_index,
-            commands::database::db_get_dashboard_summary,
-            commands::database::db_get_library_shelf_counts,
-            commands::database::db_list_entity_series,
-            commands::database::db_list_entity_series_paged,
-            commands::database::db_list_entity_tags,
             commands::database::db_list_saved_searches,
             commands::database::db_upsert_saved_search,
             commands::database::db_delete_saved_search,
-            commands::database::db_list_work_collections,
-            commands::database::db_get_work_collection,
-            commands::database::db_upsert_work_collection,
-            commands::database::db_delete_work_collection,
-            commands::database::db_add_work_collection_members,
-            commands::database::db_add_downloads_to_collection,
-            commands::database::db_create_collection_from_downloads,
-            commands::database::db_sort_work_collection_members,
             commands::database::db_sweep_collection_candidates,
             commands::database::db_suggest_collection_additions,
             commands::database::db_dismiss_swept_suggestions,
@@ -468,58 +406,30 @@ pub fn run() -> tauri::Result<()> {
             // モデルに手伝ってもらう仕事。どれも押したときだけ動く。
             commands::assist::assist_discover_engines,
             commands::assist::assist_runtime_profile,
-            commands::assist::assist_related_tags,
-            commands::assist::assist_accept_related_tags,
-            commands::assist::assist_remove_related_tag,
-            commands::assist::assist_suggest_tags,
-            commands::assist::assist_accept_tags,
-            commands::assist::assist_work_tags,
-            commands::assist::assist_remove_tag,
-            commands::assist::assist_interpret_search,
-            commands::assist::assist_describe_author,
-            commands::assist::assist_propose_splits,
-            commands::assist::assist_summarize_work,
             commands::assist::assist_proofread,
-            commands::assist::assist_recap_previous,
-            commands::assist::assist_load_note,
-            commands::assist::assist_delete_note,
-            commands::assist_shelf::library_v2_assist_related_tags,
-            commands::assist_shelf::library_v2_assist_accept_related_tags,
-            commands::assist_shelf::library_v2_assist_remove_related_tag,
-            commands::assist_shelf::library_v2_assist_suggest_tags,
-            commands::assist_shelf::library_v2_assist_accept_tags,
-            commands::assist_shelf::library_v2_assist_work_tags,
-            commands::assist_shelf::library_v2_assist_remove_tag,
-            commands::assist_shelf::library_v2_assist_interpret_search,
-            commands::assist_shelf::library_v2_assist_describe_author,
-            commands::assist_shelf::library_v2_assist_propose_splits,
-            commands::assist_shelf::library_v2_assist_summarize_work,
-            commands::assist_shelf::library_v2_assist_recap_previous,
-            commands::assist_shelf::library_v2_assist_load_note,
-            commands::assist_shelf::library_v2_assist_delete_note,
+            commands::assist::library_v2_assist_related_tags,
+            commands::assist::library_v2_assist_accept_related_tags,
+            commands::assist::library_v2_assist_remove_related_tag,
+            commands::assist::library_v2_assist_suggest_tags,
+            commands::assist::library_v2_assist_accept_tags,
+            commands::assist::library_v2_assist_work_tags,
+            commands::assist::library_v2_assist_remove_tag,
+            commands::assist::library_v2_assist_interpret_search,
+            commands::assist::library_v2_assist_describe_author,
+            commands::assist::library_v2_assist_propose_splits,
+            commands::assist::library_v2_assist_summarize_work,
+            commands::assist::library_v2_assist_recap_previous,
+            commands::assist::library_v2_assist_load_note,
+            commands::assist::library_v2_assist_delete_note,
             commands::database::db_try_naming_engine,
             commands::database::db_name_collection_suggestion,
-            commands::database::db_remove_work_collection_members,
-            commands::database::db_reorder_work_collection_members,
-            commands::database::db_list_collections_for_work,
-            commands::database::db_list_collections_for_person,
-            commands::database::db_list_collections_for_series,
             commands::database::db_generate_collection_suggestion,
             commands::database::db_list_collection_suggestions,
             commands::database::db_accept_collection_suggestion,
             commands::database::db_reject_collection_suggestion,
             commands::database::db_dismiss_collection_suggestion,
-            commands::database::db_get_filter_facets,
             commands::database::db_get_search_index_status,
-            commands::database::db_search_filter_facets,
-            commands::database::db_search_entity_facets,
-            commands::database::db_count_entity_facets,
-            commands::database::read_file_content,
-            commands::database::open_local_asset,
             // バージョン管理・更新監視 (commands::database)
-            commands::database::db_set_watch_updates,
-            commands::database::db_set_favorite,
-            commands::database::db_set_flags_for_ids,
             commands::database::db_upsert_update_target,
             commands::database::db_get_update_target,
             commands::database::db_list_update_targets,
@@ -530,17 +440,10 @@ pub fn run() -> tauri::Result<()> {
             commands::database::db_rename_watch_group,
             commands::database::db_delete_watch_group,
             commands::database::db_set_watch_group_members,
-            commands::database::db_get_person,
-            commands::database::db_get_series,
-            commands::database::db_list_entity_versions,
-            commands::database::db_get_latest_entity_profile_json,
             commands::database::refresh_entity_profile,
-            commands::database::db_scan_fanbox_asset_gaps,
             commands::database::db_get_entity_profile_repair_status,
             commands::database::repair_incomplete_entity_profiles,
             commands::database::cancel_entity_profile_repair,
-            commands::original_images::get_original_image_status,
-            commands::original_images::upgrade_pixiv_images_to_original,
             commands::original_images::library_v2_original_image_status,
             commands::backup_shelf::library_v2_backup,
             commands::backup_shelf::library_v2_export_entity_archive,
@@ -552,21 +455,6 @@ pub fn run() -> tauri::Result<()> {
             commands::backup_shelf::library_v2_cancel_restore,
             commands::original_images::library_v2_upgrade_pixiv_images_to_original,
             commands::original_images::cancel_original_image_upgrade,
-            commands::database::db_get_download_by_source,
-            commands::database::db_get_reader_metadata,
-            commands::database::get_revision_snapshot,
-            commands::database::get_active_edit_snapshot,
-            commands::database::get_work_acquisition_details,
-            commands::database::db_get_reader_content_page,
-            commands::database::db_search_reader_content,
-            commands::database::db_get_editor_document,
-            commands::database::db_save_work_draft,
-            commands::database::db_get_reader_outline,
-            commands::database::db_discard_work_draft,
-            commands::database::db_activate_work_edit,
-            commands::database::db_deactivate_work_edit,
-            commands::database::db_delete_archived_work_edits,
-            commands::database::import_work_asset,
             // 更新ジョブ (commands::update_jobs)
             commands::update_jobs::start_update_job,
             commands::update_jobs::start_save_job,
@@ -590,16 +478,6 @@ pub fn run() -> tauri::Result<()> {
             commands::update_jobs::list_pending_revisions,
             commands::update_jobs::preview_pending_revision,
             commands::update_jobs::restore_dismissed_update_candidates,
-            // エクスポート / インポート (commands::archive)
-            commands::archive::export_all_multipart,
-            commands::archive::backup_export_running,
-            commands::archive::export_entity_zip,
-            commands::archive::import_zip,
-            commands::archive::cancel_archive_restore,
-            commands::archive::import_multipart_backup,
-            commands::archive::inspect_backup,
-            commands::archive::inspect_multipart_backup,
-            commands::archive::scan_and_reimport_downloads,
             // EPUB エクスポート (commands::epub)
             commands::epub::export_epub_batch,
             commands::epub::cancel_epub_export,
@@ -615,8 +493,6 @@ pub fn run() -> tauri::Result<()> {
             commands::epub::save_template_settings,
             commands::epub::list_template_file_kinds,
             commands::epub::preview_epub_template,
-            commands::archive::get_storage_path,
-            commands::pdf::render_pdf_attachment_page,
             commands::shell::open_managed_path,
             commands::shell::reveal_managed_path,
         ])

@@ -8,8 +8,8 @@ use super::library::Library;
 use super::standalone::run_listener;
 use super::store::{DeviceSummary, FavoriteChange, Role, ServerStore};
 use super::sync_send::{
-    admin_delete, admin_get, admin_get_if_present, admin_post, admin_put, pair_admin,
-    prepare_snapshot, send_prepared, RemoteServer, SendHandle, SendProgress, CANCELED,
+    admin_delete, admin_get, admin_get_if_present, admin_post, admin_put, pair_admin, RemoteServer,
+    SendHandle, SendProgress, CANCELED,
 };
 use super::{pairing_payload, tls, DEFAULT_PORT};
 use crate::AppState;
@@ -398,9 +398,10 @@ impl DesktopServer {
         }
     }
 
+    /// 内蔵サーバーを始める。`library` は旧 API で配る本棚（デスクトップ版は [`Library::none`]）。
     pub async fn start_embedded(
         &self,
-        library: Arc<AppState>,
+        library: Library,
         settings: EmbeddedSettings,
         port: u16,
     ) -> Result<(), String> {
@@ -450,16 +451,13 @@ impl DesktopServer {
             }
         });
         let context = ServerContext::new(
-            Library::App(library),
+            library,
             Arc::clone(&self.store),
             self.app_data.clone(),
             None,
             public_url,
             fingerprint.clone(),
         );
-        if let Some(listener) = self.favorites_listener.get() {
-            context.set_favorites_listener(Arc::clone(listener));
-        }
         let router = combined_router(context);
         let handle = axum_server::Handle::new();
         // 実際のポートと、待ち受けの失敗をここで確かめる。
@@ -771,28 +769,21 @@ impl DesktopServer {
             };
             let full = items.len() >= FAVORITES_PAGE;
             let gate = state.library_gate.clone().write_owned().await;
-            let library = Arc::clone(state);
-            // 正本に切り替えた棚にも当てる（棚から読めたときは棚の値を使うので当てない）。
-            // 旧棚は今までどおり書く。
-            let shelf = state.library_v2.writable().ok().filter(|_| !from_shelf);
+            // 棚から読めたときは棚の値を使うので、旧 API の記録は当てずに読み進めるだけ。
+            let shelf = state.library_v2.library().ok().filter(|_| !from_shelf);
             applied += tokio::task::spawn_blocking(move || {
                 let _gate = gate;
                 let mut applied = 0;
-                for item in &items {
-                    let mut changed = library
-                        .db
-                        .set_favorite_by_source(&item.source, &item.source_id, item.favorite)?
-                        .is_some();
-                    if let Some(shelf) = &shelf {
-                        changed |= crate::commands::library_v2::follow_remote_favorite(
+                if let Some(shelf) = &shelf {
+                    for item in &items {
+                        if crate::commands::library_v2::follow_remote_favorite(
                             shelf,
                             &item.source,
                             &item.source_id,
                             item.favorite,
-                        )?;
-                    }
-                    if changed {
-                        applied += 1;
+                        )? {
+                            applied += 1;
+                        }
                     }
                 }
                 Ok::<_, String>(applied)
@@ -853,7 +844,7 @@ impl DesktopServer {
     /// 一覧は初めに全部、そのあとは変わった分だけ。どちらの位置が新しいかは書いた時刻で決め、
     /// 同じ位置を何度読んでも二度は書かない。印が別の写しのものならサーバーが初めから返す。
     async fn pull_shelf_reading_locked(&self, state: &Arc<AppState>) -> Result<usize, String> {
-        let Ok(library) = state.library_v2.writable() else {
+        let Ok(library) = state.library_v2.library() else {
             return Ok(0);
         };
         let Some(remote) = self.settings().remote else {
@@ -918,7 +909,7 @@ impl DesktopServer {
         &self,
         state: &Arc<AppState>,
     ) -> Result<Option<usize>, String> {
-        let Ok(library) = state.library_v2.writable() else {
+        let Ok(library) = state.library_v2.library() else {
             return Ok(None);
         };
         let Some(remote) = self.settings().remote else {
@@ -983,8 +974,7 @@ impl DesktopServer {
         if let Err(error) = self.pull_favorites_locked(&state).await {
             log::warn!("携帯のお気に入りを取り込めません: {error}");
         }
-        // 切り替えた棚があれば、旧棚ではなくその棚の写しを送る。
-        let shelf = state.library_v2.writable().ok();
+        let library = state.library_v2.library()?;
         // 写しを作る前に読む。この間に変わっても、次回もう一度送るだけで取りこぼさない。
         let generation = change_generation(&state);
         let remote = self
@@ -1002,7 +992,7 @@ impl DesktopServer {
             };
         }
         let finished_at = Some(chrono::Utc::now().to_rfc3339());
-        let result = if let Some(library) = shelf {
+        let result = {
             let outgoing = self.dir.join("outgoing").join("shelf");
             // 送る前に読んだ印の写しが、送ったときに配っていた写し。
             let from = self.settings().shelf_reading_cursor;
@@ -1023,29 +1013,6 @@ impl DesktopServer {
                     }),
                 Err(error) => Err(error),
             }
-        } else {
-            let snapshot = self.dir.join("outgoing").join("piep-snapshot.db");
-            let result = async {
-                let (report, files, skipped) =
-                    prepare_snapshot(&state, &self.app_data, &snapshot).await?;
-                if let Ok(mut progress) = self.send.progress.lock() {
-                    progress.outside_paths = report.outside;
-                    progress.skipped_names = skipped;
-                }
-                send_prepared(&remote, &token, &snapshot, files, &self.send).await
-            }
-            .await;
-            let _ = fs::remove_file(&snapshot);
-            result.map(|outcome| LastSend {
-                finished_at: finished_at.clone(),
-                generation: Some(outcome.generation),
-                works: Some(outcome.works),
-                files_added: Some(outcome.files_added),
-                files_removed: Some(outcome.files_removed),
-                missing_referenced: Some(outcome.missing_referenced),
-                unchanged: outcome.unchanged,
-                error: None,
-            })
         };
         let finished_at = Some(chrono::Utc::now().to_rfc3339());
         let (phase, record) = match result {
@@ -1100,7 +1067,7 @@ impl DesktopServer {
             if settings.embedded.enabled {
                 let port = DEFAULT_PORT;
                 if let Err(error) = server
-                    .start_embedded(Arc::clone(&state), settings.embedded, port)
+                    .start_embedded(Library::none(), settings.embedded, port)
                     .await
                 {
                     log::warn!("内蔵サーバーを始められません: {error}");
@@ -1156,12 +1123,9 @@ impl DesktopServer {
     }
 }
 
-/// 送るべき変更があったかを見る印。切り替えた棚があればその棚の、無ければ旧棚の印。
+/// 送るべき変更があったかを見る印。
 fn change_generation(state: &AppState) -> Option<i64> {
-    match state.library_v2.writable() {
-        Ok(library) => library.change_marker().ok(),
-        Err(_) => state.db.library_generation().ok(),
-    }
+    state.library_v2.library().ok()?.change_marker().ok()
 }
 
 pub fn list_local_interfaces() -> Result<Vec<LocalInterface>, String> {

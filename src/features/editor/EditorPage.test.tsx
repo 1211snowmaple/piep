@@ -17,10 +17,14 @@ const dbApi = vi.hoisted(() => ({
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  getEditorDocument: dbApi.getEditorDocument,
-  saveWorkDraft: dbApi.saveWorkDraft,
-  activateWorkEdit: dbApi.activateWorkEdit,
 }));
+vi.mock("@/features/editor/editorSource", async (importOriginal) => {
+  const { editorTestSource } = await import("@/features/editor/editorTestSource");
+  return {
+    ...(await importOriginal<typeof import("@/features/editor/editorSource")>()),
+    shelfEditorSource: (id: string) => editorTestSource(Number(id), dbApi),
+  };
+});
 
 const revision: WorkEditRevision = { id: 8, downloadId: 101, baseVersion: 3, status: "draft", title: null, contentHash: null, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" };
 
@@ -93,19 +97,15 @@ describe("EditorPage", () => {
     expect(screen.getByRole("button", { name: "反映" })).toBeEnabled();
   });
 
-  it("clears an unchanged published snapshot and invalidates the reader's real query keys", async () => {
-    const client = renderEditor();
-    const invalidate = vi.spyOn(client, "invalidateQueries");
+  // 反映のあとに古くする問い合わせは読み書き先（棚なら棚全体）が決める。ここでは画面の印だけを見る。
+  it("clears an unchanged published snapshot", async () => {
+    renderEditor();
     const heading = await screen.findByLabelText("見出し 1");
     fireEvent.change(heading, { target: { value: "公開する見出し" } });
     fireEvent.click(screen.getByRole("button", { name: "反映" }));
 
     await waitFor(() => expect(dbApi.activateWorkEdit).toHaveBeenCalledOnce());
     await waitFor(() => expect(screen.queryByText("未保存")).toBeNull());
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["reader-metadata", 101] });
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["reader-content-page", 101] });
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["reader-content-search", 101] });
-    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["reader-document", 101] });
   });
 
   it.each(["下書き保存", "反映"])("keeps a newer title dirty when %s finishes", async (action) => {

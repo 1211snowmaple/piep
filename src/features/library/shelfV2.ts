@@ -1,4 +1,3 @@
-import { useLocalStorage } from "@mantine/hooks";
 import { useEffect } from "react";
 import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { adoptDeviceReadingKeys, readingKeysAdopted } from "@/features/library/readingShelf";
@@ -36,25 +35,17 @@ import type { CollectionCoverMode, CollectionNameSource, WorkCollection, WorkCol
 import type { EntityFacet, EntityFacetScope, EntitySortBy, EntityVersion, LibrarySortBy, ListedWork, PersonEntry, SearchV2Params, SearchV2Result, SeriesEntry, ShelfEntry, SourceKind } from "@/types/library";
 
 /**
- * ライブラリの一覧を新しい棚から出す（試験中・読むだけ）。
+ * ライブラリの一覧を棚から出す。
  *
- * 旧棚が正本のあいだ、新しい棚は移行で作った写しで、アプリは読むだけにする。一覧の
- * 条件（検索語・絞り込み・並び順）は新しい棚の問い合わせに直して渡し、結果はカードが
- * 読む形（`ShelfEntry`）にする。作品は新しい棚の ID のままで、旧棚の番号に読み替えない。
+ * 一覧の条件（検索語・絞り込み・並び順）は棚の問い合わせに直して渡し、結果はカードが
+ * 読む形（`ShelfEntry`）にする。作品は棚の ID のまま。
  */
-
-export const SHELF_V2_PREFERENCE_KEY = "piep.library-shelf-v2";
 
 export function isShelfEntry(work: ListedWork): work is ShelfEntry {
   return typeof work.id === "string";
 }
 
-/** 一覧を新しい棚から出すか。端末ごとの好み。 */
-export function useShelfV2Preference() {
-  return useLocalStorage<boolean>({ key: SHELF_V2_PREFERENCE_KEY, defaultValue: false, getInitialValueInEffect: false });
-}
-
-const SETTLED: ReadonlySet<LibraryV2Status["state"]> = new Set(["absent", "ready", "failed"]);
+const SETTLED: ReadonlySet<LibraryV2Status["state"]> = new Set(["ready", "failed"]);
 
 /** 新しい棚の状態。開いている途中と索引の同期中は、落ち着くまで読み直す。 */
 export function useLibraryV2Status(enabled: boolean) {
@@ -74,21 +65,6 @@ export function shelfListable(status: LibraryV2Status | undefined): boolean {
   return status?.state === "ready" || status?.state === "indexing";
 }
 
-/** 画面の押せない操作に添える理由。 */
-export const SHELF_READ_ONLY = "新しい棚では変えられません";
-
-/** 棚を正本に切り替えたか。切り替えた棚だけ、画面から書き込める。 */
-export function shelfWritable(status: LibraryV2Status | undefined): boolean {
-  return status?.state === "ready" && status.switched === true;
-}
-
-/** 新しい棚へ書き込めるか（好み・棚の状態・切り替え）。 */
-export function useShelfWritable(runtime: boolean): boolean {
-  const [preferred] = useShelfV2Preference();
-  const status = useLibraryV2Status(runtime && preferred);
-  return runtime && preferred && shelfWritable(status.data);
-}
-
 /**
  * 新しい棚へ書いたあと、画面が持っている問い合わせを読み直させる。印・件数・絞り込みの結果が
  * どこに出ているかを一つずつ追わず、棚の状態のほかは全部古いことにする（今出ている画面だけが
@@ -99,32 +75,6 @@ export function invalidateShelf(queryClient: QueryClient, keep?: readonly unknow
     predicate: (query) => query.queryKey[0] !== "library-v2-status"
       && !(keep && keep.length === query.queryKey.length && keep.every((part, index) => part === query.queryKey[index])),
   });
-}
-
-/**
- * この画面を新しい棚から出すか（好みと棚の状態）。`deciding` のあいだは棚の状態を聞いている
- * 途中で、どちらの棚にも問い合わせない（旧棚を引いてから差し替えない）。
- */
-export function useShelfMode(runtime: boolean): { shelfMode: boolean; deciding: boolean } {
-  const [preferred] = useShelfV2Preference();
-  const status = useLibraryV2Status(runtime && preferred);
-  return {
-    shelfMode: runtime && preferred && shelfListable(status.data),
-    deciding: runtime && preferred && !status.data,
-  };
-}
-
-/**
- * 棚を正本に切り替えたら、一覧を新しい棚から出す好みを入れたままにする。切り替えたあとの旧棚は
- * 空で、旧棚の画面に戻す意味が無い。アプリの頭で一度だけ使う。
- */
-export function usePinShelfAfterSwitch(runtime: boolean) {
-  const [preferred, setPreferred] = useShelfV2Preference();
-  const status = useLibraryV2Status(runtime && !preferred);
-  const switched = runtime && !preferred && shelfWritable(status.data);
-  useEffect(() => {
-    if (switched) setPreferred(true);
-  }, [switched, setPreferred]);
 }
 
 /** 読みかけの棚を旧棚の番号で渡すか（端末の記録を棚の ID へ書き直す前だけ）。 */
@@ -140,7 +90,7 @@ export function useAdoptReadingKeys(runtime: boolean) {
   const queryClient = useQueryClient();
   const pending = runtime && !readingKeysAdopted();
   const status = useLibraryV2Status(pending);
-  const ready = pending && shelfWritable(status.data);
+  const ready = pending && shelfListable(status.data);
   useEffect(() => {
     if (!ready) return;
     adoptDeviceReadingKeys(libraryV2AdoptDevicePositions, rekeyBookmarks)

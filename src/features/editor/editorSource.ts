@@ -1,6 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { getDemoEditor } from "@/mocks/demoData";
-import { activateWorkEdit, discardWorkDraft, getAssetUrl, getEditorDocument, importWorkAsset, saveWorkDraft } from "@/services/dbApi";
+import { getAssetUrl } from "@/services/dbApi";
 import {
   libraryV2EditPointer,
   libraryV2Editor,
@@ -14,14 +14,14 @@ import { invalidateShelf } from "@/features/library/shelfV2";
 import type { AssetEntry, EditorDocument, WorkBlock, WorkBlockInput, WorkEditRevision } from "@/types/library";
 
 /**
- * 編集画面が読み書きする先。旧棚と新しい棚で、開く・下書きの保存・反映・下書きを捨てる・画像の
- * 取り込みの口だけを差し替える。段の編集・取り消し・プレビュー・校正は同じ画面のまま。
+ * 編集画面が読み書きする先。棚とプレビューの見本で、開く・下書きの保存・反映・下書きを捨てる・
+ * 画像の取り込みの口だけを差し替える。段の編集・取り消し・プレビュー・校正は同じ画面のまま。
  */
 
-/** 編集画面の画像。新しい棚の画像は `shelfFile`（ファイルの識別子）で引く。 */
+/** 編集画面の画像。棚の画像は `shelfFile`（ファイルの識別子）で引く。 */
 export type EditorAsset = AssetEntry & { shelfFile?: string };
 
-/** 編集画面の画像の URL。新しい棚の画像はファイルの識別子から、旧棚は置き場から。 */
+/** 編集画面の画像の URL。棚の画像はファイルの識別子から、見本は埋め込みの URL から。 */
 export function editorAssetUrl(asset: EditorAsset): string | null {
   return asset.shelfFile ? shelfFileUrl(asset.shelfFile) : getAssetUrl(asset.localPath);
 }
@@ -48,7 +48,7 @@ export interface EditorDoc {
 }
 
 export interface EditorSource {
-  /** 問い合わせの鍵。旧棚は番号、新しい棚は UUID。 */
+  /** 問い合わせの鍵。棚は UUID、プレビューの見本は番号。 */
   key: number | string;
   shelf: boolean;
   ready: boolean;
@@ -66,7 +66,7 @@ export interface EditorSource {
   afterPublish: (queryClient: QueryClient) => void;
 }
 
-function fromLegacy(document: EditorDocument): EditorDoc {
+function fromDemo(document: EditorDocument): EditorDoc {
   return {
     work: document.download,
     assets: document.assets,
@@ -77,39 +77,20 @@ function fromLegacy(document: EditorDocument): EditorDoc {
   };
 }
 
-export function legacyEditorSource(id: number, runtime: boolean): EditorSource {
-  const save = (doc: EditorDoc, title: string | null, blocks: WorkBlockInput[]) => saveWorkDraft(id, doc.baseVersion, title, blocks);
+/** プレビューの見本の作品。保存しない（画面の上で編集を試せるだけ）。 */
+export function previewEditorSource(id: number): EditorSource {
   return {
     key: id,
     shelf: false,
     ready: Number.isFinite(id),
     workPath: `/works/${id}`,
-    load: async () => fromLegacy(runtime ? await getEditorDocument(id) : getDemoEditor(id)),
-    saveDraft: async (doc, title, blocks) => {
-      if (runtime) await save(doc, title, blocks);
-    },
-    publish: async (doc, title, blocks) => {
-      if (!runtime) return;
-      const revision = await save(doc, title, blocks);
-      await activateWorkEdit(revision.id);
-    },
-    discard: async () => {
-      if (!runtime) return fromLegacy(getDemoEditor(id));
-      await discardWorkDraft(id);
-      return fromLegacy(await getEditorDocument(id));
-    },
-    importImage: (_doc, path) => importWorkAsset(id, path),
-    afterSave: (queryClient) => {
-      queryClient.invalidateQueries({ queryKey: ["editor-document", id] });
-      queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
-    },
-    // 反映は本文を差し替えるので、カードが出している字数と版の印も変わる。
-    // それらは棚と作者ページの一覧から引いているため、そこも古くしておく。
-    afterPublish: (queryClient) => {
-      for (const key of [["reader-metadata", id], ["reader-content-page", id], ["reader-content-search", id], ["editor-document", id], ["library"], ["entity-works"]]) {
-        queryClient.invalidateQueries({ queryKey: key });
-      }
-    },
+    load: async () => fromDemo(getDemoEditor(id)),
+    saveDraft: async () => undefined,
+    publish: async () => undefined,
+    discard: async () => fromDemo(getDemoEditor(id)),
+    importImage: () => Promise.reject(new Error("プレビューでは画像を取り込めません")),
+    afterSave: () => undefined,
+    afterPublish: () => undefined,
   };
 }
 
@@ -131,7 +112,7 @@ function shelfAsset(media: ShelfEditorMedia): EditorAsset {
 const shelfEditStates = new Map<string, { base: string; generation: number }>();
 
 /**
- * 新しい棚の作品の編集（正本に切り替えた棚だけ書ける）。保存は今の世代を添えて送り、
+ * 棚の作品の編集。保存は今の世代を添えて送り、
  * 返ってきた世代を次の保存に使う（自動保存が開き直しを待たずに続けて書けるように）。
  */
 export function shelfEditorSource(work: string): EditorSource {

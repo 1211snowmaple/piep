@@ -1,5 +1,4 @@
 use super::*;
-use crate::database::Database;
 struct Temp(std::path::PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
@@ -12,10 +11,8 @@ fn fixture() -> (Temp, AppState, Arc<Library>) {
     std::fs::create_dir_all(&root).unwrap();
     let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
     library.switch_over().unwrap();
-    let mut state =
-        AppState::new(Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap());
-    state.library_v2 = Arc::new(super::super::library_v2::LibraryV2::with_test_library(
-        library.clone(),
+    let state = AppState::new(Arc::new(
+        super::super::library_v2::LibraryV2::with_test_library(library.clone()),
     ));
     (Temp(root), state, library)
 }
@@ -67,11 +64,6 @@ fn new_shelf_candidates_drive_display_blocking_and_user_choices_without_old_cand
         .list_pending_update_candidates_after(None, 1)
         .unwrap();
     assert_eq!(page[0].source_id, "11");
-    assert!(state
-        .db
-        .list_update_candidates_after(None, 100)
-        .unwrap()
-        .is_empty());
     // 表示用の写しができた候補では、原入力が読めなくても一覧を表示できる。
     ledger.hold(&candidate("11", "incomplete")).unwrap();
     std::fs::rename(
@@ -133,8 +125,6 @@ fn unavailable_holds_and_execution_rows_use_the_native_shelf_without_changing_th
         .insert_update_job_unavailable_item(&job, &item, &serde_json::json!({}), reason)
         .unwrap());
     assert_eq!(ledger.count_saved_deferred_update_candidates().unwrap(), 1);
-    assert_eq!(state.db.count_deferred_update_candidates().unwrap(), 0);
-    assert!(state.db.list_update_jobs().unwrap().is_empty());
     state
         .jobs()
         .set_update_job_status(&job, "completed", None)
@@ -181,11 +171,6 @@ fn stale_recheck_cannot_reverse_a_choice_made_during_the_request() {
             .as_deref(),
         Some("pending")
     );
-    assert!(state
-        .db
-        .list_update_candidates_after(None, 100)
-        .unwrap()
-        .is_empty());
     library.verify().unwrap();
 }
 

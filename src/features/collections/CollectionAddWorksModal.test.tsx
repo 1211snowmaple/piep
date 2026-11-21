@@ -6,11 +6,11 @@ import { demoWorks, getDemoCollection } from "@/mocks/demoData";
 import type { DownloadEntry, SearchV2Params } from "@/types/library";
 import { CollectionAddWorksModal } from "./CollectionAddWorksModal";
 
-const dbApi = vi.hoisted(() => ({ searchDownloadsV2: vi.fn() }));
+const shelf = vi.hoisted(() => ({ searchShelf: vi.fn() }));
 
-vi.mock("@/services/dbApi", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/dbApi")>()),
-  searchDownloadsV2: dbApi.searchDownloadsV2,
+vi.mock("@/features/library/shelfV2", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/features/library/shelfV2")>()),
+  searchShelf: shelf.searchShelf,
 }));
 
 vi.mock("@/components/WorkCard", () => ({
@@ -31,8 +31,8 @@ function result(items: DownloadEntry[]) {
 
 describe("CollectionAddWorksModal", () => {
   beforeEach(() => {
-    dbApi.searchDownloadsV2.mockReset();
-    dbApi.searchDownloadsV2.mockImplementation((params: SearchV2Params) => Promise.resolve(result([params.favorite ? demoWorks[1] : demoWorks[0]])));
+    shelf.searchShelf.mockReset();
+    shelf.searchShelf.mockImplementation((params: SearchV2Params) => Promise.resolve(result([params.favorite ? demoWorks[1] : demoWorks[0]])));
   });
 
   it("keeps selected works when a scope change replaces the visible results", async () => {

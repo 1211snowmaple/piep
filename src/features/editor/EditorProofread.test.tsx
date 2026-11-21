@@ -21,11 +21,14 @@ const assist = vi.hoisted(() => ({ proofreadSegments: vi.fn(), allowBody: true }
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  getEditorDocument: dbApi.getEditorDocument,
-  saveWorkDraft: dbApi.saveWorkDraft,
-  activateWorkEdit: dbApi.activateWorkEdit,
-  discardWorkDraft: dbApi.discardWorkDraft,
 }));
+vi.mock("@/features/editor/editorSource", async (importOriginal) => {
+  const { editorTestSource } = await import("@/features/editor/editorTestSource");
+  return {
+    ...(await importOriginal<typeof import("@/features/editor/editorSource")>()),
+    shelfEditorSource: (id: string) => editorTestSource(Number(id), dbApi),
+  };
+});
 vi.mock("@/services/assistApi", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/services/assistApi")>();
   const baseUrl = "http://127.0.0.1:8080/v1";

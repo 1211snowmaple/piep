@@ -61,9 +61,9 @@ features:
 | | |
 |---|---:|
 | 画面 | <!--stat:screens.count-->10<!--/stat--> |
-| IPC コマンド | <!--stat:commands.total-->276<!--/stat--> |
-| うち説明のあるもの | <!--stat:commands.described-->276<!--/stat--> |
-| イベント | <!--stat:events.total-->19<!--/stat--> |
+| IPC コマンド | <!--stat:commands.total-->191<!--/stat--> |
+| うち説明のあるもの | <!--stat:commands.described-->191<!--/stat--> |
+| イベント | <!--stat:events.total-->12<!--/stat--> |
 | テーブル | <!--stat:tables.total-->34<!--/stat--> |
 
 この表の数は手で書いていない。抽出器が数え、`docs:check` が古くなっていないかを

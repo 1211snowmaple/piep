@@ -5,63 +5,8 @@ import type {
   CollectionNameCandidate,
   CollectionSuggestion,
   CollectionSweepResult,
-  WorkCollection,
-  WorkCollectionInput,
-  WorkCollectionMemberInput,
-  WorkCollectionSummary,
   WorkKey,
 } from "@/types/collections";
-
-export function listWorkCollections(): Promise<WorkCollectionSummary[]> {
-  return invoke<WorkCollectionSummary[]>("db_list_work_collections");
-}
-
-export function getWorkCollection(collectionId: string): Promise<WorkCollection> {
-  return invoke<WorkCollection>("db_get_work_collection", { collectionId });
-}
-
-export function upsertWorkCollection(input: WorkCollectionInput): Promise<WorkCollection> {
-  return invoke<WorkCollection>("db_upsert_work_collection", { input });
-}
-
-export function deleteWorkCollection(collectionId: string): Promise<void> {
-  return invoke<void>("db_delete_work_collection", { collectionId });
-}
-
-export function addWorkCollectionMembers(collectionId: string, members: WorkCollectionMemberInput[]): Promise<WorkCollection> {
-  return invoke<WorkCollection>("db_add_work_collection_members", { collectionId, members });
-}
-
-/** 棚で選んだ作品を、そのまま束へ入れる。並びは投稿日順になる。 */
-export function addDownloadsToCollection(collectionId: string, downloadIds: number[]): Promise<WorkCollection> {
-  return invoke<WorkCollection>("db_add_downloads_to_collection", { collectionId, downloadIds });
-}
-
-/** 選んだ作品から、新しい束をひとつ作る。作成と追加で1往復。 */
-export function createCollectionFromDownloads(
-  name: string,
-  collectionKind: CollectionKind,
-  downloadIds: number[],
-): Promise<WorkCollection> {
-  return invoke<WorkCollection>("db_create_collection_from_downloads", { name, collectionKind, downloadIds });
-}
-
-export function removeWorkCollectionMembers(collectionId: string, members: WorkKey[]): Promise<WorkCollection> {
-  return invoke<WorkCollection>("db_remove_work_collection_members", { collectionId, members });
-}
-
-/** 投稿日順か、題名の連番順に一度で整える。話数の語彙は保存側にしか無い。 */
-export function sortWorkCollectionMembers(collectionId: string, mode: "published" | "episode"): Promise<WorkCollection> {
-  return invoke<WorkCollection>("db_sort_work_collection_members", { collectionId, mode });
-}
-
-export function reorderWorkCollectionMembers(collectionId: string, members: WorkKey[]): Promise<WorkCollection> {
-  return invoke<WorkCollection>("db_reorder_work_collection_members", { collectionId, members });
-}
-
-export function listCollectionsForWork(source: string, sourceId: string): Promise<WorkCollectionSummary[]> {
-  return invoke<WorkCollectionSummary[]>("db_list_collections_for_work", { source, sourceId });
-}
 
 export function generateCollectionSuggestion(seedDownloadIds: number[], limit = 60): Promise<CollectionSuggestion> {
   return invoke<CollectionSuggestion>("db_generate_collection_suggestion", {
@@ -153,13 +98,4 @@ export function rejectCollectionSuggestion(suggestionId: string, memberKeys?: Wo
  *  the same works can be suggested again later. */
 export function dismissCollectionSuggestion(suggestionId: string): Promise<boolean> {
   return invoke<boolean>("db_dismiss_collection_suggestion", { suggestionId });
-}
-
-export function listCollectionsForPerson(source: string, personKey: string): Promise<WorkCollectionSummary[]> {
-  return invoke<WorkCollectionSummary[]>("db_list_collections_for_person", { source, personKey });
-}
-
-/** シリーズの作品を 1 件でも含むコレクション。作者に対するものと対になる。 */
-export function listCollectionsForSeries(source: string, seriesKey: string): Promise<WorkCollectionSummary[]> {
-  return invoke<WorkCollectionSummary[]>("db_list_collections_for_series", { source, seriesKey });
 }

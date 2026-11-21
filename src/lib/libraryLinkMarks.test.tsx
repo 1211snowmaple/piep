@@ -3,12 +3,6 @@ import { render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { forgetContentLinkResolutions, useLibraryLinkMarks } from "@/lib/contentLinks";
 
-const dbApi = vi.hoisted(() => ({
-  getDownloadBySource: vi.fn(),
-  getPerson: vi.fn(),
-  getSeries: vi.fn(),
-}));
-
 const v2 = vi.hoisted(() => ({ libraryV2FindWork: vi.fn(), libraryV2Entity: vi.fn() }));
 vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
@@ -18,9 +12,6 @@ vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  getDownloadBySource: dbApi.getDownloadBySource,
-  getPerson: dbApi.getPerson,
-  getSeries: dbApi.getSeries,
 }));
 
 function Body({ html }: { html: string }) {
@@ -32,11 +23,8 @@ function Body({ html }: { html: string }) {
 describe("本文のリンクに、手元にあることを示す印", () => {
   beforeEach(() => {
     forgetContentLinkResolutions();
-    dbApi.getDownloadBySource.mockReset();
-    dbApi.getPerson.mockReset();
-    dbApi.getSeries.mockReset();
-    dbApi.getPerson.mockResolvedValue(null);
-    dbApi.getSeries.mockResolvedValue(null);
+    v2.libraryV2FindWork.mockReset();
+    v2.libraryV2Entity.mockReset().mockResolvedValue(null);
   });
 
   /**
@@ -44,13 +32,13 @@ describe("本文のリンクに、手元にあることを示す印", () => {
    * あるなら外の住所ではないのに、押してみるまで見分けが付かなかった。
    */
   it("保存済みの投稿を指すカードには、そう書いた札が付く", async () => {
-    dbApi.getDownloadBySource.mockResolvedValue({ id: 42 });
+    v2.libraryV2FindWork.mockResolvedValue({ id: "w-42" });
     const html = `<a href="https://sio.fanbox.cc/posts/8421" class="novel-link-card"><span class="link-card-info"><span class="link-card-title">前回</span></span></a>`;
     const view = render(<Body html={html} />);
 
     await waitFor(() => expect(view.container.querySelector("a")?.dataset.inLibrary).toBe("1"));
     expect(view.container.querySelector(".link-card-saved")?.textContent).toBe("ライブラリにあります");
-    expect(dbApi.getDownloadBySource).toHaveBeenCalledWith("fanbox", "8421");
+    expect(v2.libraryV2FindWork).toHaveBeenCalledWith("fanbox", "8421");
   });
 
   /**
@@ -59,7 +47,7 @@ describe("本文のリンクに、手元にあることを示す印", () => {
    * 分からない。手元にあるなら、その作品の題を出す。
    */
   it("住所しか書かれていないカードには、手元の題を出す", async () => {
-    dbApi.getDownloadBySource.mockResolvedValue({ id: 7, title: "架空の物語・第一話" });
+    v2.libraryV2FindWork.mockResolvedValue({ id: "w-7", title: "架空の物語・第一話" });
     const html = `<a href="https://www.pixiv.net/novel/show.php?id=90000006" class="novel-link-card"><span class="link-card-info"><span class="link-card-title">https://www.pixiv.net/novel/show.php?id=90000006</span></span></a>`;
     const view = render(<Body html={html} />);
 
@@ -67,7 +55,7 @@ describe("本文のリンクに、手元にあることを示す印", () => {
   });
 
   it("投稿者が書いた題は、手元の題で上書きしない", async () => {
-    dbApi.getDownloadBySource.mockResolvedValue({ id: 7, title: "棚での題" });
+    v2.libraryV2FindWork.mockResolvedValue({ id: "w-7", title: "棚での題" });
     const html = `<a href="https://sio.fanbox.cc/posts/8421" class="novel-link-card"><span class="link-card-info"><span class="link-card-title">前編はこちら</span></span></a>`;
     const view = render(<Body html={html} />);
 
@@ -76,21 +64,21 @@ describe("本文のリンクに、手元にあることを示す印", () => {
   });
 
   it("保存していない宛先には、何も足さない", async () => {
-    dbApi.getDownloadBySource.mockResolvedValue(null);
+    v2.libraryV2FindWork.mockResolvedValue(null);
     const view = render(<Body html={`<a href="https://sio.fanbox.cc/posts/999" class="novel-link-card"><span class="link-card-info"></span></a>`} />);
 
-    await waitFor(() => expect(dbApi.getDownloadBySource).toHaveBeenCalled());
+    await waitFor(() => expect(v2.libraryV2FindWork).toHaveBeenCalled());
     expect(view.container.querySelector("a")?.dataset.inLibrary).toBeUndefined();
     expect(view.container.querySelector(".link-card-saved")).toBeNull();
   });
 
   it("同じ宛先が何本並んでも、問い合わせは一度きり", async () => {
-    dbApi.getDownloadBySource.mockResolvedValue({ id: 7 });
+    v2.libraryV2FindWork.mockResolvedValue({ id: "w-7" });
     const link = `<a href="https://www.pixiv.net/novel/show.php?id=111">続き</a>`;
     const view = render(<Body html={`${link}${link}${link}`} />);
 
     await waitFor(() => expect(view.container.querySelectorAll("a[data-in-library]").length).toBe(3));
-    expect(dbApi.getDownloadBySource).toHaveBeenCalledTimes(1);
+    expect(v2.libraryV2FindWork).toHaveBeenCalledTimes(1);
     // 地の文のリンクは札ではなく、控えめな印で示す。
     expect(view.container.querySelector("a")?.classList.contains("novel-inline-link--saved")).toBe(true);
   });
@@ -98,20 +86,7 @@ describe("本文のリンクに、手元にあることを示す印", () => {
   it("外のリンクは問い合わせもしない", async () => {
     render(<Body html={`<a href="https://example.com/">外の記事</a>`} />);
     await Promise.resolve();
-    expect(dbApi.getDownloadBySource).not.toHaveBeenCalled();
+    expect(v2.libraryV2FindWork).not.toHaveBeenCalled();
   });
 
-  it("新しい棚を見ているときは棚で引き、旧棚には聞かない", async () => {
-    localStorage.setItem("piep.library-shelf-v2", "true");
-    try {
-      v2.libraryV2FindWork.mockResolvedValue({ id: "0195f1c2-0000-7000-8000-000000000001", title: "棚の題" });
-      const html = `<a href="https://www.pixiv.net/novel/show.php?id=90000007" class="novel-link-card"><span class="link-card-info"><span class="link-card-title">https://www.pixiv.net/novel/show.php?id=90000007</span></span></a>`;
-      const view = render(<Body html={html} />);
-      await waitFor(() => expect(view.container.querySelector(".link-card-title")?.textContent).toBe("棚の題"));
-      expect(v2.libraryV2FindWork).toHaveBeenCalledWith("pixiv", "90000007");
-      expect(dbApi.getDownloadBySource).not.toHaveBeenCalled();
-    } finally {
-      localStorage.removeItem("piep.library-shelf-v2");
-    }
-  });
 });

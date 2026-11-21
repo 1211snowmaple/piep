@@ -2,19 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   SearchRebuildProgress,
   SearchIndexStatus,
-  SearchSuggestParams,
-  SearchSuggestResult,
 } from "@/types/library";
-
-export { deleteDownloadsForSearch, searchDownloadsV2 } from "@/services/dbApi";
-
-export async function searchSuggest(params: SearchSuggestParams): Promise<SearchSuggestResult> {
-  const text = params.text?.trim() || null;
-  if (!text) return { items: [] };
-  const rawLimit = params.limit ?? 8;
-  const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.trunc(rawLimit))) : 8;
-  return invoke<SearchSuggestResult>("search_suggest", { params: { text, limit } });
-}
 
 export interface SearchRebuildOptions {
   /** Documents read and analysed together. Larger keeps more cores busy. */

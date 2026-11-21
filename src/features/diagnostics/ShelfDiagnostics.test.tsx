@@ -4,7 +4,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
-import { SHELF_V2_PREFERENCE_KEY } from "@/features/library/shelfV2";
 import type { SearchIndexStatus } from "@/types/library";
 import DiagnosticsPage from "./DiagnosticsPage";
 
@@ -66,8 +65,7 @@ function view() {
 
 describe("新しい棚の診断", () => {
   beforeEach(() => {
-    localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
-    status.libraryV2Status.mockResolvedValue({ state: "ready", path: "C:/shelf", unresolved: [], switched: true });
+    status.libraryV2Status.mockResolvedValue({ state: "ready", path: "C:/shelf" });
     status.libraryV2Search.mockResolvedValue({ page: { items: [], next: null, total: 2 }, intent: null, matches: [], cards: [] });
     legacy.getOriginalImageStatus.mockResolvedValue({ covers: 0, illustrations: 0, running: false, progress: null });
     legacy.getEntityProfileRepairStatus.mockResolvedValue({ personCount: 0, seriesCount: 0, totalCount: 0, running: false, progress: null });
@@ -105,11 +103,4 @@ describe("新しい棚の診断", () => {
     await waitFor(() => expect(health.libraryV2OptimizeSearchIndex).toHaveBeenCalled());
   });
 
-  it("切り替える前の棚では書き換える手入れを押せず、理由を添える", async () => {
-    status.libraryV2Status.mockResolvedValue({ state: "ready", path: "C:/shelf", unresolved: [], switched: false });
-    view();
-    const reclaim = await screen.findByRole("button", { name: "片付ける（新しい棚では変えられません）" });
-    expect(reclaim.hasAttribute("disabled")).toBe(true);
-    expect(screen.getByRole("button", { name: "照合する" }).hasAttribute("disabled")).toBe(false);
-  });
 });

@@ -17,11 +17,12 @@ const dbApi = vi.hoisted(() => ({
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  getReaderMetadata: dbApi.getReaderMetadata,
-  getReaderContentPage: dbApi.getReaderContentPage,
-  getReaderOutline: dbApi.getReaderOutline,
-  searchReaderContent: dbApi.searchReaderContent,
 }));
+vi.mock("@/features/reader/readerSource", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/features/reader/readerSource")>();
+  const { readerTestSource } = await import("@/features/reader/readerTestSource");
+  return { ...actual, previewReaderSource: (id: number) => readerTestSource(actual.previewReaderSource(id), dbApi) };
+});
 
 const PAGE_COUNT = 6;
 const scrolledInto: Element[] = [];

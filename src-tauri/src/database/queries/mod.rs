@@ -1,4 +1,9 @@
 //! データベースCRUD操作。
+//!
+//! デスクトップ版はもう旧棚を開かない。ここを使うのは単独サーバーの旧 API（携帯の v1）と
+//! 移行器だけで、デスクトップ版の命令から呼ばれていたものは使われないまま残る。旧 API と一緒に
+//! `database/` ごと消す（docs/plan/library-design-review.md §6.90）。それまでは使われない関数を咎めない。
+#![allow(dead_code)]
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use r2d2::{Pool, PooledConnection};
@@ -54,7 +59,6 @@ mod update_watch;
 mod watch_groups;
 pub(crate) use acquisition_audit::{
     masked_metadata_label, masked_pixiv_metadata, pixiv_missing_references_for_filenames,
-    saved_pixiv_missing_references,
 };
 pub use assist_inputs::{AiNote, TaggedName};
 mod archive_state;

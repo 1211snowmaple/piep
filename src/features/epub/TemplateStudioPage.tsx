@@ -39,7 +39,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { ProviderMark } from "@/lib/providers";
 import { errorMessage } from "@/lib/format";
 import { registerUnsavedGuard } from "@/lib/unsavedGuard";
-import { getDownloads, isTauriRuntime, searchDownloadsV2 } from "@/services/dbApi";
+import { isTauriRuntime } from "@/services/dbApi";
 import {
   createEpubTemplate,
   deleteEpubTemplate,
@@ -54,7 +54,7 @@ import {
   saveTemplateSettings,
 } from "@/services/epubApi";
 import type { DownloadEntry, ShelfEntry } from "@/types/library";
-import { searchShelf, shelfEntriesByIds, useShelfMode } from "@/features/library/shelfV2";
+import { searchShelf, shelfEntriesByIds } from "@/features/library/shelfV2";
 import type {
   DataField,
   InfoField,
@@ -823,23 +823,22 @@ function PreviewFrame({ html, css, label }: { html: string; css: string; label: 
 
 function SamplePicker({ sampleId, onChange, runtime }: { sampleId: SampleId | null; onChange: (id: SampleId | null) => void; runtime: boolean }) {
   const [query, setQuery] = useState("");
-  // 一覧を新しい棚から出しているときは、見本も新しい棚から選ぶ。
-  const { shelfMode, deciding } = useShelfMode(runtime);
+  // 見本は棚から選ぶ。
   const recent = useQuery({
-    queryKey: ["template-preview-works", shelfMode, query],
+    queryKey: ["template-preview-works", query],
     queryFn: (): Promise<{ items: Array<DownloadEntry | ShelfEntry> }> => {
       if (!runtime) return Promise.resolve({ items: [] });
-      const params = { text: query || null, limit: 20, sortBy: "downloaded_at", sortOrder: "desc" } as const;
-      return shelfMode ? searchShelf(params) : searchDownloadsV2(params);
+      return searchShelf({ text: query || null, limit: 20, sortBy: "downloaded_at", sortOrder: "desc" });
     },
-    enabled: runtime && !deciding,
+    enabled: runtime,
     staleTime: 30_000,
   });
   const current = useQuery({
     queryKey: ["template-preview-work", sampleId],
     queryFn: (): Promise<Array<DownloadEntry | ShelfEntry>> => {
       if (!runtime || sampleId === null) return Promise.resolve([]);
-      return typeof sampleId === "string" ? shelfEntriesByIds([sampleId]) : getDownloads([sampleId]);
+      // 番号の見本は旧棚のころの残りなので引かない。
+      return typeof sampleId === "string" ? shelfEntriesByIds([sampleId]) : Promise.resolve([]);
     },
     enabled: Boolean(runtime && sampleId !== null),
   });

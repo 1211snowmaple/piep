@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { isTauriRuntime, listUpdateTargets, listWatchGroups, searchDownloadsV2 } from "@/services/dbApi";
+import { isTauriRuntime, listUpdateTargets, listWatchGroups } from "@/services/dbApi";
 import { listUpdateJobsCommand, startUpdateJobCommand, type StartUpdateJobRequest } from "@/services/updateJobApi";
 import { isUpdateJobActive, isUpdateJobTerminal, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { isRunDue, loadSchedule, saveSchedule, readLastRun, writeLastRun } from "@/features/updates/updateSchedule";
@@ -68,7 +68,7 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
         const lastRun = await readLastRun();
         if (!isRunDue(settings, lastRun, Date.now(), startup)) return;
         const shelf = await libraryV2Status();
-        if (shelf.state !== "ready" && shelf.state !== "absent") return;
+        if (shelf.state !== "ready") return;
 
         // すでに走っているジョブがあれば、そのまま任せる。待つのは worker が
         // 付いているものだけ - 一時停止や再接続待ちのまま放置された1件を
@@ -96,12 +96,10 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
           request = { scope: "targets", mode: settings.mode, targetIds, watchSaved: settings.watchSaved, newWorksOnly: settings.newWorksOnly };
         } else {
           // 監視対象も監視作品も無いなら、確認する意味がない。作品ごとの監視は
-          // 作者・シリーズの登録と別なので、正本の棚で両方を確かめる。
+          // 作者・シリーズの登録と別なので、両方を確かめる。
           const [targets, watchedWorks] = await Promise.all([
             listUpdateTargets<{ id: WatchId }>(null, true),
-            shelf.state === "ready" && shelf.switched
-              ? libraryV2Search({ text: "", versions: "current", mode: "words" }, { sort: "saved", descending: true, limit: 1, after: null, filter: { watching: true }, count: false }).then((result) => ({ items: result.cards }))
-              : searchDownloadsV2({ watchFilter: "watched", limit: 1, projection: "bulk" }),
+            libraryV2Search({ text: "", versions: "current", mode: "words" }, { sort: "saved", descending: true, limit: 1, after: null, filter: { watching: true }, count: false }).then((result) => ({ items: result.cards })),
           ]);
           if (!targets.length && (settings.newWorksOnly || !watchedWorks.items.length)) return;
           request = { scope: "all", mode: settings.mode, watchSaved: settings.watchSaved, newWorksOnly: settings.newWorksOnly };

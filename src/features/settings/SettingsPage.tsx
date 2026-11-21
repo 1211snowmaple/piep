@@ -10,12 +10,10 @@ import {
   Box,
   Button,
   Card,
-  Checkbox,
   Code,
   Divider,
   Grid,
   Group,
-  Modal,
   PasswordInput,
   Progress,
   SegmentedControl,
@@ -44,31 +42,15 @@ import { PAGE_SIZE_OPTIONS, PAGING_SCOPES, useDefaultPagingMode, usePageSize, us
 import { VIEW_SCOPES, useDefaultViewMode, useScopedViewPreference, type ViewMode, type ViewPreference, type ViewScope } from "@/lib/viewMode";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getProvider, providers } from "@/lib/providers";
-import {
-  backupExportRunning,
-  cancelArchiveRestore,
-  exportAllMultipart,
-  getStoragePath,
-  importBackupFile,
-  inspectBackupFile,
-  multipartManifestPath,
-  type ArchiveProgress,
-  type BackupExportProgress,
-  type BackupFormat,
-  type BackupInspection,
-} from "@/services/archiveApi";
 import { loginFanboxWebview, loginPixivWebview, verifyFanboxSession, verifyPixivToken } from "@/services/authApi";
 import type { FanboxUser, PixivUser } from "@/services/authApi";
-import { getSearchIndexStatus, getStats, isTauriRuntime, scanAndReimportDownloads } from "@/services/dbApi";
+import { getSearchIndexStatus, isTauriRuntime } from "@/services/dbApi";
 import { libraryV2Dashboard } from "@/services/shelfHealthApi";
 import { libraryV2ReimportFolders } from "@/services/shelfBackupApi";
-import { SHELF_READ_ONLY, shelfWritable, useLibraryV2Status, useShelfMode } from "@/features/library/shelfV2";
-import { Locked } from "@/components/Locked";
+import { useLibraryV2Status } from "@/features/library/shelfV2";
 import { ShelfBackupCard } from "./ShelfBackupCard";
 import type { SearchIndexStatus } from "@/types/library";
-import { openSingleDialog, saveDialog } from "@/services/dialogApi";
 import { openFilesystemPath } from "@/services/openerApi";
-import { subscribeTauriEvent } from "@/services/eventBus";
 import { trackManualRebuild, useSearchIndexProgress } from "@/features/search/searchIndexProgress";
 import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 import DiagnosticsPage from "@/features/diagnostics/DiagnosticsPage";
@@ -80,7 +62,6 @@ import { AppUpdateCard } from "@/features/settings/AppUpdateCard";
 import { AssistSection } from "@/features/settings/AssistSection";
 import { ServerSection } from "@/features/settings/ServerSection";
 import { LibrarySidebarSettings } from "./LibrarySidebarSettings";
-import { ShelfV2Settings } from "./ShelfV2Settings";
 import { SectionIntro } from "./SectionIntro";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { searchModes, useDefaultSearchMode } from "@/lib/searchPreferences";
@@ -109,14 +90,6 @@ function isSection(value: string | null): value is Section {
   return value !== null && (SECTIONS as readonly string[]).includes(value);
 }
 interface ConnectionState { pixiv: PixivUser | null; fanbox: FanboxUser | null }
-export interface BackupReview { path: string; format: BackupFormat; inspection: BackupInspection; replaceExisting?: boolean }
-
-/** 復元の段どりを、そのまま画面の言葉にする。 */
-const PHASE_LABEL: Record<string, string> = {
-  extract: "書庫を展開しています",
-  part: "分割ファイルを取り込んでいます",
-  database: "ライブラリへ書き込んでいます",
-};
 
 /** ブラウザプレビュー用の索引の様子。追いついた棚を見せる。 */
 const PREVIEW_INDEX_STATUS: SearchIndexStatus = {
@@ -156,14 +129,6 @@ function settleManualRebuild(progress: SearchRebuildProgress) {
   notifications.show({ color: failed ? "yellow" : "green", title: "検索インデックスを再構築しました", message: summary });
 }
 
-function localBackupDate(date: Date): string {
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("-");
-}
-
 export default function SettingsPage() {
   const runtime = isTauriRuntime();
   const [searchParams] = useAppSearchParams();
@@ -192,8 +157,6 @@ export default function SettingsPage() {
   // has to show that run too.
   const rebuild = useSearchIndexProgress();
   const rebuildOperationRef = useRef<OperationController | null>(null);
-  const [restoreReview, setRestoreReview] = useState<BackupReview | null>(null);
-  const [inspectingBackup, setInspectingBackup] = useState(false);
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   const auth = useQuery({
     queryKey: ["settings-auth"],
@@ -203,18 +166,11 @@ export default function SettingsPage() {
       return { pixiv: pixivUser ?? null, fanbox: fanboxUser ?? null };
     },
   });
-  // 新しい棚を見ているあいだは、数と保存先も新しい棚のもの。
-  const { shelfMode, deciding } = useShelfMode(runtime);
-  const shelfStatus = useLibraryV2Status(shelfMode);
-  const stats = useQuery({ queryKey: ["stats", shelfMode], enabled: !deciding, queryFn: () => runtime ? (shelfMode ? libraryV2Dashboard().then((summary) => summary.stats) : getStats()) : Promise.resolve({ totalDownloads: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 }) });
+  // 数と保存先は棚のもの。
+  const shelfStatus = useLibraryV2Status(runtime);
+  const stats = useQuery({ queryKey: ["stats"], queryFn: () => runtime ? libraryV2Dashboard().then((summary) => summary.stats) : Promise.resolve({ totalDownloads: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 }) });
   const shelfPath = shelfStatus.data && "path" in shelfStatus.data ? shelfStatus.data.path : null;
-  const storagePath = useQuery({ queryKey: ["storage-path", shelfMode, shelfPath], enabled: !deciding && (!shelfMode || shelfPath !== null), queryFn: () => runtime ? (shelfMode && shelfPath ? Promise.resolve(shelfPath) : getStoragePath()) : Promise.resolve("C:\\Users\\preview\\AppData\\Roaming\\io.github.u1211snowmaple.piep\\downloads") });
-  const nativeBackup = useQuery({
-    queryKey: ["backup-export-running"],
-    queryFn: backupExportRunning,
-    enabled: runtime && section === "library",
-    refetchInterval: runtime && section === "library" ? 2_000 : false,
-  });
+  const storagePath = useQuery({ queryKey: ["storage-path", shelfPath], enabled: !runtime || shelfPath !== null, queryFn: () => Promise.resolve(runtime ? shelfPath! : "C:\\Users\\preview\\AppData\\Roaming\\io.github.u1211snowmaple.piep\\library") });
   const index = useQuery({ queryKey: ["search-index-status"], queryFn: () => runtime ? getSearchIndexStatus() : Promise.resolve(PREVIEW_INDEX_STATUS) });
   const pixivForm = useForm({ initialValues: { token: "" }, validate: { token: isNotEmpty("リフレッシュトークンを入力してください") } });
   const fanboxForm = useForm({ initialValues: { session: "", userAgent: "Mozilla/5.0" }, validate: { session: isNotEmpty("FANBOXSESSIDを入力してください") } });
@@ -262,49 +218,15 @@ export default function SettingsPage() {
     },
   });
   const maintenanceMutation = useMutation({
-    mutationFn: async (action: "backup" | "restore" | "scan") => {
+    mutationFn: async () => {
       if (!runtime) throw new Error("デスクトップアプリで利用できます");
-      if (action === "restore") {
-        const path = await openSingleDialog({ title: "検査するバックアップを選択", filters: [{ name: "Piep backup", extensions: ["json", "zip"] }] });
-        if (!path) return "";
-        setInspectingBackup(true);
-        try {
-          const review = await inspectBackupFile(path);
-          setRestoreReview({ path, ...review });
-        } finally {
-          setInspectingBackup(false);
-        }
-        return "";
-      }
       const operation = startOperation({
-        kind: action === "backup" ? "backup" : "maintenance",
-        label: action === "backup" ? "ライブラリのバックアップ" : "保存フォルダーの再取り込み",
-        onRetry: () => maintenanceMutation.mutate(action),
+        kind: "maintenance",
+        label: "保存フォルダーの再取り込み",
+        onRetry: () => maintenanceMutation.mutate(),
       });
       try {
-        if (action === "backup") {
-          const selectedPath = await saveDialog({ title: "ライブラリのバックアップ", defaultPath: `piep-backup-${localBackupDate(new Date())}.json`, filters: [{ name: "Piep multipart backup manifest", extensions: ["json"] }] });
-          if (!selectedPath) { operation.cancel("保存先の選択をキャンセルしました"); return ""; }
-          const manifestPath = multipartManifestPath(selectedPath);
-          operation.log(manifestPath);
-          operation.progress(0, null, "作品を書き出しています");
-          const disposeProgress = subscribeTauriEvent<BackupExportProgress>("backup-export-progress", (event) => {
-            const { phase, processed, total, partCount } = event.payload;
-            if (phase === "works") {
-              operation.progress(processed, total, `作品 ${formatNumber(processed)}/${formatNumber(total)} 件を書き出しました（ZIP ${partCount} 個）`);
-            } else {
-              operation.progress(0, null, `作品の書き出し完了。付随データと管理ファイルを保存中（ZIP ${partCount} 個）`);
-            }
-          });
-          try {
-            await exportAllMultipart(manifestPath);
-          } finally {
-            disposeProgress();
-          }
-          operation.complete("分割バックアップを書き出しました");
-          return "分割バックアップを書き出しました。管理ファイルと同じフォルダーの分割ZIPファイルを一緒に保管してください";
-        }
-        const outcome = await (shelfMode ? libraryV2ReimportFolders() : scanAndReimportDownloads());
+        const outcome = await libraryV2ReimportFolders();
         // 飛ばしたものがあることを黙っていると、件数が合わない理由が誰にも
         // 分からない。何件・なぜ、を同じ行に出す。
         const summary = outcome.skipped.length
@@ -320,75 +242,13 @@ export default function SettingsPage() {
     },
     // 再取り込みは作品を丸ごと増やすので、増えたときに古くなる場所すべてに
     // 知らせる（保存フォルダーから数百件戻ることがある）。
-    onSuccess: (message, action) => {
+    onSuccess: (message) => {
       if (message) notifications.show({ color: "green", message });
-      if (action === "backup") queryClient.invalidateQueries({ queryKey: ["backup-export-running"] });
-      if (action === "scan") {
-        queryClient.invalidateQueries({ queryKey: ["library"] });
-        queryClient.invalidateQueries({ queryKey: ["stats"] });
-        invalidateWorkSetViews(queryClient);
-      }
+      queryClient.invalidateQueries({ queryKey: ["library"] });
+      queryClient.invalidateQueries({ queryKey: ["stats"] });
+      invalidateWorkSetViews(queryClient);
     },
-    onError: (error, action) => notifications.show({
-      color: "red",
-      title: action === "restore" ? "バックアップを検査できませんでした" : "操作に失敗しました",
-      message: action === "restore"
-        ? `${errorMessage(error)}。分割バックアップの管理ファイル（JSON）を選ぶ場合は、同じフォルダーにすべての分割ZIPファイルが必要です。`
-        : errorMessage(error),
-    }),
-  });
-  const restoreMutation = useMutation({
-    mutationFn: async ({ path, format, inspection, replaceExisting }: BackupReview) => {
-      const execute = async (): Promise<void> => {
-        // **数時間かかりうる操作に、進捗も中止も無いままにしない。**
-        // 検証済みの一行だけを出して 0% のまま待たせ、押し間違えても止められ
-        // なかった。中止が効くのはライブラリを書き換える前までである。
-        const operation = startOperation({
-          kind: "restore",
-          label: "バックアップの復元",
-          detail: path,
-          total: inspection.workCount,
-          onRetry: execute,
-          // 約束をそのまま返す。`void` で捨てていたので、`requestOperationCancel`
-          // は「中止できた」と受け取り、実際には走り続けている復元を
-          // 「中止しています」と表示したままにしていた。返せば、失敗は
-          // あちらの catch が拾って記録し、状態を running へ戻す。
-          onCancel: async () => { await cancelArchiveRestore(); },
-        });
-        operation.log(`${inspection.workCount}作品・${inspection.assetCount}画像・添付を検証済み`);
-        const disposeProgress = subscribeTauriEvent<ArchiveProgress>("archive-progress", (event) => {
-          const { phase, processed, total, label } = event.payload;
-          const shown = PHASE_LABEL[phase] ?? phase;
-          operation.progress(processed, total || null);
-          operation.log(label ? `${shown}: ${label}` : shown);
-        });
-        try {
-          const count = await importBackupFile(path, format, Boolean(replaceExisting));
-          operation.progress(count, inspection.workCount);
-          operation.complete(`${count}件を復元しました`);
-          notifications.show({ color: "green", message: `${count}件を復元しました` });
-          setRestoreReview(null);
-          await Promise.all([
-            queryClient.invalidateQueries({ queryKey: ["library"] }),
-            queryClient.invalidateQueries({ queryKey: ["stats"] }),
-          ]);
-          invalidateWorkSetViews(queryClient);
-        } catch (error) {
-          operation.fail(error);
-          throw error;
-        } finally {
-          disposeProgress();
-        }
-      };
-      await execute();
-    },
-    onError: (error, review) => notifications.show({
-      color: "red",
-      title: "復元を完了できませんでした",
-      message: review.format === "multipart"
-        ? `${errorMessage(error)}。同じ分割バックアップの管理ファイル（JSON）をもう一度選ぶと、復元が完了した分を保ったまま安全に再開できます。`
-        : `${errorMessage(error)}。既存ライブラリは操作前の状態へ戻されます。`,
-    }),
+    onError: (error) => notifications.show({ color: "red", title: "操作に失敗しました", message: errorMessage(error) }),
   });
   /**
    * 作り直しを始める。**意味検索を切る側に倒れているときだけ、先に確認する。**
@@ -474,7 +334,7 @@ export default function SettingsPage() {
         <Grid.Col span={{ base: 12, md: 4, lg: 3 }} className="settings-nav-column"><div className="settings-nav-scroller"><SettingsNavigation items={nav} active={section} onSelect={(next) => { if (isSection(next)) setSection(next); }} /></div></Grid.Col>
         <Grid.Col span={{ base: 12, md: 8, lg: 9 }} className="settings-content">
           {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} runtime={runtime} pixivForm={pixivForm} fanboxForm={fanboxForm} mutation={connectionMutation} disconnect={disconnect} />)}
-          {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} busy={libraryOperationRunning || Boolean(nativeBackup.data)} inspecting={inspectingBackup} run={(action) => maintenanceMutation.mutate(action)} shelf={shelfMode} writable={shelfWritable(shelfStatus.data)} />)}
+          {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} busy={libraryOperationRunning} reimport={() => maintenanceMutation.mutate()} />)}
           {section === "server" && <ServerSection runtime={runtime} />}
           {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => startRebuild(includeSemantic)} cancel={() => { if (rebuildOperationRef.current) { void requestOperationCancel(rebuildOperationRef.current.id); return; } if (rebuild) reportJobAction(cancelSearchRebuildIndex(rebuild.jobId), "索引の作り直しを中止できません"); }} />)}
           {section === "assist" && <AssistSection />}
@@ -483,13 +343,6 @@ export default function SettingsPage() {
           {section === "about" && <AboutSection runtime={runtime} />}
         </Grid.Col>
       </Grid>
-      <RestoreWizard
-        review={restoreReview}
-        existingWorkCount={stats.data?.totalDownloads}
-        loading={restoreMutation.isPending}
-        onClose={() => !restoreMutation.isPending && setRestoreReview(null)}
-        onConfirm={(replaceExisting) => restoreReview && restoreMutation.mutate({ ...restoreReview, replaceExisting })}
-      />
     </div>
   );
 }
@@ -517,47 +370,7 @@ function ConnectionCard({ source, user, note, runtime, loading, onWeb, onDisconn
   const provider = getProvider(source); return <Card p="lg"><Group justify="space-between" align="flex-start"><Group><Avatar size={54} color="gray" variant="light" style={{ color: provider.color }}>{provider.icon}</Avatar><Box><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge color={user ? "green" : "gray"} variant="light">{user ? "取得用接続済み" : "未接続"}</Badge></Group><Text size="sm" c="dimmed" mt={4}>{user?.name || provider.description}</Text>{note && <Text size="xs" c="dimmed" mt={2}>{note}</Text>}</Box></Group>{user ? <Group gap="xs"><Button variant="light" size="xs" disabled={!runtime} loading={loading} onClick={onWeb}>再接続</Button><DangerButton size="xs" leftSection={<Icons.delete size={IconSize.menu} />} onClick={onDisconnect}>接続解除</DangerButton></Group> : <Button disabled={!runtime} loading={loading} leftSection={<Icons.credentials size={IconSize.menu} />} onClick={onWeb}>ブラウザで接続</Button>}</Group>{!user && <><Divider my="lg" label="または手動入力" labelPosition="center" />{manual}</>}</Card>;
 }
 
-function LibrarySection({ stats, path, runtime, pending, busy, inspecting, run, shelf = false, writable = false }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; busy: boolean; inspecting: boolean; run: (action: "backup" | "restore" | "scan") => void; shelf?: boolean; writable?: boolean }) { return <Stack gap="lg"><SectionIntro title="保存とバックアップ" description="保存先の確認、バックアップの作成と復元を行います。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="画像・添付" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card>{shelf ? <><ShelfBackupCard runtime={runtime} busy={busy} writable={writable} /><Card p="lg"><Group justify="space-between" align="flex-start" wrap="nowrap"><Box miw={0}><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>旧棚の保存フォルダーを調べ、棚にまだ無い作品を版ごと棚へ戻します。棚にある作品や、棚から外した作品には触れません。</Text></Box>{writable ? <Button style={{ flexShrink: 0 }} disabled={!runtime || busy} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => run("scan")}>保存フォルダーを調べる</Button> : <Locked reason={SHELF_READ_ONLY} label="保存フォルダーを調べる"><Button style={{ flexShrink: 0 }} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />}>保存フォルダーを調べる</Button></Locked>}</Group></Card></> : <Card p="lg"><Stack gap="md"><Box><Text fw={700}>バックアップと復元</Text><Text size="sm" c="dimmed">大きなライブラリは分割バックアップの管理ファイル（JSON）と複数の分割ZIPファイルに分けて書き出します。復元には同じフォルダー内の一式が必要です。書き出し中は作品の保存や更新の反映が完了を待つ場合があります。</Text></Box>{busy && <Alert color="blue">ライブラリの操作が実行中です。操作履歴で追跡できない場合は、完了後に保存先を確認してください。</Alert>}{inspecting && <Alert color="blue">バックアップを検査しています。分割ZIPファイルの照合には時間がかかる場合があります。</Alert>}<ActionRow><Button disabled={!runtime || busy} loading={pending} variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => run("restore")}>バックアップを復元</Button><Button disabled={!runtime || busy} loading={pending} variant="light" leftSection={<Icons.export size={IconSize.menu} />} onClick={() => run("backup")}>分割バックアップを書き出す</Button></ActionRow><Divider /><Group justify="space-between" align="flex-start" wrap="nowrap"><Box miw={0}><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>未登録の保存フォルダーを検出し、必要なファイルが揃った作品をライブラリへ戻します。すでにある作品や、手で変えた内容は上書きしません。</Text></Box><Button style={{ flexShrink: 0 }} disabled={!runtime || busy} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => run("scan")}>保存フォルダーを調べる</Button></Group></Stack></Card>}</Stack>; }
-
-export function RestoreWizard({ review, existingWorkCount, loading, onClose, onConfirm }: { review: BackupReview | null; existingWorkCount?: number; loading: boolean; onClose: () => void; onConfirm: (replaceExisting: boolean) => void }) {
-  const [replaceExisting, setReplaceExisting] = useState(false);
-  useEffect(() => setReplaceExisting(false), [review]);
-  const inspection = review?.inspection;
-  const hasSpace = inspection?.availableFreeBytes == null || inspection.availableFreeBytes >= inspection.requiredFreeBytes;
-  const canRestore = Boolean(inspection?.valid && hasSpace && ((existingWorkCount ?? 0) === 0 || replaceExisting));
-  const multipart = review?.format === "multipart";
-  return <Modal opened={Boolean(review)} onClose={onClose} withCloseButton={!loading} closeOnClickOutside={!loading} closeOnEscape={!loading} title="バックアップ復元ウィザード" size="lg">
-    {review && inspection && <Stack gap="lg">
-      <Group gap="xs" role="list" aria-label="復元手順"><Badge component="span" role="listitem" variant="filled">1. 検査済み</Badge><Text c="dimmed" aria-hidden>→</Text><Badge component="span" role="listitem" variant="light" color={canRestore ? "piep" : "gray"}>2. 内容確認</Badge><Text c="dimmed" aria-hidden>→</Text><Badge component="span" role="listitem" variant="light" color="gray">3. {multipart ? "再開可能な復元" : "一括で復元"}</Badge></Group>
-      <Box><Text id="selected-backup-label" size="sm" fw={700}>選択した{multipart ? "分割バックアップの管理ファイル（JSON）" : "ZIPバックアップ"}</Text><Code block mt={6} aria-labelledby="selected-backup-label">{review.path}</Code></Box>
-      {!inspection.valid && <Alert color="red" title="このバックアップは復元できません">{inspection.error || "バックアップの整合性検査に失敗しました。"}</Alert>}
-      {inspection.valid && !hasSpace && <Alert color="red" title="空き容量が不足しています">復元には一時領域を含めて {formatBytes(inspection.requiredFreeBytes)} 必要ですが、利用可能なのは {formatBytes(inspection.availableFreeBytes ?? 0)} です。</Alert>}
-      {inspection.valid && (existingWorkCount ?? 0) > 0 && <Alert color="yellow" title="既存作品は置き換わる場合があります">現在のライブラリには {formatNumber(existingWorkCount)} 件あります。復元ファイルと取得元・作品IDが同じ作品は、保存済みの版やローカル編集も含めて復元内容に置き換わります。必要な変更は先にバックアップしてください。</Alert>}
-      {inspection.valid && (existingWorkCount ?? 0) > 0 && <Checkbox checked={replaceExisting} disabled={loading} onChange={(event) => setReplaceExisting(event.currentTarget.checked)} label="重複する既存作品の版とローカル編集を置き換えることを了承しました" />}
-      {inspection.valid && <>
-        <Grid>
-          <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(inspection.workCount)} /></Grid.Col>
-          <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.person} label="作者" value={formatNumber(inspection.personCount)} /></Grid.Col>
-          <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.archive} label="シリーズ" value={formatNumber(inspection.seriesCount)} /></Grid.Col>
-          <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.retry} label="履歴・版" value={formatNumber(inspection.versionCount)} /></Grid.Col>
-          <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.storage} label="画像・添付" value={formatNumber(inspection.assetCount)} /></Grid.Col>
-          <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.database} label="展開後" value={formatBytes(inspection.expandedBytes)} /></Grid.Col>
-        </Grid>
-        <Card p="md" withBorder>
-          <Group justify="space-between"><Text size="sm">{multipart ? "分割ZIPファイル合計" : "ZIPサイズ"}</Text><Text size="sm" fw={700}>{formatBytes(inspection.compressedBytes)}</Text></Group>
-          <Group justify="space-between" mt="xs"><Text size="sm">一時領域を含む必要容量</Text><Text size="sm" fw={700}>{formatBytes(inspection.requiredFreeBytes)}</Text></Group>
-          <Group justify="space-between" mt="xs"><Text size="sm">利用可能容量</Text><Text size="sm" fw={700}>{inspection.availableFreeBytes == null ? "取得できません" : formatBytes(inspection.availableFreeBytes)}</Text></Group>
-          <Group justify="space-between" mt="xs"><Text size="sm">バックアップ形式</Text><Text size="sm" fw={700}>{multipart ? "分割" : "単一ZIP"} · v{inspection.backupVersion ?? "不明"}</Text></Group>
-        </Card>
-      </>}
-      {inspection.warnings.map((warning) => <Alert key={warning} color="yellow">{warning}</Alert>)}
-      {inspection.valid && <Note icon={Icons.secure} title={multipart ? "中断しても再開できます" : "安全な復元"}>{multipart
-        ? "すべての分割ZIPファイルを先に検査し、パートごとに安全に復元します。途中で止まった場合は、同じ分割バックアップの管理ファイル（JSON）をもう一度選ぶと続きから再開できます。管理ファイルと分割ZIPファイルは移動・改名せず一緒に保管してください。"
-        : "すべてのファイルを一時領域へ展開・検証してから、データベースと保存ファイルを一括で切り替えます。途中で失敗した場合は元の状態へ戻します。"}</Note>}
-      <ActionRow><Button variant="default" disabled={loading} onClick={onClose}>キャンセル</Button><DangerButton disabled={!canRestore} loading={loading} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => onConfirm(replaceExisting)}>検証済みバックアップを復元</DangerButton></ActionRow>
-    </Stack>}
-  </Modal>;
-}
+function LibrarySection({ stats, path, runtime, pending, busy, reimport }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; busy: boolean; reimport: () => void }) { return <Stack gap="lg"><SectionIntro title="保存とバックアップ" description="保存先の確認、バックアップの作成と復元を行います。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="画像・添付" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><ShelfBackupCard runtime={runtime} busy={busy} /><Card p="lg"><Group justify="space-between" align="flex-start" wrap="nowrap"><Box miw={0}><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>旧棚の保存フォルダーを調べ、棚にまだ無い作品を版ごと棚へ戻します。棚にある作品や、棚から外した作品には触れません。</Text></Box><Button style={{ flexShrink: 0 }} disabled={!runtime || busy} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={reimport}>保存フォルダーを調べる</Button></Group></Card></Stack>; }
 
 function Metric({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string }) { return <Card p="md"><Group><ThemeIcon variant="light"><Icon size={17} /></ThemeIcon><Box><Text size="xs" c="dimmed">{label}</Text><Text fw={750}>{value}</Text></Box></Group></Card>; }
 
@@ -645,7 +458,6 @@ function AppearanceSection({ colorScheme, setColorScheme }: { colorScheme: strin
     <Card p="lg"><Stack gap="md"><Text fw={700}>テーマと余白</Text><SegmentedControl aria-label="カラーテーマ" value={colorScheme} onChange={(value) => setColorScheme(value as "light" | "dark" | "auto")} data={[{ value: "light", label: "ライト" }, { value: "dark", label: "ダーク" }, { value: "auto", label: "システム" }]} /><Switch label="高密度表示" description="ページ余白とカードの間隔を狭くします" checked={dense} onChange={(event) => { setDense(event.currentTarget.checked); applyDensity(event.currentTarget.checked); }} /><Text size="xs" c="dimmed">アニメーションはOSの「視覚効果を減らす」設定に従います。</Text></Stack></Card>
     <Card p="lg"><LibrarySidebarSettings /></Card>
     <Card p="lg"><Stack gap="md"><Text fw={700}>一覧</Text><Text size="sm" c="dimmed">一覧の画面でも切り替えられます。画面ごとに変える場合は下の詳細を開いてください。</Text><Accordion variant="separated"><Accordion.Item value="view"><Accordion.Control>表紙・リストの表示</Accordion.Control><Accordion.Panel><ViewSettings /></Accordion.Panel></Accordion.Item><Accordion.Item value="paging"><Accordion.Control>読み込み方と画面ごとの指定</Accordion.Control><Accordion.Panel><PagingSettings /><Text size="xs" c="dimmed" mt="sm">関連度順は続きから順に読み込みます。日付や名前などの並び順ではページ番号も利用できます。</Text></Accordion.Panel></Accordion.Item></Accordion><Box><Text size="sm" fw={650} mb="sm">1回に表示する件数</Text><SegmentedControl aria-label="1ページの件数" value={String(pageSize)} onChange={(value) => setPageSize(Number(value))} data={PAGE_SIZE_OPTIONS.map((size) => ({ value: String(size), label: `${size}件` }))} /></Box></Stack></Card>
-    <ShelfV2Settings />
     <Card p="lg"><Text fw={700} mb="sm">キーボードショートカット</Text><Stack gap="xs"><Shortcut keys="Ctrl K" label="ライブラリ検索・画面移動" /><Shortcut keys="F5" label="入力や処理を保って画面を更新" /><Shortcut keys="Ctrl L" label="ライブラリを開く" /><Shortcut keys="Ctrl Shift S" label="保存画面を開く" /><Shortcut keys="Ctrl S" label="エディタで下書き保存" /></Stack></Card>
   </Stack>;
 }

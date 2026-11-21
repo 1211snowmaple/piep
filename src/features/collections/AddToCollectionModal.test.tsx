@@ -5,23 +5,23 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { AddToCollectionModal } from "@/features/collections/AddToCollectionModal";
 
-vi.mock("@/services/collectionApi", () => ({
-  listWorkCollections: vi.fn(),
-  addDownloadsToCollection: vi.fn(),
-  createCollectionFromDownloads: vi.fn(),
+const api = vi.hoisted(() => ({ shelfCollections: vi.fn(), editShelfCollection: vi.fn() }));
+vi.mock("@/features/library/shelfV2", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/features/library/shelfV2")>()),
+  shelfCollections: api.shelfCollections,
+  editShelfCollection: api.editShelfCollection,
+  invalidateShelf: vi.fn(),
 }));
 vi.mock("@/services/dbApi", () => ({
   isTauriRuntime: () => true,
   getAssetUrl: (path: string | null) => path,
 }));
 
-import * as collectionApi from "@/services/collectionApi";
-
-const api = collectionApi as unknown as {
-  listWorkCollections: ReturnType<typeof vi.fn>;
-  addDownloadsToCollection: ReturnType<typeof vi.fn>;
-  createCollectionFromDownloads: ReturnType<typeof vi.fn>;
-};
+const WORKS = [
+  { source: "pixiv", sourceId: "11" },
+  { source: "pixiv", sourceId: "12" },
+  { source: "fanbox", sourceId: "13" },
+];
 
 function existing(id: string, name: string) {
   return {
@@ -45,13 +45,13 @@ function existing(id: string, name: string) {
   };
 }
 
-function renderModal(downloadIds = [11, 12, 13]) {
+function renderModal(works = WORKS) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <MantineProvider>
       <QueryClientProvider client={client}>
         <AppRouter>
-          <AddToCollectionModal opened onClose={vi.fn()} downloadIds={downloadIds} />
+          <AddToCollectionModal opened onClose={vi.fn()} works={works} />
         </AppRouter>
       </QueryClientProvider>
     </MantineProvider>,
@@ -62,18 +62,21 @@ describe("AddToCollectionModal", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     window.location.hash = "#/library";
-    api.listWorkCollections.mockResolvedValue([existing("collection-1", "雨の記憶")]);
-    api.createCollectionFromDownloads.mockResolvedValue({ ...existing("collection-9", "新しい束"), members: [] });
-    api.addDownloadsToCollection.mockResolvedValue({ ...existing("collection-1", "雨の記憶"), members: [] });
+    api.shelfCollections.mockResolvedValue([existing("collection-1", "雨の記憶")]);
+    api.editShelfCollection.mockImplementation(async (id: string, change: { kind: string; title?: string }) =>
+      ({ ...existing(id, change.title ?? "雨の記憶"), members: [] }));
   });
 
-  it("sends only the row ids, leaving the ordering to the saving side", async () => {
+  it("sends only the works, leaving the ordering to the shelf", async () => {
     renderModal();
     fireEvent.change(screen.getByLabelText(/^名前/), { target: { value: "新しい束" } });
     fireEvent.click(screen.getByRole("button", { name: "3作品を入れる" }));
     await waitFor(() =>
-      expect(api.createCollectionFromDownloads).toHaveBeenCalledWith("新しい束", "ordered", [11, 12, 13]),
+      expect(api.editShelfCollection).toHaveBeenCalledWith(expect.any(String), { kind: "create", title: "新しい束", description: null, ordered: true, works: WORKS }),
     );
+    // 読む順のある束は、棚が投稿日順に並べる。
+    const created = api.editShelfCollection.mock.calls[0][0];
+    await waitFor(() => expect(api.editShelfCollection).toHaveBeenCalledWith(created, { kind: "sort", by: "published" }));
   });
 
   it("refuses to create a collection with no name rather than inventing one", () => {
@@ -87,9 +90,9 @@ describe("AddToCollectionModal", () => {
     fireEvent.click(screen.getByText("雨の記憶"));
     fireEvent.click(screen.getByRole("button", { name: "3作品を入れる" }));
     await waitFor(() =>
-      expect(api.addDownloadsToCollection).toHaveBeenCalledWith("collection-1", [11, 12, 13]),
+      expect(api.editShelfCollection).toHaveBeenCalledWith("collection-1", { kind: "add", works: WORKS }),
     );
-    expect(api.createCollectionFromDownloads).not.toHaveBeenCalled();
+    expect(api.editShelfCollection).toHaveBeenCalledTimes(1);
   });
 
   it("starts on 新規 even after the listing arrives, so the default never moves", async () => {
@@ -100,7 +103,7 @@ describe("AddToCollectionModal", () => {
   });
 
   it("shows listing failures and prevents creation until the list recovers", async () => {
-    api.listWorkCollections.mockRejectedValueOnce(new Error("database unavailable"));
+    api.shelfCollections.mockRejectedValueOnce(new Error("database unavailable"));
     renderModal();
     expect(await screen.findByText("database unavailable")).toBeInTheDocument();
     expect(screen.queryByText("まだコレクションはありません")).toBeNull();

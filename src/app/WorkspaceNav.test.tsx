@@ -14,7 +14,6 @@ import { theme } from "@/theme";
 
 const librarySearch = vi.hoisted(() => vi.fn().mockResolvedValue({ items: [] }));
 const shelfApi = vi.hoisted(() => ({
-  getLibraryShelfCounts: vi.fn(),
   listSavedSearches: vi.fn(),
   upsertSavedSearch: vi.fn(),
   deleteSavedSearch: vi.fn(),
@@ -24,7 +23,16 @@ const updateJobApi = vi.hoisted(() => ({
   countSavedDeferredUpdateCandidatesCommand: vi.fn(),
 }));
 
+const shelfCounts = vi.hoisted(() => vi.fn());
 vi.mock("@/services/shelfApi", () => shelfApi);
+vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
+  libraryV2ShelfCounts: shelfCounts,
+}));
+vi.mock("@/features/library/shelfV2", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/features/library/shelfV2")>()),
+  searchShelf: librarySearch,
+}));
 vi.mock("@/services/updateJobApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/updateJobApi")>()),
   listUpdateJobsCommand: updateJobApi.listUpdateJobsCommand,
@@ -33,7 +41,6 @@ vi.mock("@/services/updateJobApi", async (importOriginal) => ({
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  searchDownloadsV2: librarySearch,
 }));
 vi.mock("@/features/search/searchIndexProgress", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/features/search/searchIndexProgress")>()),
@@ -123,7 +130,7 @@ function rows(): HTMLElement[] {
 describe("library sidebar", () => {
   beforeEach(() => {
     window.localStorage.clear();
-    shelfApi.getLibraryShelfCounts.mockResolvedValue(counts);
+    shelfCounts.mockResolvedValue(counts);
     shelfApi.listSavedSearches.mockResolvedValue([saved()]);
     updateJobApi.listUpdateJobsCommand.mockResolvedValue([]);
     updateJobApi.countSavedDeferredUpdateCandidatesCommand.mockResolvedValue(4);
@@ -294,14 +301,14 @@ describe("library sidebar", () => {
   });
 
   it("shows real bounded library candidates and opens the chosen work", async () => {
-    librarySearch.mockResolvedValueOnce({ items: [{ id: 123, source:"pixiv",title: "長い作品の題名", authorName: "省略しない長い作者名",downloadedAt:"2026-10-30T00:00:00Z",textLength:1234,currentVersion:1 }] });
+    librarySearch.mockResolvedValueOnce({ items: [{ id: "w-123", source:"pixiv",title: "長い作品の題名", authorName: "省略しない長い作者名",downloadedAt:"2026-10-30T00:00:00Z",textLength:1234,currentVersion:1 }] });
     const user = userEvent.setup();
     renderApp("#/library");
     await user.click(await screen.findByRole("button", { name: "検索または移動" }));
     await user.type(await screen.findByRole("textbox", { name: "ライブラリ全体を検索" }), "題名");
     await user.click(await screen.findByRole("button", { name: /長い作品の題名/ }));
-    expect(librarySearch).toHaveBeenCalledWith(expect.objectContaining({ text: "題名", limit: 6, versionScope: "current", projection: "libraryCompact" }));
-    await waitFor(() => expect(window.location.hash).toBe("#/works/123"));
+    expect(librarySearch).toHaveBeenCalledWith(expect.objectContaining({ text: "題名", limit: 6, versionScope: "current" }));
+    await waitFor(() => expect(window.location.hash).toBe("#/works/w-123"));
   });
 
   it("keeps typed text when switching from library search to commands", async () => {
@@ -375,7 +382,7 @@ describe("library sidebar", () => {
   });
 
   it("still renders when the library cannot be reached", async () => {
-    shelfApi.getLibraryShelfCounts.mockRejectedValue(new Error("database is busy"));
+    shelfCounts.mockRejectedValue(new Error("database is busy"));
     shelfApi.listSavedSearches.mockRejectedValue(new Error("database is busy"));
     renderApp("#/library");
     // The shelves are still navigable; only their counts are unknown.
@@ -384,7 +391,7 @@ describe("library sidebar", () => {
   });
 
   it("keeps working with an empty library", async () => {
-    shelfApi.getLibraryShelfCounts.mockResolvedValue({ total: 0, favorite: 0, watched: 0, reading: 0 });
+    shelfCounts.mockResolvedValue({ total: 0, favorite: 0, watched: 0, reading: 0 });
     shelfApi.listSavedSearches.mockResolvedValue([]);
     renderApp("#/library");
     await waitFor(() => expect(nav().getAllByText("0").length).toBeGreaterThan(0));
@@ -394,11 +401,11 @@ describe("library sidebar", () => {
 
   it("refreshes the persistent reading shelf when the reader records progress", async () => {
     renderApp("#/library");
-    await waitFor(() => expect(shelfApi.getLibraryShelfCounts).toHaveBeenCalledWith([]));
+    await waitFor(() => expect(shelfCounts).toHaveBeenCalledWith([]));
 
     writeReadingPosition(42, null, { page: 2, top: 0 });
 
-    await waitFor(() => expect(shelfApi.getLibraryShelfCounts).toHaveBeenCalledWith([42]));
+    await waitFor(() => expect(shelfCounts).toHaveBeenCalledWith([42]));
   });
 });
 
@@ -416,7 +423,7 @@ describe("collapsed rail", () => {
     window.localStorage.clear();
     window.localStorage.setItem("piep.nav-railed", "true");
     matchMediaMatches = true;
-    shelfApi.getLibraryShelfCounts.mockResolvedValue(counts);
+    shelfCounts.mockResolvedValue(counts);
     shelfApi.listSavedSearches.mockResolvedValue([saved(), saved({ id: "0196a1b2-0000-7000-8000-000000000002", name: "青葉しおり 全作" })]);
   });
   afterEach(() => { matchMediaMatches = false; });

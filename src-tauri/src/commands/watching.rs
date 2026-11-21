@@ -15,9 +15,10 @@ pub(super) async fn blocking<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-pub(super) fn active(app: &tauri::AppHandle) -> Option<Arc<Library>> {
-    app.try_state::<Arc<super::library_v2::LibraryV2>>()?
-        .switched()
+pub(super) fn active(app: &tauri::AppHandle) -> Result<Arc<Library>, String> {
+    app.try_state::<Arc<super::library_v2::LibraryV2>>()
+        .ok_or_else(|| "棚は開いていません".to_string())?
+        .library()
 }
 
 fn date(value: i64) -> Result<String, String> {

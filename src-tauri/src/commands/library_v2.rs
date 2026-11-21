@@ -1,12 +1,8 @@
-//! 新しい棚をアプリから開く（評価文書 4.1 の 2・4）。
+//! 棚をアプリから開く。
 //!
-//! 旧棚が正本のあいだ、新しい棚は旧棚から移行して作った写しで、アプリは読むだけにする
-//! （二重書き込みをしない。書けば旧棚からの追いつきが続けられなくなる）。棚を正本に切り替えた
-//! あと（`library_meta.switched_at`）だけ、書き込みの命令が棚へ書く。棚は `PIEP_LIBRARY_V2_DIR` か、
-//! アプリのフォルダーの隣の `….library-v2` にあれば開き、なければ何もしない（画面には何も出さない）。
-//!
-//! 開くのと索引の同期は起動の門（旧棚の準備）と別のスレッドで進める。全棚では索引を
-//! 初めて作るのに数分かかるので、旧棚の画面を待たせない。
+//! 棚は `PIEP_LIBRARY_V2_DIR` か、アプリのフォルダーの中の `library`。無ければ空の棚を作る。
+//! 開くのは起動の門の中、本文の検索の索引の同期は別のスレッドで進める（全棚では索引を
+//! 初めて作るのに数分かかるので、画面を待たせない）。
 //!
 //! 画像（表紙・本文の画像）は `piep-library` の URI で、ファイルの識別子（中身の SHA-256）
 //! から返す。画面は `convertFileSrc(識別子, "piep-library")` で URL にする。
@@ -28,23 +24,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tauri::State;
 
 pub const DIR_ENV: &str = "PIEP_LIBRARY_V2_DIR";
-pub const DEFAULT_DIR: &str = "library-v2";
-/// 旧棚を片付けたあとの、アプリのフォルダーの中の棚の場所。
+/// アプリのフォルダーの中の棚の場所。
 pub const INSIDE_DIR: &str = "library";
-/// 旧棚の台帳。これがある間は、新しい棚をアプリのフォルダーの中へ移さない。
-const OLD_DATABASE: &str = "piep.db";
 pub const URI_SCHEME: &str = "piep-library";
 
 /// 新しい棚の状態。
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum LibraryV2Status {
-    /// まだ探していない（起動の直後）。
+    /// まだ開いていない（起動の直後）。
     Starting,
-    /// 棚がない。
-    Absent {
-        path: PathBuf,
-    },
     Opening {
         path: PathBuf,
     },
@@ -54,10 +43,6 @@ pub enum LibraryV2Status {
     },
     Ready {
         path: PathBuf,
-        /// 移行の未解決の記録。0 でなければ、切り替えに使える棚ではない。
-        unresolved: Vec<String>,
-        /// 正本に切り替えた棚か。切り替えた棚だけ、アプリが書き込む。
-        switched: bool,
     },
     Failed {
         path: PathBuf,
@@ -150,25 +135,7 @@ impl LibraryV2 {
         self.library
             .get()
             .cloned()
-            .ok_or_else(|| "新しい棚は開いていません".to_string())
-    }
-
-    /// 書き込める棚。正本に切り替えるまでは誤り（旧棚から移した写しに書かない）。
-    pub(crate) fn writable(&self) -> Result<Arc<Library>, String> {
-        let library = self.library()?;
-        match library.switched_at() {
-            Ok(Some(_)) => Ok(library),
-            Ok(None) => Err("新しい棚はまだ旧棚の写しなので変えられません".to_string()),
-            Err(error) => Err(error.to_string()),
-        }
-    }
-
-    /// 正本に切り替えた棚。切り替えていなければ（開いていない・旧棚の写し）None で、保存は旧棚へ。
-    pub(crate) fn switched(&self) -> Option<Arc<Library>> {
-        self.library
-            .get()
-            .filter(|library| matches!(library.switched_at(), Ok(Some(_))))
-            .cloned()
+            .ok_or_else(|| "棚は開いていません".to_string())
     }
 
     /// 書いたあと、覚えていた集計を捨てる（件数・印が変わる）。
@@ -219,121 +186,87 @@ impl LibraryV2 {
         Ok(document)
     }
 
-    /// 棚を探して開き、本文の検索の索引を同期する。呼んだスレッドで最後まで進む。
-    pub fn open(&self, path: &Path) {
-        if !path.join("library.json").is_file() {
-            self.set(LibraryV2Status::Absent { path: path.into() });
-            return;
-        }
+    /// 棚を開く。無ければ空の棚を作る。正本に切り替えていない棚（移行で作った写し）は開かない。
+    pub fn open(&self, path: &Path) -> Result<(), String> {
         self.set(LibraryV2Status::Opening { path: path.into() });
-        let failed = |message: String| LibraryV2Status::Failed {
-            path: path.into(),
-            message,
+        let opened = if path.join("library.json").is_file() {
+            Library::open(path)
+        } else {
+            log::info!("棚が無いので、空の棚を作ります: {}", path.display());
+            Library::create(path).and_then(|library| library.switch_over().map(|_| library))
         };
-        let library = match Library::open(path) {
+        let library = match opened {
             Ok(library) => Arc::new(library),
             Err(error) => {
-                log::error!("新しい棚を開けません: {error}");
-                self.set(failed(error.to_string()));
-                return;
+                let message = format!("棚を開けません: {error}");
+                self.set(LibraryV2Status::Failed {
+                    path: path.into(),
+                    message: message.clone(),
+                });
+                return Err(message);
             }
         };
-        let library = Arc::clone(self.library.get_or_init(|| library));
+        if !matches!(library.switched_at(), Ok(Some(_))) {
+            let message = "正本に切り替えていない棚は開けません".to_string();
+            self.set(LibraryV2Status::Failed {
+                path: path.into(),
+                message: message.clone(),
+            });
+            return Err(message);
+        }
+        let _ = self.library.set(library);
         self.set(LibraryV2Status::Indexing { path: path.into() });
+        Ok(())
+    }
+
+    /// 本文の検索の索引を同期する。呼んだスレッドで最後まで進む。
+    pub fn sync_index(&self, path: &Path) {
+        let Ok(library) = self.library() else {
+            return;
+        };
         let started = std::time::Instant::now();
         match library.sync_search_index(&mut |_, _| {}) {
             Ok(report) => log::info!(
-                "新しい棚の索引を同期しました: {} ms, {report:?}",
+                "棚の索引を同期しました: {} ms, {report:?}",
                 started.elapsed().as_millis()
             ),
             Err(error) => {
-                log::error!("新しい棚の索引を同期できません: {error}");
-                self.set(failed(error.to_string()));
+                log::error!("棚の索引を同期できません: {error}");
+                self.set(LibraryV2Status::Failed {
+                    path: path.into(),
+                    message: error.to_string(),
+                });
                 return;
             }
         }
-        let unresolved = library
-            .activation_problems()
-            .unwrap_or_else(|error| vec![format!("未解決の記録を読めません: {error}")]);
-        let switched = matches!(library.switched_at(), Ok(Some(_)));
-        if switched {
-            // 保存のたびに合わせるが、前回の起動で残った分もここで追いつかせる。
-            super::library_health::schedule_semantic_sync(Arc::clone(&library));
-        }
-        self.set(LibraryV2Status::Ready {
-            path: path.into(),
-            unresolved,
-            switched,
-        });
+        // 保存のたびに合わせるが、前回の起動で残った分もここで追いつかせる。
+        super::library_health::schedule_semantic_sync(Arc::clone(&library));
+        self.set(LibraryV2Status::Ready { path: path.into() });
     }
 }
 
-/// 棚の場所。環境変数があればそれ。アプリのフォルダーの中の `library` に棚があればそれ。
-/// なければアプリのフォルダーの隣の `<アプリのフォルダー名>.library-v2`。
-///
-/// 旧棚がある間はアプリのフォルダーの中には置かない。移行器は旧棚の中への移行を断り（旧棚の
-/// 全件照合が新しい棚のファイルを知らないファイルとして数える）、旧棚の書庫やバックアップにも
-/// 入ってしまう。旧棚を片付けたら、起動のときに中へ移す（`settle_place`）。
+/// 棚の場所。環境変数があればそれ、なければアプリのフォルダーの中の `library`。
 pub fn library_dir(app_data: &Path) -> PathBuf {
     std::env::var_os(DIR_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| place(app_data))
+        .unwrap_or_else(|| app_data.join(INSIDE_DIR))
 }
 
-fn place(app_data: &Path) -> PathBuf {
-    let inside = app_data.join(INSIDE_DIR);
-    if inside.join("library.json").is_file() {
-        inside
-    } else {
-        default_dir(app_data)
-    }
-}
-
-/// 起動のとき、棚を開く前に呼ぶ。旧棚の台帳が無くなっていて、隣に棚があれば、アプリの
-/// フォルダーの中の `library` へ移す（同じドライブの中の名前の付け替えなので、すぐ終わる）。
-/// 移したら新しい場所を返す。
-pub(crate) fn settle_place(app_data: &Path) -> Result<Option<PathBuf>, String> {
-    if std::env::var_os(DIR_ENV).is_some_and(|value| !value.is_empty()) {
-        return Ok(None);
-    }
-    let inside = app_data.join(INSIDE_DIR);
-    let beside = default_dir(app_data);
-    let old = app_data.join(OLD_DATABASE);
-    if old.exists() || inside.exists() || !beside.join("library.json").is_file() {
-        return Ok(None);
-    }
-    std::fs::rename(&beside, &inside)
-        .map_err(|error| format!("棚をアプリのフォルダーの中へ移せません: {error}"))?;
-    piep_storage::sync_directory(app_data).map_err(|error| error.to_string())?;
-    log::info!("旧棚を片付けたので、新しい棚をアプリのフォルダーの中へ移しました");
-    Ok(Some(inside))
-}
-
-fn default_dir(app_data: &Path) -> PathBuf {
-    let mut name = app_data.file_name().unwrap_or_default().to_os_string();
-    name.push(".");
-    name.push(DEFAULT_DIR);
-    app_data.with_file_name(name)
-}
-
-/// 起動のときに呼ぶ。別のスレッドで開く。
-pub fn open_in_background(state: Arc<LibraryV2>, app_data: &Path) {
+/// 起動のときに呼ぶ。棚を開き（無ければ作る）、本文の検索の索引は別のスレッドで同期する。
+pub fn open_for_startup(state: Arc<LibraryV2>, app_data: &Path) -> Result<(), String> {
     super::library_health::set_settings_dir(app_data);
-    if let Err(error) = settle_place(app_data) {
-        log::error!("{error}");
-    }
     let path = library_dir(app_data);
+    // 予約した復元は、棚を開く前に入れ替える。
+    super::backup_shelf::apply_pending_restore(&path);
+    state.open(&path)?;
     let spawned = std::thread::Builder::new()
-        .name("piep-library-v2".into())
-        .spawn(move || {
-            // 予約した復元は、棚を開く前に入れ替える。
-            super::backup_shelf::apply_pending_restore(&path);
-            state.open(&path)
-        });
+        .name("piep-library-index".into())
+        .spawn(move || state.sync_index(&path));
     if let Err(error) = spawned {
-        log::error!("新しい棚を開くスレッドを作れません: {error}");
+        log::error!("棚の索引を同期するスレッドを作れません: {error}");
     }
+    Ok(())
 }
 
 /// `piep-library` の URI の要求に答える。パスはファイルの識別子（64 桁の 16 進）。
@@ -407,7 +340,7 @@ pub async fn library_v2_set_user_state(
 ) -> Result<crate::library::UserState, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let library = state.writable()?;
+        let library = state.library()?;
         let (request, work) = (parse_id(&request)?, parse_id(&work)?);
         let current = library
             .user_state(work, library.id)
@@ -556,7 +489,7 @@ pub async fn library_v2_reading_position(
 ) -> Result<Option<ShelfReading>, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let library = state.writable()?;
+        let library = state.library()?;
         let card = library.work_card(work).map_err(|e| e.to_string())?;
         let position = library
             .reading_position(work, library.id)
@@ -601,7 +534,7 @@ pub async fn library_v2_set_reading_position(
 ) -> Result<(), String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let library = state.writable()?;
+        let library = state.library()?;
         if page == 0 || !(0.0..=1.0).contains(&ratio) {
             return Err("読書位置が不正です".to_string());
         }
@@ -647,7 +580,7 @@ pub async fn library_v2_clear_reading_positions(
 ) -> Result<usize, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let library = state.writable()?;
+        let library = state.library()?;
         let mut cleared = 0;
         for work in works {
             let current = library
@@ -686,7 +619,7 @@ pub async fn library_v2_adopt_device_positions(
 ) -> Result<Vec<(i64, LibraryId)>, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let library = state.writable()?;
+        let library = state.library()?;
         let numbers: HashMap<i64, LibraryId> = library
             .legacy_work_numbers()
             .map_err(|e| e.to_string())?
@@ -749,7 +682,7 @@ pub async fn library_v2_remove_work(
 ) -> Result<(), String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let library = state.writable()?;
+        let library = state.library()?;
         let (request, work) = (parse_id(&request)?, parse_id(&work)?);
         let generation = library
             .library_item_generation(work)
@@ -1630,7 +1563,7 @@ pub async fn library_v2_edit_collection(
 ) -> Result<Option<CollectionView>, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let library = state.writable()?;
+        let library = state.library()?;
         let target = collection_target(&library, &id)?;
         let change = collection_change(&library, change)?;
         let deleting = matches!(
@@ -1711,7 +1644,7 @@ pub async fn library_v2_save_editor(
 ) -> Result<crate::library::EditState, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let library = state.writable()?;
+        let library = state.library()?;
         let publish = save.publish;
         let work = parse_id(&work)?;
         let result = library
@@ -1737,7 +1670,7 @@ pub async fn library_v2_edit_pointer(
 ) -> Result<crate::library::EditState, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let library = state.writable()?;
+        let library = state.library()?;
         let work = parse_id(&work)?;
         let changed = library
             .change_edit_pointers(parse_id(&request)?, work, library.id, expected, change)
@@ -1765,7 +1698,7 @@ pub async fn library_v2_import_edit_image(
 ) -> Result<crate::library_work_edit::EditorMedia, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        let library = state.writable()?;
+        let library = state.library()?;
         let path = std::path::PathBuf::from(path);
         let name = path
             .file_name()
@@ -1870,7 +1803,7 @@ pub async fn library_v2_job_history_visibility(
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         state
-            .writable()?
+            .library()?
             .set_job_history_hidden(
                 parse_id(&request)?,
                 job.as_deref().map(parse_id).transpose()?,

@@ -115,8 +115,6 @@ pub struct ServerContext {
     illustrations: Mutex<CoverCache>,
     illustration_workers: Arc<tokio::sync::Semaphore>,
     dimensions: Mutex<HashMap<IllustrationKey, (u32, u32)>>,
-    /// 携帯がお気に入りを変えたと、デスクトップ版の画面へ知らせる係。内蔵サーバーにだけある。
-    favorites_listener: OnceLock<FavoritesListener>,
     /// 新しい棚の写しの受け取り。単独サーバーにだけある。
     shipments: OnceLock<Arc<super::standalone::shipment::ShelfShipments>>,
     /// 単独サーバーの置き場（設定を書くため）。
@@ -218,7 +216,6 @@ impl ServerContext {
             illustrations: Mutex::new(CoverCache::default()),
             illustration_workers: Arc::new(tokio::sync::Semaphore::new(ILLUSTRATION_WORKERS)),
             dimensions: Mutex::new(HashMap::new()),
-            favorites_listener: OnceLock::new(),
             shipments: OnceLock::new(),
             paths: OnceLock::new(),
         })
@@ -234,10 +231,6 @@ impl ServerContext {
         let _ = self.shipments.set(shipments);
     }
 
-    pub fn set_favorites_listener(&self, listener: FavoritesListener) {
-        let _ = self.favorites_listener.set(listener);
-    }
-
     pub fn set_update(&self, controller: Arc<UpdateController>) {
         let _ = self.update.set(controller);
     }
@@ -248,7 +241,8 @@ impl ServerContext {
         self.reader_shelf
             .set(Arc::clone(&shelf))
             .map_err(|_| "新しい棚は既に設定されています".to_owned())?;
-        if let Library::Swappable(db) = &self.library {
+        {
+            let db = &self.library.0;
             // 携帯が新しい棚で変えたお気に入りを、旧 API の変更の記録にも残す。デスクトップ版は
             // 今までどおりその記録を取り込み、旧 API の画面も同じ値を出す。
             let (store, db) = (Arc::clone(&self.store), Arc::clone(db));
@@ -1618,55 +1612,32 @@ async fn favorite_put(
     if update.device_time <= 0 {
         return Err(ApiError::invalid("お気に入りの変更が正しくありません"));
     }
-    let favorite = match &ctx.library {
-        Library::App(state) => {
-            // デスクトップ版の書き込みと同じ順番待ちに並ぶ。取り込みや作り直しの途中に割り込まない。
-            let gate = state.library_gate.clone().write_owned().await;
-            let state = Arc::clone(state);
-            let (key, id, favorite) = (source.clone(), source_id.clone(), update.favorite);
-            let found = tokio::task::spawn_blocking(move || {
-                let _gate = gate;
-                state.db.set_favorite_by_source(&key, &id, favorite)
-            })
-            .await
-            .map_err(|_| ApiError::internal())?
-            .map_err(|error| {
-                log::error!("お気に入りを書けません: {error}");
-                ApiError::internal()
-            })?;
-            found.ok_or_else(ApiError::not_found)?;
-            if let Some(listener) = ctx.favorites_listener.get() {
-                listener();
-            }
-            favorite
-        }
-        Library::Swappable(_) => {
-            let store = Arc::clone(&ctx.store);
-            let (key, id) = (source.clone(), source_id.clone());
-            let device_id = device.id.clone();
-            let stored = with_db(&ctx, move |db| {
-                store
-                    .apply_favorite(db, &key, &id, &device_id, &update)
-                    .map_err(|error| {
-                        log::error!("お気に入りを書けません: {error}");
-                        ApiError::internal()
-                    })
-            })
-            .await?;
-            let stored = stored.ok_or_else(ApiError::not_found)?;
-            // 旧 API の画面（作者・シリーズなど）で変えた値も、新しい棚の一覧と揃える。
-            if let Some(shelf) = ctx.reader_shelf.get().cloned() {
-                let (key, id, favorite) = (source.clone(), source_id.clone(), stored.favorite);
-                let device = device.id.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Err(error) = shelf.follow_favorite(Some(&device), &key, &id, favorite) {
-                        log::warn!("お気に入りを新しい棚へ当てられません: {error}");
-                    }
+    let favorite = {
+        let store = Arc::clone(&ctx.store);
+        let (key, id) = (source.clone(), source_id.clone());
+        let device_id = device.id.clone();
+        let stored = with_db(&ctx, move |db| {
+            store
+                .apply_favorite(db, &key, &id, &device_id, &update)
+                .map_err(|error| {
+                    log::error!("お気に入りを書けません: {error}");
+                    ApiError::internal()
                 })
-                .await;
-            }
-            stored.favorite
+        })
+        .await?;
+        let stored = stored.ok_or_else(ApiError::not_found)?;
+        // 旧 API の画面（作者・シリーズなど）で変えた値も、新しい棚の一覧と揃える。
+        if let Some(shelf) = ctx.reader_shelf.get().cloned() {
+            let (key, id, favorite) = (source.clone(), source_id.clone(), stored.favorite);
+            let device = device.id.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Err(error) = shelf.follow_favorite(Some(&device), &key, &id, favorite) {
+                    log::warn!("お気に入りを新しい棚へ当てられません: {error}");
+                }
+            })
+            .await;
         }
+        stored.favorite
     };
     Ok(Json(FavoriteState {
         source,
@@ -2409,7 +2380,7 @@ mod illustration_tests {
     async fn cancelling_a_request_keeps_its_worker_slot_until_blocking_work_finishes() {
         let dir = crate::server::tests::TestRoot::created("illustration-cancel");
         let ctx = ServerContext::new(
-            Library::Swappable(Arc::new(super::super::library::SwappableDb::new(
+            Library(Arc::new(super::super::library::SwappableDb::new(
                 dir.0.join("piep.db"),
                 dir.0.join("downloads"),
             ))),

@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import type { AssetEntry } from "@/types/library";
 
 export interface RevisionAsset {
@@ -41,7 +40,3 @@ export interface WorkAcquisitionDetails {
   missingMetadata?: Array<"title" | "caption" | "tags">;
   locationError?: string | null;
 }
-export const getRevisionSnapshot = (downloadId: number, version: number) => invoke<RevisionSnapshot>("get_revision_snapshot", { downloadId, version });
-/** 反映中の編集を保存版と同じ形で読む。反映していなければ `null`。 */
-export const getActiveEditSnapshot = (downloadId: number) => invoke<RevisionSnapshot | null>("get_active_edit_snapshot", { downloadId });
-export const getWorkAcquisitionDetails = (downloadId: number) => invoke<WorkAcquisitionDetails | null>("get_work_acquisition_details", { downloadId });

@@ -10,10 +10,6 @@
 //! 閉じるのに二つあるのは、隠すだけの `close_` と、面ごと捨てる `destroy_`
 //! を分けているからである。次に開くのが同じ場所なら、捨てないほうが速い。
 
-use std::sync::Arc;
-
-use tauri::Manager;
-
 use crate::auth::webview::{
     close_child_webview, close_standalone_webview, destroy_child_webview, get_child_webview_url,
     go_back_child_webview, go_forward_child_webview, navigate_child_webview, open_child_webview,
@@ -21,7 +17,6 @@ use crate::auth::webview::{
     reload_child_webview, set_child_webview_bounds, set_child_webview_visible,
     standalone_webview_url, BrowserPageUser, BrowserPageWork,
 };
-use crate::AppState;
 
 /// 表示中の一覧から読み取った作品ひとつ。`saved` は棚にすでにあるかどうか。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -55,44 +50,26 @@ pub async fn read_browser_page_work_candidates(
 ) -> Result<PageWorkCandidates, String> {
     let page = read_browser_page_works(app.clone(), browser, source.clone()).await?;
     // 切り替えた棚では、棚に載っている作品を保存済みとする（外した作品は載っていない）。
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || {
-            let works = page
-                .works
-                .into_iter()
-                .map(|work| {
-                    let saved = library
-                        .find_listed_work(&source, &work.source_id)
-                        .map_err(|e| e.to_string())?
-                        .is_some();
-                    Ok(PageWorkCandidate { work, saved })
-                })
-                .collect::<Result<Vec<_>, String>>()?;
-            Ok(PageWorkCandidates {
-                url: page.url,
-                works,
-                truncated: page.truncated,
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || {
+        let works = page
+            .works
+            .into_iter()
+            .map(|work| {
+                let saved = library
+                    .find_listed_work(&source, &work.source_id)
+                    .map_err(|e| e.to_string())?
+                    .is_some();
+                Ok(PageWorkCandidate { work, saved })
             })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(PageWorkCandidates {
+            url: page.url,
+            works,
+            truncated: page.truncated,
         })
-        .await;
-    }
-    let state = app.state::<Arc<AppState>>();
-    let works = page
-        .works
-        .into_iter()
-        .map(|work| {
-            let saved = state
-                .db
-                .get_download_by_source(&source, &work.source_id)?
-                .is_some();
-            Ok(PageWorkCandidate { work, saved })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok(PageWorkCandidates {
-        url: page.url,
-        works,
-        truncated: page.truncated,
     })
+    .await
 }
 
 /// フォロー一覧から読み取った作者ひとり。`watched` は監視に登録済みかどうか。
@@ -124,47 +101,29 @@ pub async fn read_browser_page_user_candidates(
 ) -> Result<PageUserCandidates, String> {
     let page = read_browser_page_users(app.clone(), browser).await?;
     // 切り替えた棚では、棚の監視の登録で見る（止めた登録も「登録済み」）。
-    if let Some(library) = super::watching::active(&app) {
-        return super::watching::blocking(move || {
-            let watched: std::collections::HashSet<String> =
-                super::watching::targets(&library, Some("author"), false)?
-                    .into_iter()
-                    .filter(|target| target.source == "pixiv")
-                    .map(|target| target.source_key)
-                    .collect();
-            let users = page
-                .users
+    let library = super::watching::active(&app)?;
+    super::watching::blocking(move || {
+        let watched: std::collections::HashSet<String> =
+            super::watching::targets(&library, Some("author"), false)?
                 .into_iter()
-                .map(|user| {
-                    let watched = watched.contains(&user.user_id);
-                    PageUserCandidate { user, watched }
-                })
+                .filter(|target| target.source == "pixiv")
+                .map(|target| target.source_key)
                 .collect();
-            Ok(PageUserCandidates {
-                url: page.url,
-                users,
-                truncated: page.truncated,
+        let users = page
+            .users
+            .into_iter()
+            .map(|user| {
+                let watched = watched.contains(&user.user_id);
+                PageUserCandidate { user, watched }
             })
+            .collect();
+        Ok(PageUserCandidates {
+            url: page.url,
+            users,
+            truncated: page.truncated,
         })
-        .await;
-    }
-    let state = app.state::<Arc<AppState>>();
-    let users = page
-        .users
-        .into_iter()
-        .map(|user| {
-            let watched = state
-                .db
-                .find_update_target("author", "pixiv", &user.user_id)?
-                .is_some();
-            Ok(PageUserCandidate { user, watched })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok(PageUserCandidates {
-        url: page.url,
-        users,
-        truncated: page.truncated,
     })
+    .await
 }
 
 /// アプリの窓の中に子 WebView を開く。

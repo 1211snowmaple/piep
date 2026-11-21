@@ -1,32 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-const searchMock = vi.fn();
-const statusMock = vi.fn();
-vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
-  libraryV2Status: () => statusMock(),
-}));
-const readingMock = vi.fn(() => [11, 12]);
-
-vi.mock("@/services/dbApi", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/dbApi")>()),
-  searchDownloadsV2: (params: unknown) => searchMock(params),
-}));
-vi.mock("@/features/library/readingShelf", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/features/library/readingShelf")>()),
-  readingWorkIds: () => readingMock(),
-}));
-
-const { isSavableCandidateStatus, isSettledCandidateStatus, parseWorkId, shelfWorkIds } = await import(
+const { isSavableCandidateStatus, isSettledCandidateStatus, parseWorkId } = await import(
   "@/features/updates/UpdatesPage"
 );
-
-beforeEach(() => {
-  searchMock.mockReset();
-  statusMock.mockReset().mockResolvedValue({ state: "absent", path: "unused" });
-  readingMock.mockReset();
-  readingMock.mockReturnValue([11, 12]);
-});
 
 describe("update candidate selection", () => {
   it("only allows new and failed candidates to be selected for saving", () => {
@@ -61,42 +37,3 @@ describe("work-scoped update URLs", () => {
   });
 });
 
-describe("shelf-scoped update checks", () => {
-  it("leaves the ordinary scopes alone", async () => {
-    for (const scope of ["all", "work", "author", "series"]) {
-      await expect(shelfWorkIds(scope)).resolves.toBeNull();
-    }
-  });
-
-  it("collects the works behind a shelf so the job can check them as works", async () => {
-    searchMock.mockResolvedValueOnce({ items: [{ id: 3 }, { id: 7 }] });
-    await expect(shelfWorkIds("favorite")).resolves.toEqual([3, 7]);
-    expect(searchMock).toHaveBeenCalledWith(expect.objectContaining({ favorite: true }));
-  });
-
-  // 切り替えた棚では、棚が自分の範囲で選ぶ。旧棚の番号は集めない。
-  it("lets a switched shelf choose the works of its own scope", async () => {
-    statusMock.mockResolvedValue({ state: "ready", switched: true });
-    await expect(shelfWorkIds("favorite")).resolves.toBeNull();
-    await expect(shelfWorkIds("reading")).resolves.toBeNull();
-    expect(searchMock).not.toHaveBeenCalled();
-  });
-
-  // 読みかけが空なら、取得しに行かずに「空の棚」と答える。
-  it("answers with an empty shelf instead of querying for nothing", async () => {
-    readingMock.mockReturnValueOnce([]);
-    await expect(shelfWorkIds("reading")).resolves.toEqual([]);
-    expect(searchMock).not.toHaveBeenCalled();
-  });
-
-  it("keeps a reading-shelf check within the disclosed 500-work limit", async () => {
-    readingMock.mockReturnValueOnce(Array.from({ length: 501 }, (_, index) => index + 1));
-    searchMock.mockImplementationOnce(async (params: { idsInclude: number[] }) => ({
-      items: params.idsInclude.map((id) => ({ id })),
-    }));
-    const ids = await shelfWorkIds("reading");
-    expect(ids).toHaveLength(500);
-    expect(ids).not.toContain(501);
-    expect(searchMock).toHaveBeenCalledWith(expect.objectContaining({ limit: 500 }));
-  });
-});

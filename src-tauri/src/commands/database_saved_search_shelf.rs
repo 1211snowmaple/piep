@@ -3,7 +3,6 @@
 //! 画面は ID を文字列として扱う。棚では検索の UUID、旧 DB では番号の文字列になる。
 //! 棚の持ち主は棚そのもの（`library.id`）で、書き込みは要求 ID と世代で重複なく一度だけ効く。
 
-use crate::database::{SavedSearch as LegacySavedSearch, SavedSearchInput as LegacyInput};
 use crate::library::{Library, LibraryId, SavedSearch, SavedSearchDefinition, SavedSearchUpdate};
 use serde::{Deserialize, Serialize};
 
@@ -41,33 +40,6 @@ fn view(search: SavedSearch) -> Result<SavedSearchView, String> {
         params_json: search.definition.params_json,
         created_at: time(search.created_at)?,
         updated_at: time(search.updated_at)?,
-    })
-}
-
-pub(super) fn legacy_view(search: LegacySavedSearch) -> SavedSearchView {
-    SavedSearchView {
-        id: search.id.to_string(),
-        name: search.name,
-        query: search.query,
-        params_json: search.params_json,
-        created_at: search.created_at,
-        updated_at: search.updated_at,
-    }
-}
-
-pub(super) fn legacy_input(input: SavedSearchViewInput) -> Result<LegacyInput, String> {
-    let id = input
-        .id
-        .map(|id| {
-            id.parse::<i64>()
-                .map_err(|_| "保存した検索の ID が不正です".to_string())
-        })
-        .transpose()?;
-    Ok(LegacyInput {
-        id,
-        name: input.name,
-        query: input.query,
-        params_json: input.params_json,
     })
 }
 
@@ -224,24 +196,5 @@ mod tests {
         let again = upsert(&library, input(None, "乙", "五")).unwrap();
         assert_ne!(again.id, second.id);
         assert!(upsert(&library, input(Some("7"), "丁", "六")).is_err());
-    }
-
-    #[test]
-    fn legacy_ids_cross_as_number_strings() {
-        let view = legacy_view(LegacySavedSearch {
-            id: 42,
-            name: "甲".into(),
-            query: None,
-            params_json: "{}".into(),
-            created_at: "2026-11-19T00:00:00+00:00".into(),
-            updated_at: "2026-11-19T00:00:00+00:00".into(),
-        });
-        assert_eq!(view.id, "42");
-        assert_eq!(
-            legacy_input(input(Some("42"), "甲", "")).unwrap().id,
-            Some(42)
-        );
-        assert_eq!(legacy_input(input(None, "甲", "")).unwrap().id, None);
-        assert!(legacy_input(input(Some("abc"), "甲", "")).is_err());
     }
 }

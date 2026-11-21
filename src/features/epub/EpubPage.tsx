@@ -35,7 +35,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { PageHeader } from "@/components/PageHeader";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { demoWorks } from "@/mocks/demoData";
-import { getDownloads, isTauriRuntime } from "@/services/dbApi";
+import { isTauriRuntime } from "@/services/dbApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import { cancelEpubExport, exportEpubBatch, listEpubTemplates } from "@/services/epubApi";
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
@@ -51,20 +51,15 @@ import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 type EpubValues = EpubExportSettings;
 /**
- * キューの作品を引く。旧棚は番号で、新しい棚は作品の ID でまとめて引き、キューの順に並べ直す。
- * 一件ずつ引くと、数百冊のキューで開くたびにその数だけ往復していた。
+ * キューの作品を棚の ID でまとめて引く（並びはキューの順）。一件ずつ引くと、数百冊のキューで
+ * 開くたびにその数だけ往復していた。番号の項目は旧棚のころの残りなので引かない。
  */
-async function queuedWorks(queue: EpubQueueId[]): Promise<Array<DownloadEntry | ShelfEntry>> {
-  const legacy = queue.filter((id): id is number => typeof id === "number");
+async function queuedWorks(queue: EpubQueueId[]): Promise<ShelfEntry[]> {
   const shelf = queue.filter((id): id is string => typeof id === "string");
-  const [legacyWorks, shelfWorks] = await Promise.all([
-    legacy.length ? getDownloads(legacy) : Promise.resolve([] as DownloadEntry[]),
-    shelf.length ? shelfEntriesByIds(shelf) : Promise.resolve([] as ShelfEntry[]),
-  ]);
-  const byId = new Map<EpubQueueId, DownloadEntry | ShelfEntry>();
-  for (const work of legacyWorks) byId.set(work.id, work);
-  for (const work of shelfWorks) byId.set(work.id, work);
-  return queue.flatMap((id) => byId.get(id) ?? []);
+  if (!shelf.length) return [];
+  // 書き出す順は積んだ順。
+  const order = new Map(shelf.map((id, index) => [id, index]));
+  return (await shelfEntriesByIds(shelf)).sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 }
 
 type EpubExportRequest = EpubValues & { works: { id: EpubQueueId; title: string }[] };
@@ -85,7 +80,7 @@ export default function EpubPage() {
   // hundred books fired that many IPC round trips on every visit.
   const queueQuery = useQuery({
     queryKey: ["epub-queue-works", epubQueue],
-    queryFn: () => runtime
+    queryFn: (): Promise<(ShelfEntry | DownloadEntry)[]> => runtime
       ? queuedWorks(epubQueue)
       : Promise.resolve(epubQueue.map((id) => demoWorks.find((work) => work.id === id)).filter((work): work is DownloadEntry => Boolean(work))),
     enabled: epubQueue.length > 0,

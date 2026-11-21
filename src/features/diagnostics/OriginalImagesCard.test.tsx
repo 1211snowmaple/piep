@@ -8,16 +8,13 @@ import { OriginalImagesCard } from "./OriginalImagesCard";
 const api = vi.hoisted(() => ({ status: vi.fn(), upgrade: vi.fn(), cancel: vi.fn(), listen: vi.fn() }));
 vi.mock("@/services/dbApi", async (original) => ({
   ...await original<typeof import("@/services/dbApi")>(),
-  getOriginalImageStatus: api.status,
-  upgradePixivImagesToOriginal: api.upgrade,
   cancelOriginalImageUpgrade: api.cancel,
 }));
 vi.mock("@/services/eventBus", () => ({ subscribeTauriEvent: () => () => undefined, onTauriEvent: api.listen }));
-const shelfApi = vi.hoisted(() => ({ status: vi.fn(), upgrade: vi.fn() }));
 vi.mock("@/services/shelfHealthApi", async (original) => ({
   ...await original<typeof import("@/services/shelfHealthApi")>(),
-  libraryV2OriginalImageStatus: shelfApi.status,
-  libraryV2UpgradePixivImagesToOriginal: shelfApi.upgrade,
+  libraryV2OriginalImageStatus: api.status,
+  libraryV2UpgradePixivImagesToOriginal: api.upgrade,
 }));
 
 beforeEach(() => {
@@ -54,26 +51,4 @@ it("shows a running upgrade with a cancel button instead of a second start", asy
   expect(screen.queryByRole("button", { name: "原寸に取り直す" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "中止" }));
   await waitFor(() => expect(api.cancel).toHaveBeenCalledOnce());
-});
-
-const renderShelfCard = (writable: boolean) => render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><AppRouter><OriginalImagesCard runtime disabled={false} shelf writable={writable} /></AppRouter></QueryClientProvider></MantineProvider>);
-
-it("counts and upgrades the images of the new shelf on a switched shelf", async () => {
-  shelfApi.status.mockResolvedValue({ covers: 3, illustrations: 1, running: false, progress: null });
-  shelfApi.upgrade.mockResolvedValue({ attempted: 4, upgraded: 4, unavailable: 0, failed: 0, canceled: false, stoppedReason: null, remaining: 0 });
-  renderShelfCard(true);
-  expect(await screen.findByText("4枚 縮小版")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "原寸に取り直す" }));
-  await waitFor(() => expect(shelfApi.upgrade).toHaveBeenCalledOnce());
-  expect(api.status).not.toHaveBeenCalled();
-  expect(api.upgrade).not.toHaveBeenCalled();
-});
-
-it("shows the count of a read-only new shelf but does not start the upgrade", async () => {
-  shelfApi.status.mockResolvedValue({ covers: 3, illustrations: 0, running: false, progress: null });
-  renderShelfCard(false);
-  const button = await screen.findByRole("button", { name: "原寸に取り直す（新しい棚では変えられません）" });
-  expect(button).toHaveAttribute("aria-disabled", "true");
-  fireEvent.click(button);
-  expect(shelfApi.upgrade).not.toHaveBeenCalled();
 });

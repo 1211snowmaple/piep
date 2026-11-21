@@ -246,7 +246,7 @@ pub async fn library_v2_import_archive(
     path: String,
 ) -> Result<PartTransfer, String> {
     let shelf = app.state::<Arc<LibraryV2>>().inner().clone();
-    let library = shelf.writable()?;
+    let library = shelf.library()?;
     let _guard = claim()?;
     let outcome = tokio::task::spawn_blocking(move || {
         let path = PathBuf::from(path);
@@ -315,6 +315,10 @@ pub async fn library_v2_schedule_restore(
             "作者・シリーズのアーカイブは、棚の入れ替えには使えません。取り込みを使ってください"
                 .into(),
         );
+    }
+    // 切り替える前の写しは、もう開けない（棚は切り替えた棚しか開かない）。
+    if !inspection.switched {
+        return Err("正本に切り替える前の写しは、棚の入れ替えに使えません".into());
     }
     write_json(
         &request_path(&live),

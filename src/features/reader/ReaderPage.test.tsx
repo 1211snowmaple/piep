@@ -16,10 +16,12 @@ const dbApi = vi.hoisted(() => ({
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  getReaderMetadata: dbApi.getReaderMetadata,
-  getReaderContentPage: dbApi.getReaderContentPage,
-  searchReaderContent: dbApi.searchReaderContent,
 }));
+vi.mock("@/features/reader/readerSource", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/features/reader/readerSource")>();
+  const { readerTestSource } = await import("@/features/reader/readerTestSource");
+  return { ...actual, previewReaderSource: (id: number) => readerTestSource(actual.previewReaderSource(id), dbApi) };
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

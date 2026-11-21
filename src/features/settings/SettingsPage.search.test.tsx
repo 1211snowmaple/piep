@@ -28,11 +28,6 @@ vi.mock("@/services/searchApi", async (importOriginal) => ({
   startSearchRebuildIndex: db.startSearchRebuildIndex,
   cancelSearchRebuildIndex: vi.fn(),
 }));
-vi.mock("@/services/archiveApi", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/archiveApi")>()),
-  backupExportRunning: vi.fn().mockResolvedValue(false),
-  getStoragePath: vi.fn().mockResolvedValue("C:\\piep\\downloads"),
-}));
 vi.mock("@/store", () => ({
   store: {
     get: vi.fn().mockResolvedValue(null),

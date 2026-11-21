@@ -17,10 +17,14 @@ const dbApi = vi.hoisted(() => ({
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  getEditorDocument: dbApi.getEditorDocument,
-  saveWorkDraft: dbApi.saveWorkDraft,
-  activateWorkEdit: dbApi.activateWorkEdit,
 }));
+vi.mock("@/features/editor/editorSource", async (importOriginal) => {
+  const { editorTestSource } = await import("@/features/editor/editorTestSource");
+  return {
+    ...(await importOriginal<typeof import("@/features/editor/editorSource")>()),
+    shelfEditorSource: (id: string) => editorTestSource(Number(id), dbApi),
+  };
+});
 
 function block(order: number, blockType: WorkBlock["blockType"], text: string): WorkBlock {
   return { id: order + 1, editRevisionId: 0, order, blockType, text, assetId: null, attrsJson: null };

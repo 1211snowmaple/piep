@@ -14,20 +14,23 @@ fn temp(name: &str) -> Temp {
 }
 
 #[test]
-fn a_missing_library_is_absent_and_serves_nothing() {
+fn a_missing_library_is_created_switched_over_and_serves_nothing_until_asked() {
     let dir = temp("absent");
     let state = LibraryV2::default();
     assert_eq!(state.status(), LibraryV2Status::Starting);
-    state.open(&dir.0);
-    assert_eq!(
-        state.status(),
-        LibraryV2Status::Absent {
-            path: dir.0.clone()
-        }
-    );
     assert!(state.library().is_err());
     assert_eq!(respond(&state, &"0".repeat(64)).status(), 503);
     assert_eq!(respond(&state, "/not-a-file").status(), 400);
+    state.open(&dir.0).unwrap();
+    assert_eq!(
+        state.status(),
+        LibraryV2Status::Indexing {
+            path: dir.0.clone()
+        }
+    );
+    let library = state.library().unwrap();
+    assert!(library.switched_at().unwrap().is_some());
+    assert_eq!(respond(&state, &"0".repeat(64)).status(), 404);
 }
 
 #[test]
@@ -36,17 +39,21 @@ fn an_existing_library_opens_indexes_and_serves_files_by_their_fingerprint() {
     let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
     let stored = {
         let library = Library::create(&dir.0).unwrap();
+        library.switch_over().unwrap();
         let file = library
             .store_original(&crate::library::CaptureSource::Bytes(png.to_vec()))
             .unwrap();
         file.id
     };
     let state = LibraryV2::default();
-    state.open(&dir.0);
-    let LibraryV2Status::Ready { unresolved, .. } = state.status() else {
-        panic!("開いて同期する: {:?}", state.status());
-    };
-    assert!(unresolved.is_empty());
+    state.open(&dir.0).unwrap();
+    state.sync_index(&dir.0);
+    assert_eq!(
+        state.status(),
+        LibraryV2Status::Ready {
+            path: dir.0.clone()
+        }
+    );
     let found = respond(&state, &format!("/{stored}"));
     assert_eq!(found.status(), 200);
     assert_eq!(found.body(), &png);
@@ -57,22 +64,16 @@ fn an_existing_library_opens_indexes_and_serves_files_by_their_fingerprint() {
 }
 
 #[test]
-fn a_migrated_copy_is_not_written_until_the_shelf_is_switched_over() {
+fn a_shelf_that_was_never_switched_over_is_not_opened() {
     let dir = temp("switch");
     {
         let library = Library::create(&dir.0).unwrap();
-        // 開く前に切り替えた棚と、切り替えていない棚を一つずつ試す。
         assert_eq!(library.switched_at().unwrap(), None);
     }
     let state = LibraryV2::default();
-    state.open(&dir.0);
-    let LibraryV2Status::Ready { switched, .. } = state.status() else {
-        panic!("開いて同期する: {:?}", state.status());
-    };
-    assert!(!switched);
-    assert!(state.writable().is_err());
-    state.library().unwrap().switch_over().unwrap();
-    assert!(state.writable().is_ok());
+    assert!(state.open(&dir.0).is_err());
+    assert!(matches!(state.status(), LibraryV2Status::Failed { .. }));
+    assert!(state.library().is_err());
 }
 
 #[test]
@@ -84,33 +85,9 @@ fn image_kinds_come_from_the_bytes() {
 }
 
 #[test]
-fn the_default_place_is_next_to_the_app_folder_not_inside_it() {
+fn the_shelf_lives_inside_the_app_folder() {
     let app = Path::new("C:/Users/u/AppData/Roaming/io.github.example.piep");
-    assert_eq!(
-        default_dir(app),
-        Path::new("C:/Users/u/AppData/Roaming/io.github.example.piep.library-v2")
-    );
-    assert!(!default_dir(app).starts_with(app));
-}
-
-#[test]
-fn the_shelf_moves_inside_the_app_folder_only_after_the_old_shelf_is_gone() {
-    let root = std::env::temp_dir().join(format!("piep-place-{}", uuid::Uuid::now_v7()));
-    let app = root.join("io.github.example.piep");
-    std::fs::create_dir_all(&app).unwrap();
-    let beside = default_dir(&app);
-    std::fs::create_dir_all(beside.join("objects")).unwrap();
-    std::fs::write(beside.join("library.json"), b"{}").unwrap();
-    std::fs::write(app.join("piep.db"), b"").unwrap();
-    // 旧棚がある間は動かさない。
-    assert_eq!(settle_place(&app).unwrap(), None);
-    assert_eq!(place(&app), beside);
-    std::fs::remove_file(app.join("piep.db")).unwrap();
-    let inside = settle_place(&app).unwrap().unwrap();
-    assert_eq!(inside, app.join(INSIDE_DIR));
-    assert!(inside.join("objects").is_dir() && !beside.exists());
-    assert_eq!(place(&app), inside);
-    // 二度目は何もしない。
-    assert_eq!(settle_place(&app).unwrap(), None);
-    std::fs::remove_dir_all(&root).unwrap();
+    if std::env::var_os(DIR_ENV).is_none() {
+        assert_eq!(library_dir(app), app.join(INSIDE_DIR));
+    }
 }

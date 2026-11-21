@@ -1,4 +1,4 @@
-import { getAssetUrl, getReaderContentPage, getReaderMetadata, getReaderOutline, isTauriRuntime, searchReaderContent } from "@/services/dbApi";
+import { getAssetUrl } from "@/services/dbApi";
 import { libraryV2Content, libraryV2Outline, libraryV2ReadingPosition, libraryV2SearchContent, libraryV2SetReadingPosition, libraryV2Work, shelfBodyUrl, staleEditBaseOf, type ShelfReading, type ShelfWork } from "@/services/libraryV2Api";
 export { SHELF_WORK_ID } from "@/services/libraryV2Api";
 import { getDemoReader } from "@/mocks/demoData";
@@ -6,15 +6,15 @@ import { readingKeyOf } from "@/features/library/readingShelf";
 import type { ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit } from "@/types/library";
 
 /**
- * 読む画面が読む先。旧棚と新しい棚（試験中・読むだけ）で、本文・目次・本文内検索・作品の頭を
- * 取ってくる口だけを差し替える。読書位置・しおり・組み方・鍵盤の操作は同じ画面のまま。
+ * 読む画面が読む先。棚とプレビューの見本で、本文・目次・本文内検索・作品の頭を取ってくる口だけを
+ * 差し替える。読書位置・しおり・組み方・鍵盤の操作は同じ画面のまま。
  */
 
 /** 読む画面の頭に出す作品の情報。 */
 export interface ReaderHead {
-  /** 作品の画面の ID（旧棚は番号、新しい棚は UUID）。 */
+  /** 作品の画面の ID（棚は UUID、プレビューの見本は番号）。 */
   id: number | string;
-  /** 読書位置・しおりを引く鍵（`readingKeyOf`）。旧棚から移した作品は、新しい棚でも旧棚の番号。 */
+  /** 読書位置・しおりを引く鍵（`readingKeyOf`）。旧棚から移した作品は、まだ旧棚の番号のことがある。 */
   readingKey: number | string;
   title: string;
   authorName: string;
@@ -36,15 +36,15 @@ export interface ReaderHead {
   hasDraft: boolean;
 }
 
-/** 作品の頭。旧棚なら旧棚の読む画面の情報も持つ（前後の作品・保存フォルダー）。 */
+/** 作品の頭。見本なら見本の読む画面の情報も持つ（前後の作品）。 */
 export interface ReaderHeadData {
   head: ReaderHead;
   legacy: ReaderMetadata | null;
 }
 
 /**
- * 作品の頭の問い合わせ。取ってきたものは作品の画面と同じ鍵・同じ形で持ち（旧棚は
- * `reader-metadata`、新しい棚は `library-v2-work`）、読む画面は `select` で読み替える。
+ * 作品の頭の問い合わせ。取ってきたものは作品の画面と同じ鍵・同じ形で持ち（棚は
+ * `library-v2-work`、見本は `reader-metadata`）、読む画面は `select` で読み替える。
  */
 export interface ReaderHeadQuery {
   queryKey: readonly unknown[];
@@ -53,9 +53,9 @@ export interface ReaderHeadQuery {
 }
 
 export interface ReaderSource {
-  /** 問い合わせの鍵。旧棚は番号、新しい棚は UUID。読書位置・しおりは頭の `readingKey` で引く。 */
+  /** 問い合わせの鍵。棚は UUID、見本は番号。読書位置・しおりは頭の `readingKey` で引く。 */
   key: number | string;
-  /** 新しい棚の作品。書き換える操作（編集）と、旧棚の保存フォルダー・前後の作品は使えない。 */
+  /** 棚の作品（見本でない）。 */
   shelf: boolean;
   head: ReaderHeadQuery;
   /** 本文の一ページ。`version` が null なら今読む本文、`page` は 0 から。 */
@@ -65,7 +65,7 @@ export interface ReaderSource {
   /** 本文の `data-local-path` を URL にする。 */
   assetUrl(localPath: string | null | undefined): string | null;
   /**
-   * 棚の読書位置（新しい棚だけ。正本に切り替えた棚でなければ命令が断る）。ページは 1 から、
+   * 棚の読書位置（棚の作品だけ）。ページは 1 から、
    * `ratio` はそのページの中の割合。端末の細かい位置（何行目か）は端末の記録に残す。
    */
   shelfReading?: {
@@ -74,7 +74,7 @@ export interface ReaderSource {
   };
 }
 
-function legacyHead(doc: ReaderMetadata): ReaderHead {
+function demoHead(doc: ReaderMetadata): ReaderHead {
   const work = doc.download;
   const edit = doc.activeEditRevision;
   return {
@@ -96,25 +96,20 @@ function legacyHead(doc: ReaderMetadata): ReaderHead {
   };
 }
 
-/** 旧棚の作品。ブラウザのプレビューでは見本の作品を読む。 */
-export function legacyReaderSource(id: number): ReaderSource {
-  const runtime = isTauriRuntime();
+/** ブラウザのプレビューの見本の作品。 */
+export function previewReaderSource(id: number): ReaderSource {
   const demo = () => getDemoReader(id);
   return {
     key: id,
     shelf: false,
     head: {
       queryKey: ["reader-metadata", id],
-      queryFn: (): Promise<ReaderMetadata> => runtime
-        ? getReaderMetadata(id)
-        : Promise.resolve((() => { const sample = demo(); return { download: sample.download, versions: sample.versions, assetCount: sample.assets.length, isEdited: sample.isEdited, activeEditRevision: sample.activeEditRevision, draftEditRevision: null }; })()),
-      select: (data) => ({ head: legacyHead(data as ReaderMetadata), legacy: data as ReaderMetadata }),
+      queryFn: (): Promise<ReaderMetadata> => Promise.resolve((() => { const sample = demo(); return { download: sample.download, versions: sample.versions, assetCount: sample.assets.length, isEdited: sample.isEdited, activeEditRevision: sample.activeEditRevision, draftEditRevision: null }; })()),
+      select: (data) => ({ head: demoHead(data as ReaderMetadata), legacy: data as ReaderMetadata }),
     },
-    page: (version, page) => runtime
-      ? getReaderContentPage(id, version, page)
-      : Promise.resolve((() => { const sample = demo(); return { page: 0, pageCount: 1, html: sample.html, plainText: sample.plainText, totalPlainTextChars: sample.plainText.length, sourcePageStarts: [0] }; })()),
-    outline: (version) => runtime ? getReaderOutline(id, version) : Promise.resolve([]),
-    search: (term, version) => runtime ? searchReaderContent(id, term, version) : Promise.resolve([]),
+    page: () => Promise.resolve((() => { const sample = demo(); return { page: 0, pageCount: 1, html: sample.html, plainText: sample.plainText, totalPlainTextChars: sample.plainText.length, sourcePageStarts: [0] }; })()),
+    outline: () => Promise.resolve([]),
+    search: () => Promise.resolve([]),
     assetUrl: getAssetUrl,
   };
 }
@@ -141,12 +136,11 @@ function shelfHead(work: ShelfWork): ReaderHead {
 }
 
 /**
- * 新しい棚の作品（試験中・読むだけ）。版の番号は、その番号の版の保存状態（snapshot）に
- * 読み替えて渡す。番号の無い版は今読む本文（有効な編集があればそれ）。
+ * 棚の作品。版の番号は、その番号の版の保存状態（snapshot）に読み替えて渡す。番号の無い版は
+ * 今読む本文（有効な編集があればそれ）。
  */
 export function shelfReaderSource(id: string): ReaderSource {
-  // 版の番号を読み替えるのにも同じ作品の頭を使う。新しい棚は読むだけなので、開いている
-  // あいだに変わらない。
+  // 版の番号を読み替えるのにも同じ作品の頭を使う。
   let work: Promise<ShelfWork> | null = null;
   const load = () => {
     work ??= libraryV2Work(id).catch((error: unknown) => { work = null; throw error; });

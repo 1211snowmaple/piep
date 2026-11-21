@@ -1,4 +1,4 @@
-//! 実行キューの排他・復旧・保存結果の所属と、旧キューからの引き継ぎを確かめる。
+//! 実行キューの排他・復旧・保存結果の所属を確かめる。
 use super::*;
 use crate::library::WorkSave;
 
@@ -14,10 +14,8 @@ fn fixture() -> (Temp, AppState, Arc<Library>) {
     std::fs::create_dir_all(&root).unwrap();
     let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
     library.switch_over().unwrap();
-    let mut state =
-        AppState::new(Database::open(&root.join("old.db"), &root.join("downloads")).unwrap());
-    state.library_v2 = Arc::new(crate::commands::library_v2::LibraryV2::with_test_library(
-        library.clone(),
+    let state = AppState::new(Arc::new(
+        crate::commands::library_v2::LibraryV2::with_test_library(library.clone()),
     ));
     (Temp(root), state, library)
 }
@@ -63,7 +61,7 @@ fn native_queue_fixture() {
     let first = state.jobs().next_update_job_item(&job).unwrap().unwrap();
     state
         .jobs()
-        .complete_saved_item(first.id, "saved", None, None, Some(work))
+        .complete_saved_item(first.id, "saved", None, Some(work))
         .unwrap();
     state.jobs().next_update_job_item(&job).unwrap().unwrap();
     state
@@ -81,16 +79,8 @@ fn save(library: &Library, key: &str) -> LibraryId {
 }
 
 #[test]
-fn native_queue_preserves_exact_inputs_stop_resume_recovery_and_old_database() {
+fn native_queue_preserves_exact_inputs_stop_resume_and_recovery() {
     let (_temp, state, library) = fixture();
-    state
-        .db
-        .create_update_job("old-job", &request(), &[])
-        .unwrap();
-    state
-        .db
-        .set_update_job_status("old-job", "completed", None)
-        .unwrap();
     let job = id();
     let input = item("1", "work", "queued");
     state
@@ -114,7 +104,6 @@ fn native_queue_preserves_exact_inputs_stop_resume_recovery_and_old_database() {
             .unwrap(),
         ("blob".into(), 16)
     );
-    assert_eq!(state.db.list_update_jobs().unwrap().len(), 1);
     assert_eq!(state.jobs().list_update_jobs().unwrap().len(), 1);
     assert!(state.jobs().update_job_watch_saved(&job).unwrap());
     assert!(state.jobs().update_job_new_works_only(&job).unwrap());
@@ -153,7 +142,7 @@ fn native_queue_preserves_exact_inputs_stop_resume_recovery_and_old_database() {
     );
     state
         .jobs()
-        .complete_update_job_item(first.id, "failed", Some("当時の失敗"), None)
+        .complete_update_job_item(first.id, "failed", Some("当時の失敗"))
         .unwrap();
     state
         .jobs()
@@ -167,10 +156,6 @@ fn native_queue_preserves_exact_inputs_stop_resume_recovery_and_old_database() {
     assert_eq!(
         state.jobs().update_job_snapshot(&job).unwrap().error_count,
         0
-    );
-    assert_eq!(
-        state.db.update_job_status_value("old-job").unwrap(),
-        "completed"
     );
     library.verify().unwrap();
 }
@@ -188,7 +173,7 @@ fn results_belong_to_the_work_and_survive_backup_without_numeric_legacy_ids() {
     let claimed = state.jobs().next_update_job_item(&job).unwrap().unwrap();
     assert!(state
         .jobs()
-        .complete_saved_item(claimed.id, "saved", None, None, Some(wrong))
+        .complete_saved_item(claimed.id, "saved", None, Some(wrong))
         .is_err());
     assert_eq!(
         state.jobs().update_job_snapshot(&job).unwrap().saved_count,
@@ -196,7 +181,7 @@ fn results_belong_to_the_work_and_survive_backup_without_numeric_legacy_ids() {
     );
     state
         .jobs()
-        .complete_saved_item(claimed.id, "saved", None, None, Some(work))
+        .complete_saved_item(claimed.id, "saved", None, Some(work))
         .unwrap();
     let snapshot = state.jobs().update_job_snapshot(&job).unwrap();
     assert_eq!(
@@ -211,7 +196,7 @@ fn results_belong_to_the_work_and_survive_backup_without_numeric_legacy_ids() {
     );
     state
         .jobs()
-        .complete_saved_item(claimed.id, "saved", None, None, Some(work))
+        .complete_saved_item(claimed.id, "saved", None, Some(work))
         .unwrap();
     assert_eq!(
         state.jobs().update_job_snapshot(&job).unwrap().saved_count,
@@ -228,7 +213,6 @@ fn results_belong_to_the_work_and_survive_backup_without_numeric_legacy_ids() {
         Some(work)
     );
     copy.verify().unwrap();
-    assert!(state.db.list_update_jobs().unwrap().is_empty());
 }
 
 #[test]
@@ -425,96 +409,3 @@ fn candidate_selection_is_scoped_and_resume_cannot_race_another_active_job() {
     assert_eq!(state.jobs().list_update_jobs().unwrap().len(), 1);
     library.verify().unwrap();
 }
-
-#[test]
-fn previous_queue_import_is_atomic_idempotent_and_does_not_resurrect_cleared_jobs() {
-    let (_temp, state, library) = fixture();
-    let input = item("1", "candidate", "queued");
-    state
-        .db
-        .create_update_job("previous-runtime", &request(), std::slice::from_ref(&input))
-        .unwrap();
-    let original = state
-        .db
-        .next_update_job_item("previous-runtime")
-        .unwrap()
-        .unwrap();
-    state
-        .db
-        .append_update_job_log("previous-runtime", "future-type", "当時の操作記録")
-        .unwrap();
-    library.conn.lock().unwrap().execute_batch("CREATE TRIGGER reject_queue_import BEFORE INSERT ON execution_logs WHEN NEW.log_type='future-type' BEGIN SELECT RAISE(ABORT,'injected failure'); END").unwrap();
-    assert!(state.jobs().import_previous_queue().is_err());
-    assert!(state.jobs().list_update_jobs().unwrap().is_empty());
-    assert_eq!(
-        state
-            .db
-            .update_job_status_value("previous-runtime")
-            .unwrap(),
-        "running"
-    );
-    library
-        .conn
-        .lock()
-        .unwrap()
-        .execute_batch("DROP TRIGGER reject_queue_import")
-        .unwrap();
-    state.jobs().import_previous_queue().unwrap();
-    state.jobs().import_previous_queue().unwrap();
-    let jobs = state.jobs().list_update_jobs().unwrap();
-    assert_eq!(jobs.len(), 1);
-    let job = &jobs[0].job_id;
-    assert_ne!(job, "previous-runtime");
-    assert!(job.parse::<LibraryId>().is_ok());
-    let snapshot = state.jobs().update_job_snapshot(job).unwrap();
-    assert_eq!(snapshot.logs.last().unwrap().message, "当時の操作記録");
-    assert_eq!(snapshot.logs.last().unwrap().log_type, "future-type");
-    {
-        let conn = library.conn.lock().unwrap();
-        assert_eq!(
-            conn.query_row("SELECT source_sequence FROM execution_items", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            original.id
-        );
-        let file = conn
-            .query_row("SELECT payload_file_id FROM execution_items", [], |r| {
-                r.get::<_, Vec<u8>>(0)
-            })
-            .unwrap();
-        assert_eq!(
-            library
-                .read_job_payload(&conn, crate::library::Fingerprint(file.try_into().unwrap()))
-                .unwrap(),
-            input.payload_json
-        );
-    }
-    state.jobs().recover_update_jobs_on_startup().unwrap();
-    assert_eq!(state.jobs().update_job_status_value(job).unwrap(), "paused");
-    assert!(state.jobs().next_update_job_item(job).unwrap().is_none());
-    state.jobs().clear_update_job(job).unwrap();
-    state.jobs().import_previous_queue().unwrap();
-    assert!(state.jobs().list_update_jobs().unwrap().is_empty());
-    assert_eq!(
-        state
-            .db
-            .update_job_status_value("previous-runtime")
-            .unwrap(),
-        "running"
-    );
-    assert_eq!(
-        state
-            .db
-            .update_job_snapshot("previous-runtime")
-            .unwrap()
-            .logs
-            .last()
-            .unwrap()
-            .message,
-        "当時の操作記録"
-    );
-    library.verify().unwrap();
-}
-
-#[path = "job_queue_migration_tests.rs"]
-mod migration;

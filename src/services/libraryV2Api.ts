@@ -15,10 +15,9 @@ export const SHELF_WORK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
 
 export type LibraryV2Status =
   | { state: "starting" }
-  | { state: "absent"; path: string }
   | { state: "opening"; path: string }
   | { state: "indexing"; path: string }
-  | { state: "ready"; path: string; unresolved: string[]; switched: boolean }
+  | { state: "ready"; path: string }
   | { state: "failed"; path: string; message: string };
 
 export type ShelfSort =

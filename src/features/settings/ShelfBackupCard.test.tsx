@@ -23,7 +23,7 @@ beforeEach(() => {
   api.state.mockResolvedValue({ pending: null, last: null });
 });
 
-const renderCard = (writable = true) => render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><AppRouter><ShelfBackupCard runtime busy={false} writable={writable} /></AppRouter></QueryClientProvider></MantineProvider>);
+const renderCard = () => render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><AppRouter><ShelfBackupCard runtime busy={false} /></AppRouter></QueryClientProvider></MantineProvider>);
 
 it("makes a backup as a new folder inside the chosen one", async () => {
   dialog.open.mockResolvedValue("C:\\backups");
@@ -74,19 +74,25 @@ it("takes in an author archive instead of swapping the shelf, and tells what it 
   await waitFor(() => expect(show).toHaveBeenCalledWith(expect.objectContaining({ title: "アーカイブを取り込みました", message: "2作品を足しました。9作品を棚に戻しました。1作品はすでに棚にあります。" })));
 });
 
-it("does not take in an archive made from another shelf or into a shelf not yet switched", async () => {
+it("does not take in an archive made from another shelf", async () => {
   dialog.open.mockResolvedValue("D:/archives/作者");
   api.inspect.mockResolvedValue({ path: "D:/archives/作者", works: 12, files: 40, bytes: 2048, sameLibrary: false, switched: false, partial: true });
-  const { unmount } = renderCard();
+  renderCard();
   fireEvent.click(await screen.findByRole("button", { name: "バックアップから復元" }));
   expect(await screen.findByText(/別の棚から作ったアーカイブなので、取り込めません/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "この棚に取り込む" })).toBeDisabled();
-  unmount();
-  api.inspect.mockResolvedValue({ path: "D:/archives/作者", works: 12, files: 40, bytes: 2048, sameLibrary: true, switched: false, partial: true });
-  renderCard(false);
-  fireEvent.click(await screen.findByRole("button", { name: "バックアップから復元" }));
-  const locked = await screen.findByRole("button", { name: "この棚に取り込む（新しい棚では変えられません）" });
-  expect(locked).toHaveAttribute("aria-disabled", "true");
-  fireEvent.click(locked);
   expect(api.importArchive).not.toHaveBeenCalled();
+});
+
+// 棚は切り替えた棚しか開かないので、切り替える前の写しでは入れ替えない。
+it("does not swap the shelf for a copy made before switching over", async () => {
+  dialog.open.mockResolvedValue("D:/old-shelf");
+  api.inspect.mockResolvedValue({ path: "D:/old-shelf", works: 1200, files: 30000, bytes: 1024, sameLibrary: true, switched: false });
+  renderCard();
+  fireEvent.click(await screen.findByRole("button", { name: "バックアップから復元" }));
+  expect(await screen.findByText(/正本に切り替える前の写しです/)).toBeInTheDocument();
+  const swap = screen.getByRole("button", { name: "次の起動で入れ替える" });
+  expect(swap).toBeDisabled();
+  fireEvent.click(swap);
+  expect(api.schedule).not.toHaveBeenCalled();
 });

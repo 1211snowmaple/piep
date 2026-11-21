@@ -17,7 +17,7 @@ import { isTauriRuntime } from "@/services/dbApi";
  * 一度作れば残り、次に開いたときはモデルを呼ばずに出る。
  */
 type RecapProps = {
-  /** 旧棚は番号、新しい棚は作品の ID。両方とも同じ棚の作品であること。 */
+  /** 棚の作品の ID。 */
   currentId: AssistWork;
   previous: { id: AssistWork; title: string };
 };
@@ -32,7 +32,6 @@ function RecapForPair({
 }: RecapProps) {
   const { engine, body, settings } = useAssist("reader_recap");
   const queryClient = useQueryClient();
-  const shelf = typeof currentId === "string";
   const subjectKey = `${currentId}:${previous.id}`;
   const key = ["assist-note", "work", subjectKey, "recap"] as const;
   const noteEngine = settings ? toEngine(settings, "reader_recap") : null;
@@ -40,7 +39,7 @@ function RecapForPair({
   // 保存してあるものを読むだけ。開いただけではモデルを呼ばない。
   const note = useQuery({
     queryKey: [...key, noteEngine],
-    queryFn: () => loadNote("work", subjectKey, "recap", noteEngine, shelf),
+    queryFn: () => loadNote("work", subjectKey, "recap", noteEngine),
     enabled: isTauriRuntime(),
   });
 
@@ -54,7 +53,7 @@ function RecapForPair({
       notifications.show({ color: "red", title: "前回のあらすじを作れません", message: errorMessage(error) }),
   });
   const discard = useMutation({
-    mutationFn: () => deleteNote("work", subjectKey, "recap", shelf),
+    mutationFn: () => deleteNote("work", subjectKey, "recap"),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: key }),
   });
 

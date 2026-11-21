@@ -2,24 +2,21 @@ import { useState } from "react";
 import { Select } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import { useQuery } from "@tanstack/react-query";
-import { searchEntityFacets } from "@/services/dbApi";
 import { demoFacets } from "@/mocks/demoData";
 import { searchShelfEntities } from "./shelfV2";
 
 export interface SeriesSelection { key: string; source: string | null; label: string }
 
-export function SeriesFilterSelect({ value, onChange, runtime, shelfMode = false }: { value: SeriesSelection | null; onChange: (value: SeriesSelection | null) => void; runtime: boolean; shelfMode?: boolean }) {
+export function SeriesFilterSelect({ value, onChange, runtime }: { value: SeriesSelection | null; onChange: (value: SeriesSelection | null) => void; runtime: boolean }) {
   const [query, setQuery] = useState("");
   const [opened, setOpened] = useState(false);
   const [debounced] = useDebouncedValue(query.trim(), 180);
   const candidates = useQuery({
-    queryKey: ["filter-series", debounced, shelfMode],
+    queryKey: ["filter-series", debounced],
     queryFn: async () => {
       // A mixed suggestion budget can be filled by tags/authors before any
       // series survives. Query the same series listing as the library instead.
-      const result = !runtime ? null
-        : shelfMode ? (await searchShelfEntities("series", debounced, 30, 0, null, "work_count", null, null)).items
-        : await searchEntityFacets("series", debounced, 30, 0);
+      const result = runtime ? (await searchShelfEntities("series", debounced, 30, 0, null, "work_count", null, null)).items : null;
       const listed = result ?? demoFacets.series.filter((item) => item.displayName.toLocaleLowerCase("ja-JP").includes(debounced.toLocaleLowerCase("ja-JP")));
       return listed.map((item) => ({ key: item.sourceKey, source: item.source, label: item.displayName }));
     },

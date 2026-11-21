@@ -7,13 +7,11 @@ use super::http::{
 use super::standalone::{assemble, command_admin_pair, command_init, ServerPaths, StandaloneParts};
 use super::store::{random_token, Role, ServerStore};
 use super::sync_receive::{BindEntry, CommitRequest, ManifestEntry, SyncError};
-use super::sync_send::{
-    admin_post, pair_admin, prepare_snapshot, send_prepared, RemoteServer, SendHandle,
-};
+use super::sync_send::{admin_post, pair_admin, RemoteServer, SendHandle};
+use super::sync_send_v1::{prepare_snapshot, send_prepared};
 use super::API_VERSION;
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{Database, NewDownload, WorkCollectionInput, WorkCollectionMemberInput};
-use crate::AppState;
 use reqwest::{header, StatusCode};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -55,7 +53,18 @@ struct Fixture {
     app_data: PathBuf,
     work_id: i64,
     collection_id: String,
-    state: Arc<AppState>,
+    db: Arc<Database>,
+}
+
+impl Fixture {
+    /// この本棚を旧 API で配る内蔵サーバーの本棚。
+    fn library(&self) -> super::library::Library {
+        super::library::Library(Arc::new(super::library::SwappableDb::holding(
+            self.app_data.join("piep.db"),
+            self.app_data.join("downloads"),
+            Arc::clone(&self.db),
+        )))
+    }
 }
 
 fn write_image(path: &Path, color: [u8; 3]) {
@@ -220,7 +229,7 @@ fn fixture(root: &Path) -> Fixture {
         app_data,
         work_id,
         collection_id: collection.summary.id,
-        state: Arc::new(AppState::new(db)),
+        db: Arc::new(db),
     }
 }
 
@@ -580,7 +589,7 @@ async fn embedded_https_requires_pairing_and_revocation_takes_effect() {
     let server = DesktopServer::new(&fixture.app_data).expect("server");
     server
         .start_embedded(
-            Arc::clone(&fixture.state),
+            fixture.library(),
             EmbeddedSettings {
                 ip: Some("127.0.0.1".into()),
                 ..Default::default()
@@ -876,19 +885,17 @@ fn entity_series_cursor_is_rejected_after_reopening_the_library() {
     let root = TestRoot::created("entity-series-reopen");
     let first = fixture(&root.0);
     let (second_id, _) = add_work(
-        &first.state.db,
+        &first.db,
         &first.app_data.join("downloads"),
         "second-series-work",
         "別作品",
         "本文",
     );
     first
-        .state
         .db
         .upsert_download_series(second_id, "pixiv", "second-series", "別シリーズ", Some(1))
         .unwrap();
     let page = first
-        .state
         .db
         .list_entity_series_paged(
             "pixiv",
@@ -901,7 +908,7 @@ fn entity_series_cursor_is_rejected_after_reopening_the_library() {
         )
         .unwrap();
     let cursor = page.next_cursor.expect("more than one series");
-    let old_generation = first.state.db.library_generation().unwrap();
+    let old_generation = first.db.library_generation().unwrap();
     let app_data = first.app_data.clone();
     drop(first);
 
@@ -983,14 +990,14 @@ fn admin_secret(paths: &ServerPaths) -> String {
 }
 
 async fn send(
-    state: &Arc<AppState>,
+    db: &Arc<Database>,
     app_data: &Path,
     outgoing: &Path,
     remote: &RemoteServer,
     token: &str,
 ) -> super::sync_receive::CommitOutcome {
     let snapshot = outgoing.join("piep-snapshot.db");
-    let (report, files, skipped) = prepare_snapshot(state, app_data, &snapshot)
+    let (report, files, skipped) = prepare_snapshot(db, app_data, &snapshot)
         .await
         .expect("snapshot");
     assert_eq!(report.outside, 0, "app data の外を指すパスがあります");
@@ -1063,14 +1070,7 @@ async fn a_library_sent_from_the_desktop_can_be_read_from_the_standalone_server(
         .expect("search before send");
     assert_eq!(empty.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-    let first = send(
-        &fixture.state,
-        &fixture.app_data,
-        &outgoing,
-        &remote,
-        &token,
-    )
-    .await;
+    let first = send(&fixture.db, &fixture.app_data, &outgoing, &remote, &token).await;
     assert!(!first.unchanged);
     assert_eq!(first.generation, 1);
     assert_eq!(first.works, 1);
@@ -1122,34 +1122,20 @@ async fn a_library_sent_from_the_desktop_can_be_read_from_the_standalone_server(
     assert_reading_api(&client, &url, &reader).await;
 
     // 何も変えなければ、何も動かさない。
-    let second = send(
-        &fixture.state,
-        &fixture.app_data,
-        &outgoing,
-        &remote,
-        &token,
-    )
-    .await;
+    let second = send(&fixture.db, &fixture.app_data, &outgoing, &remote, &token).await;
     assert!(second.unchanged, "{second:?}");
     assert_eq!(second.generation, 1);
 
     // 1 作品足すと、そのファイルだけが増える。
     let storage = fixture.app_data.join("downloads");
     let (_, new_body) = add_work(
-        &fixture.state.db,
+        &fixture.db,
         &storage,
         "server-test-2",
         "二つ目の作品",
         "追加された本文",
     );
-    let third = send(
-        &fixture.state,
-        &fixture.app_data,
-        &outgoing,
-        &remote,
-        &token,
-    )
-    .await;
+    let third = send(&fixture.db, &fixture.app_data, &outgoing, &remote, &token).await;
     assert_eq!(third.generation, 2);
     assert_eq!(third.works, 2);
     assert_eq!(third.files_added, 2, "{third:?}");
@@ -1178,14 +1164,7 @@ async fn a_library_sent_from_the_desktop_can_be_read_from_the_standalone_server(
 
     // 手元で消えたファイルは、捨てずに library-trash へ退ける。
     fs::remove_file(&new_body).expect("remove local body");
-    let fourth = send(
-        &fixture.state,
-        &fixture.app_data,
-        &outgoing,
-        &remote,
-        &token,
-    )
-    .await;
+    let fourth = send(&fixture.db, &fixture.app_data, &outgoing, &remote, &token).await;
     assert_eq!(fourth.files_removed, 1, "{fourth:?}");
     assert!(!paths
         .library()
@@ -2820,14 +2799,7 @@ async fn a_favorite_from_the_phone_reaches_the_desktop_and_survives_a_send() {
     let token = pair_admin(&remote, &admin_secret(&paths), "test desktop")
         .await
         .expect("pair admin");
-    send(
-        &fixture.state,
-        &fixture.app_data,
-        &outgoing,
-        &remote,
-        &token,
-    )
-    .await;
+    send(&fixture.db, &fixture.app_data, &outgoing, &remote, &token).await;
     let pairing = admin_post(
         &remote,
         &token,
@@ -2888,20 +2860,13 @@ async fn a_favorite_from_the_phone_reaches_the_desktop_and_survives_a_send() {
     // デスクトップ版が取り込む前に別の変更を送っても、送られてきた本棚へ当て直す。
     let storage = fixture.app_data.join("downloads");
     add_work(
-        &fixture.state.db,
+        &fixture.db,
         &storage,
         "server-test-2",
         "二つ目の作品",
         "追加の本文",
     );
-    let replaced = send(
-        &fixture.state,
-        &fixture.app_data,
-        &outgoing,
-        &remote,
-        &token,
-    )
-    .await;
+    let replaced = send(&fixture.db, &fixture.app_data, &outgoing, &remote, &token).await;
     assert!(!replaced.unchanged);
     assert!(favorite_on_server(&client, &url, &reader).await);
 
@@ -2913,7 +2878,6 @@ async fn a_favorite_from_the_phone_reaches_the_desktop_and_survives_a_send() {
     assert_eq!(changes["items"].as_array().expect("items").len(), 1);
     let cursor = changes["cursor"].as_i64().expect("cursor");
     fixture
-        .state
         .db
         .set_favorite_by_source("pixiv", "server-test", true)
         .expect("apply")
@@ -2934,68 +2898,10 @@ async fn a_favorite_from_the_phone_reaches_the_desktop_and_survives_a_send() {
     assert!(after["items"].as_array().expect("items").is_empty());
 
     // 取り込んだあとは、送った本棚がそのまま正しい。
-    let third = send(
-        &fixture.state,
-        &fixture.app_data,
-        &outgoing,
-        &remote,
-        &token,
-    )
-    .await;
+    let third = send(&fixture.db, &fixture.app_data, &outgoing, &remote, &token).await;
     assert!(!third.unchanged);
     assert!(favorite_on_server(&client, &url, &reader).await);
     parts.receiver.stop_index_catch_up();
-}
-
-#[tokio::test]
-async fn the_embedded_server_writes_a_favorite_to_the_desktop_library_and_says_so() {
-    let root = TestRoot::new("favorite-embedded");
-    let fixture = fixture(&root.0);
-    let store = Arc::new(ServerStore::open(&root.0.join("state.db")).expect("store"));
-    let context = super::http::ServerContext::new(
-        super::library::Library::App(Arc::clone(&fixture.state)),
-        Arc::clone(&store),
-        fixture.app_data.clone(),
-        None,
-        None,
-        None,
-    );
-    let told = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counter = Arc::clone(&told);
-    context.set_favorites_listener(Arc::new(move || {
-        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }));
-    let url = spawn_plain(combined_router(context));
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .expect("client");
-    let secret = store
-        .issue_pairing(Role::Reader, Duration::from_secs(60))
-        .expect("pairing");
-    let credentials = pair_with(&client, &url, &secret).await;
-    let reader = credentials["token"].as_str().expect("token").to_string();
-
-    let response = put_favorite(&client, &url, &reader, "server-test", true, 1_000).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        fixture
-            .state
-            .db
-            .get_download(fixture.work_id)
-            .expect("work")
-            .favorite
-    );
-    assert_eq!(told.load(std::sync::atomic::Ordering::SeqCst), 1);
-    // 内蔵サーバーは送信で入れ替わらないので、記録は残さない。
-    assert!(store
-        .favorite_changes_since(0, 10)
-        .expect("changes")
-        .is_empty());
-    // 無い作品は 404 で、画面へも知らせない。
-    let missing = put_favorite(&client, &url, &reader, "no-such-work", true, 2_000).await;
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-    assert_eq!(told.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -3242,7 +3148,7 @@ async fn mobile_reader_emulator_fixture() {
     let server = DesktopServer::new(&fixture.app_data).unwrap();
     server
         .start_embedded(
-            Arc::clone(&fixture.state),
+            fixture.library(),
             EmbeddedSettings {
                 ip: Some("127.0.0.1".into()),
                 ..Default::default()
@@ -3272,14 +3178,13 @@ async fn mobile_reader_emulator_fixture() {
 fn add_mobile_version_fixture(fixture: &Fixture) -> i64 {
     let storage = fixture.app_data.join("downloads");
     let (id, old) = add_work(
-        &fixture.state.db,
+        &fixture.db,
         &storage,
         "990001",
         "読書操作の確認",
         "[chapter:第一版] 第一版の本文です。",
     );
     fixture
-        .state
         .db
         .insert_version(&crate::database::NewVersion {
             download_id: id,
@@ -3301,7 +3206,6 @@ fn add_mobile_version_fixture(fixture: &Fixture) -> i64 {
     let conn = rusqlite::Connection::open(fixture.app_data.join("piep.db")).unwrap();
     conn.execute("UPDATE downloads SET current_version=2, content_hash='qa-v2', json_path=?1, original_json_path=?1 WHERE id=?2", rusqlite::params![next.to_string_lossy(), id]).unwrap();
     fixture
-        .state
         .db
         .insert_version(&crate::database::NewVersion {
             download_id: id,
@@ -3316,16 +3220,15 @@ fn add_mobile_version_fixture(fixture: &Fixture) -> i64 {
             change_summary: None,
         })
         .unwrap();
-    fixture.state.db.reindex_download(id).unwrap();
+    fixture.db.reindex_download(id).unwrap();
     add_work(
-        &fixture.state.db,
+        &fixture.db,
         &storage,
         "990002",
         "リンク先の作品",
         "リンク先の本文です。",
     );
     fixture
-        .state
         .db
         .upsert_download_person(id, "pixiv", "12345", "author", "リンク先作者")
         .unwrap();
@@ -3340,7 +3243,7 @@ async fn explicit_reader_versions_return_their_own_content_hash_and_outline() {
     let server = DesktopServer::new(&fixture.app_data).unwrap();
     server
         .start_embedded(
-            Arc::clone(&fixture.state),
+            fixture.library(),
             EmbeddedSettings {
                 ip: Some("127.0.0.1".into()),
                 ..Default::default()

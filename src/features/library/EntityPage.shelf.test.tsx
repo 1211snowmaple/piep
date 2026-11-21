@@ -6,7 +6,6 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import EntityPage from "@/features/library/EntityPage";
-import { SHELF_V2_PREFERENCE_KEY } from "@/features/library/shelfV2";
 import type { ShelfCard, ShelfEntityHead, ShelfSeriesFacet } from "@/services/libraryV2Api";
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
@@ -25,12 +24,8 @@ const api = vi.hoisted(() => ({
   libraryV2Decorations: vi.fn(),
 }));
 const refresh = vi.hoisted(() => vi.fn());
-const archive = vi.hoisted(() => ({ exportShelf: vi.fn(), exportLegacy: vi.fn(), choose: vi.fn() }));
+const archive = vi.hoisted(() => ({ exportShelf: vi.fn(), choose: vi.fn() }));
 vi.mock("@/services/shelfBackupApi", () => ({ libraryV2ExportEntityArchive: archive.exportShelf }));
-vi.mock("@/services/archiveApi", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/archiveApi")>()),
-  exportEntityZip: archive.exportLegacy,
-}));
 vi.mock("@/services/dialogApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dialogApi")>()),
   openSingleDialog: archive.choose,
@@ -42,39 +37,12 @@ vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
   ...api,
 }));
-// 旧棚の命令は一つも呼ばれないこと。
-const legacy = vi.hoisted(() => ({
-  getPerson: vi.fn(),
-  getSeries: vi.fn(),
-  searchDownloadsV2: vi.fn(),
-  listEntityVersions: vi.fn(),
-  getLatestEntityProfileJson: vi.fn(),
-  listEntitySeriesPage: vi.fn(),
-  listEntityTags: vi.fn(),
-  listCollectionsForPerson: vi.fn(),
-  listCollectionsForSeries: vi.fn(),
-}));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  getPerson: legacy.getPerson,
-  getSeries: legacy.getSeries,
-  searchDownloadsV2: legacy.searchDownloadsV2,
-  listEntityVersions: legacy.listEntityVersions,
-  getLatestEntityProfileJson: legacy.getLatestEntityProfileJson,
   getUpdateTarget: watching.get,
   upsertUpdateTarget: watching.upsert,
   refreshEntityProfile: refresh,
-}));
-vi.mock("@/services/shelfApi", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/shelfApi")>()),
-  listEntitySeriesPage: legacy.listEntitySeriesPage,
-  listEntityTags: legacy.listEntityTags,
-}));
-vi.mock("@/services/collectionApi", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/collectionApi")>()),
-  listCollectionsForPerson: legacy.listCollectionsForPerson,
-  listCollectionsForSeries: legacy.listCollectionsForSeries,
 }));
 
 const PERSON = "0195f1c2-0000-7000-8000-0000000000a1";
@@ -176,12 +144,11 @@ describe("author and series pages on the new shelf", () => {
 
   beforeEach(() => {
     window.localStorage.clear();
-    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "true");
     vi.clearAllMocks();
     watching.get.mockReset().mockResolvedValue(null);
     watching.upsert.mockReset().mockResolvedValue(undefined);
     watching.check.mockReset().mockResolvedValue(undefined);
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [] });
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     api.libraryV2Entity.mockResolvedValue(head());
     api.libraryV2EntityTags.mockResolvedValue([{ name: "雨", count: 2 }]);
     api.libraryV2PersonSeries.mockResolvedValue({ items: [facet], next: null, total: 1 });
@@ -195,7 +162,6 @@ describe("author and series pages on the new shelf", () => {
     renderEntity("person", "#/people/pixiv/77");
     expect(await screen.findByRole("heading", { name: "作者一" })).toBeInTheDocument();
     expect(api.libraryV2Entity).toHaveBeenCalledWith("person", "pixiv", "77");
-    expect(screen.getByText("新しい棚（試験中）", { selector: ".mantine-Badge-label" })).toBeInTheDocument();
     // 作品はこの作者の棚の ID で絞り、公開日の新しい順。
     await waitFor(() => expect(api.libraryV2Search).toHaveBeenCalled());
     const [, query] = api.libraryV2Search.mock.calls[0];
@@ -206,10 +172,9 @@ describe("author and series pages on the new shelf", () => {
     expect(api.libraryV2PersonSeries).toHaveBeenCalledWith(PERSON, expect.objectContaining({ sort: "work_count", offset: 0 }));
     // 画像は棚のファイルの識別子から。
     expect(document.querySelector(`img[src="http://piep-library.localhost/${ICON}"]`)).not.toBeNull();
-    for (const call of Object.values(legacy)) expect(call).not.toHaveBeenCalled();
   });
 
-  it("writes the author's archive from the shelf, even before switching", async () => {
+  it("writes the author's archive from the shelf", async () => {
     const show = vi.spyOn(notifications, "show");
     archive.choose.mockResolvedValue("D:/archives");
     archive.exportShelf.mockResolvedValue({ path: "D:/archives/作者一", works: 3 });
@@ -218,30 +183,14 @@ describe("author and series pages on the new shelf", () => {
     fireEvent.click(screen.getByRole("button", { name: "アーカイブ" }));
     await waitFor(() => expect(archive.exportShelf).toHaveBeenCalledWith("person", "pixiv", "77", "D:/archives", "作者一"));
     await waitFor(() => expect(show).toHaveBeenCalledWith(expect.objectContaining({ title: "3作品を書き出しました", message: "D:/archives/作者一" })));
-    expect(archive.exportLegacy).not.toHaveBeenCalled();
   });
 
-  it("keeps the controls that write to the old shelf in place but unpressable", async () => {
-    renderEntity("person", "#/people/pixiv/77");
-    await screen.findByRole("heading", { name: "作者一" });
-    expect(screen.getByRole("button", { name: "情報を更新（新しい棚では変えられません）" })).toBeDisabled();
-    expect(screen.getByRole("switch", { name: "新作と改稿の監視（新しい棚では変えられません）" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "いま新作・改稿を確認（新しい棚では変えられません）" })).toBeDisabled();
-    expect(watching.get).not.toHaveBeenCalled();
-    expect(watching.upsert).not.toHaveBeenCalled();
-    expect(watching.check).not.toHaveBeenCalled();
-    // 開く操作は取得元へ行くだけなので残す。
-    expect(screen.getByRole("button", { name: "ブラウザで開く" })).toBeEnabled();
-    // コレクションに入っていなければ、旧棚と同じくタブを出さない。
-    await waitFor(() => expect(api.libraryV2EntityCollections).toHaveBeenCalledWith("person", PERSON));
-    expect(screen.queryByRole("tab", { name: /コレクション/ })).toBeNull();
-  });
 
   it.each(["person", "series"] as const)("changes watching and starts a one-off %s check on the switched shelf", async (kind) => {
     const sourceKey = kind === "person" ? "77" : "55";
     const name = kind === "person" ? "作者一" : "シリーズ";
     const targetType = kind === "person" ? "author" : "series";
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     api.libraryV2Entity.mockResolvedValue(head({ id: kind === "person" ? PERSON : SERIES, kind, name, external_key: sourceKey }));
     watching.get.mockResolvedValue({ id: PERSON, enabled: true, watchGeneration: 1 });
     watching.upsert.mockImplementation(async () => { watching.get.mockResolvedValue({ id: PERSON, enabled: false, watchGeneration: 2 }); });
@@ -254,11 +203,10 @@ describe("author and series pages on the new shelf", () => {
     await waitFor(() => { expect(toggle).toBeEnabled(); expect(toggle).not.toBeChecked(); });
     fireEvent.click(screen.getByRole("button", { name: kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認" }));
     await waitFor(() => expect(watching.check).toHaveBeenCalledWith({ kind: targetType, source: "pixiv", sourceKey, label: name }, expect.any(Function)));
-    for (const call of Object.values(legacy)) expect(call).not.toHaveBeenCalled();
   });
 
   it("reads the switched shelf's watch state even if the old shelf's state is cached", async () => {
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     watching.get.mockResolvedValue({ id: PERSON, enabled: true, watchGeneration: 1 });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
     client.setQueryData(["update-targets", "person", "pixiv", "77", "legacy"], { id: 7, enabled: false });
@@ -268,7 +216,7 @@ describe("author and series pages on the new shelf", () => {
   });
 
   it("keeps the saved watch state when the switched shelf refuses a change", async () => {
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     watching.get.mockResolvedValue({ id: PERSON, enabled: true, watchGeneration: 1 });
     watching.upsert.mockRejectedValue(new Error("競合"));
     renderEntity("person", "#/people/pixiv/77");
@@ -280,7 +228,7 @@ describe("author and series pages on the new shelf", () => {
   });
 
   it("refreshes the switched shelf and reloads its head and saved response", async () => {
-    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x", unresolved: [], switched: true });
+    api.libraryV2Status.mockResolvedValue({ state: "ready", path: "x" });
     refresh.mockImplementation(async () => {
       api.libraryV2Entity.mockResolvedValue(head({ name: "更新した作者", last_checked_at: Date.UTC(2026, 0, 3) }));
       api.libraryV2EntityOriginal.mockResolvedValue(JSON.stringify({ displayName: "更新した作者" }));
@@ -294,7 +242,6 @@ describe("author and series pages on the new shelf", () => {
     await waitFor(() => expect(refresh).toHaveBeenCalledWith(expect.objectContaining({ entityType: "person", source: "pixiv", sourceKey: "77", force: true })));
     expect(await screen.findByRole("heading", { name: "更新した作者" })).toBeInTheDocument();
     await waitFor(() => expect(api.libraryV2EntityOriginal.mock.calls.length).toBeGreaterThan(1));
-    for (const call of Object.values(legacy)) expect(call).not.toHaveBeenCalled();
   });
 
   it("lists the collections holding the author's works and opens them by their old id", async () => {
@@ -325,8 +272,6 @@ describe("author and series pages on the new shelf", () => {
     expect(screen.getByRole("link", { name: /雨の束/ })).toHaveAttribute("href", "#/collections/c-old");
     // 表紙のマスは棚のファイルの識別子から。
     expect(document.querySelector(`img[src="http://piep-library.localhost/${ICON}"]`)).not.toBeNull();
-    expect(screen.getByText(/コレクションの中身は旧棚で開きます/)).toBeInTheDocument();
-    for (const call of Object.values(legacy)) expect(call).not.toHaveBeenCalled();
   });
 
   it("shows the profile's versions and the response that made the current one", async () => {
@@ -359,26 +304,7 @@ describe("author and series pages on the new shelf", () => {
   it("says so when the new shelf does not have the author", async () => {
     api.libraryV2Entity.mockResolvedValue(null);
     renderEntity("person", "#/people/pixiv/missing");
-    expect(await screen.findByText("新しい棚にこの作者はいません")).toBeInTheDocument();
-    expect(legacy.getPerson).not.toHaveBeenCalled();
+    expect(await screen.findByText("棚にこの作者はいません")).toBeInTheDocument();
   });
 
-  it("stays on the old shelf when the preference is off", async () => {
-    window.localStorage.setItem(SHELF_V2_PREFERENCE_KEY, "false");
-    legacy.getPerson.mockResolvedValue({
-      id: 1, source: "pixiv", sourceKey: "77", displayName: "旧棚の作者", iconPath: null, linksJson: null,
-      coverPath: null, description: null, contentHash: null, currentVersion: 1,
-      lastCheckedAt: null, lastFetchedAt: null, createdAt: "", updatedAt: "", workCount: 0,
-    });
-    legacy.searchDownloadsV2.mockResolvedValue({ items: [], nextCursor: null, totalEstimate: 0, searchMeta: null, facetsVersion: 0 });
-    legacy.listEntitySeriesPage.mockResolvedValue({ items: [], nextCursor: null, total: 0 });
-    legacy.listEntityTags.mockResolvedValue([]);
-    legacy.listCollectionsForPerson.mockResolvedValue([]);
-    watching.get.mockResolvedValue(null);
-    legacy.getLatestEntityProfileJson.mockResolvedValue({});
-    renderEntity("person", "#/people/pixiv/77");
-    expect(await screen.findByRole("heading", { name: "旧棚の作者" })).toBeInTheDocument();
-    expect(api.libraryV2Entity).not.toHaveBeenCalled();
-    expect(screen.queryByText("新しい棚（試験中）")).toBeNull();
-  });
 });

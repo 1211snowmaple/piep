@@ -4,8 +4,6 @@ import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ActionRow } from "@/components/ActionRow";
 import { DangerButton } from "@/components/DangerButton";
-import { Locked } from "@/components/Locked";
-import { SHELF_READ_ONLY } from "@/features/library/shelfV2";
 import { Icons, IconSize } from "@/lib/icons";
 import { errorMessage, formatBytes, formatDate, formatNumber } from "@/lib/format";
 import { openSingleDialog } from "@/services/dialogApi";
@@ -56,7 +54,7 @@ function join(directory: string, name: string): string {
  * 作者・シリーズのアーカイブ（棚の部分写し）を選んだときは、入れ替えずに今の棚へ取り込む。今の棚に
  * 無い作品だけを足し、ある作品・記録は変えない。切り替えた棚にだけ取り込める。
  */
-export function ShelfBackupCard({ runtime, busy, writable = false }: { runtime: boolean; busy: boolean; writable?: boolean }) {
+export function ShelfBackupCard({ runtime, busy }: { runtime: boolean; busy: boolean }) {
   const queryClient = useQueryClient();
   const [review, setReview] = useState<ShelfBackupInspection | null>(null);
   const state = useQuery({ queryKey: ["library-v2-restore-state"], queryFn: libraryV2RestoreState, enabled: runtime });
@@ -169,9 +167,7 @@ export function ShelfBackupCard({ runtime, busy, writable = false }: { runtime: 
             {!review.sameLibrary && <Alert color="yellow">今の棚とは別の棚から作ったアーカイブなので、取り込めません。</Alert>}
             <ActionRow>
               <Button variant="default" disabled={importArchive.isPending} onClick={() => setReview(null)}>キャンセル</Button>
-              {review.sameLibrary && !writable
-                ? <Locked reason={SHELF_READ_ONLY} label="この棚に取り込む"><Button leftSection={<Icons.import size={IconSize.menu} />}>この棚に取り込む</Button></Locked>
-                : <Button disabled={!review.sameLibrary} loading={importArchive.isPending} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => importArchive.mutate(review.path)}>この棚に取り込む</Button>}
+              <Button disabled={!review.sameLibrary} loading={importArchive.isPending} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => importArchive.mutate(review.path)}>この棚に取り込む</Button>
             </ActionRow>
           </Stack>
         )}
@@ -185,11 +181,11 @@ export function ShelfBackupCard({ runtime, busy, writable = false }: { runtime: 
               <Text size="sm">{formatBytes(review.bytes)}</Text>
             </Group>
             {!review.sameLibrary && <Alert color="yellow">今の棚とは別の棚の写しです。入れ替えると、今の棚にある作品・編集・読書位置は、この写しの内容になります。</Alert>}
-            {!review.switched && <Alert color="yellow">正本に切り替える前の写しです。入れ替えたあとは、試験中の写しとして読むだけになります。</Alert>}
+            {!review.switched && <Alert color="yellow">正本に切り替える前の写しです。この写しでは棚を入れ替えられません。</Alert>}
             <Text size="xs" c="dimmed">今の棚は消さずに隣へ退けます。選んだ写しもそのまま残ります。</Text>
             <ActionRow>
               <Button variant="default" disabled={schedule.isPending} onClick={() => setReview(null)}>キャンセル</Button>
-              <DangerButton loading={schedule.isPending} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => schedule.mutate(review.path)}>次の起動で入れ替える</DangerButton>
+              <DangerButton disabled={!review.switched} loading={schedule.isPending} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => schedule.mutate(review.path)}>次の起動で入れ替える</DangerButton>
             </ActionRow>
           </Stack>
         )}

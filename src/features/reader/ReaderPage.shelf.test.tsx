@@ -24,16 +24,9 @@ vi.mock("@/services/libraryV2Api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/libraryV2Api")>()),
   ...api,
 }));
-const legacy = vi.hoisted(() => ({
-  getReaderMetadata: vi.fn(),
-  getReaderContentPage: vi.fn(),
-  getDownloads: vi.fn(),
-  searchDownloadsV2: vi.fn(),
-}));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  ...legacy,
 }));
 
 const WORK = "0195f1c2-0000-7000-8000-000000000001";
@@ -93,10 +86,10 @@ function renderReader(hash: string) {
   return render(<MantineProvider><QueryClientProvider client={client}><AppRouter><ReaderPage /></AppRouter></QueryClientProvider></MantineProvider>);
 }
 
-describe("ReaderPage on the new shelf", () => {
+describe("ReaderPage on the shelf", () => {
   beforeEach(() => {
     window.localStorage.clear();
-    for (const fn of [...Object.values(api), ...Object.values(legacy)]) fn.mockReset();
+    for (const fn of Object.values(api)) fn.mockReset();
     api.libraryV2Work.mockResolvedValue(work);
     api.libraryV2Content.mockImplementation(async (_work: string, snapshot: string | null, page: number) => ({
       page,
@@ -110,7 +103,7 @@ describe("ReaderPage on the new shelf", () => {
     api.libraryV2Neighbors.mockResolvedValue([]);
   });
 
-  it("reads the body, images and outline from the new shelf and offers no edits", async () => {
+  it("reads the body, images and outline from the shelf and opens the shelf editor", async () => {
     renderReader(`#/reader/${WORK.toUpperCase()}`);
     expect(await screen.findByText("今の本文")).toBeInTheDocument();
     // ID は小文字にそろえて読む（読書位置としおりの鍵も同じ）。
@@ -118,11 +111,8 @@ describe("ReaderPage on the new shelf", () => {
     expect(api.libraryV2Content).toHaveBeenCalledWith(WORK, null, 0);
     expect(api.libraryV2Outline).toHaveBeenCalledWith(WORK, null);
     expect(screen.getByAltText("挿絵")).toHaveAttribute("src", `http://piep-library.localhost/${IMAGE}`);
-    expect(screen.getByText("新しい棚（試験中）")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "編集" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /保存フォルダー/ })).toBeDisabled();
-    expect(legacy.getReaderMetadata).not.toHaveBeenCalled();
-    expect(legacy.getReaderContentPage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "編集" }));
+    await waitFor(() => expect(window.location.hash).toBe(`#/editor/${WORK}`));
   });
 
   it("opens the original pages of a PDF attachment from the new shelf", async () => {
@@ -178,10 +168,40 @@ describe("ReaderPage on the new shelf", () => {
     // 説明の HTML は地の文にして見せる。
     expect(next).toHaveTextContent("一行目 二行目");
     expect(next).not.toHaveTextContent("<br />");
-    expect(legacy.getDownloads).not.toHaveBeenCalled();
-    expect(legacy.searchDownloadsV2).not.toHaveBeenCalled();
     fireEvent.click(next);
     await waitFor(() => expect(window.location.hash).toBe(`#/reader/${NEXT}`));
+  });
+
+  it("offers the next work only when the collection actually has a reading order", async () => {
+    api.libraryV2Neighbors.mockResolvedValue([
+      { kind: "collection", id: "c", title: "雨の記憶", ordered: true, position: 1, total: 2, missing: 0, previous: null, next: card(NEXT, "となりの話", { author_name: "隣の作者", text_length: 11000, excerpt: "雨の夜に始まる話。" }) },
+    ] satisfies ShelfNeighbors[]);
+    renderReader(`#/reader/${WORK}`);
+    expect(await screen.findByText("コレクション「雨の記憶」")).toBeInTheDocument();
+    // 順序付きなので現在位置と「読む順あり」を示し、次の作品へ進める。
+    expect(screen.getByText(/1 \/ 2/)).toBeInTheDocument();
+    expect(screen.getByText(/読む順あり/)).toBeInTheDocument();
+    expect(screen.queryByText("読む順は決まっていません。同じまとまりの作品です。")).toBeNull();
+    // 題だけでは何の話か分からなかった。作者・分量・書き出しを札に載せる。
+    const next = screen.getByRole("button", { name: "次の作品：となりの話" });
+    expect(next).toHaveTextContent("隣の作者 · 11,000字 · 約20分");
+    expect(next).toHaveTextContent("雨の夜に始まる話。");
+  });
+
+  it("never presents an unordered collection as a serial", async () => {
+    api.libraryV2Neighbors.mockResolvedValue([
+      { kind: "collection", id: "c", title: "雨の記憶", ordered: false, position: 1, total: 2, missing: 0, previous: null, next: card(NEXT, "となりの話") },
+    ] satisfies ShelfNeighbors[]);
+    renderReader(`#/reader/${WORK}`);
+    expect(await screen.findByText("コレクション「雨の記憶」")).toBeInTheDocument();
+    // 順序なしを「続編」として見せない。
+    await waitFor(() => expect(screen.getByText("読む順は決まっていません。同じまとまりの作品です。")).toBeInTheDocument());
+    expect(screen.getByText(/順序なし/)).toBeInTheDocument();
+    expect(screen.queryByText(/次の作品/)).toBeNull();
+    expect(screen.queryByText(/前の作品/)).toBeNull();
+    expect(screen.queryByText(/\d+ \/ \d+/)).toBeNull();
+    // 隣の作品自体は開ける。順序を主張しないだけである。
+    expect(screen.getByRole("button", { name: "並びの次：となりの話" })).toBeInTheDocument();
   });
 
   it("continues a work moved from the old shelf at the place and bookmarks kept under its old number", async () => {

@@ -631,7 +631,7 @@ pub fn assemble(
     receiver.recover_pending_publication()?;
     db.open_existing()?;
     let context = ServerContext::new(
-        Library::Swappable(Arc::clone(&db)),
+        Library(Arc::clone(&db)),
         store,
         paths.library(),
         Some(Arc::clone(&receiver)),

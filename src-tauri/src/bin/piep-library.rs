@@ -233,7 +233,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // 意味検索の索引を同期する。旧棚の保存フォルダー（その親に search/semantic-v2 と models）
             // から、同じ文のベクトルを引き継ぐ。
             let previous=Path::new(&args[3]);
-            piep_lib::database::semantic_index::set_model_cache_dir(previous);
+            piep_lib::database::semantic_index::set_model_cache_dir(previous.parent().unwrap_or(previous));
             let library=Library::open(Path::new(&args[2]))?;
             let started=std::time::Instant::now();
             let mut last=std::time::Instant::now();
@@ -249,7 +249,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // アプリと同じ手順で新しい棚を開き、索引を同期して、一覧と検索を一度ずつ引く。
             let state=piep_lib::commands::library_v2::LibraryV2::default();
             let started=std::time::Instant::now();
-            state.open(Path::new(&args[2]));
+            state.open(Path::new(&args[2]))?;
+            state.sync_index(Path::new(&args[2]));
             let opened=started.elapsed().as_secs_f64();
             let status=state.status();
             let library=state.library()?;

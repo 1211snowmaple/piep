@@ -463,7 +463,6 @@ mod tests {
                 .source_updated_at,
             Some(old)
         );
-        assert!(state.db.pixiv_works_for_author("77").unwrap().is_empty());
         assert!(matches!(
             index.lookup_key(&state, "77", "11", &first).await,
             WebLookup::Found(_)
@@ -715,7 +714,7 @@ mod tests {
 
     #[test]
     fn fanbox_cached_scan_checks_old_saved_posts_without_rediscovering_old_unsaved_posts() {
-        let (_temp, state, library) = fixture();
+        let (_temp, _state, library) = fixture();
         let card = save(
             &library,
             "fanbox",
@@ -770,14 +769,6 @@ mod tests {
         )
         .unwrap()
         .is_none());
-        assert_eq!(
-            state
-                .db
-                .get_download_by_source("fanbox", "saved")
-                .unwrap()
-                .map(|d| d.id),
-            None
-        );
         let new = cache.posts_since("creator", Some("new")).unwrap();
         assert!(new.is_empty());
         assert_eq!(

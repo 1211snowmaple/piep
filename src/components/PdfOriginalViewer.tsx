@@ -2,23 +2,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Group, Loader, Modal, Stack, Text } from "@mantine/core";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
-import { renderPdfAttachmentPage, type PdfPageImage } from "@/services/dbApi";
+import type { PdfPageImage } from "@/services/dbApi";
 import { libraryV2RenderPdfPage } from "@/services/libraryV2Api";
 import { errorMessage } from "@/lib/format";
 
 export interface PdfOriginalTarget {
-  /** 旧棚は作品の番号、新しい棚（試験中）は作品の ID（UUID）。 */
-  workId: number | string;
-  /** 旧棚は添付の保存先のパス、新しい棚はファイルの識別子。 */
+  /** 作品の ID（UUID）。 */
+  workId: string;
+  /** 添付のファイルの識別子。 */
   localPath: string;
   fileName: string;
 }
 
-/** 紙面を描く。どちらの棚も、その作品の PDF の添付でなければ断る。 */
-function renderTargetPage(target: PdfOriginalTarget, page: number, width: number): Promise<PdfPageImage> {
-  return typeof target.workId === "string"
-    ? libraryV2RenderPdfPage(target.workId, target.localPath, page, width)
-    : renderPdfAttachmentPage(target.workId, target.localPath, page, width);
+/** 紙面を描く。棚は、その作品の PDF の添付でなければ断る。 */
+function renderTargetPage(target: PdfOriginalTarget, page: number, width: number) {
+  return libraryV2RenderPdfPage(target.workId, target.localPath, page, width);
 }
 
 /**
@@ -36,7 +34,7 @@ function steppedWidth(available: number): number {
 const PAGE_CACHE_MS = 5 * 60 * 1000;
 
 function pageKey(target: PdfOriginalTarget | null, page: number, width: number) {
-  return ["pdf-page", target?.workId ?? 0, target?.localPath ?? "", page, width] as const;
+  return ["pdf-page", target?.workId ?? "", target?.localPath ?? "", page, width] as const;
 }
 
 /**

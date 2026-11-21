@@ -5,12 +5,8 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
 import {
   acceptCollectionSuggestion,
-  addWorkCollectionMembers,
   generateCollectionSuggestion,
-  listCollectionsForPerson,
-  listCollectionsForSeries,
   rejectCollectionSuggestion,
-  reorderWorkCollectionMembers,
   suggestionNameOverride,
 } from "@/services/collectionApi";
 import { exportCollectionEpub } from "@/services/epubApi";
@@ -18,25 +14,6 @@ import { exportCollectionEpub } from "@/services/epubApi";
 describe("collectionApi", () => {
   beforeEach(() => invoke.mockReset());
 
-  it("keeps stable provider work keys in collection mutations", async () => {
-    invoke.mockResolvedValue({ id: "collection-1", members: [] });
-    const members = [{ source: "pixiv", sourceId: "123", addedBy: "manual" as const }];
-    await addWorkCollectionMembers("collection-1", members);
-    expect(invoke).toHaveBeenLastCalledWith("db_add_work_collection_members", {
-      collectionId: "collection-1",
-      members,
-    });
-
-    const order = [
-      { source: "fanbox", sourceId: "9" },
-      { source: "pixiv", sourceId: "123" },
-    ];
-    await reorderWorkCollectionMembers("collection-1", order);
-    expect(invoke).toHaveBeenLastCalledWith("db_reorder_work_collection_members", {
-      collectionId: "collection-1",
-      members: order,
-    });
-  });
 
   it("sends suggestion seeds and the user's final member selection separately", async () => {
     invoke.mockResolvedValue({ id: "suggestion-1", members: [] });
@@ -75,24 +52,8 @@ describe("collectionApi", () => {
     });
   });
 
-  it("asks the author's collections by the stable person key", async () => {
-    invoke.mockResolvedValue([]);
-    await listCollectionsForPerson("fanbox", "creator-9");
-    expect(invoke).toHaveBeenLastCalledWith("db_list_collections_for_person", {
-      source: "fanbox",
-      personKey: "creator-9",
-    });
-  });
 
   /** シリーズにも同じ入口がある。作者にしか無いと、同じ画面で作りが割れる。 */
-  it("asks the series collections by the stable series key", async () => {
-    invoke.mockResolvedValue([]);
-    await listCollectionsForSeries("pixiv", "series-42");
-    expect(invoke).toHaveBeenLastCalledWith("db_list_collections_for_series", {
-      source: "pixiv",
-      seriesKey: "series-42",
-    });
-  });
 
   /** 欠落作品があっても、利用者が承知すれば書き出せる。既定は中止のまま。 */
   it("carries the skip-missing decision into the collection EPUB export", async () => {

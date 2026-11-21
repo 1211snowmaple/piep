@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use tauri::{Emitter, State};
+use tauri::State;
 
 const SETTINGS_FILE: &str = "search-settings.json";
 
@@ -47,13 +47,9 @@ fn read_settings() -> Option<SearchSettings> {
     serde_json::from_str(&text).ok()
 }
 
-/// 意味検索を使うか。設定がまだ無ければ使わない（旧棚の設定を写すまで）。
+/// 意味検索を使うか。設定がまだ無ければ使わない。
 pub(crate) fn semantic_enabled() -> bool {
     read_settings().is_some_and(|settings| settings.semantic_enabled)
-}
-
-pub(crate) fn has_settings() -> bool {
-    read_settings().is_some()
 }
 
 pub(crate) fn store_semantic_enabled(enabled: bool) -> Result<(), String> {
@@ -126,16 +122,6 @@ async fn on_library<T: Send + 'static>(
     f: impl FnOnce(Arc<Library>) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     let library = state.library()?;
-    tauri::async_runtime::spawn_blocking(move || f(library))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-async fn on_switched<T: Send + 'static>(
-    state: &Arc<LibraryV2>,
-    f: impl FnOnce(Arc<Library>) -> Result<T, String> + Send + 'static,
-) -> Result<T, String> {
-    let library = state.writable()?;
     tauri::async_runtime::spawn_blocking(move || f(library))
         .await
         .map_err(|e| e.to_string())?
@@ -217,55 +203,28 @@ pub async fn library_v2_diagnostics(
 /// 台帳の統計を整え、`compact` なら空き領域を回収する。
 #[tauri::command]
 pub async fn library_v2_maintain(
-    app: tauri::AppHandle,
     state: State<'_, Arc<LibraryV2>>,
     compact: bool,
 ) -> Result<LibraryMaintenanceResult, String> {
     let state = Arc::clone(&state);
-    let _ = app.emit(
-        "library-maintenance-progress",
-        serde_json::json!({ "phase": if compact { "compacting" } else { "optimizing" } }),
-    );
-    let result = on_switched(&state, move |library| {
+    on_library(&state, move |library| {
         library
             .maintain_database(compact)
             .map_err(|e| e.to_string())
     })
-    .await;
-    let _ = app.emit(
-        "library-maintenance-progress",
-        serde_json::json!({
-            "phase": if result.is_ok() { "complete" } else { "failed" },
-            "error": result.as_ref().err(),
-        }),
-    );
-    result
+    .await
 }
 
-/// 全文検索の索引の断片をまとめる。進み具合は旧棚と同じ知らせで流す。
+/// 全文検索の索引の断片をまとめる。
 #[tauri::command]
 pub async fn library_v2_optimize_search_index(
-    app: tauri::AppHandle,
     state: State<'_, Arc<LibraryV2>>,
 ) -> Result<SearchIndexOptimizationResult, String> {
     let state = Arc::clone(&state);
-    let emit = |phase: &str, error: Option<&String>| {
-        let _ = app.emit(
-            "search-index-optimization-progress",
-            serde_json::json!({ "phase": phase, "segments": 0, "error": error }),
-        );
-    };
-    emit("preflight", None);
-    emit("merging", None);
-    let result = on_switched(&state, |library| {
+    on_library(&state, |library| {
         library.optimize_search_index().map_err(|e| e.to_string())
     })
-    .await;
-    emit(
-        if result.is_ok() { "complete" } else { "failed" },
-        result.as_ref().err(),
-    );
-    result
+    .await
 }
 
 /// 台帳と全ファイルを照合する（壊れていれば最初に見つけた問題を誤りで返す）。
@@ -282,7 +241,7 @@ pub async fn library_v2_verify(state: State<'_, Arc<LibraryV2>>) -> Result<u64, 
 #[tauri::command]
 pub async fn library_v2_reclaim(state: State<'_, Arc<LibraryV2>>) -> Result<ReclaimReport, String> {
     let state = Arc::clone(&state);
-    on_switched(&state, |library| {
+    on_library(&state, |library| {
         library.reclaim_now().map_err(|e| e.to_string())
     })
     .await

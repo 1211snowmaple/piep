@@ -42,11 +42,8 @@ import { heldAcquisitionKind, heldReason, summarizeUpdateJobItems, updateJobSubj
 import { acquisitionStatusMeta } from "@/lib/acquisition";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
-import { createWatchGroup, deleteUpdateTarget, deleteWatchGroup, isTauriRuntime, listUpdateTargets, listWatchGroups, renameWatchGroup, searchDownloadsV2, setUpdateTargetEnabled, setWatchGroupMembers, upsertUpdateTarget } from "@/services/dbApi";
-import { readingWorkIds } from "@/features/library/readingShelf";
+import { createWatchGroup, deleteUpdateTarget, deleteWatchGroup, isTauriRuntime, listUpdateTargets, listWatchGroups, renameWatchGroup, setUpdateTargetEnabled, setWatchGroupMembers, upsertUpdateTarget } from "@/services/dbApi";
 import { clearFinishedUpdateJobsCommand, countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, listUpdateJobHeldItemStatesCommand, listUpdateJobItemStatesCommand, restoreDismissedUpdateCandidatesCommand, type UpdateJobItemState, type UpdateJobScope } from "@/services/updateJobApi";
-import { libraryV2Status } from "@/services/libraryV2Api";
-import { shelfWritable } from "@/features/library/shelfV2";
 import { loadSchedule, saveSchedule, type UpdateScheduleSettings } from "@/features/updates/updateSchedule";
 import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
 import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
@@ -92,27 +89,9 @@ export function isSettledCandidateStatus(status: string): boolean {
   return status === "saved" || status === "skipped" || status === "done";
 }
 
-/** How many works one shelf check may cover before it stops being sensible. */
+/** お気に入り・読みかけの確認で棚が選ぶ作品の上限（`update_jobs_shelf.rs` と同じ）。 */
 const SHELF_SCOPE_LIMIT = 500;
 const CANDIDATE_DISPLAY_PAGE_SIZE = 60;
-
-/**
- * The works behind a shelf scope, or null when the scope is not a shelf.
- *
- * Shelves reuse the plain work check: the ids are collected here and sent as
- * `workIds`, so the job needs no new scope of its own.
- */
-export async function shelfWorkIds(scope: string): Promise<number[] | null> {
-  if (scope !== "favorite" && scope !== "reading") return null;
-  // 切り替えた棚では、棚が自分の範囲で作品を選ぶ。旧棚の番号は集めない。
-  if (shelfWritable(await libraryV2Status().catch(() => undefined))) return null;
-  const params = scope === "favorite"
-    ? { favorite: true, limit: SHELF_SCOPE_LIMIT, projection: "bulk" as const }
-    : { idsInclude: readingWorkIds().slice(0, SHELF_SCOPE_LIMIT), limit: SHELF_SCOPE_LIMIT, projection: "bulk" as const };
-  if (scope === "reading" && !params.idsInclude?.length) return [];
-  const result = await searchDownloadsV2(params);
-  return result.items.map((item) => item.id);
-}
 
 export function parseWorkId(value: string | null): number | null {
   if (!value || !/^\d+$/.test(value)) return null;
@@ -233,16 +212,13 @@ export default function UpdatesPage() {
       if (values.scope.startsWith("group:") && !group) throw new Error("選んだ監視グループが見つかりません");
       const targetIds = values.targetIds ?? (group ? enabledMembers(group) : null);
       if (targetIds && !targetIds.length) throw new Error(group ? `「${group.name}」に確認できる監視対象がありません（止めている対象は確認しません）` : "確認できる監視対象がありません");
-      // 棚を選んだときは、その棚の作品IDを集めて「作品」の確認として投げる。
-      // 監視のオン・オフに関わらず、いま棚にあるものを見に行ける。
-      const shelfIds = targetIds ? null : await shelfWorkIds(values.scope);
-      if (shelfIds && !shelfIds.length) throw new Error("この棚には作品がありません");
+      // お気に入り・読みかけの棚は、棚が自分の範囲で作品を選ぶ。
       const shelfScope = values.scope === "favorite" || values.scope === "reading";
       const schedule = await loadSchedule();
       await updateJobs.start({
-        scope: (targetIds ? "targets" : shelfIds ? "work" : values.scope) as UpdateJobScope,
+        scope: (targetIds ? "targets" : values.scope) as UpdateJobScope,
         mode: values.mode as "check_only" | "auto_save",
-        workIds: shelfIds ?? (workId && !targetIds ? [workId] : null),
+        workIds: workId && !targetIds ? [workId] : null,
         targetIds,
         watchSaved: schedule.watchSaved,
         newWorksOnly: values.depth === "new" && values.scope !== "work" && !shelfScope && !workId,
