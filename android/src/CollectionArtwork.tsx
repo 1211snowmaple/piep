@@ -1,6 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { authorHue, sigilCells } from "@shared/coverSigil";
-import { collectionCoverUrl, savedCollectionCoverUrl, savedCoverUrl, SmoothImage, workCoverUrlById } from "./images";
+import { collectionCoverUrl, savedCollectionCoverUrl, savedCoverUrl, SmoothImage } from "./images";
 import type { OfflineWork, PcCollection } from "./pcApi";
 
 function CoverImage({ src, alt, onFailed }: { src: string | null; alt: string; onFailed?: () => void }) {
@@ -27,23 +27,21 @@ function Tile({ collection, index, offlineWorks }: { collection: PcCollection; i
 export function CollectionArtwork({ collection, offlineWorks }: { collection: PcCollection; offlineWorks?: OfflineWork[] }) {
   const [mainFailed, setMainFailed] = useState(false);
   const tiles = collection.coverTiles?.slice(0, 4) ?? [];
-  const requested = collection.coverMode ?? (collection.coverWorkId ? "single" : "sigil");
-  // 棚のコレクションは表紙に選んだ作品の番号を持たない。表紙は棚から `single` で引く。
+  const requested = collection.coverMode ?? "sigil";
+  // 表紙に選んだ作品の表紙は、棚から `single` で引く（保存した作品だけの画面では出さない）。
   const shelfSingle = Boolean(collection.shelfLibrary && !offlineWorks);
   const revision = collection.coverRevision ?? 0;
-  const savedMain = offlineWorks?.find((item) => item.work.id === collection.coverWorkId && item.work.hasCover);
   const savedFile = offlineWorks?.find((item) => item.collectionCoverIds?.includes(collection.id)
     && item.collections?.some((entry) => entry.id === collection.id && entry.coverRevision === collection.coverRevision));
   const hasMain = (requested === "file" && collection.hasFileCover && (!offlineWorks || savedFile))
-    || (requested === "single" && collection.hasSingleCover && (shelfSingle || (collection.coverWorkId && (!offlineWorks || savedMain))));
+    || (requested === "single" && collection.hasSingleCover && shelfSingle);
   const main = hasMain && !mainFailed;
   // 画像のない枠にも作品ごとの印が残る。コレクションで選んだ並べ方は、枠があるかぎり保つ。
   const mode = main ? requested : requested === "sigil" || tiles.length === 0 ? "sigil" : requested === "spine" && tiles.length >= 2 ? "spine" : "mosaic";
   const mainSrc = !main ? null
     : requested === "file"
       ? savedFile ? savedCollectionCoverUrl(savedFile.work.id, collection.id, savedFile.savedAtMs) : collectionCoverUrl(collection, "file", revision)
-      : shelfSingle ? collectionCoverUrl(collection, "single", revision)
-        : savedMain ? savedCoverUrl(savedMain.work.id, savedMain.savedAtMs) : workCoverUrlById(collection.coverWorkId!, revision);
+      : collectionCoverUrl(collection, "single", revision);
 
   useEffect(() => { setMainFailed(false); }, [collection.id, revision, requested]);
 

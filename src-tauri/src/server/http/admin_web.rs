@@ -1300,15 +1300,24 @@ async fn storage(
         }
     }
     let paths = site.paths.clone();
+    // 配っている世代の棚。まだ受け取っていなければ 0 で答える。
+    let shelf = ctx
+        .reader_shelf()
+        .map(|shelf| shelf.library().root().to_path_buf());
     let value = tokio::task::spawn_blocking(move || {
-        let database = std::fs::metadata(paths.database()).map_or(0, |meta| meta.len());
-        let content = directory_bytes(&paths.storage());
-        let library = directory_bytes(&paths.library());
+        // 棚は実体（`objects/`）・台帳（`library.db` と書きかけの記録）・作り直せる物（`derived/`）。
+        let (content, index, total) = shelf.as_ref().map_or((0, 0, 0), |shelf| {
+            (
+                directory_bytes(&shelf.join("objects")),
+                directory_bytes(&shelf.join("derived")),
+                directory_bytes(shelf),
+            )
+        });
+        let database = total.saturating_sub(content).saturating_sub(index);
         serde_json::json!({
             "contentBytes": content,
             "databaseBytes": database,
-            "indexBytes": library.saturating_sub(content).saturating_sub(database),
-            "trashBytes": directory_bytes(&paths.trash()),
+            "indexBytes": index,
             "freeBytes": crate::database::queries::available_space_bytes(&paths.root),
         })
     })
@@ -1439,28 +1448,6 @@ async fn restart(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// 索引の続きを作り直す。
-async fn reindex(
-    State(ctx): State<Ctx>,
-    Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
-) -> Result<StatusCode, ApiError> {
-    require_admin(&ctx, &headers)?;
-    let receiver = ctx.receiver.clone().ok_or_else(ApiError::not_found)?;
-    tokio::task::spawn_blocking(move || receiver.start_index_catch_up())
-        .await
-        .map_err(|_| ApiError::internal())?;
-    ctx.store.audit(
-        "library",
-        "索引の確認と作成",
-        actor(&headers),
-        ip.get(),
-        true,
-        None,
-    );
-    Ok(StatusCode::ACCEPTED)
-}
-
 /// 新しい管理者の登録文字列。今の管理者は、これが使われた時点で切れる。
 pub(super) fn require_for_admin_pairing(
     ctx: &ServerContext,
@@ -1482,11 +1469,6 @@ pub(super) fn require_for_admin_pairing(
 pub(super) fn note_device(ctx: &ServerContext, headers: &HeaderMap, ip: &ClientIp, action: &str) {
     ctx.store
         .audit("device", action, actor(headers), ip.get(), true, None);
-}
-
-pub(super) fn note_library(ctx: &ServerContext, action: &str, detail: Option<&str>) {
-    ctx.store
-        .audit("library", action, "デスクトップ版", None, true, detail);
 }
 
 /// 画面のファイルを返す。知らない道は画面そのものを返す。
@@ -1531,34 +1513,33 @@ async fn page_asset(
 /// `admin_router` に足す API。Cookie と鍵のどちらでも通るもの。
 pub(super) fn api_routes() -> Router<Ctx> {
     Router::new()
-        .route("/api/v1/admin/tickets", post(issue_ticket))
-        .route("/api/v1/admin/password", put(change_password))
-        .route("/api/v1/admin/sessions", get(list_sessions))
-        .route("/api/v1/admin/sessions/{id}", delete(end_session))
+        .route("/api/v2/admin/tickets", post(issue_ticket))
+        .route("/api/v2/admin/password", put(change_password))
+        .route("/api/v2/admin/sessions", get(list_sessions))
+        .route("/api/v2/admin/sessions/{id}", delete(end_session))
         .route(
-            "/api/v1/admin/settings/update",
+            "/api/v2/admin/settings/update",
             get(get_update_settings).put(put_update_settings),
         )
-        .route("/api/v1/admin/settings/server-name", put(put_server_name))
-        .route("/api/v1/admin/update/check", post(update_check))
-        .route("/api/v1/admin/update/history", get(update_history))
-        .route("/api/v1/admin/update/retry", post(update_retry))
-        .route("/api/v1/admin/update/rollback", post(update_rollback))
-        .route("/api/v1/admin/audit", get(audit_list))
-        .route("/api/v1/admin/storage", get(storage))
+        .route("/api/v2/admin/settings/server-name", put(put_server_name))
+        .route("/api/v2/admin/update/check", post(update_check))
+        .route("/api/v2/admin/update/history", get(update_history))
+        .route("/api/v2/admin/update/retry", post(update_retry))
+        .route("/api/v2/admin/update/rollback", post(update_rollback))
+        .route("/api/v2/admin/audit", get(audit_list))
+        .route("/api/v2/admin/storage", get(storage))
         .route(
-            "/api/v1/admin/connection",
+            "/api/v2/admin/connection",
             get(connection).put(put_connection),
         )
-        .route("/api/v1/admin/restart", post(restart))
-        .route("/api/v1/admin/library/reindex", post(reindex))
+        .route("/api/v2/admin/restart", post(restart))
 }
 
 /// 画面とログイン。管理画面を出す口にだけ足す。
 pub(super) fn web_routes(ctx: Ctx) -> Router {
     let authenticated = Router::new()
-        .route("/api/v1/admin/web/reauth", post(web_reauth))
-        .route("/api/v1/admin/web/disable", post(web_disable))
+        .route("/api/v2/admin/web/reauth", post(web_reauth))
+        .route("/api/v2/admin/web/disable", post(web_disable))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&ctx),
             super::authorize_admin_before_body,
@@ -1568,12 +1549,12 @@ pub(super) fn web_routes(ctx: Ctx) -> Router {
         .route("/admin", get(|| async { Redirect::to("/admin/") }))
         .route("/admin/", get(page_root))
         .route("/admin/{*path}", get(page_asset))
-        .route("/api/v1/admin/web/state", get(web_state))
-        .route("/api/v1/admin/web/login", post(web_login))
-        .route("/api/v1/admin/web/ticket-info", post(web_ticket_info))
-        .route("/api/v1/admin/web/ticket", post(web_ticket))
-        .route("/api/v1/admin/web/setup", post(web_setup))
-        .route("/api/v1/admin/web/logout", post(web_logout))
+        .route("/api/v2/admin/web/state", get(web_state))
+        .route("/api/v2/admin/web/login", post(web_login))
+        .route("/api/v2/admin/web/ticket-info", post(web_ticket_info))
+        .route("/api/v2/admin/web/ticket", post(web_ticket))
+        .route("/api/v2/admin/web/setup", post(web_setup))
+        .route("/api/v2/admin/web/logout", post(web_logout))
         .layer(axum::extract::DefaultBodyLimit::max(super::MAX_JSON_BYTES))
         .with_state(Arc::clone(&ctx));
     with_guard(routes, Arc::clone(&ctx)).layer(middleware::from_fn_with_state(ctx, secure_headers))

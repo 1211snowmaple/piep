@@ -6,10 +6,7 @@
 圧縮した部分の転送を提供する。
 単独サーバーでは、設定で指定した棚を開いて既存の待ち受けにこの読取 API を載せる。
 利用者状態の書き込みは、棚の作品のお気に入りの付け外しと読書位置を提供する（下の「お気に入りの付け外し」
-「読書位置」）。対応能力（`identity` の capabilities）には含めず、応答の `x-piep-favorite-write: 1`・
-`x-piep-reading: 1` で知らせる。
-携帯の作者・シリーズ・コレクションの画面の口も同じく、`x-piep-groups: 1` で知らせる。
-検索欄の候補の口と、作品の画面の版の一覧に版ごとの写しの ID を添えることは、`x-piep-suggest: 1` で知らせる。
+「読書位置」）。携帯の口は棚を配るサーバーならすべてそろうので、口ごとの知らせ（以前の `x-piep-groups` など）は無くした。
 
 管理側は新ライブラリを開き、永続化した同期 epoch と認可器を `Context` に渡す。
 epoch は棚の復元・再作成時に変更し、要求や router の起動ごとには生成しない。
@@ -29,12 +26,12 @@ sync_epoch = "<同期の世代 UUID>"
 ```
 
 設定の許可を起動時に読み、端末登録が有効かを要求ごとに確認する。`library_v2` を省いた
-設定では従来の待ち受けで動く。端末の登録 ID は既存の管理 API `GET /api/v1/admin/devices` の
+設定では棚を配らず、登録と管理の口だけで動く。端末の登録 ID は既存の管理 API `GET /api/v2/admin/devices` の
 `id` を使い、読む利用者は保存済みの利用者の UUID を指定する。
 
-管理者は `GET /api/v1/admin/status` の `libraryV2` で、開いている棚の
-`libraryId`、`syncEpoch`、`works`（十進文字列）を確認できる。設定を省いたサーバーは
-従来の応答を返す。管理 API に入る権限と、この棚を読める端末の許可は別々に確かめる。
+管理者は `GET /api/v2/admin/status` の `shelf` で、開いている棚の
+`libraryId`、`syncEpoch`、`works`（十進文字列）を確認できる。棚を配っていないサーバーは
+`shelf` が `null`。管理 API に入る権限と、この棚を読める端末の許可は別々に確かめる。
 
 ### デスクトップ版から棚を送る
 
@@ -43,15 +40,15 @@ sync_epoch = "<同期の世代 UUID>"
 
 | 口 | 用途 |
 | --- | --- |
-| `GET /api/v1/admin/shelf/shipments` | 受け取りの状態（`idle`・`receiving`・`assembling`・`ready`・`failed`）と、いま配っている世代 |
-| `POST /api/v1/admin/shelf/shipments` | `{libraryId}` で受け取りを始める。同じ棚の受け取りが残っていれば続ける。別の棚を配っていれば 409 |
+| `GET /api/v2/admin/shelf/shipments` | 受け取りの状態（`idle`・`receiving`・`assembling`・`ready`・`failed`）と、いま配っている世代 |
+| `POST /api/v2/admin/shelf/shipments` | `{libraryId}` で受け取りを始める。同じ棚の受け取りが残っていれば続ける。別の棚を配っていれば 409 |
 | `POST …/shipments/{id}/needed` | `{chunks:[{id,length}]}`（一度に 4096 まで）のうち、まだ持っていない実体を返す |
 | `PUT …/shipments/{id}/chunks/{chunk}?length=` | 実体を一つ、圧縮した保管の形のまま受け取る。受け取るときに識別子と照らす |
 | `POST …/shipments/{id}/commit` | `{database}`（台帳の写しの部分の並び）で確定する。202 を返し、別のスレッドで組む |
 | `DELETE …/shipments/{id}` | 受け取りをやめて、受け取ったものを捨てる |
-| `PUT /api/v1/admin/devices/{id}/shelf` | `{read}` で携帯にこの棚を読む許可を付け外しする（携帯の登録だけ） |
-| `GET /api/v1/admin/shelf/reading?cursor=&limit=` | 配っている棚の持ち主の読書位置。初めは全部、印のあとは変わった分だけ |
-| `GET /api/v1/admin/shelf/favorites?cursor=&limit=` | 同じく持ち主のお気に入り（`{work, favorite}`、外したものも返す） |
+| `PUT /api/v2/admin/devices/{id}/shelf` | `{read}` で携帯にこの棚を読む許可を付け外しする（携帯の登録だけ） |
+| `GET /api/v2/admin/shelf/reading?cursor=&limit=` | 配っている棚の持ち主の読書位置。初めは全部、印のあとは変わった分だけ |
+| `GET /api/v2/admin/shelf/favorites?cursor=&limit=` | 同じく持ち主のお気に入り（`{work, favorite}`、外したものも返す） |
 
 送り手は棚の台帳を読み取りの接続から一度に写し、その台帳が指す実体の一覧を出す。台帳の写しも保管と同じ
 4 MiB ずつの部分に分け、実体と同じ口で送る。写しは頁の並びを保つので、前に送った台帳と同じ部分は送らない。
@@ -72,7 +69,7 @@ sync_epoch = "<同期の世代 UUID>"
 書いた時刻の新しいほう、お気に入りはデスクトップの値を残す。デスクトップは送った写しの番号を覚えておき、
 サーバーの印の同期 epoch が変わった（その写しが配られ始めた）ときからその番号を使う。
 
-`GET /api/v1/admin/devices` と `status` の端末には、新しい棚を配っているサーバーだけ `readsShelf` が付く。
+`GET /api/v2/admin/devices` と `status` の端末には、新しい棚を配っているサーバーだけ `readsShelf` が付く。
 デスクトップ版の設定の「サーバー」には、そのとき携帯ごとの切り替えが出る。許可は `server.toml` の
 `library_v2.readers` に書き（読む利用者は棚の持ち主）、配っている棚にもすぐ効かせる。解除した端末の許可は消す。
 
@@ -107,13 +104,13 @@ piep-server activate-library --data <サーバーの置き場> --generation <準
 | `/api/v2/libraries/{library}/works/lookup?provider={provider}&key={key}` | 取得元の作品 ID から、棚の作品と現在の読書用の版を照合 |
 | `/api/v2/libraries/{library}/works/{work}` | 携帯の作品の画面：今の版のカード・説明・作者とシリーズ・版の一覧（版ごとの写しの ID つき。以前の版はその写しの bundle で読む） |
 | `/api/v2/libraries/{library}/works/{work}/cover?size={card\|large}` | 今の版の表紙を携帯向けの WebP（320×480 / 640×960 に収める）で |
-| `/api/v2/libraries/{library}/works/suggest?text&limit` | 検索欄の候補（旧 API の `search/suggest` と同じ形、既定 8・上限 12）。題の候補の `sourceKey` は棚の作品の ID |
-| `POST /api/v2/libraries/{library}/works/search` | 携帯の一覧：旧 API と同じ条件の形で、絞り込み・並べ替え・語の検索・ページ送り |
+| `/api/v2/libraries/{library}/works/suggest?text&limit` | 検索欄の候補（既定 8・上限 12）。題の候補の `sourceKey` は棚の作品の ID |
+| `POST /api/v2/libraries/{library}/works/search` | 携帯の一覧：絞り込み・並べ替え・語の検索・ページ送り |
 | `PUT /api/v2/libraries/{library}/works/{work}/favorite` | 認証した利用者のお気に入りを付け外しする（下の「お気に入りの付け外し」） |
 | `PUT /api/v2/libraries/{library}/works/{work}/reading` | 認証した利用者の読書位置を書く（下の「読書位置」） |
 | `/api/v2/libraries/{library}/reading?cursor&limit` | 認証した利用者の読書位置。初めは全部、そのあとは変わった分（既定 200・上限 500） |
 | `/api/v2/libraries/{library}/works/{work}/collections` | 作品の入ったコレクションと、その中の位置 |
-| `/api/v2/libraries/{library}/{people\|series}?text&offset&limit&sort&order` | 作者・シリーズの一覧。並べる鍵と向きは旧 API と同じ語彙、続きは `nextOffset` |
+| `/api/v2/libraries/{library}/{people\|series}?text&offset&limit&sort&order` | 作者・シリーズの一覧。並べる鍵と向きはデスクトップ版と同じ語彙、続きは `nextOffset` |
 | `/api/v2/libraries/{library}/{people\|series}/detail?provider&key` | 作者・シリーズの画面の頭：説明・リンク・タグ・シリーズの数・コレクション |
 | `/api/v2/libraries/{library}/people/series?provider&key&text&sort&order&cursor&limit` | 作者の作品が属するシリーズ。続きの位置は何件目からかの十進 |
 | `/api/v2/libraries/{library}/{people\|series}/cover?provider&key[&variant=banner]` | 作者のアイコン（`banner` はヘッダー、320×480 / 1280×480）、シリーズの表紙 |
@@ -135,14 +132,12 @@ file は利用者向けの attachment / document に限る。管理用原本の�
 別機能として保持する。一覧と照合の `editId` は認証した利用者が反映中の版を指す。
 編集の bundle・manifest・部分実体では、その利用者が反映中か以前の編集版に残しているかを確かめる。
 
-一覧の対応は `identity` の応答ヘッダー `X-Piep-Works-List: 1` で分かる。
 `limit` は 1〜50 件、省略時は 30 件。一覧の `items` の各行には `view`（作品照合と同じ項目）、
 `provider`、`key`、`title`、`authorName`、`contentType` が入る。同じ保存日の作品は作品 UUID の降順。
 `next` があれば変更せず次の要求の `after` に渡し、`null` なら終わり。
 同期 epoch または利用者が変わった場合は 409（`stale_cursor`）を返すので、最初のページから読み直す。
 
-携帯の一覧は `identity` の応答ヘッダー `X-Piep-Works-Search: 1` で分かる。本文は旧 API の
-`MobileSearchRequest` と同じ JSON で、同じ検査を通す（知らない項目・範囲外・重なる指定は 400）。
+携帯の一覧の本文は `MobileSearchRequest` の JSON で、同じ検査を通す（知らない項目・範囲外・重なる指定は 400）。
 作品は棚の UUID（`id`）と今の版の UUID（`snapshotId`）で返す。続きの位置は棚・同期 epoch・利用者に
 結び付け、違えば 409（`stale_cursor`）。ページ番号で開いたページには続きの位置を付けない。
 件数は最初のページだけ数える。語の検索は、配信する写しの索引が棚に追いつくまで 503
@@ -188,9 +183,7 @@ file は利用者向けの attachment / document に限る。管理用原本の�
   409 `{"error": "favorite_conflict", "current": {"favorite": …, "generation": …}}`。端末の時刻で
   勝者を決めない。識別のヘッダーは 409 でも付くので、棚の入れ替わり（ヘッダーが変わる 409）と見分けられる。
 - 棚に無い作品・外した作品は 404、棚が書き込み中なら 503 `busy`。
-- 単独サーバーは同じ変更を旧 API の変更の記録（`favorite_changes`）へも写し、デスクトップ版は
-  今までどおり取り込む。旧 API で変えた値は新しい棚の利用者にも当て、写しを入れ替えたときは、
-  デスクトップ版がまだ取り込んでいない変更を当て直す。
+- デスクトップ版は棚の持ち主の変更を `GET /api/v2/admin/shelf/favorites` から取り込む。
 
 ## 読書位置
 
@@ -204,7 +197,7 @@ file は利用者向けの attachment / document に限る。管理用原本の�
   別の作品の版・利用者が読めない編集は 400、棚に無い作品は 404。
 - 位置は `{"work", "location", "finished", "mine", "updatedAt", "generation"}`。`location` が空なのは
   消した位置か、ページで表せない位置。`mine` は要求した端末が書いた位置か。端末の識別は登録の ID
-  から決まった UUID（旧 API の位置を移すときと同じ）。
+  から決まった UUID。
 - 一覧は `cursor` を空で始めると利用者の位置を作品の順に全部返し、返し終えると変わった分の印になる。
   印は棚の変更の記録（outbox）の番号で、返し始める前に控えるので途中で変わった位置も次で届く。印には
   同期の世代を入れ、別の写しの印は 400 `reading_cursor_expired`（端末は空から取り直す）。

@@ -13,7 +13,7 @@ import { SortMenu } from "./SortMenu";
 import { sortOfflineWorks, type FixedSort } from "./librarySort";
 import { deleteOfflineIssue, listOfflineIssues, listOfflineWorks, searchOfflineText, type OfflineIssue, type OfflineTextHit, type OfflineWork, type PcCollection } from "./pcApi";
 
-type SavedGroup = { id: string; name: string; works: OfflineWork[]; cover: OfflineWork; coverWorkId?: number | null; collection?: PcCollection };
+type SavedGroup = { id: string; name: string; works: OfflineWork[]; cover: OfflineWork; collection?: PcCollection };
 const emptySearches: Record<OfflineTab, string> = { works: "", people: "", series: "", collections: "" };
 // 戻ったときに「確認しています」を挟まない。中身は裏で確かめ直す。
 let lastWorks: OfflineWork[] | null = null;
@@ -32,7 +32,7 @@ function savedGroups(items: OfflineWork[], kind: Exclude<OfflineTab, "works">): 
   const groups = new Map<string, SavedGroup>();
   for (const item of items) {
     const work = item.work;
-    const entries: { id: string; name: string; coverWorkId?: number | null; collection?: PcCollection }[] = kind === "people"
+    const entries: { id: string; name: string; collection?: PcCollection }[] = kind === "people"
       ? item.people?.length
         ? item.people.map((person) => ({ id: `${person.source}:${person.key}`, name: person.displayName }))
         : [{ id: `${work.source}:${work.authorId || work.authorName}`, name: work.authorName }]
@@ -40,7 +40,7 @@ function savedGroups(items: OfflineWork[], kind: Exclude<OfflineTab, "works">): 
         ? item.series?.length
           ? item.series.map((series) => ({ id: `${series.source}:${series.key}`, name: series.title }))
           : work.seriesTitle ? [{ id: `${work.source}:${work.seriesId || work.seriesTitle}`, name: work.seriesTitle }] : []
-        : (item.collections ?? []).map((collection) => ({ id: collection.id, name: collection.name, coverWorkId: collection.coverWorkId, collection }));
+        : (item.collections ?? []).map((collection) => ({ id: collection.id, name: collection.name, collection }));
     const seen = new Set<string>();
     for (const entry of entries) {
       if (seen.has(entry.id)) continue;
@@ -50,7 +50,6 @@ function savedGroups(items: OfflineWork[], kind: Exclude<OfflineTab, "works">): 
         existing.works.push(item);
         if (entry.collection && (entry.collection.coverRevision ?? 0) > (existing.collection?.coverRevision ?? 0)) {
           existing.collection = entry.collection;
-          existing.coverWorkId = entry.coverWorkId;
         }
         if (kind !== "collections" && !hasRepresentativeCover(existing.cover, kind, entry.id)
           && hasRepresentativeCover(item, kind, entry.id)) existing.cover = item;
@@ -80,8 +79,7 @@ function savedGroups(items: OfflineWork[], kind: Exclude<OfflineTab, "works">): 
         if (a === undefined && b !== undefined) return 1;
         return right.savedAtMs - left.savedAtMs;
       });
-      group.cover = group.works.find((item) => item.work.id === group.coverWorkId)
-        ?? group.works.find((item) => item.work.hasCover)
+      group.cover = group.works.find((item) => item.work.hasCover)
         ?? group.works[0];
     }
   }
@@ -137,7 +135,7 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
   const [problem, setProblem] = useState<string | null>(null);
   const [issuesProblem, setIssuesProblem] = useState<string | null>(null);
   const [loadRevision, setLoadRevision] = useState(0);
-  const [deletingIssueId, setDeletingIssueId] = useState<number | string | null>(null);
+  const [deletingIssueId, setDeletingIssueId] = useState<string | null>(null);
   const [searchInputs, setSearchInputs] = useState<Record<OfflineTab, string>>(emptySearches);
   const [queries, setQueries] = useState<Record<OfflineTab, string>>(emptySearches);
   const [groupSearchInput, setGroupSearchInput] = useState("");
@@ -165,7 +163,7 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
     return () => { alive = false; };
   }, [savedRevision, loadRevision]);
 
-  const removeUnreadableWork = async (workId: number | string) => {
+  const removeUnreadableWork = async (workId: string) => {
     setDeletingIssueId(workId);
     setIssuesProblem(null);
     try {
@@ -237,7 +235,7 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
       <h2 id="offline-issues-title">読み込めない保存データ</h2>
       <p>本文を読み込めない保存データがあります。不要なものは端末から削除できます。</p>
       {issuesProblem && <p className="offline-issues-error" role="alert">{issuesProblem}</p>}
-      {issues.map((issue) => <div className="offline-issue-row" key={issue.workId}><span>{typeof issue.workId === "number" ? `作品番号 ${issue.workId} の保存データを読み込めません` : "保存した作品のうち一つの保存データを読み込めません"}</span><button className="secondary-button" type="button" disabled={deletingIssueId === issue.workId} onClick={() => void removeUnreadableWork(issue.workId)}>{deletingIssueId === issue.workId ? "削除中…" : "このデータを削除"}</button></div>)}
+      {issues.map((issue) => <div className="offline-issue-row" key={issue.workId}><span>保存した作品のうち一つの保存データを読み込めません</span><button className="secondary-button" type="button" disabled={deletingIssueId === issue.workId} onClick={() => void removeUnreadableWork(issue.workId)}>{deletingIssueId === issue.workId ? "削除中…" : "このデータを削除"}</button></div>)}
       {issuesProblem && <button className="secondary-button offline-retry" type="button" onClick={() => setLoadRevision((revision) => revision + 1)} disabled={loading}>{loading ? "確認中…" : "一覧を再確認"}</button>}
     </section>}
     <nav className="library-tabs" aria-label="端末内のライブラリの種類">{(["works", "people", "series", "collections"] as const).map((id) => <button key={id} type="button" className={tab === id ? "active" : ""} aria-current={tab === id ? "page" : undefined} onClick={() => navigation.push({ page: { name: "offline", tab: id, groupId: null } })}>{tabLabel[id]}</button>)}</nav>

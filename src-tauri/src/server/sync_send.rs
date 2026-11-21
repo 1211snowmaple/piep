@@ -27,8 +27,6 @@ pub struct SendProgress {
     pub bytes_total: u64,
     pub bytes_done: u64,
     pub message: Option<String>,
-    pub outside_paths: i64,
-    pub skipped_names: i64,
 }
 
 #[derive(Clone)]
@@ -128,7 +126,7 @@ pub async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, Stri
         .build()
         .map_err(net_error)?;
     let response = probe
-        .get(format!("{}/api/v1/hello", normalized_base(&remote.url)))
+        .get(format!("{}/api/v2/hello", normalized_base(&remote.url)))
         .send()
         .await
         .map_err(net_error)?;
@@ -180,7 +178,7 @@ pub async fn pair_admin(
 ) -> Result<String, String> {
     let client = build_client(remote).await?;
     let response = client
-        .post(format!("{}/api/v1/pair", normalized_base(&remote.url)))
+        .post(format!("{}/api/v2/pair", normalized_base(&remote.url)))
         .json(&serde_json::json!({ "secret": secret, "deviceName": device_name }))
         .send()
         .await
@@ -204,7 +202,7 @@ pub async fn admin_get(
     let client = build_client(remote).await?;
     let response = client
         .get(format!(
-            "{}/api/v1/admin/{path}",
+            "{}/api/v2/admin/{path}",
             normalized_base(&remote.url)
         ))
         .bearer_auth(token)
@@ -227,7 +225,7 @@ pub async fn admin_get_if_present(
     let client = build_client(remote).await?;
     let response = client
         .get(format!(
-            "{}/api/v1/admin/{path}",
+            "{}/api/v2/admin/{path}",
             normalized_base(&remote.url)
         ))
         .bearer_auth(token)
@@ -254,7 +252,7 @@ pub async fn admin_post(
     let client = build_client(remote).await?;
     let response = client
         .post(format!(
-            "{}/api/v1/admin/{path}",
+            "{}/api/v2/admin/{path}",
             normalized_base(&remote.url)
         ))
         .bearer_auth(token)
@@ -279,7 +277,7 @@ pub async fn admin_put(
     let client = build_client(remote).await?;
     let response = client
         .put(format!(
-            "{}/api/v1/admin/{path}",
+            "{}/api/v2/admin/{path}",
             normalized_base(&remote.url)
         ))
         .bearer_auth(token)
@@ -295,7 +293,7 @@ pub async fn admin_delete(remote: &RemoteServer, token: &str, path: &str) -> Res
     let client = build_client(remote).await?;
     let response = client
         .delete(format!(
-            "{}/api/v1/admin/{path}",
+            "{}/api/v2/admin/{path}",
             normalized_base(&remote.url)
         ))
         .bearer_auth(token)

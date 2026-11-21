@@ -14,12 +14,12 @@ const older = "0190a000-0000-7000-8000-000000000006";
 
 const document = { key: "k", entityId: work, view: { kind: "snapshot" as const, id: snapshot }, edited: false, pageCount: 3, sourcePageStarts: [0], totalPlainTextChars: 5, outline: [] };
 
-function status(reading: boolean) {
+function status(reachable = true) {
   return {
-    url: "https://server", reachable: true,
+    url: "https://server", reachable,
     nativeLibrary: {
       scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
-      worksList: true, worksSearch: true, favoriteWrite: true, groups: true, suggest: true, reading, readerBundle: true,
+      readerBundle: true,
     },
   } as never;
 }
@@ -33,10 +33,10 @@ beforeEach(() => {
   window.localStorage.clear();
 });
 
-it("棚と受け渡せる接続では、位置を棚の作品と開いた版に結んで置き、同期で棚とも受け渡す", async () => {
+it("位置を棚の作品と開いた版に結んで置き、同期で棚と受け渡す", async () => {
   const native = await import("./nativeReading");
   const sync = await import("./readingSync");
-  native.adoptNativeLibrary(status(true));
+  native.adoptNativeLibrary(status());
   const shelf = sync.shelfReadingFor(document);
   expect(shelf).toBe(document);
   await sync.recordShelfReading(work, sync.shelfLocation(document, 1, 0.25), false);
@@ -45,20 +45,20 @@ it("棚と受け渡せる接続では、位置を棚の作品と開いた版に�
     location: { viewKind: "snapshot", viewId: snapshot, page: 1, ratioPpm: 250_000 }, finished: false,
   });
   await sync.sendReading();
-  expect(api.invoke.mock.calls.map(([command]) => command)).toEqual(["pc_native_reading_record", "reading_sync", "pc_native_reading_sync"]);
+  expect(api.invoke.mock.calls.map(([command]) => command)).toEqual(["pc_native_reading_record", "pc_native_reading_sync"]);
   await sync.readShelfPosition(work);
   expect(api.invoke).toHaveBeenLastCalledWith("pc_native_reading_get", { scope: expect.objectContaining({ libraryId: library }), work });
 });
 
-it("受け渡せない接続や同期を切ったときは、棚へ書かず旧 API の同期のまま", async () => {
+it("棚に届かないときや同期を切ったときは、棚へ書かない", async () => {
   const native = await import("./nativeReading");
   const sync = await import("./readingSync");
   native.adoptNativeLibrary(status(false));
   expect(sync.shelfReadingFor(document)).toBeNull();
   await sync.recordShelfReading(work, sync.shelfLocation(document, 0, 0), false);
   await sync.sendReading();
-  expect(api.invoke.mock.calls.map(([command]) => command)).toEqual(["reading_sync"]);
-  native.adoptNativeLibrary(status(true));
+  expect(api.invoke).not.toHaveBeenCalled();
+  native.adoptNativeLibrary(status());
   sync.setReadingSyncEnabled(false);
   expect(sync.shelfReadingFor(document)).toBeNull();
 });

@@ -32,13 +32,7 @@ pub async fn server_embedded_start(
     settings: EmbeddedSettings,
 ) -> Result<DesktopServerStatus, String> {
     let server = controller(&app)?;
-    server
-        .start_embedded(
-            crate::server::library::Library::none(),
-            settings,
-            DEFAULT_PORT,
-        )
-        .await?;
+    server.start_embedded(settings, DEFAULT_PORT).await?;
     Ok(server.status().await)
 }
 

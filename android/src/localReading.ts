@@ -8,8 +8,7 @@ import { minimumReadProgress } from "./workText";
  *
  * 読書画面は位置を同期して読む必要があるので、開く前に `loadLocalReading` で
  * 記録を手元へ読み込み、そのあとは読み書きともにここで受け持つ。書き込みは
- * 順に Rust へ送り、送った時点で端末に確定する。以前の localStorage は書き込みが
- * 遅れ、アプリを閉じた直後に最後の位置が消えることがあった。
+ * 順に Rust へ送り、送った時点で端末に確定する。
  */
 
 // layout が違う位置は、割合だけを使って戻す。ページごとと一続きでは top の基準が違う。
@@ -50,8 +49,6 @@ export type WorkIdentity = Pick<PcWork, "id" | "source" | "sourceId" | "currentV
 const shelfChanged = "piep:recent-reading-changed";
 const shelfLimit = 120;
 const shelfNoticeMs = 4000;
-const legacyRecentKey = "piep.android.reading.recent.v1";
-const legacyPrefix = "piep.android.pc.";
 
 const cache = new Map<string, LocalReading>();
 const loading = new Map<string, Promise<void>>();
@@ -142,7 +139,7 @@ export function isLocalReadingLoaded(work: Pick<PcWork, "source" | "sourceId">):
   return cache.has(workKey(work)) || unreadable.has(workKey(work)) || !isTauri();
 }
 
-/** 作品を開く前に記録を読み込む。localStorage に以前の記録が残っていれば、ここで移す。 */
+/** 作品を開く前に記録を読み込む。 */
 export function loadLocalReading(work: WorkIdentity): Promise<void> {
   const key = workKey(work);
   if (cache.has(key) || !isTauri()) return Promise.resolve();
@@ -152,16 +149,6 @@ export function loadLocalReading(work: WorkIdentity): Promise<void> {
     let row: LocalReading | null = null;
     try { row = await invoke<LocalReading | null>("reading_local_get", { source: work.source, sourceId: work.sourceId }); }
     catch { unreadable.add(key); return; }
-    if (!row) {
-      const legacy = legacyPosition(work);
-      if (legacy) {
-        try {
-          await invoke<number>("reading_local_import", { readings: [legacy.row] });
-          row = legacy.row;
-          forgetLegacy(legacy.keys);
-        } catch { /* 移せなければ、次に開いたときにもう一度試す */ }
-      }
-    }
     // 送りかけの記録があれば、そちらのほうが新しい。
     unreadable.delete(key);
     if (!cache.has(key)) cache.set(key, row ?? editable(work, null));
@@ -220,15 +207,14 @@ export function rememberReading(work: PcWork, editHash: string | null, progress:
   // 頭へ戻した作品は棚から降ろす。読み進めればまた並ぶ。
   const shelved = finished || partRead(progress);
   const joined = shelved !== row.shelved || finished !== row.finished;
-  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, serverUrl: currentServer ?? row.serverUrl, workId: typeof work.id === "number" ? work.id : null, work }, shelved || row.shelved, joined);
+  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, serverUrl: currentServer ?? row.serverUrl, workId: null, work }, shelved || row.shelved, joined);
 }
 
-/** 接続先が変わったら呼ぶ。接続先を記録していない古い履歴は、最初に分かった接続先のものとして扱う。 */
+/** 接続先が変わったら呼ぶ。「続きを読む」は接続先ごとに分ける。 */
 export function setReadingServer(server: string | null): void {
   if (server === currentServer) return;
   currentServer = server;
-  if (server) void migrateLegacyShelf(server).finally(() => noticeShelf(true));
-  else noticeShelf(true);
+  noticeShelf(true);
 }
 
 export function readingServer(): string | null {
@@ -256,113 +242,4 @@ export async function loadShelf(finished = false): Promise<RecentWork[]> {
     lastShelves.set(finished, { server, items });
     return items;
   } catch { return cachedShelf(finished); }
-}
-
-// ---- 0.5 までの localStorage からの移行 ----
-
-function readStorage(key: string): string | null {
-  try { return window.localStorage.getItem(key); } catch { return null; }
-}
-
-function legacyKeys(prefix: string): string[] {
-  const keys: string[] = [];
-  try {
-    for (let index = 0; index < window.localStorage.length; index += 1) {
-      const key = window.localStorage.key(index);
-      if (key?.startsWith(prefix)) keys.push(key);
-    }
-  } catch { /* storage unavailable */ }
-  return keys;
-}
-
-function forgetLegacy(keys: string[]): void {
-  for (const key of keys) {
-    try { window.localStorage.removeItem(key); } catch { /* storage unavailable */ }
-  }
-}
-
-function parsePosition(raw: string | null): SavedPosition | null {
-  if (raw === null) return null;
-  try {
-    const value = JSON.parse(raw) as Partial<SavedPosition> | null;
-    if (!value || !Number.isSafeInteger(value.page) || !Number.isFinite(value.top) || !Number.isFinite(value.ratio)) return null;
-    if (value.page! < 0 || value.top! < 0 || value.ratio! < 0 || value.ratio! > 1) return null;
-    return value as SavedPosition;
-  } catch { return null; }
-}
-
-/**
- * 以前の記録は `piep.android.pc.<作品番号>.<版>.<本文ハッシュ>.<編集ハッシュ>.<page|position|at>`。
- * 作品番号だけでは別のサーバーの作品と区別できないので、版と本文ハッシュまで同じものだけを移す。
- */
-function legacyPosition(work: WorkIdentity): { row: LocalReading; keys: string[] } | null {
-  const prefix = `${legacyPrefix}${work.id}.${work.currentVersion}.${work.contentHash ?? ""}.`;
-  const keys = legacyKeys(prefix);
-  let best: { editHash: string | null; page: number; position: SavedPosition | null; at: number } | null = null;
-  const variants = new Set(keys.map((key) => key.slice(prefix.length).replace(/\.(page|position|at)$/, "")));
-  for (const variant of variants) {
-    const base = `${prefix}${variant}`;
-    const page = Number(readStorage(`${base}.page`) ?? "0");
-    const at = Number(readStorage(`${base}.at`) ?? "0");
-    const candidate = {
-      editHash: variant === "original" ? null : variant,
-      page: Number.isSafeInteger(page) && page >= 0 && page <= 1_000_000 ? page : 0,
-      position: parsePosition(readStorage(`${base}.position`)),
-      at: Number.isSafeInteger(at) && at > 0 ? at : 0,
-    };
-    if (variant !== "unknown" && (!best || candidate.at > best.at)) best = candidate;
-  }
-  if (!best || (best.page === 0 && !best.position)) return null;
-  return {
-    keys,
-    row: {
-      source: work.source,
-      sourceId: work.sourceId,
-      version: work.currentVersion,
-      contentHash: work.contentHash ?? null,
-      editHash: best.editHash,
-      page: best.page,
-      position: best.position,
-      progress: 0,
-      finished: false,
-      shelved: false,
-      readAt: best.at,
-      serverUrl: null,
-      workId: null,
-      work: null,
-    },
-  };
-}
-
-/** 以前の「続きを読む」を、読書位置と一緒に一度で移す。移し終えたら localStorage から消す。 */
-async function migrateLegacyShelf(server: string): Promise<void> {
-  const raw = readStorage(legacyRecentKey);
-  if (raw === null || !isTauri()) return;
-  let entries: RecentWork[] = [];
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) entries = parsed.filter((entry): entry is RecentWork => Boolean(entry?.work?.id && entry.work.source && entry.work.sourceId) && Number.isFinite(entry.at) && Number.isFinite(entry.progress));
-  } catch { /* 壊れた記録は移さない */ }
-  const consumed: string[] = [];
-  const rows = new Map<string, LocalReading>();
-  for (const entry of entries) {
-    const key = workKey(entry.work);
-    if (rows.has(key)) continue; // 新しい順に並んでいる
-    const legacy = legacyPosition(entry.work);
-    if (legacy) consumed.push(...legacy.keys);
-    const base = legacy?.row ?? editable(entry.work, null);
-    rows.set(key, {
-      ...base,
-      progress: Math.min(1, Math.max(0, entry.progress)),
-      finished: Boolean(entry.finished),
-      shelved: Boolean(entry.finished) || partRead(entry.progress),
-      readAt: Math.max(base.readAt, Math.round(entry.at)),
-      serverUrl: entry.server ?? server,
-      workId: typeof entry.work.id === "number" ? entry.work.id : null,
-      work: entry.work,
-    });
-  }
-  try { await invoke<number>("reading_local_import", { readings: [...rows.values()] }); }
-  catch { return; } // 次に起動したときにもう一度試す
-  forgetLegacy([legacyRecentKey, ...consumed]);
 }

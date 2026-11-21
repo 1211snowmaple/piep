@@ -8,6 +8,8 @@
 use super::super::device_db::records_error;
 use super::*;
 use regex::Regex;
+use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 const MAX_QUERY_CHARS: usize = 100;
 const MAX_TERMS: usize = 8;
@@ -117,8 +119,8 @@ pub(super) fn index_work(state: &OfflineState, work_id: &OfflineKey) -> Result<(
             rusqlite::params![
                 work_key,
                 generation,
-                manifest.summary.work.source(),
-                manifest.summary.work.source_id()
+                manifest.summary.work.source,
+                manifest.summary.work.source_id
             ],
         )
         .map_err(records_error)?;
@@ -154,7 +156,7 @@ pub(super) fn reconcile(state: &OfflineState) -> Result<(), ClientError> {
     })?;
     let mut present = BTreeSet::new();
     for work in &works {
-        let Some(work_id) = work.work.key() else {
+        let Some(work_id) = OfflineKey::of(&work.work) else {
             continue;
         };
         let work_id = &work_id;

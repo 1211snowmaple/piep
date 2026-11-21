@@ -23,7 +23,7 @@ function render(element: ReactElement) {
 
 function saved(id: number, title: string): OfflineWork {
   const work: PcWork = {
-    id, source: "pixiv", sourceId: String(id), title, authorName: "作者", authorId: "1", contentType: "novel",
+    id: `w${id}`, source: "pixiv", sourceId: String(id), title, authorName: "作者", authorId: "1", contentType: "novel",
     tags: [], excerpt: null, textLength: 100, assetCount: 0, hasCover: false, favorite: false, seriesTitle: null, seriesId: null,
     currentVersion: 1, contentHash: "h",
   } as PcWork;
@@ -36,7 +36,7 @@ describe("保存した作品の本文検索", () => {
   it("題名に無い語でも本文にあれば並べ、見つかったページから開ける", async () => {
     api.listOfflineWorks.mockResolvedValue([saved(1, "夏の話"), saved(2, "冬の話")]);
     api.listOfflineIssues.mockResolvedValue([]);
-    api.searchOfflineText.mockResolvedValue([{ workId: 2, page: 3, snippet: "…そこで灯台守は言った…", pages: 2 }]);
+    api.searchOfflineText.mockResolvedValue([{ workId: "w2", page: 3, snippet: "…そこで灯台守は言った…", pages: 2 }]);
     const open = vi.fn();
     render(<OfflineLibrary page={{ name: "offline", tab: "works", groupId: null }} onOpenWork={open} onOpenDetail={() => {}} onShowPc={() => {}} savedRevision={0} pagingMode="auto" rememberedSort="dateDesc" onRememberedSortChange={() => {}} />);
     await screen.findByText("夏の話");
@@ -51,7 +51,7 @@ describe("保存した作品の本文検索", () => {
     expect(hit.textContent).toContain("4 ページ目ほか 1 ページ");
     expect(within(hit).getByText("灯台守").tagName).toBe("MARK");
     fireEvent.click(hit);
-    expect(open).toHaveBeenCalledWith(expect.objectContaining({ work: expect.objectContaining({ id: 2 }) }), 3);
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ work: expect.objectContaining({ id: "w2" }) }), 3);
   });
 
   it("本文を探せなかったときも、題名などでは探せる", async () => {

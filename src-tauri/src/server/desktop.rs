@@ -4,9 +4,8 @@
 //! 管理者の鍵は Windows の資格情報マネージャーに置き、設定ファイルには書かない。
 
 use super::http::{combined_router, FavoritesListener, ServerContext};
-use super::library::Library;
 use super::standalone::run_listener;
-use super::store::{DeviceSummary, FavoriteChange, Role, ServerStore};
+use super::store::{DeviceSummary, Role, ServerStore};
 use super::sync_send::{
     admin_delete, admin_get, admin_get_if_present, admin_post, admin_put, pair_admin, RemoteServer,
     SendHandle, SendProgress, CANCELED,
@@ -33,7 +32,6 @@ const AUTO_SEND_RETRY: Duration = Duration::from_secs(15 * 60);
 /// 携帯で変えたお気に入りを、単独サーバーへ聞きに行く間隔。
 const FAVORITES_POLL: Duration = Duration::from_secs(60);
 /// 一度に受け取る携帯のお気に入りの数。
-const FAVORITES_PAGE: usize = 500;
 /// サーバーの棚の読書位置を一度に読む数（サーバーの上限）。
 const SHELF_READING_PAGE: usize = 500;
 
@@ -52,12 +50,8 @@ pub struct EmbeddedSettings {
 #[serde(rename_all = "camelCase", default)]
 pub struct LastSend {
     pub finished_at: Option<String>,
-    pub generation: Option<i64>,
     pub works: Option<i64>,
     pub files_added: Option<i64>,
-    pub files_removed: Option<i64>,
-    pub missing_referenced: Option<i64>,
-    pub unchanged: bool,
     pub error: Option<String>,
 }
 
@@ -68,8 +62,6 @@ pub struct DesktopServerSettings {
     pub remote: Option<RemoteServer>,
     pub auto_send: bool,
     pub last_send: LastSend,
-    /// 単独サーバーから、携帯のお気に入りをどこまで取り込んだか。
-    pub favorites_cursor: i64,
     /// 単独サーバーの新しい棚から、携帯の読書位置をどこまで取り込んだか（サーバーの印）。
     pub shelf_reading_cursor: String,
     /// 単独サーバーの新しい棚から、携帯のお気に入りをどこまで取り込んだか（サーバーの印）。
@@ -398,10 +390,9 @@ impl DesktopServer {
         }
     }
 
-    /// 内蔵サーバーを始める。`library` は旧 API で配る本棚（デスクトップ版は [`Library::none`]）。
+    /// 内蔵サーバーを始める。
     pub async fn start_embedded(
         &self,
-        library: Library,
         settings: EmbeddedSettings,
         port: u16,
     ) -> Result<(), String> {
@@ -451,10 +442,9 @@ impl DesktopServer {
             }
         });
         let context = ServerContext::new(
-            library,
             Arc::clone(&self.store),
             self.app_data.clone(),
-            None,
+            false,
             public_url,
             fingerprint.clone(),
         );
@@ -689,7 +679,6 @@ impl DesktopServer {
             settings.remote = Some(remote);
             settings.last_send = LastSend::default();
             // 別のサーバーの記録の番号は、このサーバーでは意味を持たない。
-            settings.favorites_cursor = 0;
             settings.shelf_reading_cursor.clear();
             settings.shelf_favorites_cursor.clear();
             settings.shelf_shipped_sequence = 0;
@@ -708,7 +697,6 @@ impl DesktopServer {
             settings.remote = None;
             settings.auto_send = false;
             settings.last_send = LastSend::default();
-            settings.favorites_cursor = 0;
             settings.shelf_reading_cursor.clear();
             settings.shelf_favorites_cursor.clear();
             settings.shelf_shipped_sequence = 0;
@@ -725,7 +713,7 @@ impl DesktopServer {
         self.send.cancel.store(true, Ordering::Relaxed);
     }
 
-    /// 携帯で変えたお気に入りを単独サーバーから受け取り、本棚へ書く。送信の途中なら何もしない。
+    /// 携帯で変えたお気に入りと読書位置を単独サーバーの棚から受け取り、棚へ書く。送信の途中なら何もしない。
     pub async fn pull_favorites(&self, state: &Arc<AppState>) -> Result<usize, String> {
         let Ok(_running) = self.send_lock.try_lock() else {
             return Ok(0);
@@ -735,75 +723,18 @@ impl DesktopServer {
 
     /// 送信の鍵を持ったまま呼ぶ。
     ///
-    /// 写しを作る前に取り込めば、取り込んだ変更は写しに入る。だから取り込んだと知らせて
-    /// サーバーの記録を消してよい。送信の途中に取り込むと、取り込む前の写しが届いて
-    /// 携帯の変更が消えるので、送信と同時には動かさない。
+    /// 写しを作る前に取り込めば、取り込んだ変更は写しに入る。送信の途中に取り込むと、
+    /// 取り込む前の写しが届いて携帯の変更が消えるので、送信と同時には動かさない。
     async fn pull_favorites_locked(&self, state: &Arc<AppState>) -> Result<usize, String> {
-        let Some(remote) = self.settings().remote else {
-            return Ok(0);
-        };
-        let Some(token) = credential::load(&remote.url)? else {
-            return Ok(0);
-        };
-        // 新しい棚を配っているサーバーなら、携帯が棚に書いたお気に入りを棚から読む。
-        let (mut applied, from_shelf) = match self.pull_shelf_favorites_locked(state).await {
-            Ok(Some(applied)) => (applied, true),
-            Ok(None) => (0, false),
+        // 携帯が棚に書いたお気に入りを読む。
+        let applied = match self.pull_shelf_favorites_locked(state).await {
+            Ok(applied) => applied.unwrap_or(0),
             Err(error) => {
                 log::warn!("携帯のお気に入りを棚から取り込めません: {error}");
-                (0, false)
+                0
             }
         };
-        let mut since = self.settings().favorites_cursor;
-        loop {
-            let path = format!("favorites?since={since}&limit={FAVORITES_PAGE}");
-            // 古いサーバーには口が無い。携帯からも変えられないので、取り込むものも無い。
-            let Some(page) = admin_get_if_present(&remote, &token, &path).await? else {
-                break;
-            };
-            let items: Vec<FavoriteChange> =
-                serde_json::from_value(page.get("items").cloned().unwrap_or_default())
-                    .map_err(|_| "サーバーのお気に入りの変更を読み取れません".to_string())?;
-            let Some(cursor) = items.last().map(|item| item.cursor) else {
-                break;
-            };
-            let full = items.len() >= FAVORITES_PAGE;
-            let gate = state.library_gate.clone().write_owned().await;
-            // 棚から読めたときは棚の値を使うので、旧 API の記録は当てずに読み進めるだけ。
-            let shelf = state.library_v2.library().ok().filter(|_| !from_shelf);
-            applied += tokio::task::spawn_blocking(move || {
-                let _gate = gate;
-                let mut applied = 0;
-                if let Some(shelf) = &shelf {
-                    for item in &items {
-                        if crate::commands::library_v2::follow_remote_favorite(
-                            shelf,
-                            &item.source,
-                            &item.source_id,
-                            item.favorite,
-                        )? {
-                            applied += 1;
-                        }
-                    }
-                }
-                Ok::<_, String>(applied)
-            })
-            .await
-            .map_err(|error| format!("お気に入りを書けません: {error}"))??;
-            admin_post(
-                &remote,
-                &token,
-                "favorites/ack",
-                &serde_json::json!({ "cursor": cursor }),
-            )
-            .await?;
-            self.change_settings(|settings| settings.favorites_cursor = cursor)?;
-            since = cursor;
-            if !full {
-                break;
-            }
-        }
-        // 携帯が新しい棚に書いた読書位置も、同じ機会に取り込む。取り込めなくてもお気に入りは止めない。
+        // 携帯が棚に書いた読書位置も、同じ機会に取り込む。取り込めなくてもお気に入りは止めない。
         let read = match self.pull_shelf_reading_locked(state).await {
             Ok(read) => read,
             Err(error) => {
@@ -1066,10 +997,7 @@ impl DesktopServer {
             let settings = server.settings();
             if settings.embedded.enabled {
                 let port = DEFAULT_PORT;
-                if let Err(error) = server
-                    .start_embedded(Library::none(), settings.embedded, port)
-                    .await
-                {
+                if let Err(error) = server.start_embedded(settings.embedded, port).await {
                     log::warn!("内蔵サーバーを始められません: {error}");
                 }
             }

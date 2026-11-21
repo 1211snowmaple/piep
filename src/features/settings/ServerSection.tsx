@@ -226,7 +226,7 @@ function hasNewVersion(details: RemoteServerStatus): boolean {
 /** 次にすることを 1 つだけ示す。同時に 2 つは光らせない。 */
 export function nextAction(details: RemoteServerStatus | undefined, phones: number): "send" | "phone" | "update" | null {
   if (!details) return null;
-  if (details.works === null) return "send";
+  if (details.shelf === null) return "send";
   if (phones === 0) return "phone";
   if (hasNewVersion(details)) return "update";
   return null;
@@ -309,10 +309,6 @@ function ConnectedRemote(props: CardProps) {
     lastError,
     data?.shelfPending && !send.running ? "送ったライブラリは、サーバーを再起動すると読めるようになります。" : null,
     update?.lastError ? `更新できませんでした: ${update.lastError}` : null,
-    data?.sync?.indexError ? `検索の索引を更新できません: ${data.sync.indexError}` : null,
-    last.missingReferenced ? `ライブラリが参照しているファイルのうち ${formatNumber(last.missingReferenced)} 件がサーバーにありません。この PC からも失われているかもしれません。診断で確かめてください。` : null,
-    send.outsidePaths > 0 ? `ライブラリの保存先の外にあるファイル ${formatNumber(send.outsidePaths)} 件は送っていません。` : null,
-    send.skippedNames > 0 ? `ファイル名を扱えないファイル ${formatNumber(send.skippedNames)} 件は送っていません。` : null,
   ].filter((note): note is string => Boolean(note));
 
   const checkOrUpdate = () => {
@@ -358,8 +354,7 @@ function ConnectedRemote(props: CardProps) {
           <Fact label="URL"><CopyValue value={remote?.url ?? ""} label="URL をコピー">{remote?.url}</CopyValue></Fact>
           <Fact label="バージョン">{versionFact(data, offline)}</Fact>
           <Fact label="ライブラリ">
-            {!data ? (offline ? "読めませんでした" : "確認しています") : data.works === null ? "まだ送っていません" : `${formatNumber(data.works)} 作品`}
-            {data?.sync?.indexPending ? `・検索を準備中（残り ${formatNumber(data.sync.indexPending)} 件）` : ""}
+            {!data ? (offline ? "読めませんでした" : "確認しています") : data.shelf === null ? "まだ送っていません" : `${formatNumber(Number(data.shelf.works))} 作品`}
           </Fact>
           <Fact label="前回の送信">{last.finishedAt ? `${relativeTime(last.finishedAt)}${last.error ? "・送れませんでした" : ""}` : "なし"}</Fact>
           <Fact label="携帯">{data ? phonesFact(phones) : offline ? "読めませんでした" : "確認しています"}</Fact>

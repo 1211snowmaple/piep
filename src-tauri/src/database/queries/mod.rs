@@ -68,7 +68,6 @@ pub use archive_state::{
 mod collection_additions;
 mod collection_sweep;
 mod collections;
-mod server_support;
 mod suggestion_source;
 mod tag_recommendations;
 mod work_link_evidence;

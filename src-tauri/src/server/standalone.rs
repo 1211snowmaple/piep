@@ -12,9 +12,7 @@ use super::http::{
     admin_router, combined_router, reader_router, AdminWeb, ConnectionInfo, ServerContext,
 };
 use super::install::{self, InstallOptions};
-use super::library::{Library, SwappableDb};
 use super::store::{Role, ServerStore};
-use super::sync_receive::SyncReceiver;
 use super::tls::{self, TlsMaterial};
 use super::update::{
     self, AfterStop, UpdateController, UpdateHistory, UpdateSource, UpdateWindow,
@@ -72,15 +70,20 @@ pub struct ReaderShelfConfig {
 }
 
 impl ReaderShelfConfig {
+    /// 配る世代の棚の置き場。
+    fn root(&self, paths: &ServerPaths) -> Result<PathBuf, String> {
+        match self.generation {
+            Some(generation) => native::generation_path(paths, generation),
+            None => Ok(paths.native_library()),
+        }
+    }
+
     fn open(
         &self,
         paths: &ServerPaths,
         store: Arc<ServerStore>,
     ) -> Result<Arc<super::v2::Context>, String> {
-        let root = match self.generation {
-            Some(generation) => native::generation_path(paths, generation)?,
-            None => paths.native_library(),
-        };
+        let root = self.root(paths)?;
         let library = Arc::new(
             crate::library::Library::open_matching(&root, self.library_id.get())
                 .map_err(|error| format!("新しい棚を開けません: {error}"))?,
@@ -517,7 +520,6 @@ async fn tls_material(
 pub async fn command_init(data: &Path, url: Option<String>) -> Result<String, String> {
     let paths = ServerPaths::new(data)?;
     fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
-    fs::create_dir_all(paths.library()).map_err(|error| format!("置き場を作れません: {error}"))?;
     if !paths.config().exists() {
         fs::write(paths.config(), CONFIG_TEMPLATE)
             .map_err(|error| format!("設定を書けません: {error}"))?;
@@ -608,8 +610,6 @@ pub fn command_status(data: &Path) -> Result<String, String> {
 /// 組み立て済みのサーバー。テストと `serve` の両方で使う。
 pub struct StandaloneParts {
     pub context: Arc<ServerContext>,
-    pub receiver: Arc<SyncReceiver>,
-    pub db: Arc<SwappableDb>,
 }
 
 pub fn assemble(
@@ -617,32 +617,10 @@ pub fn assemble(
     public_url: Option<String>,
     fingerprint: Option<String>,
 ) -> Result<StandaloneParts, String> {
-    fs::create_dir_all(paths.storage()).map_err(|error| format!("置き場を作れません: {error}"))?;
-    fs::create_dir_all(paths.incoming()).map_err(|error| format!("置き場を作れません: {error}"))?;
+    fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
     let store = Arc::new(ServerStore::open(&paths.store())?);
-    let db = Arc::new(SwappableDb::new(paths.database(), paths.storage()));
-    let receiver = Arc::new(SyncReceiver::new(
-        paths.library(),
-        paths.trash(),
-        paths.incoming(),
-        Arc::clone(&store),
-        Arc::clone(&db),
-    ));
-    receiver.recover_pending_publication()?;
-    db.open_existing()?;
-    let context = ServerContext::new(
-        Library(Arc::clone(&db)),
-        store,
-        paths.library(),
-        Some(Arc::clone(&receiver)),
-        public_url,
-        fingerprint,
-    );
-    Ok(StandaloneParts {
-        context,
-        receiver,
-        db,
-    })
+    let context = ServerContext::new(store, paths.root.clone(), true, public_url, fingerprint);
+    Ok(StandaloneParts { context })
 }
 
 /// 口を 1 つ、終わるまで動かす。
@@ -688,7 +666,7 @@ pub async fn run_listener(
     served.map_err(|error| format!("{address} の待ち受けが止まりました: {error}"))
 }
 
-/// 自分の口に `hello` を通し、DB を検査してから、準備できた印を書く。
+/// 自分の口に `hello` を通し、棚の台帳を検査してから、準備できた印を書く。
 /// 見張り役はこの印を見て、更新が定着したと判断する。
 async fn report_ready(paths: ServerPaths, config: ServerConfig) -> Result<(), String> {
     let address = config.admin_listen.unwrap_or(config.listen);
@@ -703,7 +681,7 @@ async fn report_ready(paths: ServerPaths, config: ServerConfig) -> Result<(), St
     } else {
         "http"
     };
-    let url = format!("{scheme}://{host}:{}/api/v1/hello", address.port());
+    let url = format!("{scheme}://{host}:{}/api/v2/hello", address.port());
     // 自分自身への問い合わせなので、証明書は問わない。
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -728,7 +706,11 @@ async fn report_ready(paths: ServerPaths, config: ServerConfig) -> Result<(), St
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    let database = paths.database();
+    // 配っている棚の台帳を検査する。まだ棚を受け取っていなければ検査する物は無い。
+    let Some(shelf) = &config.library_v2 else {
+        return watchdog::write_ready_mark(&paths);
+    };
+    let database = shelf.root(&paths)?.join("library.db");
     tokio::task::spawn_blocking(move || check_database(&database))
         .await
         .map_err(|error| format!("DB の検査が異常終了しました: {error}"))??;
@@ -907,7 +889,6 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
     parts
         .context
         .set_shipments(paths.clone(), Arc::clone(&shipments));
-    parts.receiver.start_index_catch_up();
     note_started(&paths, &parts.context.store);
     let handle = axum_server::Handle::new();
     let restart = Arc::new(AtomicBool::new(false));
@@ -993,7 +974,7 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
             Box::new(move || stop_handle.graceful_shutdown(Some(Duration::from_secs(5)))),
         )?;
         parts.context.set_update(Arc::clone(&controller));
-        tokio::spawn(Arc::clone(&controller).run(Some(Arc::clone(&parts.receiver))));
+        tokio::spawn(Arc::clone(&controller).run(Some(Arc::clone(&shipments))));
         Some(controller)
     } else {
         None
@@ -1030,7 +1011,6 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
             }
         }
     }
-    parts.receiver.stop_index_catch_up();
     result?;
     let Some(after) = updates.and_then(|controller| controller.take_after_stop()) else {
         drop(lock);
@@ -1472,20 +1452,20 @@ mod tests {
         let restored =
             piep_storage::decode_chunk(&response.bytes().await.unwrap(), &file.chunks[0]).unwrap();
         assert_eq!(crate::library::Fingerprint::of(&restored), file.id);
-        let legacy = resource(format!("{base}/api/v1/about"))
+        let about = resource(format!("{base}/api/v2/about"))
             .send()
             .await
             .unwrap()
             .error_for_status()
             .unwrap();
-        assert_eq!(legacy.headers()[header::CACHE_CONTROL], "private, no-store");
+        assert_eq!(about.headers()[header::CACHE_CONTROL], "private, no-store");
         let admin_ticket = store
             .issue_pairing(Role::Admin, Duration::from_secs(60))
             .unwrap();
         let administrator = store.consume_pairing(&admin_ticket, "管理端末").unwrap();
         let status = |token: &str| {
             client
-                .get(format!("{base}/api/v1/admin/status"))
+                .get(format!("{base}/api/v2/admin/status"))
                 .bearer_auth(token)
         };
         assert_eq!(
@@ -1502,14 +1482,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            details["libraryV2"],
+            details["shelf"],
             serde_json::json!({"libraryId":id,"syncEpoch":epoch,"works":"1"})
         );
         // 携帯の読書位置は管理の口からだけ読める（デスクトップ版が自分の棚へ取り込む）。
         let reading = |token: &str| {
             client
                 .get(format!(
-                    "{base}/api/v1/admin/shelf/reading?cursor=&limit=10"
+                    "{base}/api/v2/admin/shelf/reading?cursor=&limit=10"
                 ))
                 .bearer_auth(token)
         };

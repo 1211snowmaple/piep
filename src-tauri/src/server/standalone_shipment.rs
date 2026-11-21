@@ -190,6 +190,11 @@ impl ShelfShipments {
             .unwrap_or_default()
     }
 
+    /// 受け取りか組み立ての途中か。自己更新はこれが済むのを待つ。
+    pub fn busy(&self) -> bool {
+        matches!(self.status().state.as_str(), "receiving" | "assembling")
+    }
+
     fn assembling(&self) -> bool {
         self.status().state == "assembling"
     }

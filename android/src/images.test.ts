@@ -6,20 +6,37 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => `http://pcimg.localhost/${path}`,
 }));
 
-it("同じ作品番号でも接続を変えたら、WebView の古い画像キャッシュを使わない", async () => {
-  const images = await import("./images");
-  const work = { id: 1, currentVersion: 1, contentHash: "same" } as PcWork;
-  const sources = () => [images.workCoverUrl(work), images.illustrationUrl(1, 2, 720, 1, "same"), images.entityCoverUrl("people", "pixiv", "1")];
+const library = "0190a000-0000-7000-8000-000000000001";
+const id = "0190a000-0000-7000-8000-000000000002";
+
+async function load() {
+  const native = await import("./nativeReading");
+  native.adoptNativeLibrary({
+    url: "https://server", reachable: true,
+    nativeLibrary: {
+      scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
+      readerBundle: true,
+    },
+  } as never);
+  return import("./images");
+}
+
+it("同じ作品でも接続を変えたら、WebView の古い画像キャッシュを使わない", async () => {
+  const images = await load();
+  const work = { id, currentVersion: 1, shelf: { snapshotId: "0190a000-0000-7000-8000-000000000003", edited: false } } as PcWork;
+  const sources = () => [images.workCoverUrl(work), images.entityCoverUrl("people", "pixiv", "1")];
   const before = sources();
+  expect(before.every((url) => url !== null)).toBe(true);
   expect(sources()).toEqual(before);
-  const offline = images.savedCoverUrl(1, 1);
+  const offline = images.savedCoverUrl(id, 1);
   images.forgetServerImages();
   expect(sources().every((url, index) => url !== before[index])).toBe(true);
-  expect(images.savedCoverUrl(1, 1)).toBe(offline);
+  expect(images.savedCoverUrl(id, 1)).toBe(offline);
 });
 
 it("アプリを起動し直したときも、以前の接続の HTTP キャッシュを引き継がない", async () => {
-  const first = (await import("./images")).entityCoverUrl("series", "pixiv", "1");
+  const first = (await load()).entityCoverUrl("series", "pixiv", "1");
+  expect(first).not.toBeNull();
   vi.resetModules();
-  expect((await import("./images")).entityCoverUrl("series", "pixiv", "1")).not.toBe(first);
+  expect((await load()).entityCoverUrl("series", "pixiv", "1")).not.toBe(first);
 });

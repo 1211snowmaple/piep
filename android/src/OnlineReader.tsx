@@ -15,11 +15,9 @@ import { PullIndicator, usePullToRefresh } from "./pullToRefresh";
 import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
 import { fillDocumentImages, safePageHtml } from "./readerDocument";
 import { readerKeyDirection } from "./readerKeyboard";
-import { readRemotePosition, readShelfPosition, recordReading, recordShelfReading, refreshReading, refreshReadingWithin, remoteStart, sendReading, shelfLocation, shelfReadingFor, shelfStart, type ReadingWrite, type RemoteStart } from "./readingSync";
-import { forgetWorkPages, fetchPage, prefetchPage } from "./pageCache";
-import { illustrationUrl } from "./images";
+import { readShelfPosition, recordShelfReading, refreshReading, refreshReadingWithin, sendReading, shelfLocation, shelfReadingFor, shelfStart, type ReadingWrite, type RemoteStart } from "./readingSync";
 import { nativeImageUrl, nativePage, openNative, openNativeSnapshot, type NativeOpened } from "./nativeReading";
-import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcMetadata, getPcOutline, getPcWorkCollections, pcErrorMessage, saveOfflineWork, v1WorkId, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
+import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcMetadata, getPcWorkCollections, pcErrorMessage, saveOfflineWork, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
 import type { ReaderBehavior, ReaderFont, ReaderType } from "./readerPrefs";
 
 function offlineSnapshotChanged(error: unknown): boolean {
@@ -36,15 +34,12 @@ const savedPage = localPage;
 // サーバーの位置を待つのは開くときの一瞬だけ。遅ければ手元の位置で開き、あとで案内する。
 // 同期を待つのは短く。間に合わなければ手元の位置で開き、本文を先に出す。
 const SYNC_WAIT_MS = 600;
-// 今のページを描き終えてから、次のページを受け取り始める。
-const PREFETCH_DELAY_MS = 300;
 const WRITE_DELAY_MS = 3000;
 
-/** 開始位置にするサーバーの位置。新しい棚から開いた本は棚の位置、ほかは旧 API の位置。 */
+/** 開始位置にする棚の位置。棚から開いた本だけが持つ。 */
 async function remoteStartFor(work: PcWork, editHash: string | null, document: NativeOpened | null): Promise<RemoteStart | null> {
   const shelf = shelfReadingFor(document);
-  if (shelf) return shelfStart(await readShelfPosition(shelf.entityId), localReadingTime(work, editHash), shelf);
-  return remoteStart(await readRemotePosition(work.source, work.sourceId), localReadingTime(work, editHash), work.currentVersion, editHash);
+  return shelf ? shelfStart(await readShelfPosition(shelf.entityId), localReadingTime(work, editHash), shelf) : null;
 }
 
 const readSavedPosition = localPosition;
@@ -55,12 +50,6 @@ export const hasReadingPosition = hasLocalPosition;
 function positionFromRemote(start: RemoteStart, fontFamily: ReaderFont): SavedPosition {
   // 別の端末とは文字の大きさが違うので、割合で戻す。先頭から順に画像が埋まるのを待つよう top は末尾にする。
   return { page: start.page, top: Number.MAX_SAFE_INTEGER, ratio: start.ratio, fontSize: 0, lineHeight: 0, readerWidth: 0, fontFamily };
-}
-
-function sameRevision(metadata: PcMetadata, work: PcWork, editHash: string | null): boolean {
-  return metadata.work.currentVersion === work.currentVersion
-    && metadata.work.contentHash === work.contentHash
-    && metadata.activeEditHash === editHash;
 }
 
 /** 画面を送るときに一行だけ残す。読んでいた行を見失わないため。 */
@@ -133,12 +122,11 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   const dismissedRemote = useRef(0);
   const currentPage = useRef(pageIndex);
   currentPage.current = pageIndex;
-  // 新しい棚で開けた作品は、本文・目次・挿絵をそこから読む。開けなければ今までどおり。
+  // 棚で開いた一冊。本文・目次・挿絵はそこから読む。
   const native = useRef<NativeOpened | null>(null);
-  // 以前の版を新しい棚から開いたときの、その版の写しの ID（開き直すときに使う）。
+  // 以前の版を開いたときの、その版の写しの ID（開き直すときに使う）。
   const nativeSnapshot = useRef<string | null>(null);
   const readingWork = detailWork ?? work;
-  const loadMetadata = async () => readerMetadataForVersion(await getPcMetadata(work.id), selectedVersion);
   const positionKey = activeEditHash === undefined ? null : readingKey(readingWork, activeEditHash);
 
   useLayoutEffect(() => {
@@ -153,65 +141,26 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     setProgress((old) => Math.abs(old - next) < 0.002 ? old : next);
   };
 
-  const adoptRevision = (metadata: PcMetadata): boolean => {
-    if (activeEditHash !== undefined && sameRevision(metadata, readingWork, activeEditHash)) {
-      setDetailWork(metadata.work);
-      setIsEdited(metadata.isEdited);
-      return false;
-    }
-    // A different edit or source version must never inherit the prior page or outline.
-    pendingRestore.current = readSavedPosition(metadata.work, metadata.activeEditHash);
-    pendingOutline.current = null;
-    syncedPage.current = null;
-    forgetWorkPages(work.id);
-    setOutline([]);
-    setDetailWork(metadata.work);
-    setIsEdited(metadata.isEdited);
-    setPageIndex(savedPage(metadata.work, metadata.activeEditHash));
-    setActiveEditHash(metadata.activeEditHash);
-    setRetry((current) => current + 1);
-    return true;
-  };
-
-  /**
-   * 本文を受け取り、今の版のものか確かめる。別の版だったら null を返す（読み直しは adoptRevision が始める）。
-   * サーバーが版を本文に添えるので、確かめるための往復は増えない。添えない古いサーバーにだけ一度尋ねる。
-   */
+  /** 本文を受け取る。ページは棚から開いた一冊を端末の中で組んである。 */
   const readPage = async (target: number): Promise<PcPage | null> => {
     const opened = native.current;
-    if (opened) {
-      try {
-        return await nativePage(opened, target);
-      } catch {
-        // 端末で組んだものは数冊ぶんしか覚えていない。消えていたら開き直す。
-        const again = nativeSnapshot.current
-          ? await openNativeSnapshot(String(work.id), nativeSnapshot.current, true)
-          : await openNative(readingWork, true);
-        if (!again) throw new Error("本文を読み込めませんでした。もう一度読み込んでください");
-        native.current = again;
-        return nativePage(again, target);
-      }
+    if (!opened) throw new Error("本文を読み込めませんでした。もう一度読み込んでください");
+    try {
+      return await nativePage(opened, target);
+    } catch {
+      // 端末で組んだものは数冊ぶんしか覚えていない。消えていたら開き直す。
+      const again = nativeSnapshot.current
+        ? await openNativeSnapshot(work.id, nativeSnapshot.current, true)
+        : await openNative(readingWork, true);
+      if (!again) throw new Error("本文を読み込めませんでした。もう一度読み込んでください");
+      native.current = again;
+      return nativePage(again, target);
     }
-    const next = await fetchPage(work.id, target, selectedVersion);
-    const revision = next.revision;
-    if (revision && revision.currentVersion === readingWork.currentVersion && revision.contentHash === readingWork.contentHash && revision.activeEditHash === activeEditHash) return next;
-    const metadata = await loadMetadata();
-    if (adoptRevision(metadata)) return null;
-    if (!revision) return next;
-    // 版は変わっていない。覚えていた本文のほうが古かった。
-    forgetWorkPages(work.id);
-    return fetchPage(work.id, target, selectedVersion);
   };
 
-  /** 次に読まれるページを先に受け取る。今のページの描画が済んでから。 */
-  const prefetchNext = (shown: PcPage) => {
-    if (offline || native.current || shown.page + 1 >= shown.pageCount) return;
-    window.setTimeout(() => prefetchPage(work.id, shown.page + 1, selectedVersion), PREFETCH_DELAY_MS);
-  };
-
-  const imageSource = (assetId: number, width: number, generation: string | null): string | Promise<string> => {
+  const imageSource = (assetId: number, _width: number, generation: string | null): string | Promise<string> => {
     if (offline) return getOfflineAsset(work.id, assetId, generation!).then((asset) => `data:${asset.mimeType};base64,${asset.base64}`);
-    const url = native.current ? nativeImageUrl(native.current, assetId) : illustrationUrl(v1WorkId(work), assetId, width, readingWork.currentVersion, readingWork.contentHash);
+    const url = native.current ? nativeImageUrl(native.current, assetId) : null;
     if (!url) throw new Error("画像を読み込めません");
     return url;
   };
@@ -219,8 +168,6 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   useEffect(() => {
     if (offline) return;
     let alive = true;
-    // 版と同期の確認を待つあいだに本文も受け取っておく。位置が同じなら待ち時間がなくなる。
-    prefetchPage(work.id, selectedVersion === null ? savedPage(work, null) : 0, selectedVersion);
     void Promise.all([
       getPcMetadata(work.id),
       selectedVersion === null ? refreshReadingWithin(SYNC_WAIT_MS) : Promise.resolve(),
@@ -228,9 +175,9 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       selectedVersion === null ? openNative(work) : Promise.resolve(null),
     ]).then(async ([original, , current]) => {
       const metadata = readerMetadataForVersion(original, selectedVersion);
-      // 新しい棚の作品の以前の版は、その版の写しを棚から開く。写しの ID が無ければ今までどおり。
+      // 以前の版は、その版の写しを棚から開く。
       const snapshot = selectedVersion === null ? null : readerVersions(original).find((entry) => entry.version === selectedVersion)?.snapshotId ?? null;
-      const opened = snapshot ? await openNativeSnapshot(String(work.id), snapshot) : current;
+      const opened = snapshot ? await openNativeSnapshot(work.id, snapshot) : current;
       nativeSnapshot.current = opened && snapshot ? snapshot : null;
       const start = selectedVersion === null ? await remoteStartFor(metadata.work, metadata.activeEditHash, opened) : null;
       if (!alive) return;
@@ -294,12 +241,10 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     const write = queuedWrite.current;
     queuedWrite.current = null;
     if (!write) return;
-    // 新しい棚から開いた本は、棚の作品の位置として書く（開いた版の写しか編集に結ぶ）。
+    // 棚の作品の位置として書く（開いた版の写しか編集に結ぶ）。
     const shelf = shelfReadingFor(native.current);
-    const recorded = shelf
-      ? recordShelfReading(shelf.entityId, shelfLocation(shelf, write.page, write.position), write.finished)
-      : recordReading(write);
-    void recorded.then(() => sendReading());
+    if (!shelf) return;
+    void recordShelfReading(shelf.entityId, shelfLocation(shelf, write.page, write.position), write.finished).then(() => sendReading());
   };
 
   const queueReadingWrite = (pageNumber: number, ratio: number, pageCount: number) => {
@@ -575,16 +520,12 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     let alive = true;
     void (async () => {
       try {
-        if (!offline && native.current) {
-          setOutline(native.current.outline);
+        if (!offline) {
+          setOutline(native.current?.outline ?? []);
           return;
         }
-        const entries = await (offline ? getOfflineOutline(work.id, offlineGeneration!) : getPcOutline(work.id, selectedVersion));
+        const entries = await getOfflineOutline(work.id, offlineGeneration!);
         if (!alive) return;
-        if (!offline) {
-          const after = await loadMetadata();
-          if (!alive || adoptRevision(after)) return;
-        }
         setOutline(entries);
       } catch (error) {
         if (!alive) return;
@@ -634,7 +575,6 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
         const clean = safePageHtml(next.html);
         setHtml(clean);
         setLoading(false);
-        prefetchNext(next);
         // Let React mount the sanitized document before filling its images.
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         if (cancelled) return;
@@ -823,7 +763,6 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     if (!next) return null;
     const generation = "generation" in next && typeof next.generation === "string" ? next.generation : null;
     if (offline && !generation) throw new Error("保存済み作品の版を確認できませんでした。もう一度読み込んでください");
-    prefetchNext(next);
     return { page: next, html: safePageHtml(next.html), generation };
   };
 

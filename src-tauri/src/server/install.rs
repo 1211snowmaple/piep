@@ -521,11 +521,11 @@ fn is_server_store(path: &Path) -> bool {
     };
     connection
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('devices', 'pairings', 'files', 'reading')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('devices', 'pairings', 'meta')",
             [],
             |row| row.get::<_, i64>(0),
         )
-        .is_ok_and(|count| count == 4)
+        .is_ok_and(|count| count == 3)
 }
 
 /// 引数なしで開いたときも、ここへ来る。

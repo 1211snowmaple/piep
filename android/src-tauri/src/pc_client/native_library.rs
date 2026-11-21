@@ -31,17 +31,6 @@ pub struct NativeLibraryScope {
 #[serde(rename_all = "camelCase")]
 pub struct NativeLibraryStatus {
     scope: NativeLibraryScope,
-    works_list: bool,
-    /// 一覧（絞り込み・並べ替え・語の検索）・作品の画面・表紙を新しい棚から出せるか。
-    works_search: bool,
-    /// 棚の作品のお気に入りを、要求 UUID と更新世代で付け外しできるか。
-    favorite_write: bool,
-    /// 作者・シリーズ・コレクションの画面を新しい棚から出せるか。
-    groups: bool,
-    /// 検索欄の候補と、作品の以前の版（版ごとの写し）を新しい棚から出せるか。
-    suggest: bool,
-    /// 読書位置を新しい棚と受け渡せるか（要求 UUID と更新世代で書き、変わった分を受け取る）。
-    reading: bool,
     reader_bundle: bool,
 }
 
@@ -143,12 +132,6 @@ async fn parse_identity(
     }
     Ok(NativeLibraryStatus {
         scope,
-        works_list: header_is(&headers, "x-piep-works-list", "1"),
-        works_search: header_is(&headers, "x-piep-works-search", "1"),
-        favorite_write: header_is(&headers, "x-piep-favorite-write", "1"),
-        groups: header_is(&headers, "x-piep-groups", "1"),
-        suggest: header_is(&headers, "x-piep-suggest", "1"),
-        reading: header_is(&headers, "x-piep-reading", "1"),
         reader_bundle: identity.capabilities.reader_bundle,
     })
 }
@@ -918,22 +901,14 @@ mod tests {
             let shelf = identity();
             let wire_headers = headers(&shelf);
             let body = serde_json::to_string(&shelf).unwrap();
-            let advertised = format!(
-                "{wire_headers}X-Piep-Works-List: 1\r\nX-Piep-Works-Search: 1\r\nX-Piep-Groups: 1\r\nX-Piep-Suggest: 1\r\n"
-            );
-            let connected = parse_identity(response("200 OK", &advertised, &body).await, 7)
+            let connected = parse_identity(response("200 OK", &wire_headers, &body).await, 7)
                 .await
                 .unwrap();
             assert_eq!(connected.scope.library_id, shelf.library_id);
             assert_eq!(connected.scope.subject_id, shelf.subject_id);
             assert_eq!(connected.scope.sync_epoch, shelf.sync_epoch);
             assert_eq!(connected.scope.connection_generation, 7);
-            assert!(connected.works_list && connected.works_search && connected.reader_bundle);
-            assert!(connected.groups && connected.suggest && !connected.favorite_write);
-            let older = parse_identity(response("200 OK", &wire_headers, &body).await, 7)
-                .await
-                .unwrap();
-            assert!(!older.works_list && !older.works_search && !older.groups && !older.suggest);
+            assert!(connected.reader_bundle);
             let duplicate = format!(
                 "{wire_headers}X-Piep-Sync-Epoch: {}\r\n",
                 shelf.sync_epoch.get()

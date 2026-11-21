@@ -4,8 +4,8 @@
 //! 版の切り替えと戻しは見張り役（`watchdog.rs`）が行う。動いている実行ファイルは
 //! 自分では置き換えられないからである。
 
+use super::standalone::shipment::ShelfShipments;
 use super::standalone::{ServerPaths, UpdateConfig};
-use super::sync_receive::SyncReceiver;
 use chrono::{DateTime, Local, NaiveTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -756,13 +756,13 @@ impl UpdateController {
         record.save(&self.paths);
     }
 
-    /// 送信が区切りに来るのを待つ。来なければ false。
-    async fn wait_until_quiet(&self, receiver: Option<&SyncReceiver>) -> bool {
-        let Some(receiver) = receiver else {
+    /// 棚の受け取りが区切りに来るのを待つ。来なければ false。
+    async fn wait_until_quiet(&self, shipments: Option<&ShelfShipments>) -> bool {
+        let Some(shipments) = shipments else {
             return true;
         };
         let deadline = tokio::time::Instant::now() + QUIET_LIMIT;
-        while receiver.status().session_open {
+        while shipments.busy() {
             if tokio::time::Instant::now() >= deadline {
                 return false;
             }
@@ -790,7 +790,7 @@ impl UpdateController {
     }
 
     /// 1 回分。当てることになったら true を返し、本体を止める。
-    async fn run_once(&self, now: bool, receiver: Option<&SyncReceiver>) -> bool {
+    async fn run_once(&self, now: bool, shipments: Option<&ShelfShipments>) -> bool {
         self.set_phase(UpdatePhase::Checking);
         if !now && !self.live().auto {
             // 自動を切っていても、新しいバージョンがあることは知らせる。取ってはこない。
@@ -821,7 +821,7 @@ impl UpdateController {
             self.set_phase(UpdatePhase::Idle);
             return false;
         }
-        if !self.wait_until_quiet(receiver).await {
+        if !self.wait_until_quiet(shipments).await {
             self.record_error("送信が終わらないので、更新を次に延ばします");
             self.set_phase(UpdatePhase::Idle);
             return false;
@@ -831,14 +831,14 @@ impl UpdateController {
     }
 
     /// 本体が動いている間、回り続ける。自動を切っていても、確認だけは続ける。
-    pub async fn run(self: Arc<Self>, receiver: Option<Arc<SyncReceiver>>) {
+    pub async fn run(self: Arc<Self>, shipments: Option<Arc<ShelfShipments>>) {
         let mut delay = FIRST_CHECK_DELAY;
         loop {
             let now = tokio::select! {
                 _ = self.requested.notified() => true,
                 _ = tokio::time::sleep(delay) => false,
             };
-            if self.run_once(now, receiver.as_deref()).await {
+            if self.run_once(now, shipments.as_deref()).await {
                 return;
             }
             delay = CHECK_INTERVAL;

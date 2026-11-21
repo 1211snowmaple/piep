@@ -44,7 +44,7 @@ struct Shipper {
 
 impl Shipper {
     fn url(&self, path: &str) -> String {
-        format!("{}/api/v1/admin/shelf/shipments{path}", self.base)
+        format!("{}/api/v2/admin/shelf/shipments{path}", self.base)
     }
 
     async fn status(&self) -> Result<ShipmentStatus, String> {

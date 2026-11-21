@@ -40,8 +40,8 @@ function status(overrides: Partial<DesktopServerStatus> = {}): DesktopServerStat
     devices: [],
     remote: null,
     autoSend: false,
-    send: { running: false, phase: "", filesTotal: 0, filesDone: 0, bytesTotal: 0, bytesDone: 0, message: null, outsidePaths: 0, skippedNames: 0 },
-    lastSend: { finishedAt: null, generation: null, works: null, filesAdded: null, filesRemoved: null, missingReferenced: null, unchanged: false, error: null },
+    send: { running: false, phase: "", filesTotal: 0, filesDone: 0, bytesTotal: 0, bytesDone: 0, message: null },
+    lastSend: { finishedAt: null, works: null, filesAdded: null, error: null },
     ...overrides,
   };
 }
@@ -53,9 +53,8 @@ function remote(overrides: Partial<RemoteServerStatus> = {}): RemoteServerStatus
   return {
     version: "0.36.0",
     apiVersion: 2,
-    works: 12,
+    shelf: { libraryId: "0190", syncEpoch: "0191", works: "12" },
     publicUrl: null,
-    sync: { generation: 1, committedAt: null, indexPending: 0, indexError: null },
     update: { auto: true, window: "03:00-06:00", phase: { state: "idle" }, latest: "0.36.0", lastCheckedAt: "2026-11-01T00:00:00Z", lastError: null, lastAppliedAt: null, skipped: [] },
     serverName: "Maple",
     adminWeb: "available",
@@ -84,7 +83,7 @@ describe("ServerSection", () => {
     for (const mock of Object.values(api)) mock.mockReset();
     api.serverInterfaces.mockResolvedValue([{ name: "Wi-Fi", ip: "192.168.1.10" }]);
     api.serverRemoteDevices.mockResolvedValue([]);
-    api.serverRemoteStatus.mockResolvedValue({ version: "0.31.0", apiVersion: 2, works: 12, publicUrl: null, sync: { generation: 1, committedAt: null, indexPending: 3, indexError: null } });
+    api.serverRemoteStatus.mockResolvedValue({ version: "0.31.0", apiVersion: 2, shelf: { libraryId: "0190", syncEpoch: "0191", works: "12" }, publicUrl: null, update: null });
   });
 
   it("does not call the server outside the desktop app", () => {
@@ -118,7 +117,7 @@ describe("ServerSection", () => {
   it("shows sending progress and lets it be stopped", async () => {
     api.serverStatus.mockResolvedValue(status({
       remote: { url: "https://server.example/", fingerprint: null },
-      send: { running: true, phase: "upload", filesTotal: 10, filesDone: 4, bytesTotal: 100, bytesDone: 50, message: null, outsidePaths: 0, skippedNames: 0 },
+      send: { running: true, phase: "upload", filesTotal: 10, filesDone: 4, bytesTotal: 100, bytesDone: 50, message: null },
     }));
     api.serverRemoteStatus.mockResolvedValue(remote());
     api.serverSendStop.mockResolvedValue(status());
@@ -303,7 +302,7 @@ describe("remoteView", () => {
 describe("nextAction", () => {
   it("points at one thing at a time", () => {
     expect(nextAction(undefined, 0)).toBeNull();
-    expect(nextAction(remote({ works: null }), 0)).toBe("send");
+    expect(nextAction(remote({ shelf: null }), 0)).toBe("send");
     expect(nextAction(remote(), 0)).toBe("phone");
     expect(nextAction(remote(), 1)).toBeNull();
     expect(nextAction(remote({ version: "0.35.0" }), 1)).toBe("update");

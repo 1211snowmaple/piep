@@ -1,5 +1,5 @@
 import { relativeTime } from "@/lib/serverFormat";
-import type { AdminStatus, Connection, Storage } from "./api";
+import type { AdminStatus, Connection, ShipmentStatus, Storage } from "./api";
 
 export { dayTime, isNewer, relativeTime, windowLabel } from "@/lib/serverFormat";
 
@@ -68,6 +68,17 @@ export interface Issue {
   page: AdminPage;
 }
 
+/** 棚の受け取りの今の様子。 */
+export function shipmentLabel(shipment: ShipmentStatus | undefined): string {
+  switch (shipment?.state) {
+    case "receiving": return "受け取っています";
+    case "assembling": return "組み立てています";
+    case "ready": return shipment.restarting ? "切り替えています" : "再起動で切り替わります";
+    case "failed": return "受け取れませんでした";
+    default: return "なし";
+  }
+}
+
 /** 空きがこれより少なければ知らせる。 */
 const LOW_FREE_BYTES = 10 * 1024 ** 3;
 
@@ -83,8 +94,8 @@ export function findIssues(status: AdminStatus, storage: Storage | undefined): I
   for (const version of status.update?.skipped ?? []) {
     issues.push({ message: `${version} は起動に失敗したため飛ばしています`, page: "updates" });
   }
-  if (status.sync?.indexError) {
-    issues.push({ message: "検索の索引を作れていません", page: "library" });
+  if (status.shipment?.state === "failed") {
+    issues.push({ message: "送られたライブラリを受け取れませんでした", page: "library" });
   }
   return issues;
 }

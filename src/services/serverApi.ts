@@ -30,18 +30,12 @@ export interface ServerSendProgress {
   bytesTotal: number;
   bytesDone: number;
   message: string | null;
-  outsidePaths: number;
-  skippedNames: number;
 }
 
 export interface ServerLastSend {
   finishedAt: string | null;
-  generation: number | null;
   works: number | null;
   filesAdded: number | null;
-  filesRemoved: number | null;
-  missingReferenced: number | null;
-  unchanged: boolean;
   error: string | null;
 }
 
@@ -60,9 +54,9 @@ export interface DesktopServerStatus {
 export interface RemoteServerStatus {
   version: string;
   apiVersion: number;
-  works: number | null;
+  /** 配っている棚。まだ受け取っていなければ null。 */
+  shelf: { libraryId: string; syncEpoch: string; works: string } | null;
   publicUrl: string | null;
-  sync: { generation: number; committedAt: string | null; indexPending: number | null; indexError: string | null } | null;
   /** 自分で更新できるサーバーにだけある。 */
   update: RemoteServerUpdate | null;
   /** ここから下は 0.36 からある。 */

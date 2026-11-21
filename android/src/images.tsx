@@ -4,7 +4,7 @@ import type { PcCollection, PcWork } from "./pcApi";
 import { shelfCoverPath, shelfEntityCoverPath } from "./nativeReading";
 
 // WebView の HTTP キャッシュも接続ごとに分ける。Rust 側のディスクキャッシュ
-// だけを分けても、同じ作品番号の URL が先に WebView から返されてしまう。
+// だけを分けても、同じ URL が先に WebView から返されてしまう。
 const newRemoteScope = () => [...crypto.getRandomValues(new Uint32Array(4))].map((part) => part.toString(16).padStart(8, "0")).join("");
 let remoteScope = newRemoteScope();
 function imageUrl(path: string, remote = true): string | null {
@@ -20,25 +20,23 @@ export function forgetServerImages(): void {
   failed.clear();
 }
 
+/** 作品の表紙。認証は Rust 側で済ませ、JavaScript には鍵も画像の中身も渡らない。 */
 export function workCoverUrl(work: PcWork, large = false): string | null {
-  if (work.shelf) {
-    const path = shelfCoverPath(work, large);
-    return path ? imageUrl(path) : null;
-  }
-  return imageUrl(`work/${work.id}/${work.currentVersion}/${work.contentHash ?? ""}${large ? "/large" : ""}`);
+  const path = shelfCoverPath(work, large);
+  return path ? imageUrl(path) : null;
 }
-/** 本文の挿絵。認証は Rust 側で済ませ、JavaScript には鍵も画像の中身も渡らない。 */
-export const illustrationUrl = (workId: number, assetId: number, width: number, version: number, contentHash: string | null) => imageUrl(`asset/${workId}/${assetId}/${width}/${version}/${contentHash ?? ""}`);
-export const workCoverUrlById = (workId: number, revision: number) => imageUrl(`work/${workId}/c${revision}/`);
-/** 作者・シリーズの画像。接続先が出せるなら新しい棚の画像。 */
-export const entityCoverUrl = (kind: "people" | "series", source: string, key: string, banner = false) => imageUrl(shelfEntityCoverPath(kind, source, key, banner) ?? `entity/${kind}/${source}/${encodeURIComponent(key)}${banner ? "/banner" : ""}`);
-/** コレクションの表紙。棚のコレクションは棚から（`single` は表紙に選んだ作品の表紙）。 */
-export const collectionCoverUrl = (collection: Pick<PcCollection, "id" | "shelfLibrary">, slot: string, revision: number) => imageUrl(collection.shelfLibrary
-  ? `shelf-collection/${collection.shelfLibrary}/${collection.id}/${slot}/${revision}`
-  : `collection/${collection.id}/${slot}/${revision}`);
-export const savedCoverUrl = (workId: number | string, generation: number) => imageUrl(`saved/${workId}/${generation}`, false);
-export const savedEntityCoverUrl = (workId: number | string, kind: "people" | "series", generation: number) => imageUrl(`saved-entity/${workId}/${kind}/${generation}`, false);
-export const savedCollectionCoverUrl = (workId: number | string, collectionId: string, generation: number) => imageUrl(`saved-collection/${workId}/${collectionId}/${generation}`, false);
+/** 作者・シリーズの画像。 */
+export function entityCoverUrl(kind: "people" | "series", source: string, key: string, banner = false): string | null {
+  const path = shelfEntityCoverPath(kind, source, key, banner);
+  return path ? imageUrl(path) : null;
+}
+/** コレクションの表紙（`single` は表紙に選んだ作品の表紙）。 */
+export const collectionCoverUrl = (collection: Pick<PcCollection, "id" | "shelfLibrary">, slot: string, revision: number) => collection.shelfLibrary
+  ? imageUrl(`shelf-collection/${collection.shelfLibrary}/${collection.id}/${slot}/${revision}`)
+  : null;
+export const savedCoverUrl = (workId: string, generation: number) => imageUrl(`saved/${workId}/${generation}`, false);
+export const savedEntityCoverUrl = (workId: string, kind: "people" | "series", generation: number) => imageUrl(`saved-entity/${workId}/${kind}/${generation}`, false);
+export const savedCollectionCoverUrl = (workId: string, collectionId: string, generation: number) => imageUrl(`saved-collection/${workId}/${collectionId}/${generation}`, false);
 
 // 一度出た画像は、スクロールで戻ったときに溶け込ませず、その場で出す。
 const loaded = new Set<string>();

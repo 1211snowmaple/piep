@@ -1,6 +1,6 @@
 //! 端末の記録を一つの SQLite に置く。
 //!
-//! 読書位置（端末内と同期用）、「続きを読む」、保存した作品の本文の索引をここに持つ。
+//! 読書位置（端末内と棚との同期用）、「続きを読む」、保存した作品の本文の索引をここに持つ。
 //! 本文と画像そのものはファイルのまま置き、ここは検索と記録のための台帳にする。
 //! 食い違ったときはファイルを正として作り直せるようにする。
 //!
@@ -12,13 +12,12 @@ use rusqlite::{Connection, Transaction};
 use std::path::Path;
 
 const DB_FILE: &str = "piep.sqlite3";
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
-/// 版 1: 読書位置の同期。0.5.1 では `reading-sync.sqlite3` に置いていた。
-pub(super) const SYNC_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sync_meta (
-    id INTEGER PRIMARY KEY CHECK(id=1), url TEXT NOT NULL, device_id TEXT NOT NULL, cursor INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS positions (key TEXT PRIMARY KEY, data TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS pending (key TEXT PRIMARY KEY, data TEXT NOT NULL);";
+/// 版 6: 旧 API の読書位置の同期（版 1）は使わない。表を捨てる。
+const DROP_SYNC_SCHEMA: &str = "DROP TABLE IF EXISTS sync_meta;
+    DROP TABLE IF EXISTS positions;
+    DROP TABLE IF EXISTS pending;";
 
 /// 版 2: 端末内の読書位置と「続きを読む」。作品は取得元と取得元の ID で見分ける。
 /// サーバーの作品番号はサーバーごとに振られるので、棚に出すための接続先と番号は別に持つ。
@@ -61,8 +60,6 @@ const OFFLINE_KEY_SCHEMA: &str = "DROP TABLE IF EXISTS offline_catalog;
 
 pub struct DeviceDb {
     path: PathBuf,
-    legacy_sync_json: PathBuf,
-    legacy_sync_db: PathBuf,
     connection: Mutex<Option<Connection>>,
 }
 
@@ -74,8 +71,6 @@ impl DeviceDb {
     pub fn new(dir: &Path) -> Self {
         Self {
             path: dir.join(DB_FILE),
-            legacy_sync_json: dir.join("reading-sync.json"),
-            legacy_sync_db: dir.join("reading-sync.sqlite3"),
             connection: Mutex::new(None),
         }
     }
@@ -83,45 +78,10 @@ impl DeviceDb {
     /// 試験用。ファイルを作らない。
     #[cfg(test)]
     pub(super) fn in_memory() -> Self {
-        let nowhere = PathBuf::from("piep-test-no-legacy-records");
         Self {
             path: PathBuf::from(":memory:"),
-            legacy_sync_json: nowhere.join("reading-sync.json"),
-            legacy_sync_db: nowhere.join("reading-sync.sqlite3"),
             connection: Mutex::new(None),
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-
-    #[cfg(test)]
-    pub(super) fn legacy_sync_json(&self) -> &Path {
-        &self.legacy_sync_json
-    }
-
-    #[cfg(test)]
-    pub(super) fn legacy_sync_db(&self) -> &Path {
-        &self.legacy_sync_db
-    }
-
-    /// 試験用。これまでに書いた行の数。
-    #[cfg(test)]
-    pub(super) fn total_changes(&self) -> u64 {
-        let connection = self.connection.lock().unwrap();
-        connection.as_ref().map_or(0, Connection::total_changes)
-    }
-
-    #[cfg(test)]
-    pub(super) fn checkpoint(&self) {
-        let connection = self.connection.lock().unwrap();
-        connection
-            .as_ref()
-            .unwrap()
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
-            .unwrap();
     }
 
     /// 一つの transaction で読み書きする。失敗したら何も書かない。
@@ -162,71 +122,30 @@ impl DeviceDb {
             // 新しい版で作った記録を古い版で書き換えない。
             return Err(ClientError::device_records());
         }
-        // ATTACH は transaction の中では使えないので先に付け、終わったら外す。
-        let legacy_db = version < 1 && self.legacy_sync_db.is_file();
-        if legacy_db {
-            db.execute(
-                "ATTACH DATABASE ?1 AS legacy",
-                [self.legacy_sync_db.to_string_lossy()],
-            )
-            .map_err(records_error)?;
+        let tx = db.transaction().map_err(records_error)?;
+        // 版 1 は旧 API の読書位置の同期だった。版 6 で捨てるので、新しく作るときは置かない。
+        if version < 2 {
+            tx.execute_batch(READING_SCHEMA).map_err(records_error)?;
         }
-        let migrated = (|| {
-            let tx = db.transaction().map_err(records_error)?;
-            if version < 1 {
-                tx.execute_batch(SYNC_SCHEMA).map_err(records_error)?;
-                let copied = legacy_db && copy_legacy_sync_db(&tx)?;
-                if !copied {
-                    reading_sync::import_legacy_json(&tx, &self.legacy_sync_json)?;
-                }
-            }
-            if version < 2 {
-                tx.execute_batch(READING_SCHEMA).map_err(records_error)?;
-            }
-            if version < 3 {
-                tx.execute_batch(OFFLINE_SCHEMA).map_err(records_error)?;
-            }
-            if version < 4 {
-                tx.execute_batch(OFFLINE_KEY_SCHEMA)
-                    .map_err(records_error)?;
-            }
-            // 版 5: 新しい棚の読書位置の同期（作品は棚の UUID で見分ける）。
-            if version < 5 {
-                tx.execute_batch(super::shelf_reading::SHELF_READING_SCHEMA)
-                    .map_err(records_error)?;
-            }
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+        if version < 3 {
+            tx.execute_batch(OFFLINE_SCHEMA).map_err(records_error)?;
+        }
+        if version < 4 {
+            tx.execute_batch(OFFLINE_KEY_SCHEMA)
                 .map_err(records_error)?;
-            tx.commit().map_err(records_error)
-        })();
-        if legacy_db {
-            // 元の記録は消さずに残す。移し終えれば以後は読まない。
-            let _ = db.execute("DETACH DATABASE legacy", []);
         }
-        migrated
+        // 版 5: 新しい棚の読書位置の同期（作品は棚の UUID で見分ける）。
+        if version < 5 {
+            tx.execute_batch(super::shelf_reading::SHELF_READING_SCHEMA)
+                .map_err(records_error)?;
+        }
+        if version < 6 {
+            tx.execute_batch(DROP_SYNC_SCHEMA).map_err(records_error)?;
+        }
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(records_error)?;
+        tx.commit().map_err(records_error)
     }
-}
-
-/// 0.5.1 の同期の記録を写す。中身が無ければ false を返し、その前の JSON から移す。
-fn copy_legacy_sync_db(tx: &Transaction<'_>) -> Result<bool, ClientError> {
-    let initialized: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM legacy.sqlite_master WHERE type='table' AND name='sync_meta')
-             AND EXISTS(SELECT 1 FROM legacy.sync_meta)",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(records_error)?;
-    if !initialized {
-        return Ok(false);
-    }
-    tx.execute_batch(
-        "INSERT INTO sync_meta SELECT id, url, device_id, cursor FROM legacy.sync_meta;
-         INSERT INTO positions SELECT key, data FROM legacy.positions;
-         INSERT INTO pending SELECT key, data FROM legacy.pending;",
-    )
-    .map_err(records_error)?;
-    Ok(true)
 }
 
 #[cfg(test)]
@@ -272,63 +191,41 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         for table in [
-            "sync_meta",
-            "positions",
-            "pending",
             "readings",
             "offline_catalog",
             "offline_text",
+            "shelf_reading_meta",
         ] {
             count(&db, table);
         }
-        assert_eq!(count(&db, "sync_meta"), 1);
     }
 
     #[test]
-    fn the_0_5_1_sync_database_is_copied_and_left_in_place() {
-        let dir = TempDir::new("legacy-db");
+    fn the_old_reading_sync_tables_are_dropped() {
+        let dir = TempDir::new("drop-sync");
         {
-            let legacy = Connection::open(dir.0.join("reading-sync.sqlite3")).unwrap();
-            legacy.execute_batch(SYNC_SCHEMA).unwrap();
-            legacy
-                .execute_batch(
-                    "INSERT INTO sync_meta VALUES(1, 'https://pc.example/', 'phone', 42);
-                     INSERT INTO positions VALUES('pixiv:1', '{}');
-                     INSERT INTO pending VALUES('pixiv:2', '{}');",
-                )
-                .unwrap();
+            let old = Connection::open(dir.0.join(DB_FILE)).unwrap();
+            old.execute_batch(
+                "CREATE TABLE sync_meta (id INTEGER PRIMARY KEY, url TEXT, device_id TEXT, cursor INTEGER);
+                 CREATE TABLE positions (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+                 CREATE TABLE pending (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+                 INSERT INTO positions VALUES('pixiv:1', '{}');",
+            )
+            .unwrap();
+            old.pragma_update(None, "user_version", 5).unwrap();
         }
-        // 0.5.1 の前の JSON は、SQLite に中身があれば読まない。
-        fs::write(dir.0.join("reading-sync.json"), b"not json").unwrap();
         let db = DeviceDb::new(&dir.0);
-        let (url, cursor): (String, i64) = db
+        let left: i64 = db
             .transaction(|tx| {
-                tx.query_row("SELECT url, cursor FROM sync_meta", [], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
+                tx.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('sync_meta', 'positions', 'pending')",
+                    [],
+                    |row| row.get(0),
+                )
                 .map_err(records_error)
             })
             .unwrap();
-        assert_eq!((url.as_str(), cursor), ("https://pc.example/", 42));
-        assert_eq!(count(&db, "positions"), 1);
-        assert_eq!(count(&db, "pending"), 1);
-        assert!(db.legacy_sync_db().exists());
-    }
-
-    #[test]
-    fn a_failed_migration_writes_nothing_and_is_tried_again() {
-        let dir = TempDir::new("retry");
-        let db = DeviceDb::new(&dir.0);
-        fs::write(db.legacy_sync_json(), b"broken").unwrap();
-        assert!(db.transaction(|_| Ok(())).is_err());
-        let version: i64 = Connection::open(db.path())
-            .unwrap()
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 0);
-        fs::remove_file(db.legacy_sync_json()).unwrap();
-        db.transaction(|_| Ok(())).unwrap();
-        assert_eq!(count(&db, "readings"), 0);
+        assert_eq!(left, 0);
     }
 
     #[test]

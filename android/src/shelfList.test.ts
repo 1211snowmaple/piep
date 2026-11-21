@@ -18,12 +18,12 @@ const shelfItem = {
   edited: true, editId: edit, favorite: false, favoriteGeneration: "3", seriesTitle: null, seriesId: null, sourceCreatedAt: null, downloadedAt: "2026-11-18T00:00:00.000Z",
 };
 
-function status(worksSearch: boolean, favoriteWrite = false) {
+function status(reachable = true) {
   return {
-    url: "https://server", reachable: true,
+    url: "https://server", reachable,
     nativeLibrary: {
       scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
-      worksList: true, worksSearch, favoriteWrite, readerBundle: true,
+      readerBundle: true,
     },
   } as never;
 }
@@ -33,18 +33,19 @@ beforeEach(() => {
   api.invoke.mockReset();
 });
 
-it("新しい棚の一覧を出せる接続では、一覧・作品の画面・表紙を新しい棚から引く", async () => {
+it("一覧・作品の画面・表紙を棚から引く", async () => {
   const native = await import("./nativeReading");
   const pc = await import("./pcApi");
   const images = await import("./images");
-  native.adoptNativeLibrary(status(true));
+  native.adoptNativeLibrary(status());
   api.invoke.mockImplementation(async (command: string) => {
     if (command === "pc_native_search") return { items: [shelfItem], nextCursor: "next", totalEstimate: 1, indexComplete: true };
     if (command === "pc_native_work") return { work: shelfItem, people: [], series: [], versions: [], editBaseVersion: 1 };
     if (command === "offline_save_shelf_work" || command === "offline_list_works") {
       const saved = { work: shelfItem, shelfLibrary: library, savedAtMs: 1, savedVersion: 2, savedContentHash: null, savedEditHash: `edit:${edit}`, pageCount: 3 };
-      return command === "offline_list_works" ? [saved, { ...saved, work: { ...shelfItem, id: 9, sourceId: "9" } }] : saved;
+      return command === "offline_list_works" ? [saved] : saved;
     }
+    if (command === "pc_native_work_collections") return [];
     throw new Error(command);
   });
 
@@ -54,7 +55,6 @@ it("新しい棚の一覧を出せる接続では、一覧・作品の画面・�
   const [item] = page.items;
   expect(item.id).toBe(work);
   expect(item.contentHash).toBeNull();
-  expect(pc.isShelfWork(item)).toBe(true);
   expect(images.workCoverUrl(item)?.startsWith(`http://pcimg.localhost/shelf/${library}/${work}/${snapshot}?connection=`)).toBe(true);
   expect(images.workCoverUrl(item, true)?.startsWith(`http://pcimg.localhost/shelf/${library}/${work}/${snapshot}/large?connection=`)).toBe(true);
 
@@ -75,23 +75,18 @@ it("新しい棚の一覧を出せる接続では、一覧・作品の画面・�
   expect(pc.sameSavedVersion({ ...item, shelf: { ...item.shelf!, snapshotId: work } }, saved)).toBe(false);
   const listed = await pc.listOfflineWorks();
   expect(listed[0].work).toEqual(listedItem);
-  // 旧 API の作品の保存版は、そのままの形で返る。
-  expect(listed[1].work.id).toBe(9);
-  expect(pc.isShelfWork(listed[1].work)).toBe(false);
 
   await expect(pc.getPcWorkCollections(item.id)).resolves.toEqual([]);
-  expect(api.invoke).toHaveBeenCalledTimes(4);
-  expect(native.favoriteShelf()).toBeNull();
-  native.adoptNativeLibrary(status(true, true));
-  expect(native.favoriteShelf()).toMatchObject({ libraryId: library });
+  expect(api.invoke).toHaveBeenCalledTimes(5);
+  expect(native.nativeShelf()).toMatchObject({ libraryId: library });
 });
 
-it("新しい棚の一覧を出せない接続では、旧 API の一覧のまま", async () => {
+it("棚に届かない接続では、一覧を引かずに知らせる", async () => {
   const native = await import("./nativeReading");
   const pc = await import("./pcApi");
   native.adoptNativeLibrary(status(false));
-  api.invoke.mockResolvedValue({ items: [], nextCursor: null, totalEstimate: 0, indexComplete: true });
-  await pc.searchPcWorks({ ...pc.defaultPcSearch, sort: "dateDesc" });
-  expect(api.invoke.mock.calls[0][0]).toBe("pc_search_works");
+  await expect(pc.searchPcWorks({ ...pc.defaultPcSearch, sort: "dateDesc" })).rejects.toMatchObject({ code: "library_changed" });
+  await expect(pc.saveOfflineWork(work)).rejects.toMatchObject({ code: "library_changed" });
+  expect(api.invoke).not.toHaveBeenCalled();
   expect(native.nativeShelfKey()).toBeNull();
 });

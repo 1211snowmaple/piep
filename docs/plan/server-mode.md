@@ -1,5 +1,7 @@
 # サーバーモード（β）
 
+> 旧 API（`/api/v1`）は無くした。いまの口は `/api/v2/hello`・`/api/v2/pair`・`/api/v2/about`・`/api/v2/admin/*` と、棚の読取 API（[新ライブラリの認証付き資産 API](./library-api-v2.md)）だけ。携帯の契約は `android/PROTOCOL.md`。下の `/api/v1` の読み手の口・読書位置・お気に入りの節は、作ったときの記録として残す。
+
 ## 目的
 
 **本棚を持つのは、いつも 1 つの「piep サーバー」にする。** デスクトップ版も携帯端末も、
@@ -77,7 +79,7 @@ API と保存形式は、β の間は予告して変えてよい。
 `PROTOCOL.md` より広い。サーバーはこの読み取り API を**そのまま**提供する。Android 版の検索・読書・
 保存の処理を作り直さずに済むからである。
 
-- API 版は **2**。`GET /api/v1/hello` が `{apiVersion: 2, serverName: "piep"}` を返さないと
+- API 版は **2**。`GET /api/v2/hello`（以前は `/api/v1/hello`）が `{apiVersion: 2, serverName: "piep"}` を返さないと
   互換性エラーになる。
 - 今の登録文字列は `{version: 1, url, fingerprint, secret}`。`url` は
   **私設 IPv4 か 127.0.0.1 の `https://`、ポート必須**でなければ受け付けない。
@@ -874,7 +876,7 @@ Linux・Docker は β に含めないので、`install` と `uninstall` は Wind
 
 ## 状態を見る
 
-管理の API `GET /api/v1/admin/status` と `piep-server status` が同じ中身を返す。デスクトップ版の
+管理の API `GET /api/v2/admin/status` と `piep-server status` が同じ中身を返す。デスクトップ版の
 「設定 → サーバー（β）」はこれを表示する。サーバーの URL に置く Web の管理画面の続きは [サーバーの管理画面の続き](./server-admin.md) に書く。
 
 - 本棚: 世代、作品数、最後に反映した時刻、索引の進み具合、空き容量
@@ -886,7 +888,7 @@ Linux・Docker は β に含めないので、`install` と `uninstall` は Wind
 - 端末: 登録した端末、最後に使った時刻
 - 通知: 最後の失敗
 
-外の監視には、無認証の `GET /api/v1/hello` か、`uptime-kuma` 形式の通知の heartbeat を使う。
+外の監視には、無認証の `GET /api/v2/hello` か、`uptime-kuma` 形式の通知の heartbeat を使う。
 
 ## テストと確認
 

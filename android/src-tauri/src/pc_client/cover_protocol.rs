@@ -258,10 +258,6 @@ fn percent_decode(value: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-fn positive(value: &str) -> Option<i64> {
-    value.parse().ok().filter(|id| *id > 0)
-}
-
 fn safe_collection_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
@@ -278,60 +274,6 @@ fn parse_route(path: &str) -> Option<Route> {
     let decoded = percent_decode(path.trim_start_matches('/'))?;
     let parts: Vec<&str> = decoded.split('/').collect();
     match parts.as_slice() {
-        ["work", id, _version, _hash] => Some(Route::Remote {
-            endpoint: format!("/api/v1/works/{}/cover", positive(id)?),
-            refreshes: false,
-        }),
-        // 本文の挿絵。端末の幅を添える。版と内容の印は、改稿後に古い絵を出さないためのキャッシュ鍵。
-        ["asset", id, asset, width, _version, _hash] => {
-            let width: u32 = width
-                .parse()
-                .ok()
-                .filter(|width| (1..=4096).contains(width))?;
-            Some(Route::Remote {
-                endpoint: format!(
-                    "/api/v1/works/{}/assets/{}?width={width}",
-                    positive(id)?,
-                    positive(asset)?
-                ),
-                refreshes: false,
-            })
-        }
-        ["work", id, _version, _hash, "large"] => Some(Route::Remote {
-            endpoint: format!("/api/v1/works/{}/cover?size=large", positive(id)?),
-            refreshes: false,
-        }),
-        [
-            "entity",
-            kind @ ("people" | "series"),
-            source @ ("pixiv" | "fanbox"),
-            key,
-            rest @ ..,
-        ] if rest.is_empty() || rest == ["banner"] => {
-            let key = percent_decode(key)?;
-            if key.is_empty() || key.chars().count() > 200 {
-                return None;
-            }
-            let mut query = url::form_urlencoded::Serializer::new(String::new());
-            query.append_pair("source", source);
-            query.append_pair("key", &key);
-            if !rest.is_empty() {
-                query.append_pair("variant", "banner");
-            }
-            Some(Route::Remote {
-                endpoint: format!("/api/v1/entities/{kind}/cover?{}", query.finish()),
-                refreshes: true,
-            })
-        }
-        [
-            "collection",
-            id,
-            slot @ ("file" | "tile-0" | "tile-1" | "tile-2" | "tile-3"),
-            _revision,
-        ] if safe_collection_id(id) => Some(Route::Remote {
-            endpoint: format!("/api/v1/collections/{id}/cover/{slot}"),
-            refreshes: false,
-        }),
         // 新しい棚の作品の表紙。版の UUID は端末の覚えの鍵で、版が変わると取り直す。
         ["shelf", library, work, snapshot, rest @ ..] if rest.is_empty() || rest == ["large"] => {
             let library = uuid::Uuid::parse_str(library).ok()?;
@@ -441,12 +383,6 @@ fn cache_path(dir: &Path, server: &str, path: &str) -> PathBuf {
     let mut hasher = Sha256::new();
     // APNG 検査のない旧版が保存した画像を、検査済みとして使い回さない。
     hasher.update(b"display-image-validation-v2\0");
-    // 作者の丸い枠に背景画像を流用していた旧サーバーの返却を使い回さない。
-    let person = percent_decode(path.trim_start_matches('/'))
-        .is_some_and(|decoded| decoded.starts_with("entity/people/"));
-    if person {
-        hasher.update(b"profile-icon-only-v1\0");
-    }
     hasher.update(server.as_bytes());
     hasher.update([0]);
     hasher.update(path.as_bytes());
@@ -692,7 +628,7 @@ mod tests {
             let cache = CoverCacheState::new(root.join("covers"));
             let file = cache_path(&cache.dir, &saved.url, "/work/1");
             assert_eq!(
-                fetch_and_cache(&state, &cache, &saved, 0, &file, "/api/v1/works/1/cover")
+                fetch_and_cache(&state, &cache, &saved, 0, &file, "/api/v2/libraries/01a1eeaa-0000-7000-8000-000000000001/works/01a1eeaa-0000-7000-8000-000000000002/cover")
                     .await
                     .unwrap_err(),
                 StatusCode::SERVICE_UNAVAILABLE
@@ -733,7 +669,7 @@ mod tests {
                     let length = socket.read(&mut request).unwrap();
                     assert!(
                         String::from_utf8_lossy(&request[..length])
-                            .starts_with("GET /api/v1/works/1/cover ")
+                            .starts_with(&format!("GET {} ", "/api/v2/libraries/01a1eeaa-0000-7000-8000-000000000001/works/01a1eeaa-0000-7000-8000-000000000002/cover"))
                     );
                     if change {
                         *changed_state.connection_generation.lock().unwrap() += 1;
@@ -745,7 +681,7 @@ mod tests {
                 let cache = CoverCacheState::new(root.join("covers"));
                 let file = cache_path(&cache.dir, &saved.url, "/work/1");
                 let result =
-                    fetch_and_cache(&state, &cache, &saved, 0, &file, "/api/v1/works/1/cover")
+                    fetch_and_cache(&state, &cache, &saved, 0, &file, "/api/v2/libraries/01a1eeaa-0000-7000-8000-000000000001/works/01a1eeaa-0000-7000-8000-000000000002/cover")
                         .await;
                 server.join().unwrap();
                 if change {
@@ -762,48 +698,6 @@ mod tests {
 
     #[test]
     fn routes_only_accept_known_shapes() {
-        assert_eq!(
-            parse_route("/work%2F12%2F3%2Fabc"),
-            Some(Route::Remote {
-                endpoint: "/api/v1/works/12/cover".into(),
-                refreshes: false
-            })
-        );
-        assert_eq!(
-            parse_route("/work%2F12%2F3%2Fabc%2Flarge"),
-            Some(Route::Remote {
-                endpoint: "/api/v1/works/12/cover?size=large".into(),
-                refreshes: false
-            })
-        );
-        assert_eq!(
-            parse_route("/entity%2Fpeople%2Fpixiv%2Fa%252Fb"),
-            Some(Route::Remote {
-                endpoint: "/api/v1/entities/people/cover?source=pixiv&key=a%2Fb".into(),
-                refreshes: true
-            })
-        );
-        assert_eq!(
-            parse_route("/entity%2Fpeople%2Fpixiv%2Fa%2Fbanner"),
-            Some(Route::Remote {
-                endpoint: "/api/v1/entities/people/cover?source=pixiv&key=a&variant=banner".into(),
-                refreshes: true
-            })
-        );
-        assert_eq!(
-            parse_route("/collection%2Fabc-1%2Ftile-2%2F4"),
-            Some(Route::Remote {
-                endpoint: "/api/v1/collections/abc-1/cover/tile-2".into(),
-                refreshes: false
-            })
-        );
-        assert_eq!(
-            parse_route("/asset%2F12%2F5%2F1080%2F3%2Fabc"),
-            Some(Route::Remote {
-                endpoint: "/api/v1/works/12/assets/5?width=1080".into(),
-                refreshes: false
-            })
-        );
         let (library, work, snapshot) = (
             "01a1eeaa-0000-7000-8000-000000000001",
             "01a1eeaa-0000-7000-8000-000000000002",
@@ -863,19 +757,17 @@ mod tests {
         ] {
             assert_eq!(parse_route(&bad), None, "{bad}");
         }
-        assert_eq!(parse_route("/asset%2F12%2F5%2F99999%2F3%2Fabc"), None);
-        assert_eq!(parse_route("/asset%2F12%2F-5%2F1080%2F3%2Fabc"), None);
+        let shelf = uuid::Uuid::now_v7();
         assert_eq!(
-            parse_route("/saved%2F7%2F99"),
+            parse_route(&format!("/saved%2F{shelf}%2F99")),
             Some(Route::SavedCover {
-                work_id: OfflineKey::Legacy(7)
+                work_id: OfflineKey(shelf)
             })
         );
-        let shelf = uuid::Uuid::now_v7();
         assert_eq!(
             parse_route(&format!("/saved-entity%2F{shelf}%2Fpeople%2F1")),
             Some(Route::SavedEntity {
-                work_id: OfflineKey::Shelf(shelf),
+                work_id: OfflineKey(shelf),
                 kind: "people".into()
             })
         );
@@ -883,13 +775,14 @@ mod tests {
             parse_route(&format!("/saved%2F{}%2F1", shelf.simple())),
             None
         );
+        // 旧 API の形はもう受け付けない。
         for bad in [
-            "/work%2F0%2F1%2Fa",
-            "/work%2F-1%2F1%2Fa",
-            "/entity%2Fpeople%2Fother%2Fa",
-            "/entity%2Fother%2Fpixiv%2Fa",
-            "/collection%2F..%2Ffile%2F1",
-            "/collection%2Fa%2Ftile-4%2F1",
+            "/work%2F12%2F3%2Fabc",
+            "/work%2F12%2F3%2Fabc%2Flarge",
+            "/asset%2F12%2F5%2F1080%2F3%2Fabc",
+            "/entity%2Fpeople%2Fpixiv%2Fa",
+            "/collection%2Fabc-1%2Ftile-2%2F4",
+            "/saved%2F7%2F99",
             "/etc%2Fpasswd",
             "/%zz",
         ] {
@@ -904,30 +797,6 @@ mod tests {
             cache_path(dir, "https://a/", "/work%2F1"),
             cache_path(dir, "https://b/", "/work%2F1")
         );
-    }
-
-    #[test]
-    fn only_person_images_skip_the_old_cache() {
-        // 旧版の鍵を再現して、作者の画像だけが別の鍵になることを確かめる。
-        let old_key = |path: &str| {
-            let mut hasher = Sha256::new();
-            hasher.update(b"display-image-validation-v2\0");
-            hasher.update(b"https://a/");
-            hasher.update([0]);
-            hasher.update(path.as_bytes());
-            let name: String = hasher
-                .finalize()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
-            Path::new("covers").join(name)
-        };
-        let dir = Path::new("covers");
-        let person = "/entity%2Fpeople%2Fpixiv%2Fa";
-        assert_ne!(cache_path(dir, "https://a/", person), old_key(person));
-        for path in ["/entity%2Fseries%2Fpixiv%2Fpeople", "/work%2F1"] {
-            assert_eq!(cache_path(dir, "https://a/", path), old_key(path), "{path}");
-        }
     }
 
     #[test]

@@ -17,11 +17,7 @@ use url::Url;
 
 use crate::secret_cipher::SecretCipher;
 // サーバーから受け取る型。サーバーと同じ定義（crates/piep-mobile-api）を使う。
-pub use piep_mobile_api::{
-    MobileCollection, MobileCollectionDetail, MobileEntityDetail, MobileEntityPage,
-    MobileEntitySeriesPage, MobileMetadata, MobilePage, MobilePerson,
-    MobileSearchPage as SearchPage, MobileSeriesMembership, MobileWork,
-};
+pub use piep_mobile_api::{MobileCollection, MobilePage, MobilePerson, MobileSeriesMembership};
 
 pub mod cover_protocol;
 pub(crate) mod device_db;
@@ -30,7 +26,6 @@ pub(crate) mod local_reading;
 pub(crate) mod native_library;
 pub(crate) mod native_reader;
 pub(crate) mod offline;
-pub(crate) mod reading_sync;
 pub(crate) mod shelf_reading;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -48,8 +43,6 @@ const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NUMBERED_OFFSET: i64 = 5_000;
 const API_VERSION: u32 = 2;
 const PAIRING_VERSION: u32 = 2;
-const CAPABILITY_READING_SYNC: &str = "reading-sync";
-const CAPABILITY_FAVORITE_WRITE: &str = "favorite-write";
 
 pub struct PcClientState {
     file: PathBuf,
@@ -344,24 +337,6 @@ impl ClientError {
             message: "サーバーの作品を読み込めません",
         }
     }
-    fn favorite_unsupported() -> Self {
-        Self {
-            code: "favorite_unsupported",
-            message: "このサーバーではお気に入りを切り替えられません。サーバーを新しい版にしてください",
-        }
-    }
-    fn favorite_missing() -> Self {
-        Self {
-            code: "favorite_missing",
-            message: "サーバーの本棚にこの作品が見つかりません",
-        }
-    }
-    fn favorite_rejected() -> Self {
-        Self {
-            code: "favorite_rejected",
-            message: "お気に入りを切り替えられませんでした",
-        }
-    }
     /// 通信の失敗を、利用者が次に何をすべきかで分ける。
     fn from_send(error: &reqwest::Error, pinned: bool) -> Self {
         if !pinned && rejected_certificate(error) {
@@ -402,16 +377,6 @@ struct SavedConnection {
 impl SavedConnection {
     fn pinned(&self) -> bool {
         self.fingerprint.is_some()
-    }
-    fn can_sync_reading(&self) -> bool {
-        self.capabilities
-            .iter()
-            .any(|capability| capability == CAPABILITY_READING_SYNC)
-    }
-    fn can_write_favorite(&self) -> bool {
-        self.capabilities
-            .iter()
-            .any(|capability| capability == CAPABILITY_FAVORITE_WRITE)
     }
 }
 
@@ -499,7 +464,7 @@ fn parse_pairing(payload: &str, device_name: &str) -> Result<PairingPayload, Cli
         "admin" => return Err(ClientError::admin_pairing()),
         _ => return Err(ClientError::invalid_pairing()),
     }
-    // 端点は `{url}/api/v1/...` で組み立てるので、末尾の / を落として持つ。
+    // 端点は `{url}/api/v2/...` で組み立てるので、末尾の / を落として持つ。
     pairing.url = validate_url(&pairing.url)?
         .as_str()
         .trim_end_matches('/')
@@ -683,7 +648,7 @@ async fn hello(
     pinned: bool,
 ) -> Result<reqwest::Response, ClientError> {
     let response = client
-        .get(format!("{base}/api/v1/hello"))
+        .get(format!("{base}/api/v2/hello"))
         .send()
         .await
         .map_err(|error| ClientError::from_send(&error, pinned))?;
@@ -731,7 +696,7 @@ pub async fn pc_pair(
         return Err(ClientError::protocol());
     }
     let response = client
-        .post(format!("{}/api/v1/pair", pairing.url))
+        .post(format!("{}/api/v2/pair", pairing.url))
         .json(&serde_json::json!({"secret": pairing.secret, "deviceName": device_name.trim()}))
         .send()
         .await
@@ -798,17 +763,18 @@ pub async fn pc_connection_status(
                     state.refresh_capabilities(generation, saved.capabilities.clone())?;
                 }
                 // /hello は無認証。登録解除された端末を「接続中」と表示しない。
-                let legacy = client
-                    .get(format!("{}/api/v1/collections", saved.url))
+                let about = client
+                    .get(format!("{}/api/v2/about", saved.url))
                     .bearer_auth(&saved.token)
                     .timeout(PROBE_TIMEOUT)
                     .send();
-                let (authorized, native_library) = tokio::join!(
-                    legacy,
-                    native_library::discover(&client, &saved, generation),
-                );
+                let (authorized, native_library) =
+                    tokio::join!(about, native_library::discover(&client, &saved, generation),);
                 let issue = match authorized {
-                    Ok(response) if response.status().is_success() => None,
+                    // 登録は生きているが、棚を読めない（サーバーに棚がまだ無いか、この端末に許可が無い）。
+                    Ok(response) if response.status().is_success() => {
+                        native_library.is_none().then_some("no_library")
+                    }
                     Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
                         Some("revoked")
                     }
@@ -856,22 +822,6 @@ pub async fn pc_disconnect(
 ) -> Result<ConnectionStatus, ClientError> {
     state.forget()?;
     Ok(ConnectionStatus::empty())
-}
-
-async fn authenticated_get(
-    state: &PcClientState,
-    endpoint: &str,
-) -> Result<reqwest::Response, ClientError> {
-    authenticated_get_with_timeout(state, endpoint, REQUEST_TIMEOUT).await
-}
-
-async fn authenticated_get_with_timeout(
-    state: &PcClientState,
-    endpoint: &str,
-    timeout: Duration,
-) -> Result<reqwest::Response, ClientError> {
-    let saved = state.load()?.ok_or_else(ClientError::invalid_pairing)?;
-    authenticated_get_with_saved(state, &saved, endpoint, timeout).await
 }
 
 // キャッシュの名前空間を決めた接続と、実際の送信先を一致させる。
@@ -1144,34 +1094,6 @@ fn search_payload(
     Ok(payload)
 }
 
-#[tauri::command]
-pub async fn pc_search_works(
-    state: State<'_, PcClientState>,
-    criteria: PcSearchCriteria,
-    cursor: Option<String>,
-    offset: Option<i64>,
-    scope: Option<PcWorkScope>,
-    limit: Option<i64>,
-) -> Result<SearchPage, ClientError> {
-    if limit.is_some_and(|value| !(1..=50).contains(&value)) {
-        return Err(ClientError::remote());
-    }
-    let mut payload = search_payload(&criteria, cursor, offset, scope)?;
-    if let Some(limit) = limit {
-        payload["limit"] = serde_json::json!(limit);
-    }
-    let saved = state.load()?.ok_or_else(ClientError::invalid_pairing)?;
-    let client = state.client(&saved)?;
-    let response = client
-        .post(format!("{}/api/v1/works/search", saved.url))
-        .bearer_auth(&saved.token)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
-    check_response(response)?.bounded_json().await
-}
-
 fn validate_numbered_offset(offset: Option<i64>, cursor: Option<&str>) -> Result<(), ClientError> {
     if cursor.is_some() && offset.is_some()
         || offset.is_some_and(|value| !(0..=MAX_NUMBERED_OFFSET).contains(&value))
@@ -1202,313 +1124,12 @@ fn valid_entity_sort(sort: Option<&str>, order: Option<&str>) -> bool {
     }) && order.is_none_or(|value| matches!(value, "asc" | "desc"))
 }
 
-#[tauri::command]
-pub async fn pc_list_entities(
-    state: State<'_, PcClientState>,
-    kind: String,
-    text: String,
-    offset: i64,
-    sort: Option<String>,
-    order: Option<String>,
-) -> Result<MobileEntityPage, ClientError> {
-    if !matches!(kind.as_str(), "people" | "series")
-        || text.chars().count() > 200
-        || !(0..=1_000_000).contains(&offset)
-        || !valid_entity_sort(sort.as_deref(), order.as_deref())
-    {
-        return Err(ClientError::remote());
-    }
-    let query_string = {
-        let mut query = url::form_urlencoded::Serializer::new(String::new());
-        query.append_pair("text", text.trim());
-        query.append_pair("offset", &offset.to_string());
-        query.append_pair("limit", "30");
-        if let Some(sort) = sort.as_deref() {
-            query.append_pair("sort", sort);
-        }
-        if let Some(order) = order.as_deref() {
-            query.append_pair("order", order);
-        }
-        query.finish()
-    };
-    let endpoint = format!("/api/v1/entities/{kind}?{query_string}");
-    authenticated_get(&state, &endpoint)
-        .await?
-        .bounded_json()
-        .await
-}
-
-#[tauri::command]
-pub async fn pc_get_entity_detail(
-    state: State<'_, PcClientState>,
-    kind: String,
-    source: String,
-    key: String,
-) -> Result<MobileEntityDetail, ClientError> {
-    if !matches!(kind.as_str(), "people" | "series") || !valid_entity_identity(&source, &key) {
-        return Err(ClientError::remote());
-    }
-    let query_string = {
-        let mut query = url::form_urlencoded::Serializer::new(String::new());
-        query.append_pair("source", &source);
-        query.append_pair("key", &key);
-        query.finish()
-    };
-    authenticated_get(
-        &state,
-        &format!("/api/v1/entities/{kind}/detail?{query_string}"),
-    )
-    .await?
-    .bounded_json()
-    .await
-}
-
-#[tauri::command]
-pub async fn pc_list_entity_series(
-    state: State<'_, PcClientState>,
-    source: String,
-    key: String,
-    text: String,
-    cursor: Option<String>,
-    sort: Option<String>,
-    order: Option<String>,
-) -> Result<MobileEntitySeriesPage, ClientError> {
-    if !valid_entity_identity(&source, &key)
-        || text.chars().count() > 200
-        || cursor.as_ref().is_some_and(|cursor| cursor.len() > 4096)
-        || !valid_entity_sort(sort.as_deref(), order.as_deref())
-    {
-        return Err(ClientError::remote());
-    }
-    let query_string = {
-        let mut query = url::form_urlencoded::Serializer::new(String::new());
-        query.append_pair("source", &source);
-        query.append_pair("key", &key);
-        query.append_pair("text", text.trim());
-        query.append_pair("limit", "30");
-        if let Some(cursor) = cursor.as_deref() {
-            query.append_pair("cursor", cursor);
-        }
-        if let Some(sort) = sort.as_deref() {
-            query.append_pair("sort", sort);
-        }
-        if let Some(order) = order.as_deref() {
-            query.append_pair("order", order);
-        }
-        query.finish()
-    };
-    authenticated_get(
-        &state,
-        &format!("/api/v1/entities/people/series?{query_string}"),
-    )
-    .await?
-    .bounded_json()
-    .await
-}
-
-#[tauri::command]
-pub async fn pc_list_collections(
-    state: State<'_, PcClientState>,
-) -> Result<Vec<MobileCollection>, ClientError> {
-    authenticated_get(&state, "/api/v1/collections")
-        .await?
-        .bounded_json()
-        .await
-}
-
-#[tauri::command]
-pub async fn pc_get_work_collections(
-    state: State<'_, PcClientState>,
-    work_id: i64,
-) -> Result<Vec<MobileCollection>, ClientError> {
-    if work_id <= 0 {
-        return Err(ClientError::remote());
-    }
-    authenticated_get(&state, &format!("/api/v1/works/{work_id}/collections"))
-        .await?
-        .bounded_json()
-        .await
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FavoriteState {
-    source: String,
-    source_id: String,
-    favorite: bool,
-}
-
-fn favorite_endpoint(base: &str, source: &str, source_id: &str) -> Result<Url, ClientError> {
-    let mut url = Url::parse(base).map_err(|_| ClientError::storage())?;
-    url.path_segments_mut()
-        .map_err(|_| ClientError::storage())?
-        .pop_if_empty()
-        .extend(["api", "v1", "favorites", source, source_id]);
-    Ok(url)
-}
-
-fn valid_favorite_target(source: &str, source_id: &str) -> bool {
-    matches!(source, "pixiv" | "fanbox")
-        && !source_id.is_empty()
-        && source_id.chars().count() <= 200
-}
-
-/// お気に入りを付け外しする。サーバーが `favorite-write` を持つときだけ送る。
-///
-/// 圏外では溜めずに失敗を返す。利用者は「つながる時だけ押せる」を選んでいる。
-/// 返る値はサーバーが残したほうで、別の端末が新しい時刻で書いていればそちらになる。
-#[tauri::command]
-pub async fn pc_set_favorite(
-    state: State<'_, PcClientState>,
-    source: String,
-    source_id: String,
-    favorite: bool,
-) -> Result<FavoriteState, ClientError> {
-    if !valid_favorite_target(&source, &source_id) {
-        return Err(ClientError::favorite_rejected());
-    }
-    let saved = state.load()?.ok_or_else(ClientError::invalid_pairing)?;
-    if !saved.can_write_favorite() {
-        return Err(ClientError::favorite_unsupported());
-    }
-    let device_time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(1)
-        .max(1);
-    let client = state.client(&saved)?;
-    let response = client
-        .put(favorite_endpoint(&saved.url, &source, &source_id)?)
-        .bearer_auth(&saved.token)
-        .json(&serde_json::json!({ "favorite": favorite, "deviceTime": device_time }))
-        .send()
-        .await
-        .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
-    match response.status() {
-        reqwest::StatusCode::NOT_FOUND => Err(ClientError::favorite_missing()),
-        status if status.is_client_error() && status != reqwest::StatusCode::UNAUTHORIZED => {
-            Err(ClientError::favorite_rejected())
-        }
-        _ => check_response(response)?.bounded_json().await,
-    }
-}
-
-#[tauri::command]
-pub async fn pc_get_collection(
-    state: State<'_, PcClientState>,
-    collection_id: String,
-) -> Result<MobileCollectionDetail, ClientError> {
-    if collection_id.is_empty()
-        || collection_id.len() > 128
-        || !collection_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(ClientError::remote());
-    }
-    authenticated_get(&state, &format!("/api/v1/collections/{collection_id}"))
-        .await?
-        .bounded_json()
-        .await
-}
-
-#[tauri::command]
-pub async fn pc_search_suggest(
-    state: State<'_, PcClientState>,
-    text: String,
-) -> Result<serde_json::Value, ClientError> {
-    if text.chars().count() > 200 {
-        return Err(ClientError::remote());
-    }
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("text", text.trim())
-        .append_pair("limit", "8")
-        .finish();
-    authenticated_get(&state, &format!("/api/v1/search/suggest?{query}"))
-        .await?
-        .bounded_json()
-        .await
-}
-
-#[tauri::command]
-pub async fn pc_lookup_work(
-    state: State<'_, PcClientState>,
-    source: String,
-    key: String,
-) -> Result<Option<MobileWork>, ClientError> {
-    if !valid_entity_identity(&source, &key) {
-        return Err(ClientError::remote());
-    }
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("source", &source)
-        .append_pair("key", &key)
-        .finish();
-    authenticated_get(&state, &format!("/api/v1/works/lookup?{query}"))
-        .await?
-        .bounded_json()
-        .await
-}
-
-#[tauri::command]
-pub async fn pc_get_metadata(
-    state: State<'_, PcClientState>,
-    work_id: i64,
-) -> Result<MobileMetadata, ClientError> {
-    if work_id <= 0 {
-        return Err(ClientError::remote());
-    }
-    authenticated_get(&state, &format!("/api/v1/works/{work_id}"))
-        .await?
-        .bounded_json()
-        .await
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileOutlineEntry {
     page: usize,
     index: usize,
     title: String,
-}
-
-#[tauri::command]
-pub async fn pc_get_outline(
-    state: State<'_, PcClientState>,
-    work_id: i64,
-    version: Option<i64>,
-) -> Result<Vec<MobileOutlineEntry>, ClientError> {
-    if work_id <= 0 {
-        return Err(ClientError::remote());
-    }
-    let query = version
-        .map(|value| format!("?version={value}"))
-        .unwrap_or_default();
-    authenticated_get(&state, &format!("/api/v1/works/{work_id}/outline{query}"))
-        .await?
-        .bounded_json()
-        .await
-}
-
-#[tauri::command]
-pub async fn pc_get_page(
-    state: State<'_, PcClientState>,
-    work_id: i64,
-    page: usize,
-    version: Option<i64>,
-) -> Result<MobilePage, ClientError> {
-    if work_id <= 0 || page > 1_000_000 {
-        return Err(ClientError::remote());
-    }
-    let version_query = version
-        .map(|version| format!("?version={version}"))
-        .unwrap_or_default();
-    authenticated_get(
-        &state,
-        &format!("/api/v1/works/{work_id}/pages/{page}{version_query}"),
-    )
-    .await?
-    .bounded_json()
-    .await
 }
 
 #[derive(Debug, Serialize)]
@@ -1579,24 +1200,6 @@ async fn image_response(response: reqwest::Response) -> Result<MobileAssetData, 
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn favorite_endpoint_keeps_the_path_prefix_and_escapes_the_id() {
-        assert_eq!(
-            super::favorite_endpoint("https://example.com/piep", "fanbox", "a/b c")
-                .unwrap()
-                .as_str(),
-            "https://example.com/piep/api/v1/favorites/fanbox/a%2Fb%20c",
-        );
-        assert_eq!(
-            super::favorite_endpoint("https://192.168.1.2:38777", "pixiv", "123")
-                .unwrap()
-                .as_str(),
-            "https://192.168.1.2:38777/api/v1/favorites/pixiv/123",
-        );
-        assert!(!super::valid_favorite_target("booth", "1"));
-        assert!(!super::valid_favorite_target("pixiv", ""));
-    }
-
     use super::*;
 
     pub(super) async fn local_response(wire_response: impl Into<String>) -> reqwest::Response {
@@ -1940,7 +1543,6 @@ mod tests {
         }));
         let loaded = load_saved("old", old).expect("load").expect("saved");
         assert!(loaded.pinned());
-        assert!(!loaded.can_sync_reading());
     }
 
     #[test]
@@ -1952,7 +1554,6 @@ mod tests {
         .expect("load")
         .expect("saved");
         assert!(!loaded.pinned());
-        assert!(loaded.can_sync_reading());
         // 指紋だけ残っていて証明書が無い形を、CA 検証へ格下げしない。
         let half = saved(serde_json::json!({ "fingerprint": "a".repeat(64) }));
         assert_eq!(load_saved("half", half).unwrap_err().code, "storage");

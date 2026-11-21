@@ -1,9 +1,7 @@
-//! 携帯の作品の一覧・作品の画面・表紙を、新しい棚から返す。
+//! 携帯の作品の一覧・作品の画面・表紙を、棚から返す。
 //!
-//! 一覧の条件は旧 API の検索（`/api/v1/works/search`）と同じ形で受け取り、同じ検査を通してから
-//! 新しい棚の問い合わせ（`TextSearch` と `WorkListQuery`）にする。携帯の絞り込みの画面と条件の
-//! 組み立てはそのまま使え、意味だけが新しい棚の一覧（デスクトップの一覧と同じ問い合わせ）になる。
-//! 作品は棚の UUID で返し、旧棚の番号に読み替えない。
+//! 一覧の条件（`MobileSearchRequest`）を検査してから棚の問い合わせ（`TextSearch` と
+//! `WorkListQuery`）にする。意味はデスクトップの一覧と同じ問い合わせになる。作品は棚の UUID で返す。
 
 use super::{
     internal, invalid, library_error, not_found, read_permit, ApiError, Context, Principal,
