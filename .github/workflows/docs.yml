@@ -40,6 +40,8 @@ jobs:
           rustup default 1.99.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          # PR ごとに保存すると上限 10GB を超え、main とリリースの分が押し出される。
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             tools/ipc-extract
             tools/api-types
@@ -95,6 +97,8 @@ jobs:
           rustup default 1.99.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          # PR ごとに保存すると上限 10GB を超え、main とリリースの分が押し出される。
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: |
             src-tauri
             tools/ipc-extract

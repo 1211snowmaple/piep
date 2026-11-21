@@ -1,0 +1,49 @@
+name: "Release cache"
+
+# リリースの組み立てが引くキャッシュを main で用意する。
+#
+# Actions のキャッシュは、保存した ref と既定のブランチからしか読めない。
+# タグの実行が保存した物は同じタグの実行からしか読めないので、次のリリースでは
+# 一度も当たらず、毎回すべての依存を release で組み直していた（13分ほど）。
+# ここで main に保存しておけば、どのタグの実行からも読める。
+#
+# 組み方は release.yml と揃える。`tauri build` は tauri に custom-protocol の
+# 機能を足すので、cargo だけで組んだ物とは依存の成果物が別になる。単独サーバーは
+# cargo で組むので、両方を組んでおく。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-cache
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          check-latest: true
+          cache: npm
+      - name: Install Rust 1.99.1
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+          shared-key: release
+      - run: npm ci
+      - run: npx --no-install tauri build --no-bundle
+      - name: Build the standalone server
+        shell: pwsh
+        run: |
+          npm run build:admin
+          if ($LASTEXITCODE -ne 0) { throw 'Could not build the admin screen' }
+          $env:PIEP_REQUIRE_ADMIN_UI = '1'
+          cargo build --release --locked --manifest-path src-tauri/Cargo.toml --example piep-server
+          if ($LASTEXITCODE -ne 0) { throw 'Could not build piep-server' }

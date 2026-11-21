@@ -24,20 +24,27 @@ jobs:
       # 素で組むと1ジョブ20分かかる。`docs.yml` は既にこれを使っている。
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          # PR ごとに保存すると上限 10GB を超え、main とリリースの分が押し出される。
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: src-tauri
       - run: npm ci
       - run: npm run check
       # Rust は `-D warnings` で通しているのに、28k 行の React 側は型検査だけ
       # だった。hooks の依存漏れと Promise の取りこぼしは型では捕まらない。
       - run: npm run lint
-      - run: npm test
-      # One thread: Tantivy allows a single IndexWriter per directory, and the
-      # app only ever opens one library per process - it takes an exclusive
-      # lock on it at startup. Running the index-backed tests side by side puts
-      # dozens of writers in one process, which on Windows fails commits with
-      # "Access is denied". Serial runs match how the component is really used
-      # and cost about twenty seconds against a twenty-minute compile.
-      - run: cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
+      # 試験はテストごとに別のプロセスで走らせる。Tantivy は1つの索引に
+      # IndexWriter を1つしか許さず、アプリも起動時に棚を排他で握る。同じ
+      # プロセスで索引つきの試験を並べると、Windows では書き込みが
+      # "Access is denied" で落ちるため、以前は `--test-threads=1` で1本ずつ
+      # 流していた（単体と library_core で約10分）。nextest は試験ごとに
+      # プロセスを分けるので、実際の使われ方（1プロセスに1つの棚）を保った
+      # まま並べられる。一時フォルダーは試験ごとに一意の名前を付けている。
+      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+        with:
+          tool: cargo-nextest@0.9.151
+      - run: cargo nextest run --manifest-path src-tauri/Cargo.toml --profile ci
+      # nextest は doctest を走らせない。
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --doc
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
@@ -45,8 +52,10 @@ jobs:
       # 内蔵の検証器は自分で書いた規則しか知らないので、外の権威の代わりには
       # ならない。手で一度走らせた結果は EPUB のコードが変わった時点で根拠で
       # なくなるため、変更のたびに取り直す。原稿は利用者のライブラリを要さない。
-      # クレートは前の手順で組み上がっているので、ここは1分もかからない。
-      - run: cargo run --manifest-path src-tauri/Cargo.toml --example epub_conformance -- ${{ runner.temp }}/epub-conformance
+      # 例は nextest の手順で test の設定のまま組み上がっている。`cargo run` は
+      # dev の設定で本体を組み直し、2分ほど余計にかかっていたので、できた物を
+      # そのまま動かす。
+      - run: ./src-tauri/target/debug/examples/epub_conformance.exe ${{ runner.temp }}/epub-conformance
       - name: EPUBCheck
         shell: pwsh
         run: |
@@ -86,6 +95,8 @@ jobs:
           check-latest: true
           cache: npm
       - run: npm ci
+      # Rust を組まない側で流し、checks の待ち時間から外す。
+      - run: npm test
       - run: npx playwright install chromium
       # Built here rather than inside the Playwright web server so a build
       # failure reads as a build failure.
@@ -116,6 +127,8 @@ jobs:
       # 素で組むと1ジョブ20分かかる。`docs.yml` は既にこれを使っている。
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
+          # PR ごとに保存すると上限 10GB を超え、main とリリースの分が押し出される。
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: src-tauri
       - run: npm ci
       # npm 12 treats dashed arguments after `npm run ... --` as npm config
