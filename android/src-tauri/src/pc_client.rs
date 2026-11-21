@@ -108,20 +108,9 @@ impl PcClientState {
                     .map_err(|_| ClientError::secret_lost())?;
                 parse_saved(&bytes)?
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // 封をする前の版が置いたファイルは、読んだら封じて消す。
-                let bytes = match fs::read(&self.file) {
-                    Ok(bytes) => bytes,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(_) => return Err(ClientError::storage()),
-                };
-                let saved = parse_saved(&bytes)?;
-                self.write_sealed(&saved)?;
-                saved
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(ClientError::storage()),
         };
-        remove_if_present(&self.file)?;
         *cache = Some(saved.clone());
         Ok(Some(saved))
     }
@@ -135,8 +124,7 @@ impl PcClientState {
         self.write_sealed(saved)?;
         *cache = Some(saved.clone());
         *generation += 1;
-        // sealed の公開後は、旧平文の削除に失敗しても接続世代を巻き戻さない。
-        remove_if_present(&self.file)
+        Ok(())
     }
 
     fn connection_snapshot(&self) -> Result<(u64, Option<SavedConnection>), ClientError> {
@@ -183,7 +171,6 @@ impl PcClientState {
             updated.capabilities = capabilities;
             self.write_sealed(&updated)?;
             *current = updated;
-            remove_if_present(&self.file)?;
         }
         Ok(())
     }
@@ -208,7 +195,6 @@ impl PcClientState {
             .map_err(|_| ClientError::storage())?;
         let mut cache = self.saved.lock().map_err(|_| ClientError::storage())?;
         remove_if_present(&self.sealed_file())?;
-        remove_if_present(&self.file)?;
         *cache = None;
         *generation += 1;
         Ok(())
@@ -1416,9 +1402,10 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("piep-android-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).expect("directory");
-        let file = directory.join("connection.json");
-        fs::write(&file, value.to_string()).expect("write");
-        let loaded = PcClientState::new(file, Arc::new(TestCipher)).load();
+        let state = PcClientState::new(directory.join("connection.json"), Arc::new(TestCipher));
+        let sealed = TestCipher.seal(value.to_string().as_bytes()).expect("seal");
+        fs::write(state.sealed_file(), sealed).expect("write");
+        let loaded = state.load();
         fs::remove_dir_all(&directory).expect("cleanup");
         loaded
     }
@@ -1461,14 +1448,12 @@ mod tests {
     }
 
     #[test]
-    fn the_old_plain_file_is_sealed_and_removed() {
+    fn the_connection_is_kept_only_sealed() {
         let (directory, file, value) = secret_fixture();
-        fs::write(&file, value.to_string()).expect("write");
         let state = PcClientState::new(file.clone(), Arc::new(TestCipher));
-        assert_eq!(
-            state.load().expect("load").expect("saved").device_id,
-            "device"
-        );
+        state
+            .save(&serde_json::from_value(value).unwrap())
+            .expect("save");
         assert!(!file.exists());
         let sealed = fs::read(state.sealed_file()).expect("sealed");
         let token = URL_SAFE_NO_PAD.encode([7_u8; 32]);
@@ -1485,51 +1470,15 @@ mod tests {
     #[test]
     fn a_seal_that_cannot_be_opened_asks_for_registration_again() {
         let (directory, file, value) = secret_fixture();
-        fs::write(&file, value.to_string()).expect("write");
         let writer = PcClientState::new(file.clone(), Arc::new(TestCipher));
-        writer.load().expect("load");
+        writer
+            .save(&serde_json::from_value(value).unwrap())
+            .expect("save");
         let state = PcClientState::new(file, Arc::new(BrokenCipher));
         let error = state.load().expect_err("cannot open");
         assert_eq!(error.code, "secret_lost");
         state.forget().expect("forget");
         assert!(state.load().expect("load").is_none());
-        fs::remove_dir_all(&directory).expect("cleanup");
-    }
-
-    #[test]
-    fn published_connection_advances_generation_even_if_plaintext_cleanup_fails() {
-        let (directory, file, value) = secret_fixture();
-        let state = PcClientState::new(file.clone(), Arc::new(TestCipher));
-        let old: SavedConnection = serde_json::from_value(value).unwrap();
-        state.save(&old).unwrap();
-        let (old_generation, _) = state.connection_snapshot().unwrap();
-        fs::create_dir(&file).unwrap();
-        let mut new = old;
-        new.url = "https://new.example".into();
-        assert_eq!(state.save(&new).unwrap_err().code, "storage");
-        let (new_generation, current) = state.connection_snapshot().unwrap();
-        assert_ne!(new_generation, old_generation);
-        assert_eq!(current.unwrap().url, new.url);
-        assert_eq!(
-            state
-                .with_connection(old_generation, || Ok(()))
-                .unwrap_err()
-                .code,
-            "connection_changed"
-        );
-        fs::remove_dir(&file).unwrap();
-        let reopened = PcClientState::new(file, Arc::new(TestCipher));
-        assert_eq!(reopened.load().unwrap().unwrap().url, new.url);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn a_plain_file_stays_until_it_can_be_sealed() {
-        let (directory, file, value) = secret_fixture();
-        fs::write(&file, value.to_string()).expect("write");
-        let state = PcClientState::new(file.clone(), Arc::new(BrokenCipher));
-        assert_eq!(state.load().expect_err("cannot seal").code, "storage");
-        assert!(file.exists());
         fs::remove_dir_all(&directory).expect("cleanup");
     }
 

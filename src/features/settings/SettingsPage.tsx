@@ -42,8 +42,8 @@ import { PAGE_SIZE_OPTIONS, PAGING_SCOPES, useDefaultPagingMode, usePageSize, us
 import { VIEW_SCOPES, useDefaultViewMode, useScopedViewPreference, type ViewMode, type ViewPreference, type ViewScope } from "@/lib/viewMode";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getProvider, providers } from "@/lib/providers";
-import { loginFanboxWebview, loginPixivWebview, verifyFanboxSession, verifyPixivToken } from "@/services/authApi";
-import type { FanboxUser, PixivUser } from "@/services/authApi";
+import { connectFanboxSession, connectPixivToken, disconnectAccount, getConnectionStatus, loginFanboxWebview, loginPixivWebview } from "@/services/authApi";
+import type { ConnectionStatus } from "@/services/authApi";
 import { getSearchIndexStatus, isTauriRuntime } from "@/services/dbApi";
 import { shelfDashboard } from "@/services/shelfHealthApi";
 import { shelfReimportFolders } from "@/services/shelfBackupApi";
@@ -55,7 +55,6 @@ import { trackManualRebuild, useSearchIndexProgress } from "@/features/search/se
 import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 import DiagnosticsPage from "@/features/diagnostics/DiagnosticsPage";
 import { cancelSearchRebuildIndex, startSearchRebuildIndex, type SearchRebuildProgress } from "@/services/searchApi";
-import { store } from "@/store";
 import { reportJobAction, requestOperationCancel, startOperation, useOperationJobs, type OperationController } from "@/features/jobs/operationJobs";
 import { APP_VERSION } from "@/lib/version";
 import { AppUpdateCard } from "@/features/settings/AppUpdateCard";
@@ -89,7 +88,7 @@ type Section = (typeof SECTIONS)[number];
 function isSection(value: string | null): value is Section {
   return value !== null && (SECTIONS as readonly string[]).includes(value);
 }
-interface ConnectionState { pixiv: PixivUser | null; fanbox: FanboxUser | null }
+type ConnectionState = ConnectionStatus;
 
 /** ブラウザプレビュー用の索引の様子。追いついた棚を見せる。 */
 const PREVIEW_INDEX_STATUS: SearchIndexStatus = {
@@ -162,8 +161,7 @@ export default function SettingsPage() {
     queryKey: ["settings-auth"],
     queryFn: async (): Promise<ConnectionState> => {
       if (!runtime) return { pixiv: null, fanbox: null };
-      const [pixivUser, fanboxUser] = await Promise.all([store.get<PixivUser>("pixiv_user"), store.get<FanboxUser>("fanbox_user")]);
-      return { pixiv: pixivUser ?? null, fanbox: fanboxUser ?? null };
+      return getConnectionStatus();
     },
   });
   // 数と保存先は棚のもの。
@@ -177,41 +175,21 @@ export default function SettingsPage() {
   const connectionMutation = useMutation({
     mutationFn: async (input: { source: "pixiv" | "fanbox"; mode: "web" | "manual"; values?: Record<string, string> }) => {
       if (!runtime) throw new Error("接続はデスクトップアプリで利用できます");
-      if (input.source === "pixiv") {
-        // ブラウザ経由の接続だけが web のセッションを持ち帰る。手動でトークンを
-        // 貼った場合は Cookie が無いので、更新確認は従来の経路になる。
-        const connection = input.mode === "web"
-          ? await loginPixivWebview()
-          : { refreshToken: input.values?.token ?? "", user: await verifyPixivToken(input.values?.token ?? ""), cookie: null, userAgent: null };
-        await store.set("pixiv_refresh_token", connection.refreshToken); await store.set("pixiv_user", connection.user);
-        // Cookie と UA は対でしか意味を持たない。片方だけ残らないよう、
-        // 揃っているときだけ書き、そうでなければ両方消す。
-        if (connection.cookie && connection.userAgent) { await store.set("pixiv_cookie", connection.cookie); await store.set("pixiv_user_agent", connection.userAgent); }
-        else { await store.delete("pixiv_cookie"); await store.delete("pixiv_user_agent"); }
-        await store.save();
-      } else {
-        const [session, user, userAgent] = input.mode === "web" ? await loginFanboxWebview() : [input.values?.session ?? "", await verifyFanboxSession(input.values?.session ?? "", input.values?.userAgent || "Mozilla/5.0"), input.values?.userAgent || "Mozilla/5.0"] as const;
-        await store.set("fanbox_session_id", session); await store.set("fanbox_user", user); await store.set("fanbox_user_agent", userAgent); await store.save();
-      }
+      // 鍵はバックエンドが資格情報マネージャーに置く。画面へ返るのは接続の様子だけ。
+      // ブラウザ経由の接続だけが web のセッションを持ち帰る。手動でトークンを
+      // 貼った場合は Cookie が無いので、更新確認は従来の経路になる。
+      if (input.source === "pixiv") return input.mode === "web" ? loginPixivWebview() : connectPixivToken(input.values?.token ?? "");
+      return input.mode === "web" ? loginFanboxWebview() : connectFanboxSession(input.values?.session ?? "", input.values?.userAgent || "Mozilla/5.0");
     },
-    onSuccess: (_, input) => { notifications.show({ color: "green", title: "接続しました", message: getProvider(input.source).label }); queryClient.invalidateQueries({ queryKey: ["settings-auth"] }); queryClient.invalidateQueries({ queryKey: ["auth-status"] }); queryClient.invalidateQueries({ queryKey: ["pixiv-session"] }); pixivForm.reset(); fanboxForm.reset(); },
+    onSuccess: (status, input) => { notifications.show({ color: "green", title: "接続しました", message: getProvider(input.source).label }); queryClient.setQueryData(["settings-auth"], status); queryClient.invalidateQueries({ queryKey: ["auth-status"] }); pixivForm.reset(); fanboxForm.reset(); },
     onError: (error) => notifications.show({ color: "red", title: "接続できません", message: errorMessage(error) }),
   });
   const disconnect = (source: "pixiv" | "fanbox") => modals.openConfirmModal({
     title: `${getProvider(source).label}との接続を解除しますか？`, children: <Text size="sm">保存済みの作品は削除されません。再度保存・更新するには接続が必要です。</Text>, labels: { confirm: "接続を解除", cancel: "キャンセル" }, confirmProps: DANGER_CONFIRM,
     onConfirm: async () => {
       try {
-        if (source === "pixiv") {
-          await store.delete("pixiv_refresh_token"); await store.delete("pixiv_user");
-          await store.delete("pixiv_cookie"); await store.delete("pixiv_user_agent");
-        } else {
-          await store.delete("fanbox_session_id"); await store.delete("fanbox_user");
-          await store.delete("fanbox_user_agent");
-        }
-        await store.save();
-        queryClient.invalidateQueries({ queryKey: ["settings-auth"] });
+        queryClient.setQueryData(["settings-auth"], await disconnectAccount(source));
         queryClient.invalidateQueries({ queryKey: ["auth-status"] });
-        queryClient.invalidateQueries({ queryKey: ["pixiv-session"] });
       } catch (error) {
         notifications.show({ color: "red", title: "接続を解除できません", message: errorMessage(error) });
       }
@@ -353,15 +331,10 @@ function ConnectionsSection({ auth, runtime, pixivForm, fanboxForm, mutation, di
   // web のセッションは「二つ目の接続」ではなく、この接続の内訳である。
   // 揃っていることは既定なので何も言わない。欠けているときだけ、何が
   // できないのかと、どうすれば戻るのかを言う。
-  const pixivSession = useQuery({
-    queryKey: ["pixiv-session"],
-    queryFn: async () => Boolean(await store.get<string>("pixiv_cookie") && await store.get<string>("pixiv_user_agent")),
-    enabled: runtime,
-  });
-  return <Stack gap="lg"><SectionIntro title="取得用の接続" description="作品の保存・更新確認に使うアカウントです。内蔵ブラウザで表示するアカウントとは独立しています。" /><ConnectionCard source="pixiv" user={auth.pixiv} note={auth.pixiv && pixivSession.data === false ? "一覧を使った高速確認には、ブラウザでの再接続が必要です" : null} runtime={runtime} loading={mutation.isPending} onWeb={() => mutation.mutate({ source: "pixiv", mode: "web" })} onDisconnect={() => disconnect("pixiv")} manual={<form onSubmit={pixivForm.onSubmit((values) => mutation.mutate({ source: "pixiv", mode: "manual", values }))}><Group align="flex-start"><PasswordInput flex={1} disabled={!runtime} label="リフレッシュトークン" placeholder="手動で入力" {...pixivForm.getInputProps("token")} /><Button type="submit" mt={25} variant="light" disabled={!runtime}>検証して保存</Button></Group></form>} /><ConnectionCard source="fanbox" user={auth.fanbox} runtime={runtime} loading={mutation.isPending} onWeb={() => mutation.mutate({ source: "fanbox", mode: "web" })} onDisconnect={() => disconnect("fanbox")} manual={<form onSubmit={fanboxForm.onSubmit((values) => mutation.mutate({ source: "fanbox", mode: "manual", values }))}><Stack><PasswordInput disabled={!runtime} label="FANBOXSESSID" placeholder="手動で入力" {...fanboxForm.getInputProps("session")} /><TextInput disabled={!runtime} label="User-Agent" {...fanboxForm.getInputProps("userAgent")} /><ActionRow><Button type="submit" variant="light" disabled={!runtime}>検証して保存</Button></ActionRow></Stack></form>} /><Text size="sm" c="dimmed">内蔵ブラウザのログインは保存画面で行います。ログイン・ログアウトしても取得用の接続は変わりません。</Text><Note icon={Icons.secure} title="ローカル保存">piepは接続情報を外部サーバーへ送信しません。各サービスへの通信とローカル保存だけに使用します。</Note></Stack>;
+  return <Stack gap="lg"><SectionIntro title="取得用の接続" description="作品の保存・更新確認に使うアカウントです。内蔵ブラウザで表示するアカウントとは独立しています。" /><ConnectionCard source="pixiv" user={auth.pixiv} note={auth.pixiv && !auth.pixiv.webSession ? "一覧を使った高速確認には、ブラウザでの再接続が必要です" : null} runtime={runtime} loading={mutation.isPending} onWeb={() => mutation.mutate({ source: "pixiv", mode: "web" })} onDisconnect={() => disconnect("pixiv")} manual={<form onSubmit={pixivForm.onSubmit((values) => mutation.mutate({ source: "pixiv", mode: "manual", values }))}><Group align="flex-start"><PasswordInput flex={1} disabled={!runtime} label="リフレッシュトークン" placeholder="手動で入力" {...pixivForm.getInputProps("token")} /><Button type="submit" mt={25} variant="light" disabled={!runtime}>検証して保存</Button></Group></form>} /><ConnectionCard source="fanbox" user={auth.fanbox} runtime={runtime} loading={mutation.isPending} onWeb={() => mutation.mutate({ source: "fanbox", mode: "web" })} onDisconnect={() => disconnect("fanbox")} manual={<form onSubmit={fanboxForm.onSubmit((values) => mutation.mutate({ source: "fanbox", mode: "manual", values }))}><Stack><PasswordInput disabled={!runtime} label="FANBOXSESSID" placeholder="手動で入力" {...fanboxForm.getInputProps("session")} /><TextInput disabled={!runtime} label="User-Agent" {...fanboxForm.getInputProps("userAgent")} /><ActionRow><Button type="submit" variant="light" disabled={!runtime}>検証して保存</Button></ActionRow></Stack></form>} /><Text size="sm" c="dimmed">内蔵ブラウザのログインは保存画面で行います。ログイン・ログアウトしても取得用の接続は変わりません。</Text><Note icon={Icons.secure} title="ローカル保存">piepは接続情報を外部サーバーへ送信しません。各サービスへの通信とローカル保存だけに使用します。</Note></Stack>;
 }
 
-function ConnectionCard({ source, user, note, runtime, loading, onWeb, onDisconnect, manual }: { source: "pixiv" | "fanbox"; user: PixivUser | FanboxUser | null; note?: string | null; runtime: boolean; loading: boolean; onWeb: () => void; onDisconnect: () => void; manual: React.ReactNode }) {
+function ConnectionCard({ source, user, note, runtime, loading, onWeb, onDisconnect, manual }: { source: "pixiv" | "fanbox"; user: { name: string } | null; note?: string | null; runtime: boolean; loading: boolean; onWeb: () => void; onDisconnect: () => void; manual: React.ReactNode }) {
   // 保存元の記号を出す。ここは長く `profile_image_urls` を `Avatar` に渡して
   // いたが、pixiv の画像は `Referer` を求めるので `<img>` からは取れず、必ず
   // 人型に落ちていた。**取れない絵を頼んで、取れなかった姿を見せていた。**

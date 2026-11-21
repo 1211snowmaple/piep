@@ -2,9 +2,10 @@ import { act, renderHook } from "@testing-library/react";
 import { createElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
-const api = vi.hoisted(() => ({ jobs:vi.fn(),credentials:vi.fn(),list:vi.fn(),record:vi.fn(),start:vi.fn(),getJob:vi.fn() }));
+const api = vi.hoisted(() => ({ jobs:vi.fn(),connection:vi.fn(),list:vi.fn(),record:vi.fn(),start:vi.fn(),getJob:vi.fn() }));
 vi.mock("@/services/dbApi", () => ({ isTauriRuntime:()=>true }));
-vi.mock("@/services/updateJobApi", () => ({ listUpdateJobsCommand:api.jobs,getUpdateJobCredentials:api.credentials,listIncompleteSaveRepairWorksCommand:api.list,recordIncompleteSaveRepairAttemptsCommand:api.record,startSaveJobCommand:api.start,getUpdateJobCommand:api.getJob }));
+vi.mock("@/services/authApi", () => ({ getConnectionStatus:api.connection }));
+vi.mock("@/services/updateJobApi", () => ({ listUpdateJobsCommand:api.jobs,listIncompleteSaveRepairWorksCommand:api.list,recordIncompleteSaveRepairAttemptsCommand:api.record,startSaveJobCommand:api.start,getUpdateJobCommand:api.getJob }));
 import { REPAIR_BATCH_SIZE, startIncompleteSaveRepair, useIncompleteSaveRepair } from "./repairIncompleteSaves";
 
 // DB の代わり。一部保存の作品と、今の版で試した作品を覚える。
@@ -18,7 +19,7 @@ beforeEach(() => {
   incomplete = ["1"];
   attempted.clear();
   api.jobs.mockResolvedValue([]);
-  api.credentials.mockResolvedValue({ pixivRefreshToken:"test-token",pixivCookie:"session",pixivUserAgent:"ua" });
+  api.connection.mockResolvedValue({ pixiv:{ name:"利用者",webSession:true },fanbox:null });
   api.list.mockImplementation(async (limit:number) => incomplete.filter((id)=>!attempted.has(id)).slice(0,limit).map(work));
   api.record.mockImplementation(async (ids:string[]) => { ids.forEach((id)=>attempted.add(id)); });
   api.start.mockResolvedValue({ jobId:"repair-job",status:"running" });
@@ -26,7 +27,7 @@ beforeEach(() => {
 
 it("queues missing details through the normal save job and does not repeat accepted work", async () => {
   expect((await startIncompleteSaveRepair()).job?.jobId).toBe("repair-job");
-  expect(api.start).toHaveBeenCalledWith([{source:"pixiv",sourceId:"1",title:"作品"}],false,{pixivRefreshToken:"test-token",pixivCookie:"session",pixivUserAgent:"ua"});
+  expect(api.start).toHaveBeenCalledWith([{source:"pixiv",sourceId:"1",title:"作品"}],false);
   expect(await startIncompleteSaveRepair()).toEqual({ waiting:false });
   expect(api.start).toHaveBeenCalledOnce();
 });
@@ -42,12 +43,12 @@ it("moves attempts recorded by older builds into the library once", async () => 
 it("waits for an existing download job instead of adding background traffic", async () => {
   api.jobs.mockResolvedValue([{status:"running"}]);
   expect(await startIncompleteSaveRepair()).toEqual({ waiting:true });
-  expect(api.credentials).not.toHaveBeenCalled();
+  expect(api.connection).not.toHaveBeenCalled();
   expect(api.start).not.toHaveBeenCalled();
 });
 
 it("waits for a connection without marking the saved work as attempted", async () => {
-  api.credentials.mockResolvedValue({pixivRefreshToken:null});
+  api.connection.mockResolvedValue({pixiv:null,fanbox:null});
   expect(await startIncompleteSaveRepair()).toEqual({waiting:true});
   expect(api.record).not.toHaveBeenCalled();
   expect(api.start).not.toHaveBeenCalled();

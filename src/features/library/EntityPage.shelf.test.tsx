@@ -32,7 +32,6 @@ vi.mock("@/services/dialogApi", async (importOriginal) => ({
 }));
 const watching = vi.hoisted(() => ({ get: vi.fn(), upsert: vi.fn(), check: vi.fn() }));
 vi.mock("@/features/updates/startSingleCheck", () => ({ runSingleCheck: watching.check }));
-vi.mock("@/store", () => ({ store: { get: vi.fn().mockResolvedValue("test-connection") } }));
 vi.mock("@/services/shelfApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfApi")>()),
   ...api,

@@ -2,7 +2,8 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { notifications } from "@mantine/notifications";
 import { isTauriRuntime } from "@/services/dbApi";
-import { getUpdateJobCommand, getUpdateJobCredentials, listIncompleteSaveRepairWorksCommand, listUpdateJobsCommand, recordIncompleteSaveRepairAttemptsCommand, startSaveJobCommand, type UpdateJobSnapshot } from "@/services/updateJobApi";
+import { getConnectionStatus } from "@/services/authApi";
+import { getUpdateJobCommand, listIncompleteSaveRepairWorksCommand, listUpdateJobsCommand, recordIncompleteSaveRepairAttemptsCommand, startSaveJobCommand, type UpdateJobSnapshot } from "@/services/updateJobApi";
 import { invalidateAfterUpdateJob, isUpdateJobActive } from "./updateJobs";
 
 // 以前は試した作品をここ（画面側の保存領域）に控えていた。入れ直すと消えて
@@ -29,12 +30,12 @@ async function moveLegacyAttempts(): Promise<void> {
 
 async function startRepair(shouldContinue: () => boolean): Promise<RepairResult> {
   if ((await listUpdateJobsCommand()).some((job) => (isUpdateJobActive(job.status) || job.status === "auth_required"))) return { waiting: true };
-  const credentials = await getUpdateJobCredentials();
-  if (!credentials.pixivRefreshToken || !credentials.pixivCookie || !credentials.pixivUserAgent) return { waiting: true };
+  // 補完は web のセッションまで揃った pixiv の接続でだけ走らせる。
+  if (!(await getConnectionStatus()).pixiv?.webSession) return { waiting: true };
   await moveLegacyAttempts();
   const repairWorks = await listIncompleteSaveRepairWorksCommand(REPAIR_BATCH_SIZE);
   if (!repairWorks.length || !shouldContinue()) return { waiting: false };
-  const job = await startSaveJobCommand(repairWorks, false, credentials);
+  const job = await startSaveJobCommand(repairWorks, false);
   await recordIncompleteSaveRepairAttemptsCommand(repairWorks.map((work) => work.sourceId));
   return { waiting: false, job };
 }

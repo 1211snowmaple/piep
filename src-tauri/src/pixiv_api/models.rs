@@ -536,7 +536,8 @@ pub struct UserIllustrations {
 
 /// OAuth token refresh response (access_token, expires_in, etc.).
 ///
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// **Debug を付けない。** トークンを持つので、`{:?}` 一つでログへ落ちる。
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TokenRefreshResult {
     pub access_token: String,
     pub refresh_token: Option<String>,

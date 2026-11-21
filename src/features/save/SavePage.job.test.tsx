@@ -37,7 +37,7 @@ const jobs = vi.hoisted(() => ({
 
 vi.mock("@/services/browserApi", () => browserApi);
 vi.mock("@/services/eventBus", () => ({ subscribeTauriEvent: vi.fn(() => () => undefined) }));
-vi.mock("@/store", () => ({ store: { get: vi.fn().mockResolvedValue("token"), set: vi.fn(), save: vi.fn() } }));
+vi.mock("@/services/authApi", () => ({ getConnectionStatus: vi.fn().mockResolvedValue({ pixiv: { name: "利用者", webSession: true }, fanbox: { name: "利用者" } }) }));
 vi.mock("@/services/downloadApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/downloadApi")>()),
   ...downloadApi,

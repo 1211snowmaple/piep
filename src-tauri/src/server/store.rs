@@ -55,7 +55,7 @@ pub struct DeviceSummary {
     pub last_seen_at: Option<String>,
 }
 
-#[derive(Debug)]
+// **Debug を付けない。** 端末の鍵を持つので、`{:?}` 一つでログへ落ちる。
 pub struct Paired {
     pub device_id: String,
     pub token: String,
@@ -370,7 +370,7 @@ mod tests {
             .issue_pairing(Role::Reader, Duration::from_secs(60))
             .unwrap();
         assert_eq!(
-            store.consume_pairing("wrong", "端末").unwrap_err(),
+            store.consume_pairing("wrong", "端末").err().unwrap(),
             PairError::Rejected
         );
         let paired = store
@@ -378,12 +378,12 @@ mod tests {
             .expect("正しい鍵は通る");
         assert_eq!(paired.role, Role::Reader);
         assert_eq!(
-            store.consume_pairing(&secret, "端末").unwrap_err(),
+            store.consume_pairing(&secret, "端末").err().unwrap(),
             PairError::Rejected
         );
         let expired = store.issue_pairing(Role::Reader, Duration::ZERO).unwrap();
         assert_eq!(
-            store.consume_pairing(&expired, "端末").unwrap_err(),
+            store.consume_pairing(&expired, "端末").err().unwrap(),
             PairError::Rejected
         );
         drop(store);
@@ -448,7 +448,7 @@ mod tests {
             .issue_pairing(Role::Admin, Duration::from_secs(60))
             .unwrap();
         assert_eq!(
-            store.consume_pairing(&obsolete, "古い案内").unwrap_err(),
+            store.consume_pairing(&obsolete, "古い案内").err().unwrap(),
             PairError::Rejected
         );
         assert!(
@@ -470,7 +470,7 @@ mod tests {
         assert!(store.authorize(&current.token).is_none());
         assert!(store.authorize(&replacement.token).is_some());
         assert_eq!(
-            store.consume_pairing(&legacy, "古い版の案内").unwrap_err(),
+            store.consume_pairing(&legacy, "古い版の案内").err().unwrap(),
             PairError::Rejected
         );
         assert_eq!(
@@ -496,7 +496,7 @@ mod tests {
             .issue_pairing(Role::Reader, Duration::from_secs(60))
             .unwrap();
         assert_eq!(
-            store.consume_pairing(&secret, "多すぎる").unwrap_err(),
+            store.consume_pairing(&secret, "多すぎる").err().unwrap(),
             PairError::TooManyDevices
         );
         drop(store);

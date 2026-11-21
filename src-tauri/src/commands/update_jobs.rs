@@ -1094,14 +1094,7 @@ pub async fn start_update_job(
     let snapshot = state
         .jobs()
         .create_update_job_if_idle(&job_id, &request, &items)?;
-    spawn_update_job(
-        app.clone(),
-        job_id.clone(),
-        request
-            .credentials
-            .clone()
-            .unwrap_or_else(snapshot_credentials_missing),
-    );
+    spawn_update_job(app.clone(), job_id.clone(), saved_credentials());
     emit_snapshot(&app, &state, &job_id).await;
     Ok(snapshot)
 }
@@ -1140,7 +1133,6 @@ pub async fn start_save_job(
     app: tauri::AppHandle,
     works: Vec<SaveJobWork>,
     watch_saved: Option<bool>,
-    credentials: Option<UpdateCredentials>,
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let items = build_save_items(&works);
@@ -1153,7 +1145,6 @@ pub async fn start_save_job(
         mode: "save".to_string(),
         work_ids: None,
         target_ids: None,
-        credentials: credentials.clone(),
         watch_saved,
         adhoc_targets: None,
         new_works_only: None,
@@ -1170,11 +1161,7 @@ pub async fn start_save_job(
         "info",
         &format!("{}件の保存を受け付けました", items.len()),
     )?;
-    spawn_update_job(
-        app.clone(),
-        job_id.clone(),
-        credentials.unwrap_or_else(snapshot_credentials_missing),
-    );
+    spawn_update_job(app.clone(), job_id.clone(), saved_credentials());
     emit_snapshot(&app, &state, &job_id).await;
     Ok(snapshot)
 }
@@ -1222,7 +1209,7 @@ fn build_save_items(works: &[SaveJobWork]) -> Vec<UpdateJobItemInput> {
 ///
 /// **今の項目が終わってから止まる。** 相手への問い合わせを途中で切らない。
 ///
-/// 再開には `resume_update_job` を使い、鍵をもう一度渡す。
+/// 再開には `resume_update_job` を使う。
 #[tauri::command]
 pub async fn pause_update_job(
     app: tauri::AppHandle,
@@ -1242,8 +1229,8 @@ pub async fn pause_update_job(
 
 /// 止めたジョブを続きから走らせる。
 ///
-/// **鍵をもう一度渡す。** 止めている間に繋ぎ直されていることがあるので、
-/// 止めたときのものを持ち回さない。
+/// **鍵は保存してある接続から読み直す。** 止めている間に繋ぎ直されていることが
+/// あるので、止めたときのものを持ち回さない。
 ///
 /// `retryFailed` を立てると、失敗した項目もやり直す。既定は false で、まだ
 /// 手を付けていないものだけを進める。
@@ -1251,7 +1238,6 @@ pub async fn pause_update_job(
 pub async fn resume_update_job(
     app: tauri::AppHandle,
     job_id: String,
-    credentials: UpdateCredentials,
     retry_failed: Option<bool>,
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
@@ -1261,7 +1247,7 @@ pub async fn resume_update_job(
     state
         .jobs()
         .append_update_job_log(&job_id, "info", "更新ジョブを再開しました")?;
-    spawn_update_job(app.clone(), job_id.clone(), credentials);
+    spawn_update_job(app.clone(), job_id.clone(), saved_credentials());
     emit_snapshot(&app, &state, &job_id).await;
     state.jobs().update_job_snapshot(&job_id)
 }
@@ -1380,13 +1366,12 @@ fn clear_finished_jobs(state: &AppState, include_shelf: bool) -> Result<usize, S
 /// 積む間はライブラリの書き込みを止める。候補はバックアップに載るので、書き出し
 /// の最中に書き換えると、パートごとに別の世代が写ってしまう。
 ///
-/// 鍵を省くと、保存の段で足りずに失敗する。
+/// 鍵は保存してある接続から読む。繋がっていなければ、保存の段で接続を求めて止まる。
 #[tauri::command]
 pub async fn save_update_job_candidates(
     app: tauri::AppHandle,
     job_id: String,
     candidate_ids: Vec<i64>,
-    credentials: Option<UpdateCredentials>,
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     // `update_candidates` はバックアップに載る。書き出しの最中に書き換えると、
@@ -1407,16 +1392,20 @@ pub async fn save_update_job_candidates(
         state
             .jobs()
             .set_update_job_status(&job_id, "queued", Some("候補保存待ち"))?;
-        spawn_update_job(
-            app.clone(),
-            job_id.clone(),
-            credentials.unwrap_or_else(snapshot_credentials_missing),
-        );
+        spawn_update_job(app.clone(), job_id.clone(), saved_credentials());
     }
     emit_snapshot(&app, &state, &job_id).await;
     state.jobs().update_job_snapshot(&job_id)
 }
 
+/// 仕事に渡す鍵。保存してある接続から、その都度読む。
+///
+/// 止めている間に繋ぎ直されていることがあるので、前に読んだものを持ち回さない。
+fn saved_credentials() -> UpdateCredentials {
+    crate::auth::saved::Vault::app().update_credentials()
+}
+
+#[cfg(test)]
 fn snapshot_credentials_missing() -> UpdateCredentials {
     UpdateCredentials {
         pixiv_refresh_token: None,
@@ -1562,7 +1551,6 @@ pub async fn record_incomplete_save_repair_attempts(
 pub async fn recheck_deferred_update_candidates(
     app: tauri::AppHandle,
     keys: Vec<String>,
-    credentials: Option<UpdateCredentials>,
     refresh_post_access: Option<bool>,
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
@@ -1627,7 +1615,6 @@ pub async fn recheck_deferred_update_candidates(
         watch_saved: Some(false),
         new_works_only: None,
         adhoc_targets: None,
-        credentials: credentials.clone(),
     };
     let job_id = make_job_id();
     let snapshot = state
@@ -1638,11 +1625,7 @@ pub async fn recheck_deferred_update_candidates(
         "info",
         "保留した作品の閲覧条件を再確認します。保存や監視登録は行いません",
     )?;
-    spawn_update_job(
-        app.clone(),
-        job_id.clone(),
-        credentials.unwrap_or_else(snapshot_credentials_missing),
-    );
+    spawn_update_job(app.clone(), job_id.clone(), saved_credentials());
     emit_snapshot(&app, &state, &job_id).await;
     Ok(snapshot)
 }
@@ -1799,7 +1782,7 @@ async fn recheck_deferred_item(
                 }
             }
         }
-        let post = super::downloader::fetch_fanbox_post(id.into(), cookie, ua).await?;
+        let post = super::downloader::fanbox_post(id.into(), cookie, ua).await?;
         if post.get("isRestricted").and_then(Value::as_bool) == Some(true)
             || !super::downloader::fetched_has_material_content(&post, "fanbox")
         {
@@ -1930,9 +1913,9 @@ pub struct PendingRevisionPreview {
 pub async fn preview_pending_revision(
     app: tauri::AppHandle,
     work: String,
-    credentials: UpdateCredentials,
 ) -> Result<PendingRevisionPreview, String> {
     const NONE: &str = "この作品には未保存の改稿がありません";
+    let credentials = saved_credentials();
     let state = app.state::<Arc<AppState>>().inner().clone();
     let lookup_state = state.clone();
     let lookup_work = work.clone();
@@ -1962,7 +1945,7 @@ pub async fn preview_pending_revision(
         "fanbox" => {
             let cookie = fanbox_cookie(&credentials)
                 .ok_or_else(|| "差分を取るには、設定でFANBOXに接続してください".to_string())?;
-            super::downloader::fetch_fanbox_post(
+            super::downloader::fanbox_post(
                 source_id.clone(),
                 cookie,
                 fanbox_user_agent(&credentials),
@@ -2664,7 +2647,7 @@ async fn refresh_profiles_for_saved_works(
             user_agent: Some(fanbox_user_agent(credentials)),
         };
         if let Err(error) =
-            crate::commands::database::refresh_entity_profile(app.clone(), params).await
+            crate::commands::database::refresh_entity_profile_with(app.clone(), params).await
         {
             log::warn!("{entity_type}:{source}:{source_key} の情報を取れません: {error}");
             let _ = state.jobs().append_update_job_log(
@@ -3373,7 +3356,7 @@ async fn process_target_item(
         .flatten();
     if let Some(params) = profile_params {
         if let Err(error) =
-            crate::commands::database::refresh_entity_profile(app.clone(), params).await
+            crate::commands::database::refresh_entity_profile_with(app.clone(), params).await
         {
             log::warn!(
                 "監視作者 {}:{} のプロフィールを更新できません: {error}",
@@ -3510,7 +3493,7 @@ async fn save_candidate(
             ));
         };
         let user_agent = fanbox_user_agent(credentials);
-        let post = super::downloader::fetch_fanbox_post(
+        let post = super::downloader::fanbox_post(
             source_id.to_string(),
             cookie.clone(),
             user_agent.clone(),
@@ -3675,7 +3658,6 @@ mod tests {
                 mode: mode.into(),
                 work_ids: None,
                 target_ids: None,
-                credentials: None,
                 watch_saved: None,
                 new_works_only: Some(true),
                 adhoc_targets: None,
@@ -3743,7 +3725,6 @@ mod tests {
             mode: "check_only".into(),
             work_ids: None,
             target_ids: None,
-            credentials: None,
             watch_saved: None,
             new_works_only: Some(true),
             adhoc_targets: Some(vec![AdhocUpdateTarget {

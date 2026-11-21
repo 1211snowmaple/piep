@@ -58,7 +58,7 @@ Tauri の外（ブラウザでの開発）でモックに差し替えられる�
 
 | 境界 | 数 | 繋ぎ方 | 生成した一覧 |
 |---|---:|---|---|
-| コマンド | <!--stat:commands.total-->187<!--/stat--> | `invoke("名前")` | [IPC コマンド契約](../reference/ipc.md) |
+| コマンド | <!--stat:commands.total-->189<!--/stat--> | `invoke("名前")` | [IPC コマンド契約](../reference/ipc.md) |
 | イベント | <!--stat:events.total-->12<!--/stat-->種 | `emit` / `subscribeTauriEvent` | [イベント契約](../reference/events.md) |
 | 棚の台帳 | <!--stat:tables.total-->83<!--/stat-->テーブル | SQL の文字列 | [スキーマ](../reference/schema.md) |
 

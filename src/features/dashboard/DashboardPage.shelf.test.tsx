@@ -24,7 +24,7 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
   isTauriRuntime: () => true,
   ...legacy,
 }));
-vi.mock("@/store", () => ({ store: { get: vi.fn().mockResolvedValue("token") } }));
+vi.mock("@/services/authApi", () => ({ getConnectionStatus: vi.fn().mockResolvedValue({ pixiv: { name: "利用者", webSession: true }, fanbox: { name: "利用者" } }) }));
 
 const card: ShelfCard = {
   id: "0195f1c2-0000-7000-8000-000000000001",

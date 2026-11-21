@@ -27,7 +27,7 @@ import { getProvider } from "@/lib/providers";
 import { isTauriRuntime } from "@/services/dbApi";
 import { shelfDashboard, shelfSearchIndexStatus } from "@/services/shelfHealthApi";
 import { searchShelf } from "@/features/library/shelf";
-import { store } from "@/store";
+import { getConnectionStatus } from "@/services/authApi";
 
 export type QuickSaveSource = "pixiv" | "fanbox";
 
@@ -112,10 +112,11 @@ export default function DashboardPage() {
   });
   const auth = useQuery({
     queryKey: ["auth-status"],
-    queryFn: async () => runtime ? {
-      pixiv: Boolean(await store.get<string>("pixiv_refresh_token")),
-      fanbox: Boolean(await store.get<string>("fanbox_session_id")),
-    } : { pixiv: true, fanbox: true },
+    queryFn: async () => {
+      if (!runtime) return { pixiv: true, fanbox: true };
+      const status = await getConnectionStatus();
+      return { pixiv: Boolean(status.pixiv), fanbox: Boolean(status.fanbox) };
+    },
   });
   const quickSave = useForm({
     mode: "uncontrolled",

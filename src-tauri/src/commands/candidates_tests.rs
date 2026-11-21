@@ -94,7 +94,6 @@ fn unavailable_holds_and_execution_rows_use_the_native_shelf_without_changing_th
                 mode: "check_only".into(),
                 work_ids: None,
                 target_ids: None,
-                credentials: None,
                 watch_saved: None,
                 new_works_only: None,
                 adhoc_targets: None,
