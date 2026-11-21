@@ -6,6 +6,12 @@ on:
   push:
     branches: [main]
 
+# 同じ PR に新しく push したら古い実行を取り消す。実行役は2台しかないので、古いコミットの
+# 検査が新しい方を待たせる。main の実行はリリースの関門にも使うので取り消さない。
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # 検査の中身は tools/check.ps1 にある。ここは環境を用意して段を呼ぶだけにする。
 #
 # 重いジョブは利用者の PC（self-hosted、ラベル snow）で動かす。組み立ての途中経過が
