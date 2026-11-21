@@ -99,10 +99,10 @@ export function useAdoptReadingKeys(runtime: boolean) {
   }, [ready, queryClient]);
 }
 
-/** 新しい棚では使えない条件。画面はこれを出して、黙って外さない。 */
+/** 棚ではまだ使えない条件。画面はこれを出して、黙って外さない。 */
 export class ShelfUnsupportedError extends Error {
   constructor(readonly conditions: string[]) {
-    super(`新しい棚ではまだ使えない条件です: ${conditions.join("、")}`);
+    super(`棚ではまだ使えない条件です: ${conditions.join("、")}`);
     this.name = "ShelfUnsupportedError";
   }
 }

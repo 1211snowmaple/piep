@@ -319,7 +319,7 @@ export function ShelfWorkPage({ workId }: { workId: string }) {
     void openContentLink(event);
   };
 
-  if (!runtime) return <div className="page"><Alert color="gray">新しい棚の作品は、デスクトップアプリで開けます。</Alert></div>;
+  if (!runtime) return <div className="page"><Alert color="gray">棚の作品は、デスクトップアプリで開けます。</Alert></div>;
   if (workQuery.isLoading) return <div className="page"><LoadingState label="作品を開いています" /></div>;
   if (workQuery.error || !work) return <div className="page"><ErrorState error={workQuery.error ?? "作品が見つかりません"} retry={() => workQuery.refetch()} /></div>;
 
