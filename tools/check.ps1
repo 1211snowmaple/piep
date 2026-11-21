@@ -3,10 +3,11 @@
 piep の検査の入口。手元でも CI でも、これ一つを呼ぶ。
 
 .DESCRIPTION
-段（Stage）ごとに検査を流す。何も指定しなければ frontend と rust（push の前に流す分）。
+段（Stage）ごとに検査を流す。何も指定しなければ frontend・rust・docs（push の前に流す分）。
 
   frontend  型検査・lint・単体試験（画面側）
   rust      Rust の試験（nextest）・clippy・rustfmt・EPUB の適合（EPUBCheck）
+  docs      画面と Rust の境界の突き合わせ・方針書の数・文書サイトの組み立て
   visual    画面の組み立てと Playwright の視覚の試験
   android   携帯の画面側の組み立てと試験
   apk       携帯の APK を鍵なしで組めること（重い）
@@ -21,10 +22,12 @@ pwsh tools/check.ps1 -Stage frontend,rust,visual,android
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('frontend', 'rust', 'visual', 'android', 'apk')]
-    [string[]]$Stage = @('frontend', 'rust')
+    [ValidateSet('frontend', 'rust', 'docs', 'visual', 'android', 'apk')]
+    [string[]]$Stage = @('frontend', 'rust', 'docs')
 )
 $ErrorActionPreference = 'Stop'
+# 日本語の Windows では既定が CP932 で、ログに残すと段の名前が化ける。
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
@@ -104,6 +107,29 @@ if ('rust' -in $Stage) {
             Remove-Item -Recurse -Force -LiteralPath $books -ErrorAction SilentlyContinue
         }
     }
+}
+
+if ('docs' -in $Stage) {
+    # invoke の名前・イベント・スキーマの食い違いと、手で書いた数の古さを捕まえる。
+    # 実行するまで気づかない境界のずれは、ここでしか見つからない。
+    foreach ($tool in 'tools/ipc-extract/Cargo.toml', 'tools/api-types/Cargo.toml') {
+        Step "試験 $tool" { Invoke-Native cargo @('test', '--manifest-path', $tool) }
+        Step "clippy $tool" { Invoke-Native cargo @('clippy', '--manifest-path', $tool, '--all-targets', '--', '-D', 'warnings') }
+        Step "rustfmt $tool" { Invoke-Native cargo @('fmt', '--manifest-path', $tool, '--all', '--', '--check') }
+    }
+    Step '携帯向け API の試験' { Invoke-Native cargo @('test', '--manifest-path', 'crates/piep-mobile-api/Cargo.toml') }
+    Step 'API の型の突き合わせ' { Invoke-Native cargo @('run', '--manifest-path', 'tools/api-types/Cargo.toml', '--', '--repo', '.', '--check') }
+    if (-not (Test-Path -LiteralPath 'docs-tools/node_modules')) {
+        throw 'docs-tools の依存がありません。npm --prefix docs-tools ci で入れてください'
+    }
+    Push-Location docs-tools
+    try {
+        # docs/reference/ の生成物は追跡していない。手元に前回の写しが残っていると
+        # 方針書の検査がそれを「古い」と言うので、先に今のソースから作り直す。
+        Step '境界の突き合わせ' { Invoke-Native npm @('run', 'contract') }
+        Step '方針書の検査' { Invoke-Native npm @('run', 'docs:check') }
+        Step '文書サイトの組み立て' { Invoke-Native npm @('run', 'site:build') }
+    } finally { Pop-Location }
 }
 
 if ('visual' -in $Stage) {
