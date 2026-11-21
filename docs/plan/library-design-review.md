@@ -2721,3 +2721,6 @@ web 詳細で確認した空欄・通常の空欄の変更を試験した。同�
 6. 旧棚の ID（`legacyId`、`migration_records`）と、端末の読書位置を棚の ID へ書き直す一度きりの処理
    （`useAdoptReadingKeys`）。全端末が書き直し終えたら消す。
 7. `library_v2_` の名前を外す。移行用の `piep-library` の旧棚の比較・取り込みのコマンド。
+8. 生成するスキーマの資料（`docs/reference/schema.md`）は、まだ旧棚の `database/schema.rs` から作って
+   いる。棚の台帳のスキーマから作るよう `tools/ipc-extract` を変える。それまで利用者の案内
+   （`docs/guide/04-your-data.md`）にはテーブルの数を書かない。
