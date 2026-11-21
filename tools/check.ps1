@@ -22,10 +22,14 @@ pwsh tools/check.ps1 -Stage frontend,rust,visual,android
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('frontend', 'rust', 'docs', 'visual', 'android', 'apk')]
     [string[]]$Stage = @('frontend', 'rust', 'docs')
 )
 $ErrorActionPreference = 'Stop'
+# pwsh tools/check.ps1 -Stage a,b と外から呼ぶと、コンマ区切りが1つの文字列で届く。
+$Stage = @($Stage | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$known = @('frontend', 'rust', 'docs', 'visual', 'android', 'apk')
+$unknown = @($Stage | Where-Object { $_ -notin $known })
+if ($unknown.Count -gt 0) { throw "知らない段です: $($unknown -join ', ')（使える段: $($known -join ', ')）" }
 # 日本語の Windows では既定が CP932 で、ログに残すと段の名前が化ける。
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $root = Split-Path -Parent $PSScriptRoot
