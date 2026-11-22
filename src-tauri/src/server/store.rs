@@ -470,7 +470,10 @@ mod tests {
         assert!(store.authorize(&current.token).is_none());
         assert!(store.authorize(&replacement.token).is_some());
         assert_eq!(
-            store.consume_pairing(&legacy, "古い版の案内").err().unwrap(),
+            store
+                .consume_pairing(&legacy, "古い版の案内")
+                .err()
+                .unwrap(),
             PairError::Rejected
         );
         assert_eq!(
