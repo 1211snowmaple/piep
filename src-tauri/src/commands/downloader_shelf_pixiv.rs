@@ -622,9 +622,10 @@ mod tests {
     }
 
     /// 同じシリーズの表紙を使う作品を続けて取り直しても、原寸は一度しか取りに行かない。
-    /// 二作品目は、一作品目が棚に入れた同じ URL の原寸を使う。
+    /// 二作品目は、一作品目が棚に入れた同じ URL の原寸を使う。シリーズの新しい作品を
+    /// 普段どおり保存するときも、同じ表紙は取りに行かない。
     #[tokio::test]
-    async fn upgrading_works_that_share_a_series_cover_fetches_the_original_once() {
+    async fn works_that_share_a_series_cover_fetch_the_original_once() {
         let mut served = std::io::Cursor::new(Vec::new());
         image::RgbImage::from_pixel(4, 4, image::Rgb([10, 200, 10]))
             .write_to(&mut served, image::ImageFormat::Png)
@@ -713,6 +714,21 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("{error} {:?}", paths.lock().unwrap()));
         }
+        let mut newcomer = json!({"detail":{"title":"題3", "caption":"説明", "tags":["タグ"]},
+            "text":"本文", "cover_url":cover});
+        newcomer[crate::downloader::pixiv_originals::COVER_ORIGINAL_FIELD] = json!(original_cover);
+        let third = save_to_shelf(
+            Arc::clone(&shelf),
+            Arc::clone(&library),
+            newcomer,
+            "pixiv".into(),
+            "3".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{error} {:?}", paths.lock().unwrap()));
+        works.push(("3", json!(null), third.work));
         assert_eq!(
             *paths.lock().unwrap(),
             vec!["/novel-cover-original/sci1.png".to_string()]
