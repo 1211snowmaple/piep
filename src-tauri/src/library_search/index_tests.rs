@@ -275,3 +275,44 @@ fn search_results_page_by_relevance_and_combine_with_filters_and_sorts() {
         .is_err());
     crate::database::tantivy_index::release_runtime(&temp.0.join("derived"));
 }
+
+/// 保存のたびの少しずつの同期で、セグメントが保存の数だけたまらない。
+///
+/// 以前は少しずつの同期も排他の書き手で書いて捨てていた。tantivy の書き手は捨てると
+/// 統合を打ち切るので、統合が一度も終わらず、実際の棚では1文書のセグメントが4千個たまった。
+#[test]
+fn small_syncs_let_merges_finish_instead_of_piling_up_segments() {
+    let temp =
+        Temp(std::env::temp_dir().join(format!("piep-search-merge-{}", LibraryId::now_v7())));
+    let library = Library::create(&temp.0).unwrap();
+    // 棚の根は正規化した形なので、同じ書き手を見るには棚が使う場所をそのまま使う。
+    let storage = library.search_storage();
+    library
+        .capture(capture("0", "はじまり", "最初の本文", 1_000))
+        .unwrap();
+    library.sync_search_index(&mut |_, _| {}).unwrap();
+    const SAVES: usize = 24;
+    for index in 1..=SAVES {
+        let key = index.to_string();
+        library
+            .capture(capture(
+                &key,
+                "続き",
+                &format!("灯台{index}の本文"),
+                1_000 + index as i64,
+            ))
+            .unwrap();
+        let report = library.sync_search_index(&mut |_, _| {}).unwrap();
+        assert_eq!(report.indexed, 1);
+    }
+    // 少しずつの同期は使い回す書き手で書いている。
+    assert!(crate::database::tantivy_index::ordinary_writer_is_cached(&storage).unwrap());
+    crate::database::tantivy_index::settle_ordinary_writer(&storage).unwrap();
+    let segments = crate::database::tantivy_index::searchable_segment_count(&storage).unwrap();
+    assert!(
+        segments < SAVES / 2,
+        "{SAVES} 回の保存で {segments} 個のセグメントが残った（統合が終わっていない）"
+    );
+    // 統合しても文書は欠けない。
+    assert_eq!(found(&library, "続き").len(), SAVES);
+}
