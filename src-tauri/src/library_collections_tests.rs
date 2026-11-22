@@ -145,15 +145,11 @@ fn a_collection_lists_its_works_in_order_with_their_cards_and_other_editions() {
 }
 
 #[test]
-fn an_unknown_collection_is_unavailable_and_an_unmigrated_legacy_id_finds_nothing() {
+fn an_unknown_collection_is_unavailable() {
     let temp = temp();
     let library = Library::create(&temp.0).unwrap();
     assert!(matches!(
         library.collection_detail(LibraryId::now_v7()),
         Err(Error::ResourceUnavailable)
     ));
-    assert_eq!(
-        library.collection_by_legacy_id("collection-old").unwrap(),
-        None
-    );
 }

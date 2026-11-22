@@ -106,7 +106,7 @@ impl SourceBody {
                 if let Some(text) = body.get("text").and_then(Value::as_str) {
                     return text.into();
                 }
-                // 旧棚の文字数と同じく、段落と見出しの空でない文を空行でつなぐ。
+                // 文字数は、段落と見出しの空でない文を空行でつないで数える。
                 // 数え方が変わると、文字数での並べ替えと絞り込みの結果が棚の切り替えで変わる。
                 body.get("blocks")
                     .and_then(Value::as_array)

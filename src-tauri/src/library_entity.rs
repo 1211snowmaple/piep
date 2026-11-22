@@ -1,8 +1,6 @@
-//! 新しい棚の作者・シリーズを、作者・シリーズの画面が出す形にする（評価文書 6.21）。
+//! 棚の作者・シリーズを、作者・シリーズの画面が出す形にする（評価文書 6.21）。
 //!
-//! 画面は旧棚の作者・シリーズの画面をそのまま使い、読む先だけを差し替える。数え方・並べ方は
-//! 旧棚の問い合わせ（`get_person`・`get_series`・`list_entity_tags`・`list_entity_series_paged`）
-//! に合わせ、`piep-library compare-entities` で全員・全シリーズを突き合わせる。
+//! 数え方・並べ方は、切り替えの前に全員・全シリーズで突き合わせて合わせたもの。
 
 use crate::library::{
     EntityKind, Fingerprint, Library, LibraryId, ResourceReference, ResourceScope, Result,
@@ -53,7 +51,7 @@ pub struct TagCount {
     pub count: u64,
 }
 
-/// 作者のシリーズの一件（旧棚の `EntityFacet` の形）。
+/// 作者のシリーズの一件（画面の `EntityFacet` の形）。
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct SeriesFacet {
     pub id: LibraryId,
@@ -79,7 +77,7 @@ pub struct SeriesFacet {
     pub total_revisions: u64,
 }
 
-/// 作者のシリーズを並べる鍵。旧棚の `list_entity_series_paged` と同じ語彙。
+/// 作者のシリーズを並べる鍵。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeriesSort {
@@ -134,7 +132,7 @@ pub(crate) fn text(value: Option<&serde_json::Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// 旧棚の `LIKE … COLLATE NOCASE`（ASCII だけ大文字と小文字を区別しない）と同じ一致。
+/// SQLite の `LIKE … COLLATE NOCASE`（ASCII だけ大文字と小文字を区別しない）と同じ一致。
 pub(crate) fn contains_nocase(haystack: &str, needle: &str) -> bool {
     haystack
         .to_ascii_lowercase()
@@ -274,8 +272,8 @@ impl Library {
     }
 
     /// 画面の「保存データ」の欄に出す、版を作った取得元の応答（最も新しく受け取ったもの）。
-    /// 旧棚の行を写した記録（`legacy-current-row`）は取得元の応答ではないので除く。旧棚の
-    /// 画面は最新の版の JSON を出しており、その JSON は取り込みの記録の側にある。
+    /// 移行で作品の行を写した記録（`legacy-current-row`）は取得元の応答ではないので除く。
+    /// 最新の版の JSON は取り込みの記録の側にある。
     pub fn entity_profile(&self, entity: LibraryId, snapshot: LibraryId) -> Result<Option<String>> {
         let observation: Option<Vec<u8>> = self
             .reader()?
@@ -318,7 +316,7 @@ impl Library {
             .optional()?)
     }
 
-    /// 作者・シリーズの作品に付いた取得元のタグ。多い順、同じ数は名前の順（旧棚と同じ）。
+    /// 作者・シリーズの作品に付いた取得元のタグ。多い順、同じ数は名前の順。
     pub fn entity_tags(
         &self,
         kind: EntityKind,
@@ -368,7 +366,7 @@ impl Library {
         .collect()
     }
 
-    /// 作者の作品が属するシリーズ。旧棚と同じく、名前か説明に語を含むものに絞り、鍵で並べ、
+    /// 作者の作品が属するシリーズ。名前か説明に語を含むものに絞り、鍵で並べ、
     /// 同じ値は作品の多い順・名前の順に並べる。
     pub fn person_series(
         &self,

@@ -8,9 +8,9 @@ import { formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { searchShelf } from "@/features/library/shelf";
 import type { WorkCollection } from "@/types/collections";
-import type { ListedWork, SearchParams } from "@/types/library";
+import type { ShelfEntry, SearchParams } from "@/types/library";
 
-/** 作品を取得元と取得元の ID で指す（旧棚の番号も新しい棚の ID も持たない回を含めて一つの形）。 */
+/** 作品を取得元と取得元の ID で指す（棚の ID を持たない回を含めて一つの形）。 */
 function keyOf(work: { source: string; sourceId: string }): string {
   return `${work.source}\u0000${work.sourceId}`;
 }
@@ -43,7 +43,7 @@ export function CollectionAddWorksModal({
   onClose: () => void;
   collection: WorkCollection;
   busy: boolean;
-  onAdd: (works: ListedWork[]) => void;
+  onAdd: (works: ShelfEntry[]) => void;
 }) {
   const [scope, setScope] = useState<Scope>("authors");
   const [query, setQuery] = useState("");
@@ -51,7 +51,7 @@ export function CollectionAddWorksModal({
   // Keep the records, not only their ids. Search/scope changes replace the
   // visible result page, but choices made on a previous page must still be
   // present when the user confirms the add.
-  const [selected, setSelected] = useState<Map<string, ListedWork>>(() => new Map());
+  const [selected, setSelected] = useState<Map<string, ShelfEntry>>(() => new Map());
 
   const memberKeys = useMemo(
     () => new Set(collection.members.map(keyOf)),
@@ -119,13 +119,13 @@ export function CollectionAddWorksModal({
   const searchQuery = useQuery({
     queryKey: ["shelf-collection-add-works", collection.id, params],
     // 棚は検索語を `text` で受ける。
-    queryFn: (): Promise<{ items: ListedWork[] }> => searchShelf({ ...params, text: params.query, query: null }),
+    queryFn: (): Promise<{ items: ShelfEntry[] }> => searchShelf({ ...params, text: params.query, query: null }),
     enabled: opened,
   });
 
   const results = searchQuery.data?.items ?? [];
   const selectedWorks = [...selected.values()];
-  const toggle = (work: ListedWork, next: boolean) =>
+  const toggle = (work: ShelfEntry, next: boolean) =>
     setSelected((current) => {
       const updated = new Map(current);
       if (next) updated.set(keyOf(work), work); else updated.delete(keyOf(work));

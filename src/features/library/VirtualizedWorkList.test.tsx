@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { demoWorks } from "@/mocks/demoData";
 
 vi.mock("@/components/WorkCard", () => ({
-  WorkCard: ({ work }: { work: { id: number } }) => <div data-testid="virtual-work">{work.id}</div>,
+  WorkCard: ({ work }: { work: { id: string } }) => <div data-testid="virtual-work">{work.id}</div>,
 }));
 
 import { libraryColumnCount, VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
@@ -17,7 +17,7 @@ describe("VirtualizedWorkList", () => {
   });
 
   it("bounds the initial DOM while the AppFrame scroll viewport is discovered", () => {
-    const works = Array.from({ length: 10_000 }, (_, index) => ({ ...demoWorks[0], id: index + 1 }));
+    const works = Array.from({ length: 10_000 }, (_, index) => ({ ...demoWorks[0], id: String(index + 1) }));
     const view = render(<VirtualizedWorkList items={works} view="gallery" />);
 
     expect(screen.getAllByTestId("virtual-work")).toHaveLength(120);
@@ -63,7 +63,7 @@ describe("VirtualizedWorkList", () => {
   it("draws a window over the list instead of every row", () => {
     const layout = withLayout(1500, 800);
     try {
-      const works = Array.from({ length: 10_000 }, (_, index) => ({ ...demoWorks[0], id: index + 1 }));
+      const works = Array.from({ length: 10_000 }, (_, index) => ({ ...demoWorks[0], id: String(index + 1) }));
       const view = render(<VirtualizedWorkList items={works} view="gallery" />, { container: layout.scroller });
 
       // 仮想化側の分岐に入っている。
@@ -90,7 +90,7 @@ describe("VirtualizedWorkList", () => {
    * 幅は画面の形であって一覧の状態ではないので、外れても覚えておける。
    */
   it("draws rows on the first frame after a remount, without measuring again", () => {
-    const works = Array.from({ length: 40 }, (_, index) => ({ ...demoWorks[0], id: index + 1 }));
+    const works = Array.from({ length: 40 }, (_, index) => ({ ...demoWorks[0], id: String(index + 1) }));
 
     // 一度きちんと測っておく。
     const first = withLayout(1500, 800);
@@ -136,7 +136,7 @@ describe("VirtualizedWorkList", () => {
     const wide = withLayout(1500, 800);
     let wideFirstRow: string;
     try {
-      const works = Array.from({ length: 40 }, (_, index) => ({ ...demoWorks[0], id: index + 1 }));
+      const works = Array.from({ length: 40 }, (_, index) => ({ ...demoWorks[0], id: String(index + 1) }));
       render(<VirtualizedWorkList items={works} view="gallery" />, { container: wide.scroller });
       wideFirstRow = screen.getAllByTestId("virtual-work").slice(0, 4).map((node) => node.textContent).join(",");
       expect(wideFirstRow).toBe("1,2,3,4");
@@ -146,7 +146,7 @@ describe("VirtualizedWorkList", () => {
 
     const narrow = withLayout(736, 800);
     try {
-      const works = Array.from({ length: 40 }, (_, index) => ({ ...demoWorks[0], id: index + 1 }));
+      const works = Array.from({ length: 40 }, (_, index) => ({ ...demoWorks[0], id: String(index + 1) }));
       render(<VirtualizedWorkList items={works} view="gallery" />, { container: narrow.scroller });
       const narrowFirstRow = screen.getAllByTestId("virtual-work").slice(0, 2).map((node) => node.textContent).join(",");
       expect(narrowFirstRow).toBe("1,2");

@@ -37,7 +37,7 @@ beforeEach(() => {
   api.invoke.mockReset();
 });
 
-it("候補と以前の版を出せる接続では、候補・作品の引き当て・以前の版を新しい棚から", async () => {
+it("候補と以前の版を出せる接続では、候補・作品の引き当て・以前の版を棚から", async () => {
   const native = await import("./nativeReading");
   const pc = await import("./pcApi");
   native.adoptNativeLibrary(status());

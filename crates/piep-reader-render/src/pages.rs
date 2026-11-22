@@ -29,8 +29,8 @@ pub const READER_PAGE_TARGET_BYTES: usize = 128 * 1024;
 
 /// 転送用のページの大きさとして数える長さ。画像・添付の置き場（`data-local-path` の値）は数えない。
 ///
-/// 置き場の長さは本文と関係がない（旧棚は保存先のフォルダーを含むパス、新しい棚はファイルの
-/// 識別子）。数えていたころは、同じ本文でも保存先を移したり棚を替えたりするだけでページの
+/// 置き場の長さは本文と関係がない（保存先のフォルダーを含むパスのことも、ファイルの
+/// 識別子のこともある）。数えていたころは、同じ本文でも保存先を移したり棚を替えたりするだけでページの
 /// 切れ目が動き、「何ページ目の何行目」で憶えた読書位置としおりが別の行を指していた。
 pub fn transport_len(html: &str) -> usize {
     static PLACE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
@@ -201,7 +201,7 @@ pub fn folded_match_positions(haystack: &[char], needle: &str) -> Vec<usize> {
     positions
 }
 
-/// 作品全体の見出しと、それが載っているページ（1 から）。旧棚と新しい棚の読む画面で共通。
+/// 作品全体の見出しと、それが載っているページ（1 から）。デスクトップと携帯の読む画面で共通。
 pub fn reader_outline(pages: &[String]) -> Vec<ReaderOutlineEntry> {
     let mut entries = Vec::new();
     for (page, html) in pages.iter().enumerate() {
@@ -225,7 +225,7 @@ pub fn reader_outline(pages: &[String]) -> Vec<ReaderOutlineEntry> {
     entries
 }
 
-/// 本文内検索。ページ（1 から）ごとに、一致の数と最初の一致のまわりを返す。旧棚と新しい棚で共通。
+/// 本文内検索。ページ（1 から）ごとに、一致の数と最初の一致のまわりを返す。デスクトップと携帯で共通。
 pub fn search_reader_pages(pages: &[String], query: &str, limit: usize) -> Vec<ReaderSearchHit> {
     let needle = fold_for_reader_search(query.trim());
     if needle.is_empty() {

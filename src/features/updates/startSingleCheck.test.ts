@@ -7,7 +7,8 @@ vi.mock("@/services/updateJobApi", () => ({ startUpdateJobCommand: api.start }))
 vi.mock("@/features/updates/updateSchedule", () => ({ loadSchedule: async () => ({ watchSaved: false }) }));
 beforeEach(() => api.start.mockReset().mockResolvedValue({}));
 
-it.each([123, "0195f1c2-0000-7000-8000-000000000001"])("keeps the explicit work ID %s in the one-off check", async (workId) => {
+it("keeps the explicit work ID in the one-off check", async () => {
+  const workId = "0195f1c2-0000-7000-8000-000000000001";
   await startSingleCheck({ kind: "work", workId, label: "題" });
   expect(api.start).toHaveBeenCalledWith({ scope: "work", mode: "check_only", workIds: [workId], adhocTargets: null, watchSaved: false });
 });

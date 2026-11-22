@@ -12,7 +12,7 @@ import { useDefaultSearchMode } from "@/lib/searchPreferences";
 import { SearchMethodMenu } from "@/components/SearchMethodMenu";
 import { ProviderMark } from "@/lib/providers";
 import { formatDateNumeric, formatNumber } from "@/lib/format";
-import type { LibrarySearchMode, ListedWork } from "@/types/library";
+import type { LibrarySearchMode, ShelfEntry } from "@/types/library";
 
 /** Library search comes first; commands have their own explicit mode. */
 export function LibrarySpotlight({ actions }: { actions: SpotlightActionData[] }) {
@@ -30,7 +30,7 @@ export function LibrarySpotlight({ actions }: { actions: SpotlightActionData[] }
   const current = query.trim().slice(0, 500) === debounced;
   const results = useQuery({
     queryKey: ["launcher-library", debounced, searchMode, includeHistory],
-    queryFn: (): Promise<{ items: ListedWork[] }> => isTauriRuntime() ? searchShelf({ text: debounced, limit: 6, searchMode, versionScope: includeHistory ? "all" : "current" }) : Promise.resolve(searchDemoWorks(debounced)),
+    queryFn: (): Promise<{ items: ShelfEntry[] }> => isTauriRuntime() ? searchShelf({ text: debounced, limit: 6, searchMode, versionScope: includeHistory ? "all" : "current" }) : Promise.resolve(searchDemoWorks(debounced)),
     enabled: opened && mode === "library" && Boolean(debounced) && !composing,
     staleTime: 30_000, gcTime: 60_000,
   });

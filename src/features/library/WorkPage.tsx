@@ -58,7 +58,6 @@ import {
   isTauriRuntime,
 } from "@/services/dbApi";
 import { getDemoReader } from "@/mocks/demoData";
-import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import type { ReaderMetadata } from "@/types/library";
 import type { PendingRevision } from "@/services/updateJobApi";
@@ -70,9 +69,9 @@ import { ContentPagination, Info, parseWorkTab } from "@/features/library/workPa
 // React StrictMode briefly mounts, cleans up, and mounts an effect again in
 // development. Track the active work so that rehearsal does not evict the
 // cache the second mount is about to reuse.
-const activeWorkPages = new Set<number>();
+const activeWorkPages = new Set<string>();
 
-type ContentLocation = { workId: number; page: number; top: number };
+type ContentLocation = { workId: string; page: number; top: number };
 const contentLocations = new WeakMap<object, Map<number, ContentLocation>>();
 
 function locationsFor(client: object) {
@@ -95,7 +94,7 @@ export default function WorkPage() {
 
 const PREVIEW_ONLY = "プレビューでは変更できません";
 
-/** プレビューの見本の作品の画面。棚には触らない（見本は番号で指す）。 */
+/** プレビューの見本の作品の画面。棚には触らない。 */
 function PreviewWorkPage() {
   const navigate = useAppNavigate();
   const returnTo = useReturnTo();
@@ -103,8 +102,8 @@ function PreviewWorkPage() {
   // library; those open the screen for it rather than a browser.
   const openContentLink = useContentLinkNavigation();
   const { workId } = useRouteParams("/works/:workId");
-  const id = Number(workId);
-  const validId = Number.isSafeInteger(id) && id > 0;
+  const id = workId ?? "";
+  const validId = id !== "";
   const queryClient = useQueryClient();
   const { historyIndex, navigationType } = useAppRouter();
   const locations = locationsFor(queryClient);
@@ -129,7 +128,7 @@ function PreviewWorkPage() {
   const [imageTarget, setImageTarget] = useState<MissingImageLocation | null>(null);
   const [contentSourceVersion, setContentSourceVersion] = useState<number | null>(null);
   useEffect(() => { setImageTarget(null); setContentSourceVersion(null); }, [id]);
-  const initializedLocationRef = useRef<{ workId: number; historyIndex: number } | null>(null);
+  const initializedLocationRef = useRef<{ workId: string; historyIndex: number } | null>(null);
   // 本文の中のリンクに「ライブラリにあります」の印を付けるための器。
   const contentBodyRef = useRef<HTMLDivElement>(null);
   const workHeroRef = useRef<HTMLDivElement>(null);
@@ -244,7 +243,7 @@ function PreviewWorkPage() {
     });
   }, [contentPage, contentSourceVersion, contentQuery.data?.page, id, queryClient]);
   const rawJson = useQuery({
-    queryKey: ["work-json", id, documentQuery.data?.download.jsonPath],
+    queryKey: ["work-json", id],
     queryFn: () => Promise.resolve(JSON.stringify(documentQuery.data?.download ?? {}, null, 2)),
     enabled: tab === "json" && Boolean(documentQuery.data),
   });
@@ -450,17 +449,7 @@ function PreviewWorkPage() {
     title: "この作品を削除しますか？",
     children: <Text size="sm">「{work.title}」と保存済みの画像・添付をローカルライブラリから削除します。この操作は元に戻せません。</Text>,
     labels: { confirm: "削除する", cancel: "キャンセル" }, confirmProps: DANGER_CONFIRM,
-    onConfirm: async () => {
-      try {
-        await deleteThenCleanup(
-          () => Promise.resolve(),
-          { queryClient, ids: [work.id], removeFromEpubQueue },
-        );
-        navigate("/library");
-        notifications.show({ color: "green", message: "作品を削除しました" });
-      }
-      catch (error) { notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) }); }
-    },
+    onConfirm: () => notifications.show({ color: "gray", message: PREVIEW_ONLY }),
   });
   const openSavedFolder = () => notifications.show({ color: "piep", message: "保存フォルダーはデスクトップアプリで開けます" });
   const openSource = async () => {

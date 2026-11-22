@@ -3,8 +3,8 @@ import { WorkCover } from "@/components/WorkCover";
 import { Icons, IconSize } from "@/lib/icons";
 import { formatNumber } from "@/lib/format";
 import { summaryText } from "@/lib/content";
-import { readingKeyOf, readReadingPosition } from "@/features/library/readingShelf";
-import type { DownloadEntry, ShelfEntry } from "@/types/library";
+import { readReadingPosition } from "@/features/library/readingShelf";
+import type { ShelfEntry } from "@/types/library";
 
 /**
  * 黙読の速さの目安（字/分）。日本語の小説でよく言われる 400〜600字/分の
@@ -39,19 +39,19 @@ export function NeighborTile({ role, ordered, label, title, work, emphasized, on
   ordered: boolean;
   label: string;
   title: string;
-  /** 詳しい情報（旧棚の作品か新しい棚の作品）。まだ届いていなければ題だけで描く。 */
-  work?: DownloadEntry | ShelfEntry;
+  /** 詳しい情報。まだ届いていなければ題だけで描く。 */
+  work?: ShelfEntry;
   /** 読む順のある並びの「次」。いちばん押されるので目立たせる。 */
   emphasized: boolean;
   onOpen: () => void;
 }) {
-  const reading = work ? readReadingPosition(readingKeyOf(work), null) !== null : false;
+  const reading = work ? readReadingPosition(work.id, null) !== null : false;
   // 取得元の説明は HTML のことがある。一覧のカードと同じく地の文にして見せる。
   const excerpt = work?.excerpt ? summaryText(work.excerpt) : "";
   return (
     <UnstyledButton className="reader-neighbor" data-role={role} data-emphasized={emphasized || undefined} onClick={onOpen} aria-label={`${label}：${title}`}>
       <Box className="reader-neighbor__cover">
-        <WorkCover work={work ?? { coverPath: null, source: "pixiv", sourceId: String(title), title, authorName: "" }} variant="compact" />
+        <WorkCover work={work ?? { source: "pixiv", sourceId: String(title), title, authorName: "" }} variant="compact" />
       </Box>
       <Box className="reader-neighbor__body">
         <Text size="xs" c={emphasized ? "piep" : "dimmed"} fw={700} className="reader-neighbor__label">

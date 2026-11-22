@@ -38,15 +38,15 @@ export function CollectionCoverModal({
   collection: WorkCollection;
   busy: boolean;
   /**
-   * 選んだ画像を棚へ取り込み、ファイルの識別子を返す（新しい棚）。渡さなければ画像の場所を
-   * そのまま保存する（旧棚）。取り込んでから見本に出すので、見本も保存後と同じ画像になる。
+   * 選んだ画像を棚へ取り込み、ファイルの識別子を返す。渡さなければ画像の場所を
+   * そのまま保存する。取り込んでから見本に出すので、見本も保存後と同じ画像になる。
    */
   importImage?: (path: string) => Promise<string>;
   /** `coverWork` は「1作を選ぶ」で選んだ作品（取得元と作品の番号）。 */
   onSave: (input: WorkCollectionInput, coverWork: { source: string; sourceId: string } | null) => void;
 }) {
   const [mode, setMode] = useState<CollectionCoverMode>("mosaic");
-  // 表紙の作品は取得元と作品の番号で選ぶ（新しい棚の作品は旧棚の番号を持たないことがある）。
+  // 表紙の作品は取得元と取得元の作品の番号で選ぶ。
   const [coverKey, setCoverKey] = useState<string | null>(null);
   const [imagePath, setImagePath] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
@@ -54,10 +54,13 @@ export function CollectionCoverModal({
   useEffect(() => {
     if (!opened) return;
     setMode(collection.coverMode);
-    const current = collection.members.find((member) => member.downloadId !== null && member.downloadId === collection.coverDownloadId);
+    // 「1作を選ぶ」の表紙は、その作品の表紙の画像そのもの。同じ画像の回を選んだことにする。
+    const current = collection.coverMode === "single" && collection.coverPath
+      ? collection.members.find((member) => member.coverPath === collection.coverPath)
+      : undefined;
     setCoverKey(current ? memberKey(current) : null);
     setImagePath(collection.coverImagePath);
-  }, [collection.coverDownloadId, collection.coverImagePath, collection.coverMode, collection.members, opened]);
+  }, [collection.coverImagePath, collection.coverMode, collection.coverPath, collection.members, opened]);
 
   const pickImage = async () => {
     try {
@@ -82,7 +85,7 @@ export function CollectionCoverModal({
 
   // 選んだ設定でどう見えるかを、その場で出す。保存してから確かめさせない。
   const coverMember = collection.members.find((member) => memberKey(member) === coverKey) ?? null;
-  const preview = { ...collection, coverMode: mode, coverImagePath: imagePath, coverPath: coverMember?.work?.coverPath ?? coverMember?.coverPath ?? null };
+  const preview = { ...collection, coverMode: mode, coverImagePath: imagePath, coverPath: coverMember?.coverPath ?? null };
   const members = collection.members.filter((member) => member.work);
 
   return (
@@ -151,7 +154,6 @@ export function CollectionCoverModal({
                 name: collection.name,
                 description: collection.description,
                 collectionKind: collection.collectionKind,
-                coverDownloadId: coverMember?.downloadId ?? null,
                 coverMode: mode,
                 coverImagePath: imagePath,
               }, coverMember ? { source: coverMember.source, sourceId: coverMember.sourceId } : null)

@@ -148,7 +148,6 @@ impl Candidates<'_> {
             status: entry.decision,
             first_seen_at: date(entry.first_seen_at)?,
             updated_at: date(entry.updated_at)?,
-            download_id: None,
         })
     }
     pub(crate) fn upsert_update_candidate(

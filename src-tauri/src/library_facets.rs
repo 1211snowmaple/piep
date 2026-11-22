@@ -10,7 +10,7 @@ use crate::database::search::normalize_search_text;
 use crate::library::{Error, Library, LibraryId, Result};
 use rusqlite::{params_from_iter, types::Value, OptionalExtension};
 
-/// 引き出しに並べる数。旧棚と同じく多い順に 500 まで（それより先は名前で探す）。
+/// 引き出しに並べる数。多い順に 500 まで（それより先は名前で探す）。
 const DRAWER_LIMIT: i64 = 500;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,8 +131,7 @@ impl Library {
         })
     }
 
-    /// 選択肢を名前で探す。含むものを先に集め、足りなければ多いものから読みの近いものを拾う
-    /// （旧棚と同じ並べ方）。
+    /// 選択肢を名前で探す。含むものを先に集め、足りなければ多いものから読みの近いものを拾う。
     pub fn search_filter_facets(
         &self,
         kind: FacetKind,

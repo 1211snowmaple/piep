@@ -1,7 +1,7 @@
 //! 棚の数と手入れ（ホーム・横の欄・設定・診断の画面）。
 //!
-//! 旧棚の同じ画面と同じ形で返す。数え方は棚の今の版（`work_current_projection`）に揃え、
-//! 旧棚にしかない数（保存フォルダーの照合・未登録のファイル）は持たない。棚のファイルは
+//! 数え方は棚の今の版（`work_current_projection`）に揃え、保存フォルダーの照合・未登録の
+//! ファイルのような数は持たない。棚のファイルは
 //! 中身の指紋で台帳と結ばれているので、照合は `verify` が、未参照の片付けは `reclaim` が担う。
 
 use crate::database::models::{
@@ -10,13 +10,13 @@ use crate::database::models::{
     SearchIndexOptimizationResult, SearchIndexStatus, SourceBreakdown,
 };
 use crate::library::{
-    Error, Library, LibraryId, ReclaimOptions, ReclaimReport, Result, RevisionFilter, WorkFilter,
+    Error, Library, ReclaimOptions, ReclaimReport, Result, RevisionFilter, WorkFilter,
     WorkListQuery,
 };
 use serde::Serialize;
 use std::path::Path;
 
-/// 診断の画面の数。旧棚の診断のうち、棚にも意味のあるものだけを持つ。
+/// 診断の画面の数。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShelfDiagnostics {
@@ -45,14 +45,6 @@ pub struct ShelfDiagnostics {
     pub search_index: SearchIndexStatus,
 }
 
-/// 横の欄の「読みかけ」をどう数えるか。
-pub enum ReadingSet {
-    /// 棚の読書位置（端末の記録を棚へ移したあと）。
-    Shelf,
-    /// 端末に残る旧棚の番号。棚の作品に対応するものだけを数える。
-    Legacy(Vec<LibraryId>),
-}
-
 fn file_size(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
@@ -61,7 +53,7 @@ fn count(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
 
-/// 月の区切りは日本時間（旧棚の保存日時の文字列の先頭 7 文字と同じ月）。
+/// 月の区切りは日本時間。
 const MONTH_SQL: &str = "strftime('%Y-%m',p.saved_at/1000,'unixepoch','+9 hours')";
 
 impl Library {
@@ -77,23 +69,16 @@ impl Library {
     }
 
     /// 横の欄の件数（すべて・お気に入り・読みかけ・更新監視・改稿あり）。
-    pub fn shelf_counts(&self, reading: ReadingSet) -> Result<LibraryShelfCounts> {
+    pub fn shelf_counts(&self) -> Result<LibraryShelfCounts> {
         let (total, favorite, watched): (i64, i64, i64) = self.reader()?.query_row(
             "SELECT count(*),coalesce(sum(favorite),0),coalesce(sum(watching),0) FROM work_current_projection",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        let reading = match reading {
-            ReadingSet::Shelf => self.count_works(WorkFilter {
-                reading: Some(true),
-                ..WorkFilter::default()
-            })?,
-            ReadingSet::Legacy(works) if works.is_empty() => 0,
-            ReadingSet::Legacy(works) => self.count_works(WorkFilter {
-                works: Some(works),
-                ..WorkFilter::default()
-            })?,
-        };
+        let reading = self.count_works(WorkFilter {
+            reading: Some(true),
+            ..WorkFilter::default()
+        })?;
         let revised = self.count_works(WorkFilter {
             revision: Some(RevisionFilter::Revised),
             ..WorkFilter::default()
@@ -151,7 +136,7 @@ impl Library {
             })?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         };
-        // 旧棚と同じく名前でまとめる（取得元が違っても同じ名前のタグは一つ）。
+        // 名前でまとめる（取得元が違っても同じ名前のタグは一つ）。
         let top_tags = facets(
             "SELECT t.name,count(*) AS n FROM work_current_projection p
              JOIN snapshot_tags st ON st.snapshot_id=p.snapshot_id JOIN tags t ON t.id=st.tag_id
@@ -383,7 +368,7 @@ impl Library {
     }
 
     /// 棚の作品の今の版に載る作者・シリーズのうち、プロフィールをまだ一度も取得していないもの
-    /// （旧棚の「作者・シリーズ情報の修復」の対象と同じ。作者が先、名前の順）。
+    /// （作者が先、名前の順）。
     pub fn incomplete_profiles(&self) -> Result<Vec<IncompleteEntityProfile>> {
         let conn = self.reader()?;
         let mut statement = conn.prepare(

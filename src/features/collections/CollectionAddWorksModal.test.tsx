@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { demoWorks, getDemoCollection } from "@/mocks/demoData";
-import type { DownloadEntry, SearchParams } from "@/types/library";
+import type { ShelfEntry, SearchParams } from "@/types/library";
 import { CollectionAddWorksModal } from "./CollectionAddWorksModal";
 
 const shelf = vi.hoisted(() => ({ searchShelf: vi.fn() }));
@@ -14,12 +14,12 @@ vi.mock("@/features/library/shelf", async (importOriginal) => ({
 }));
 
 vi.mock("@/components/WorkCard", () => ({
-  WorkCard: ({ work, selected, onToggleSelect }: { work: DownloadEntry; selected?: boolean; onToggleSelect?: (selected: boolean) => void }) => (
+  WorkCard: ({ work, selected, onToggleSelect }: { work: ShelfEntry; selected?: boolean; onToggleSelect?: (selected: boolean) => void }) => (
     <button type="button" aria-label={work.title} aria-pressed={selected} onClick={() => onToggleSelect?.(!selected)}>{work.title}</button>
   ),
 }));
 
-function result(items: DownloadEntry[]) {
+function result(items: ShelfEntry[]) {
   return {
     items,
     nextCursor: null,

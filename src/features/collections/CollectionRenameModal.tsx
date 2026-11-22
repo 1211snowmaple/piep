@@ -184,7 +184,6 @@ export function CollectionRenameModal({
                   name: name.trim(),
                   description: description.trim() || null,
                   collectionKind: collection.collectionKind,
-                  coverDownloadId: collection.coverDownloadId,
                   // どこから来た名前かを覚える。自動命名が後から上書きしない。
                   nameSource: source,
                 })

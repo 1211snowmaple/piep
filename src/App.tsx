@@ -12,7 +12,7 @@ import { isTauriRuntime } from "@/services/dbApi";
 import { rememberWindowColorScheme } from "@/services/startupApi";
 import { useIncompleteSaveRepair } from "@/features/updates/repairIncompleteSaves";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
-import { invalidateShelf, useAdoptReadingKeys } from "@/features/library/shelf";
+import { invalidateShelf } from "@/features/library/shelf";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 const DashboardPage = lazy(() => import("@/features/dashboard/DashboardPage"));
@@ -84,7 +84,6 @@ function confirmDiscardOnNavigation(): Promise<boolean> {
 
 function AppContent() {
   useIncompleteSaveRepair();
-  useAdoptReadingKeys(isTauriRuntime());
   const { pathname } = useAppRouter();
   const queryClient = useQueryClient();
   const { colorScheme } = useMantineColorScheme();
@@ -95,8 +94,8 @@ function AppContent() {
   }, [colorScheme]);
   useEffect(() => {
     if (!isTauriRuntime()) return;
-    // 携帯がサーバー越しにお気に入りを付け外しした（新しい棚では読書位置も届く）。同じハートを
-    // 押したときと同じ範囲を読み直し、新しい棚の画面も読み直させる。
+    // 携帯がサーバー越しにお気に入りを付け外しした（棚では読書位置も届く）。同じハートを
+    // 押したときと同じ範囲を読み直し、棚の画面も読み直させる。
     return subscribeTauriEvent<null>("favorites-changed", () => {
       void invalidateWorkFlagViews(queryClient);
       void invalidateShelf(queryClient);

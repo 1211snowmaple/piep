@@ -1,4 +1,4 @@
-//! デスクトップ版から新しい棚の写しを受け取り、次の起動で配る棚を入れ替える（単独サーバー）。
+//! デスクトップ版から棚の写しを受け取り、次の起動で配る棚を入れ替える（単独サーバー）。
 //!
 //! 送り手は台帳（DB）の写しと、まだ持っていない実体だけを送る。台帳も 4 MiB ずつの部分に分けて
 //! 実体と同じ口で送り、前に受け取った台帳と同じ部分は送らない（写しは頁の並びを保つので、
@@ -521,14 +521,14 @@ pub fn apply_pending(paths: &ServerPaths) {
         };
         activate_locked(paths, pending.generation, false)?;
         let next = generation_path(paths, pending.generation)?;
-        // ここからは切り替えたあと。読書位置を写せなくても新しい棚で起動する（前の世代は残る）。
+        // ここからは切り替えたあと。読書位置を写せなくても棚で起動する（前の世代は残る）。
         if let (Some(previous), Some(settings)) = (&previous, &before) {
             if previous != &next && previous.is_dir() {
                 let moved = (|| -> Result<(usize, usize), String> {
                     let old = Library::open_matching(previous, settings.library_id.get())
                         .map_err(|error| format!("前の棚を開けません: {error}"))?;
                     let new = Library::open_matching(&next, settings.library_id.get())
-                        .map_err(|error| format!("新しい棚を開けません: {error}"))?;
+                        .map_err(|error| format!("棚を開けません: {error}"))?;
                     new.adopt_from_previous(&old)
                         .map_err(|error| format!("読書位置とお気に入りを写せません: {error}"))
                 })();
@@ -583,7 +583,7 @@ pub fn set_reader(paths: &ServerPaths, device: &str, read: bool) -> Result<Id, S
         .shelf
         .as_ref()
         .map(|settings| settings.library_id)
-        .ok_or("このサーバーはまだ新しい棚を配っていません")?;
+        .ok_or("このサーバーはまだ棚を配っていません")?;
     let mut document: DocumentMut = text
         .parse()
         .map_err(|error: toml_edit::TomlError| error.to_string())?;

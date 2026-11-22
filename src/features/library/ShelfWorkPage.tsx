@@ -88,7 +88,7 @@ function revisionDate(revision: ShelfEditorRevision): string {
   return formatDate(new Date(revision.createdAt).toISOString(), true);
 }
 
-/** 本文の上の知らせ（旧棚と共用）が読む形へ。 */
+/** 本文の上の知らせが読む形へ。 */
 function stripRevision(revision: ShelfEditorRevision, status: string): WorkEditRevision {
   const at = new Date(revision.createdAt).toISOString();
   return { id: 0, downloadId: 0, baseVersion: revision.baseVersion, status, title: revision.title, contentHash: null, createdAt: at, updatedAt: at };

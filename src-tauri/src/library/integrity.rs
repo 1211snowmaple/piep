@@ -27,13 +27,14 @@ pub(super) fn source_field_v1(name: &str, value: &Value) -> Value {
 }
 
 /// 比較規則は版ごとに固定する。今後の規則変更で既存の指紋を解釈し直さない。
+/// 見出しの `classification` はかつての版の区分の名残で、今はどの版も `source`。
 pub(super) fn snapshot_fingerprints(
     conn: &Connection,
     snapshot: LibraryId,
 ) -> Result<(Fingerprint, Fingerprint)> {
-    let StoredSnapshot {metadata,states,body,semantic_rule,manifest_rule,interpretation,header}=conn.query_row("SELECT s.metadata_json,s.field_states_json,s.body_file_id,s.semantic_rule,s.manifest_rule,s.interpretation_version,s.entity_id,s.revision_id,s.sequence,s.created_at,r.ordinal,r.classification,r.discovered_at,s.body_format,s.body_semantic_hash,s.body_semantic_rule FROM revision_snapshots s JOIN source_revisions r ON r.id=s.revision_id WHERE s.id=?1",[snapshot.as_bytes().as_slice()],|r|Ok(StoredSnapshot {
-        metadata:r.get(0)?,states:r.get(1)?,body:r.get(14)?,semantic_rule:r.get(3)?,manifest_rule:r.get(4)?,interpretation:r.get(5)?,
-        header:json!({"id":snapshot,"entity":r.get::<_,Vec<u8>>(6)?,"revision":r.get::<_,Vec<u8>>(7)?,"sequence":r.get::<_,i64>(8)?,"saved_at":r.get::<_,i64>(9)?,"source_ordinal":r.get::<_,i64>(10)?,"classification":r.get::<_,String>(11)?,"source_discovered_at":r.get::<_,i64>(12)?,"body_file":r.get::<_,Option<Vec<u8>>>(2)?,"body_format":r.get::<_,Option<String>>(13)?,"body_semantic_rule":r.get::<_,i64>(15)?}),
+    let StoredSnapshot {metadata,states,body,semantic_rule,manifest_rule,interpretation,header}=conn.query_row("SELECT s.metadata_json,s.field_states_json,s.body_file_id,s.semantic_rule,s.manifest_rule,s.interpretation_version,s.entity_id,s.revision_id,s.sequence,s.created_at,r.ordinal,r.discovered_at,s.body_format,s.body_semantic_hash,s.body_semantic_rule FROM revision_snapshots s JOIN source_revisions r ON r.id=s.revision_id WHERE s.id=?1",[snapshot.as_bytes().as_slice()],|r|Ok(StoredSnapshot {
+        metadata:r.get(0)?,states:r.get(1)?,body:r.get(13)?,semantic_rule:r.get(3)?,manifest_rule:r.get(4)?,interpretation:r.get(5)?,
+        header:json!({"id":snapshot,"entity":r.get::<_,Vec<u8>>(6)?,"revision":r.get::<_,Vec<u8>>(7)?,"sequence":r.get::<_,i64>(8)?,"saved_at":r.get::<_,i64>(9)?,"source_ordinal":r.get::<_,i64>(10)?,"classification":"source","source_discovered_at":r.get::<_,i64>(11)?,"body_file":r.get::<_,Option<Vec<u8>>>(2)?,"body_format":r.get::<_,Option<String>>(12)?,"body_semantic_rule":r.get::<_,i64>(14)?}),
     }))?;
     if semantic_rule != 1 || manifest_rule != 1 {
         return Err(Error::Unsupported(
@@ -117,6 +118,41 @@ pub(super) fn snapshot_fingerprints(
         (people, series, tags),
     ))?);
     Ok((semantic, manifest))
+}
+
+/// 区分の分からない移した版（`temp.unclassified_snapshots`）の構成の指紋を、今の規則で
+/// 計算し直す。内容の指紋は区分を含まないので変わらないはずで、変われば移行を止める。
+/// 読む形の見出しは構成の指紋を写しているので、一緒に書き換える。
+pub(super) fn refingerprint_unclassified(conn: &Connection) -> Result<()> {
+    let ids = {
+        let mut stmt = conn.prepare("SELECT id FROM temp.unclassified_snapshots ORDER BY id")?;
+        let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for id in ids {
+        let snapshot = LibraryId::from_slice(&id)
+            .map_err(|_| Error::Integrity("保存状態の識別子が不正です".into()))?;
+        let (semantic, manifest) = snapshot_fingerprints(conn, snapshot)?;
+        let stored: Vec<u8> = conn.query_row(
+            "SELECT semantic_hash FROM revision_snapshots WHERE id=?1",
+            [id.as_slice()],
+            |r| r.get(0),
+        )?;
+        if stored != semantic.0.as_slice() {
+            return Err(Error::Integrity(format!(
+                "保存状態 {snapshot} の内容が記録された指紋と一致しません"
+            )));
+        }
+        conn.execute(
+            "UPDATE revision_snapshots SET manifest_hash=?2 WHERE id=?1",
+            rusqlite::params![id.as_slice(), manifest.0.as_slice()],
+        )?;
+        conn.execute(
+            "UPDATE reader_binding_sets SET source_manifest=?2 WHERE snapshot_id=?1",
+            rusqlite::params![id.as_slice(), manifest.0.as_slice()],
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn verify_snapshots(conn: &Connection) -> Result<()> {

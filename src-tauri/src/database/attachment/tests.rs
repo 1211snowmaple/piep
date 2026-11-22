@@ -165,31 +165,6 @@ fn an_attachment_that_cannot_be_read_adds_a_note_but_no_body() {
 }
 
 #[test]
-fn an_attachment_that_cannot_be_read_says_so_instead_of_staying_silent() {
-    // **黙って 📎 の箱だけを残さない。** 何も書かないと、本文が入っているのに
-    // 空に見える作品と、本当に音源しか無い作品が、読み手には同じ顔になる。
-    let dir = fixture::temp_dir();
-    let broken = fixture::write(&dir, "broken.pdf", b"not a pdf".to_vec());
-    let assets = [asset(&broken.to_string_lossy(), "broken.pdf")];
-    let raw = file_post("broken").to_string();
-
-    let (html, plain) = content_from_json(&raw, "fanbox", &assets);
-    assert!(
-        html.contains("本文を取り込めませんでした"),
-        "取り込めなかったことを読み手に伝えること: {html}"
-    );
-    assert!(
-        !html.contains("attachment-original"),
-        "読めなかった添付に「原本を見る」は出さない: {html}"
-    );
-    assert!(
-        !plain.contains("取り込めませんでした"),
-        "piep の事情を検索の材料に入れない: {plain}"
-    );
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
 fn an_attachment_that_is_not_a_pdf_is_left_alone() {
     let dir = fixture::temp_dir();
     let assets = [asset("C:/nowhere/track.mp3", "track.mp3")];
@@ -279,62 +254,6 @@ fn a_shift_jis_text_attachment_is_read_without_mojibake() {
             .iter()
             .any(|(kind, text)| kind == "p" && text == "雨が降っている。"),
         "{blocks:?}"
-    );
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn a_text_attachment_offers_no_original_view_because_there_is_no_page() {
-    let dir = fixture::temp_dir();
-    let file = write_text(&dir, "本文.txt", "本文である。".as_bytes().to_vec());
-    let assets = [asset(&file.to_string_lossy(), "本文.txt")];
-    let raw = text_post("本文").to_string();
-
-    let (html, plain) = content_from_json(&raw, "fanbox", &assets);
-    assert!(html.contains("本文である。"), "{html}");
-    assert!(plain.contains("本文である。"), "{plain}");
-    assert!(
-        !html.contains("attachment-original"),
-        "紙面の無い添付に「原本を見る」は出さない: {html}"
-    );
-    assert!(
-        !html.contains("推定"),
-        "作者の改行をそのまま使ったものを推定と書かない: {html}"
-    );
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn the_imported_body_reaches_the_search_index_but_the_notice_does_not() {
-    let dir = fixture::temp_dir();
-    let pdf = fixture::write_pdf(&dir, true);
-    let assets = [asset(&pdf.to_string_lossy(), "sample.pdf")];
-    let raw = file_post("sample").to_string();
-
-    let (html, plain) = content_from_json(&raw, "fanbox", &assets);
-
-    assert!(
-        plain.contains("Alpha beta gamma delta epsilon zetaX etatheta"),
-        "取り込んだ本文が検索の材料に入ること: {plain}"
-    );
-    assert!(
-        plain.contains("良ければお納めください。"),
-        "投稿本文も残ること"
-    );
-    assert!(
-        !plain.contains("取り込んだ本文"),
-        "piep が付けた印は検索の材料に入れない: {plain}"
-    );
-    assert!(
-        html.contains("attachment-notice"),
-        "読む側には出所を示すこと"
-    );
-    // 画面はこの二つの印から原本を開く。名前を変えると、押しても何も起きない
-    // ボタンだけが残る。
-    assert!(
-        html.contains(r#"class="attachment-original""#)
-            && html.contains(&format!(r#"data-local-path="{}""#, pdf.to_string_lossy())),
-        "原本を開く道を本文に添えること: {html}"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

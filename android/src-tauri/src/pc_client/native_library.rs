@@ -1,4 +1,4 @@
-//! 新しい棚の接続情報と読書用の応答を、登録した端末の認証で受け取る。
+//! 棚の接続情報と読書用の応答を、登録した端末の認証で受け取る。
 use super::{
     ClientError, PROBE_TIMEOUT, PcClientState, PcSearchCriteria, PcWorkScope, REQUEST_TIMEOUT,
     SavedConnection, bounded_response_bytes, check_response,
@@ -161,11 +161,11 @@ pub(super) fn check_scope(
     if response.status() == StatusCode::CONFLICT {
         return Err(library_changed());
     }
-    // v2 の 401 は端末登録の解除と、新しい棚だけの許可不足の両方を含む。
+    // v2 の 401 は端末登録の解除と、棚だけの許可不足の両方を含む。
     if response.status() == StatusCode::UNAUTHORIZED {
         return Err(ClientError {
             code: "library_unavailable",
-            message: "この端末には新しい棚を読む許可がありません",
+            message: "この端末には棚を読む許可がありません",
         });
     }
     let response = check_response(response)?;
@@ -367,7 +367,7 @@ fn valid_shelf_work(work: &MobileShelfWork) -> bool {
         && work.source_id.len() <= 4096
 }
 
-/// 作品の一覧を新しい棚から引く。条件は旧 API の検索と同じ形に組んで送る（検査も同じ）。
+/// 作品の一覧を棚から引く。条件は旧 API の検索と同じ形に組んで送る（検査も同じ）。
 #[tauri::command]
 pub async fn pc_native_search(
     state: State<'_, PcClientState>,
@@ -403,7 +403,7 @@ pub async fn pc_native_search(
     .await
 }
 
-/// 作品の画面（説明・作者とシリーズ・版）を新しい棚から引く。
+/// 作品の画面（説明・作者とシリーズ・版）を棚から引く。
 #[tauri::command]
 pub async fn pc_native_work(
     state: State<'_, PcClientState>,
@@ -516,7 +516,7 @@ fn valid_suggestions(found: &MobileSearchSuggestions) -> bool {
         })
 }
 
-/// 検索欄の候補を新しい棚から引く（旧 API の `search/suggest` と同じ形）。
+/// 検索欄の候補を棚から引く（旧 API の `search/suggest` と同じ形）。
 #[tauri::command]
 pub async fn pc_native_suggest(
     state: State<'_, PcClientState>,
@@ -541,7 +541,7 @@ pub async fn pc_native_suggest(
     .await
 }
 
-/// 作者・シリーズの一覧（ライブラリの「作者」「シリーズ」）を新しい棚から引く。
+/// 作者・シリーズの一覧（ライブラリの「作者」「シリーズ」）を棚から引く。
 #[tauri::command]
 pub async fn pc_native_entities(
     state: State<'_, PcClientState>,
@@ -586,7 +586,7 @@ pub async fn pc_native_entities(
     .await
 }
 
-/// 作者・シリーズの画面の頭（説明・リンク・タグ・コレクション）を新しい棚から引く。
+/// 作者・シリーズの画面の頭（説明・リンク・タグ・コレクション）を棚から引く。
 #[tauri::command]
 pub async fn pc_native_entity_detail(
     state: State<'_, PcClientState>,
@@ -617,7 +617,7 @@ pub async fn pc_native_entity_detail(
     .await
 }
 
-/// 作者の作品が属するシリーズの一ページを新しい棚から引く。
+/// 作者の作品が属するシリーズの一ページを棚から引く。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn pc_native_entity_series(
@@ -670,7 +670,7 @@ pub async fn pc_native_entity_series(
     .await
 }
 
-/// コレクションの一覧を新しい棚から引く。
+/// コレクションの一覧を棚から引く。
 #[tauri::command]
 pub async fn pc_native_collections(
     state: State<'_, PcClientState>,
@@ -687,7 +687,7 @@ pub async fn pc_native_collections(
     .await
 }
 
-/// 作品の入ったコレクションと、その中の位置を新しい棚から引く。
+/// 作品の入ったコレクションと、その中の位置を棚から引く。
 #[tauri::command]
 pub async fn pc_native_work_collections(
     state: State<'_, PcClientState>,
@@ -717,14 +717,14 @@ pub(super) async fn work_collections(
     .await
 }
 
-/// コレクションの画面（回の作品は一覧と同じ棚の作品の形）を新しい棚から引く。
+/// コレクションの画面（回の作品は一覧と同じ棚の作品の形）を棚から引く。
 #[tauri::command]
 pub async fn pc_native_collection(
     state: State<'_, PcClientState>,
     library: NativeLibraryScope,
     collection: String,
 ) -> Result<MobileShelfCollectionDetail, ClientError> {
-    // 棚の UUID か、旧棚から移したコレクションの旧棚の ID（端末に保存した作品が持っている）。
+    // 棚のコレクションの UUID。サーバーが読み解くので、ここでは道に入れてよい文字かだけを見る。
     if collection.is_empty()
         || collection.len() > 128
         || !collection

@@ -6,7 +6,7 @@ export interface ServerDevice {
   role: "reader" | "admin";
   createdAt: string;
   lastSeenAt: string | null;
-  /** 新しい棚を配っているサーバーだけにある。この携帯が棚を読めるか。 */
+  /** 棚を配っているサーバーだけにある。この携帯が棚を読めるか。 */
   readsShelf?: boolean;
 }
 
@@ -51,7 +51,7 @@ export interface RemoteServerStatus {
   serverName?: string;
   adminWeb?: "available" | "public-only" | "disabled" | "none";
   devices?: ServerDevice[];
-  /** 送った棚を組み終えて、サーバーの次の起動で配るのを待っている。新しい棚を受け取れるサーバーだけにある。 */
+  /** 送った棚を組み終えて、サーバーの次の起動で配るのを待っている。棚を受け取れるサーバーだけにある。 */
   shelfPending?: boolean;
 }
 
@@ -75,7 +75,7 @@ export interface ServerPairing {
 export const serverStatus = () => invoke<DesktopServerStatus>("server_status");
 export const serverCreateReaderPairing = () => invoke<ServerPairing>("server_create_reader_pairing");
 export const serverRemoteDevices = () => invoke<ServerDevice[]>("server_list_remote_devices");
-/** 単独サーバーの携帯に、新しい棚を読む許可を付け外しする。 */
+/** 単独サーバーの携帯に、棚を読む許可を付け外しする。 */
 export const serverSetRemoteShelfReader = (deviceId: string, read: boolean) =>
   invoke<void>("server_set_remote_shelf_reader", { deviceId, read });
 export const serverRemoteStatus = () => invoke<RemoteServerStatus>("server_remote_status");

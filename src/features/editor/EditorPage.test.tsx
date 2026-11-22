@@ -43,7 +43,7 @@ function renderEditor() {
 
 describe("EditorPage", () => {
   beforeEach(() => {
-    dbApi.getEditorDocument.mockResolvedValue(getDemoEditor(101));
+    dbApi.getEditorDocument.mockResolvedValue(getDemoEditor("101"));
     dbApi.saveWorkDraft.mockResolvedValue(revision);
     dbApi.activateWorkEdit.mockResolvedValue({ ...revision, status: "active" });
   });
@@ -90,7 +90,7 @@ describe("EditorPage", () => {
   });
 
   it("names an unpublished draft so a saved draft is not mistaken for the reading text", async () => {
-    dbApi.getEditorDocument.mockResolvedValue({ ...getDemoEditor(101), draftRevision: revision });
+    dbApi.getEditorDocument.mockResolvedValue({ ...getDemoEditor("101"), draftRevision: revision });
     renderEditor();
     expect(await screen.findByText("下書き・未反映")).toBeInTheDocument();
     // 下書きがあれば、変更なしでもそれを反映できる。

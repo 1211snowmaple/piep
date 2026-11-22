@@ -2789,3 +2789,19 @@ web 詳細で確認した空欄・通常の空欄の変更を試験した。同�
   アプリデータの `server\state.db` と `server	ls\` は起動時に消し、設定の `embedded` は読むときに捨てる。
 
 残り: Maple への反映と `C:\ServerData\piep\library` の削除（4、了承が要る）。
+
+**2026-11-22 旧棚の移行記録を落とす（スキーマ 28・29、`claude/remove-old-db`）。** 利用者の了承を得て、
+棚が旧棚と突き合わせるための記録を消した。
+
+- 落とした表: `migration_records`（原記録 約 79.5 万行）・`migration_requests`・`migration_fingerprints`・
+  `repair_attempt_markers`・`asset_audit_markers`。原記録だけが指していたファイル（約 6.7 万）は回収で消える。
+  補完を試した印のうち今の版のもの（実棚で 1,909 作品）は `incomplete_save_attempts` へ移した。
+- `asset_repair_state` の `legacy_evidence_file_id` を落とし、`request_id` を必須にした（実棚は 0 行）。
+- 版の区分 `source_revisions.classification` を落とした。区分は構成の指紋（`manifest_hash`）の見出しに
+  入っていたので、見出しは常に `source` とし、`legacy_unclassified` だった版（実棚で 7,107 保存状態）の
+  指紋を 28 の直後に計算し直した。内容の指紋は区分を含まないので変わらないことを確かめ、変われば移行を止める。
+  読む形の見出し（`reader_binding_sets.source_manifest`）も同じ値へ書き換え、29 で不変の制約を戻した。
+- 実棚の DB の写しで、移行（約 3 秒）・全保存状態の指紋の照合・読む形の見出しの一致・外部キー・
+  `integrity_check` を確かめた。
+- 残したもの: `job_history` の旧実行キューの履歴（画面に出る履歴）、取得の記録の経路名
+  （`legacy-import` など。指紋に入っている）、`repair` 列（改稿の数え方に使う）。

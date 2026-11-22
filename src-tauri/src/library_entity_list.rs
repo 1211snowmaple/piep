@@ -1,9 +1,7 @@
-//! 新しい棚の作者・シリーズの一覧と、作者・シリーズに関わるコレクション（評価文書 6.22）。
+//! 棚の作者・シリーズの一覧と、作者・シリーズに関わるコレクション（評価文書 6.22）。
 //!
-//! ライブラリの「作者・クリエイター」「シリーズ」タブは旧棚の `search_entity_facets`・
-//! `count_entity_facets` を、作者・シリーズの画面のコレクションの欄は旧棚の
-//! `list_collections_for_person`・`list_collections_for_series` を、そのまま新しい棚で読む。
-//! 数え方・並べ方は旧棚に合わせ、`piep-library compare-entities` で突き合わせる。
+//! ライブラリの「作者・クリエイター」「シリーズ」タブと、作者・シリーズの画面のコレクションの欄が
+//! 読む。数え方・並べ方は、切り替えの前に突き合わせて合わせたもの。
 
 use crate::library::{EntityKind, Library, LibraryId, Result, WorkFilter};
 use crate::library_entity::{contains_nocase, fingerprint, id, nocase, text, SeriesSort};
@@ -12,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 
-/// 更新監視の登録で絞る。旧棚の `EntityFacetScope.watch` と同じ三つ。
+/// 更新監視の登録で絞る（画面の `EntityFacetScope.watch` の三つ）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WatchScope {
@@ -50,7 +48,7 @@ pub struct EntityListQuery {
     pub limit: usize,
 }
 
-/// 一覧の一件（旧棚の `EntityFacet` の形）。
+/// 一覧の一件（画面の `EntityFacet` の形）。
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct EntityRow {
     pub id: LibraryId,
@@ -66,7 +64,7 @@ pub struct EntityRow {
     pub icon: Option<String>,
     pub banner: Option<String>,
     pub cover: Option<String>,
-    /// 作者は最も新しく公開した作品、シリーズは最初の回の題（絞り込みに依らない、旧棚と同じ）。
+    /// 作者は最も新しく公開した作品、シリーズは最初の回の題（絞り込みに依らない）。
     pub sample_title: Option<String>,
     /// ミリ秒。作者・シリーズの今の版を保存した時。版がなければ None。
     pub updated_at: Option<i64>,
@@ -89,7 +87,7 @@ pub struct EntityListPage {
     pub total: usize,
 }
 
-/// コレクションの表紙のモザイクの一マス（旧棚の `CollectionCoverTile`）。
+/// コレクションの表紙のモザイクの一マス（画面の `CollectionCoverTile`）。
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct CollectionTile {
     pub provider: String,
@@ -100,12 +98,10 @@ pub struct CollectionTile {
     pub cover: Option<String>,
 }
 
-/// 作者・シリーズに関わるコレクションの一件（旧棚の `WorkCollectionSummary`）。
+/// 作者・シリーズに関わるコレクションの一件（画面の `WorkCollectionSummary`）。
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct CollectionSummary {
     pub id: LibraryId,
-    /// 旧棚から移したコレクションの、旧棚での ID。画面の URL はこの ID（旧棚と同じ場所に開く）。
-    pub legacy_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub ordered: bool,
@@ -163,11 +159,11 @@ impl Library {
         )?)
     }
 
-    /// 作者・シリーズの一覧の一ページ（旧棚の `search_entity_facets`）。
+    /// 作者・シリーズの一覧の一ページ。
     ///
     /// 作品の絞り込みに当てはまる作品を作者・シリーズごとに集め、名前か説明の語・監視・完結・
-    /// 作品の数で絞り、旧棚と同じ鍵で並べる。同じ値は作品の多い順・名前の順・取得元の ID の順。
-    /// 作者は名前の載った作品だけを数える（旧棚と同じ）。
+    /// 作品の数で絞り、選んだ鍵で並べる。同じ値は作品の多い順・名前の順・取得元の ID の順。
+    /// 作者は名前の載った作品だけを数える。
     pub fn list_entities(&self, request: &EntityListQuery) -> Result<EntityListPage> {
         let rows =
             self.entity_rows(request.kind, &request.query, &request.filter, request.scope)?;
@@ -264,7 +260,7 @@ impl Library {
             watches.insert(entity, enabled);
         }
         // 版のない（プロフィールを取っていない）作者・シリーズは、作品に載った名前・題のうち
-        // 最も新しく更新された作品のもの（旧棚と同じく、絞り込みに依らない）。ほとんどの作者・
+        // 最も新しく更新された作品のもの。ほとんどの作者・
         // シリーズは版を持つので、持たないものだけを引く。
         let listed_sql = if series {
             "SELECT r.title FROM snapshot_series r JOIN work_current_projection p ON p.snapshot_id=r.snapshot_id
@@ -356,7 +352,7 @@ impl Library {
         Ok(rows)
     }
 
-    /// 集計を旧棚と同じ鍵で並べ、一ページ分に画像と見本の題を足す。
+    /// 集計を選んだ鍵で並べ、一ページ分に画像と見本の題を足す。
     pub fn entity_page(
         &self,
         rows: &[EntityRow],
@@ -390,13 +386,13 @@ impl Library {
         let mut order: Vec<&EntityRow> = rows.iter().collect();
         order.sort_by(|left, right| {
             let ordering = match sort {
-                // 旧棚: 名前（大文字小文字を区別しない）→ 作品の多い順。
+                // 名前（大文字小文字を区別しない）→ 作品の多い順。
                 SeriesSort::Name => direct(nocase(&left.name, &right.name))
                     .then_with(|| right.work_count.cmp(&left.work_count)),
-                // 旧棚: 作品の数 → 名前。
+                // 作品の数 → 名前。
                 SeriesSort::WorkCount => direct(left.work_count.cmp(&right.work_count))
                     .then_with(|| left.name.cmp(&right.name)),
-                // 旧棚: 鍵 → 作品の多い順 → 名前。
+                // 鍵 → 作品の多い順 → 名前。
                 _ => direct(key(left).cmp(&key(right)))
                     .then_with(|| right.work_count.cmp(&left.work_count))
                     .then_with(|| left.name.cmp(&right.name)),
@@ -425,12 +421,12 @@ impl Library {
             )
         };
         let sample_sql = if series {
-            // 旧棚: 話数の順（話数のない回は後ろ）→ 公開の古い順 → 保存の古い順。
+            // 話数の順（話数のない回は後ろ）→ 公開の古い順 → 保存の古い順。
             "SELECT p.title FROM snapshot_series r JOIN work_current_projection p ON p.snapshot_id=r.snapshot_id
              JOIN library_items i ON i.work_id=p.work_id WHERE r.series_id=?1
              ORDER BY r.position IS NULL,r.position,coalesce(p.published_at,p.saved_at),i.added_at,p.work_id LIMIT 1"
         } else {
-            // 旧棚: 公開の新しい順 → 保存の新しい順。
+            // 公開の新しい順 → 保存の新しい順。
             "SELECT p.title FROM snapshot_people r JOIN work_current_projection p ON p.snapshot_id=r.snapshot_id
              JOIN library_items i ON i.work_id=p.work_id WHERE r.person_id=?1
              ORDER BY coalesce(p.published_at,p.saved_at) DESC,i.added_at DESC,p.work_id DESC LIMIT 1"
@@ -454,8 +450,7 @@ impl Library {
         })
     }
 
-    /// 作者・シリーズの作品を一つでも含むコレクション（旧棚の `list_collections_for_person`・
-    /// `list_collections_for_series`）。最後に変えた順、同じなら名前・ID の順。
+    /// 作者・シリーズの作品を一つでも含むコレクション。最後に変えた順、同じなら名前・ID の順。
     pub fn entity_collections(
         &self,
         kind: EntityKind,
@@ -478,8 +473,7 @@ impl Library {
         collection_summaries(&conn, &condition, &[entity.as_bytes().to_vec()])
     }
 
-    /// 作品の入ったコレクションと、その中での位置（旧棚の `list_collections_for_work`・
-    /// `list_collection_positions_for_work`）。並びはコレクションの一覧と同じ。
+    /// 作品の入ったコレクションと、その中での位置。並びはコレクションの一覧と同じ。
     pub fn work_collections(&self, work: LibraryId) -> Result<Vec<(CollectionSummary, i64)>> {
         let conn = self.reader()?;
         let summaries = collection_summaries(
@@ -503,21 +497,13 @@ impl Library {
     }
 }
 
-/// コレクションの要約を、条件（`c` が `collections`）に当てはまるものだけ、旧棚と同じく更新の新しい順で。
+/// コレクションの要約を、条件（`c` が `collections`）に当てはまるものだけ、更新の新しい順で。
 /// 値は `?1` から順に束縛する。
 pub(crate) fn collection_summaries(
     conn: &rusqlite::Connection,
     condition: &str,
     values: &[Vec<u8>],
 ) -> Result<Vec<CollectionSummary>> {
-    let mut legacy: HashMap<Vec<u8>, String> = HashMap::new();
-    for row in conn
-            .prepare_cached("SELECT target_id,source_key FROM migration_records WHERE source_table='work_collections' AND status='imported' AND target_id IS NOT NULL")?
-            .query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)))?
-        {
-            let (target, key) = row?;
-            legacy.insert(target, key);
-        }
     type Row = (
         Vec<u8>,
         String,
@@ -619,7 +605,6 @@ pub(crate) fn collection_summaries(
                 })
                 .collect::<Result<Vec<_>>>()?;
         collections.push(CollectionSummary {
-            legacy_id: legacy.get(&collection).cloned(),
             id: id(collection)?,
             name,
             description,

@@ -54,7 +54,7 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
   // 表紙は凝っているので、一覧に並ぶのは読めない切れ端ばかりになっていた。
   // 詳細画面は最初から icon だけを見ており、同じ作者が画面によって
   // 別の顔になっていた。シリーズの枠は表紙を出す場所なので今までどおり。
-  // 新しい棚の画像はファイルの識別子。旧棚のパスとは URL への直し方が違う。
+  // 棚の画像はファイルの識別子。`shelfFileUrl` で URL にする。
   const asset = (path: string | null | undefined) => entity.shelf === true ? shelfFileUrl(path) : getAssetUrl(path);
   const icon = asset(kind === "person" ? entity.iconPath : entity.iconPath ?? entity.coverPath);
   // 保存元が画像を持ちうるのに、この人は置いていない。「まだ無い」ではなく

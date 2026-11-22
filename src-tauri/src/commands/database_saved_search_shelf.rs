@@ -1,6 +1,6 @@
-//! 保存した検索を、切り替えた棚と旧 DB のどちらでも同じ形で返す。
+//! 保存した検索を棚から返す。
 //!
-//! 画面は ID を文字列として扱う。棚では検索の UUID、旧 DB では番号の文字列になる。
+//! 画面は ID を文字列として扱う。中身は検索の UUID。
 //! 棚の持ち主は棚そのもの（`library.id`）で、書き込みは要求 ID と世代で重複なく一度だけ効く。
 
 use crate::library::{Library, LibraryId, SavedSearch, SavedSearchDefinition, SavedSearchUpdate};

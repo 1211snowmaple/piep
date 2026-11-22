@@ -68,12 +68,10 @@ const card: ShelfCard = {
   series_title: null,
   series_position: null,
   coverFile: COVER,
-  legacyId: 41,
 };
 
 const summary: ShelfCollectionSummary = {
   id: "0195f1c2-0000-7000-8000-0000000000d1",
-  legacy_id: "c-old",
   name: "雨の束",
   description: "説明の文",
   ordered: true,
@@ -98,7 +96,7 @@ const detail: ShelfCollection = {
       provider: "pixiv", external_key: "1", work: card, title: "前の話", author_name: "作者一", cover: COVER,
       text_length: 1200, position: 0, role: "main", added_by: "manual", pinned: false, note: null, missing: false,
       created_at: Date.UTC(2026, 0, 1), updated_at: Date.UTC(2026, 0, 1),
-      editions: [{ ...card, id: "0195f1c2-0000-7000-8000-000000000003", external_key: "3", title: "前の話（全文）", legacyId: null }],
+      editions: [{ ...card, id: "0195f1c2-0000-7000-8000-000000000003", external_key: "3", title: "前の話（全文）" }],
     },
     {
       provider: "pixiv", external_key: "2", work: null, title: "後の話", author_name: "足した時の作者", cover: null,
@@ -132,10 +130,10 @@ describe("collections on the shelf", () => {
   });
 
   it("opens a collection by its old id and shows its works", async () => {
-    renderWith(<CollectionPage />, "#/collections/c-old");
+    renderWith(<CollectionPage />, "#/collections/0195f1c2-0000-7000-8000-0000000000d1");
     expect(await screen.findByRole("heading", { name: "雨の束" })).toBeInTheDocument();
-    expect(api.shelfCollection).toHaveBeenCalledWith("c-old");
-    // 棚にある回は一覧と同じカード（新しい棚の作品の画面へ）、無い回は未保存の札。
+    expect(api.shelfCollection).toHaveBeenCalledWith("0195f1c2-0000-7000-8000-0000000000d1");
+    // 棚にある回は一覧と同じカード（棚の作品の画面へ）、無い回は未保存の札。
     expect(screen.getByText("前の話")).toBeInTheDocument();
     expect(screen.getByText("後の話")).toBeInTheDocument();
     expect(screen.getByText("未保存")).toBeInTheDocument();
@@ -151,7 +149,7 @@ describe("collections on the shelf", () => {
   it("lists the collections from the shelf", async () => {
     renderWith(<CollectionsPanel />, "#/library?tab=collections");
     expect(await screen.findByText("雨の束")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /雨の束/ })).toHaveAttribute("href", "#/collections/c-old");
+    expect(screen.getByRole("link", { name: /雨の束/ })).toHaveAttribute("href", "#/collections/0195f1c2-0000-7000-8000-0000000000d1");
     expect(screen.getByText("1件")).toBeInTheDocument();
     await waitFor(() => expect(api.shelfCollections).toHaveBeenCalled());
   });
@@ -163,42 +161,42 @@ describe("collections on the shelf", () => {
     });
 
     it("edits the collection on the shelf", async () => {
-      renderWith(<CollectionPage />, "#/collections/c-old");
+      renderWith(<CollectionPage />, "#/collections/0195f1c2-0000-7000-8000-0000000000d1");
       expect(await screen.findByRole("heading", { name: "雨の束" })).toBeInTheDocument();
       await waitFor(() => expect(screen.getByRole("button", { name: "表紙を変える" })).not.toHaveAttribute("data-disabled"));
       expect(screen.getByRole("button", { name: "一冊のEPUB" })).not.toHaveAttribute("data-disabled");
       expect(screen.getByRole("button", { name: "合う作品を探す" })).not.toHaveAttribute("data-disabled");
 
-      // 並べ替えは作品の鍵で、画面の ID（旧棚の ID）のまま送る。
+      // 並べ替えは作品の鍵で、画面の ID のまま送る。
       fireEvent.click(screen.getByRole("button", { name: "前の話を一つ後へ" }));
-      await waitFor(() => expect(api.shelfEditCollection).toHaveBeenCalledWith("c-old", {
+      await waitFor(() => expect(api.shelfEditCollection).toHaveBeenCalledWith("0195f1c2-0000-7000-8000-0000000000d1", {
         kind: "reorder",
         works: [{ source: "pixiv", sourceId: "2" }, { source: "pixiv", sourceId: "1" }],
       }));
 
-      // 削除は確認を経て、新しい棚の一回の編集で消す。
+      // 削除は確認を経て、棚の一回の編集で消す。
       fireEvent.click(screen.getByRole("button", { name: "このコレクションのその他の操作" }));
       fireEvent.click(await screen.findByRole("menuitem", { name: "コレクションを削除" }));
       api.shelfEditCollection.mockResolvedValueOnce(null);
       fireEvent.click(await screen.findByRole("button", { name: "削除する" }));
-      await waitFor(() => expect(api.shelfEditCollection).toHaveBeenLastCalledWith("c-old", { kind: "delete" }));
+      await waitFor(() => expect(api.shelfEditCollection).toHaveBeenLastCalledWith("0195f1c2-0000-7000-8000-0000000000d1", { kind: "delete" }));
     });
 
     it("adds the works found for the collection by their keys", async () => {
       suggest.suggestCollectionAdditions.mockResolvedValue({
-        collectionId: "c-old", collectionName: "雨の束", semanticUsed: false, eligibleCount: 1, note: null,
+        collectionId: "0195f1c2-0000-7000-8000-0000000000d1", collectionName: "雨の束", semanticUsed: false, eligibleCount: 1, note: null,
         candidates: [{
-          source: "pixiv", sourceId: "9", downloadId: 0, work: "0195f1c2-0000-7000-8000-000000000009",
+          source: "pixiv", sourceId: "9", work: "0195f1c2-0000-7000-8000-000000000009",
           title: "次の話", authorName: "作者一", coverPath: COVER, textLength: 900, publishedAt: "2026-01-05T00:00:00Z",
           confidence: 0.9, reason: "同じシリーズの作品です", evidence: [],
         }],
       });
-      renderWith(<CollectionPage />, "#/collections/c-old");
+      renderWith(<CollectionPage />, "#/collections/0195f1c2-0000-7000-8000-0000000000d1");
       expect(await screen.findByRole("heading", { name: "雨の束" })).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "合う作品を探す" }));
-      await waitFor(() => expect(suggest.suggestCollectionAdditions).toHaveBeenCalledWith("c-old"));
+      await waitFor(() => expect(suggest.suggestCollectionAdditions).toHaveBeenCalledWith("0195f1c2-0000-7000-8000-0000000000d1"));
       fireEvent.click(await screen.findByRole("button", { name: "1作品を追加" }));
-      await waitFor(() => expect(api.shelfEditCollection).toHaveBeenCalledWith("c-old", {
+      await waitFor(() => expect(api.shelfEditCollection).toHaveBeenCalledWith("0195f1c2-0000-7000-8000-0000000000d1", {
         kind: "add", works: [{ source: "pixiv", sourceId: "9" }],
       }));
     });

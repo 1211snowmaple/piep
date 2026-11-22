@@ -26,14 +26,14 @@ function toDoc(document: EditorDocument): EditorDoc {
 export function editorTestSource(id: number, api: EditorTestApi): EditorSource {
   const save = (doc: EditorDoc, title: string | null, blocks: WorkBlockInput[]) => api.saveWorkDraft(id, doc.baseVersion, title, blocks);
   return {
-    key: id,
+    key: String(id),
     shelf: true,
     ready: Number.isFinite(id),
     workPath: `/works/${id}`,
     load: async () => toDoc(await api.getEditorDocument(id)),
     saveDraft: async (doc, title, blocks) => { await save(doc, title, blocks); },
     publish: async (doc, title, blocks) => {
-      // 旧棚と同じく、保存が版を返さなければ反映できずに止まる。
+      // 保存が版を返さなければ反映できずに止まる。
       const revision = await save(doc, title, blocks) as WorkEditRevision;
       await api.activateWorkEdit(revision.id);
     },

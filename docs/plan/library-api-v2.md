@@ -35,8 +35,7 @@ sync_epoch = "<同期の世代 UUID>"
 
 ### デスクトップ版から棚を送る
 
-正本に切り替えた棚があれば、デスクトップ版の「今すぐ送る」と自動の送信は、旧棚ではなくその棚の写しを送る
-（切り替える前は今までどおり旧棚を送る）。管理者の鍵で次の口を使う。
+デスクトップ版の「今すぐ送る」と自動の送信は、棚の写しを送る。管理者の鍵で次の口を使う。
 
 | 口 | 用途 |
 | --- | --- |
@@ -117,7 +116,7 @@ piep-server activate-library --data <サーバーの置き場> --generation <準
 | `/api/v2/libraries/{library}/people/series?provider&key&text&sort&order&cursor&limit` | 作者の作品が属するシリーズ。続きの位置は何件目からかの十進 |
 | `/api/v2/libraries/{library}/{people\|series}/cover?provider&key[&variant=banner]` | 作者のアイコン（`banner` はヘッダー、320×480 / 1280×480）、シリーズの表紙 |
 | `/api/v2/libraries/{library}/collections` | コレクションの一覧（更新の新しい順）。`id` は棚の UUID |
-| `/api/v2/libraries/{library}/collections/{collection}` | コレクションの画面。回の作品は一覧と同じ形。旧棚から移したものは旧棚の ID でも開ける |
+| `/api/v2/libraries/{library}/collections/{collection}` | コレクションの画面。回の作品は一覧と同じ形。コレクションは UUID で指す |
 | `/api/v2/libraries/{library}/collections/{collection}/cover/{single\|file\|tile-0〜3}` | 表紙に選んだ作品の表紙・選んだ画像・並びの先頭からの回の表紙 |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/bundle` | 読書 bundle：読書用文書（`piep-reader-v1`）と、渡せる全資産の file 記述を一回で |
 | `/api/v2/libraries/{library}/entities/{entity}/views/{snapshot\|edit}/{view}/resources/{body\|media\|file}/manifest` | 所属と表示版を固定した一ファイルの descriptor |

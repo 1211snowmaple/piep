@@ -1,4 +1,4 @@
-//! 携帯と新しい棚の読書位置を受け渡す。
+//! 携帯と棚の読書位置を受け渡す。
 //!
 //! 書き込みはお気に入りと同じく、端末が作る要求 UUID と手元の更新世代を添える。棚はその要求の
 //! 結果を受領として残すので、送り直しても一度だけ効く。世代が違えば（別の端末やデスクトップで
@@ -228,7 +228,7 @@ impl Context {
                 }
             })()
             .map_err(|error| {
-                log::error!("新しい棚のお気に入りを読めません: {error}");
+                log::error!("棚のお気に入りを読めません: {error}");
                 internal()
             })?;
             let (rows, cursor, more) = page;
@@ -269,7 +269,7 @@ impl Context {
             let subject = ctx.library.id;
             let (rows, cursor, more) = reading_page(&ctx.library, subject, epoch, cursor, limit)
                 .map_err(|error| {
-                    log::error!("新しい棚の読書位置を読めません: {error}");
+                    log::error!("棚の読書位置を読めません: {error}");
                     internal()
                 })?;
             let items: Vec<OwnerReading<'_>> = rows
@@ -319,7 +319,7 @@ pub(super) async fn list(
         let _permit = permit;
         let (rows, cursor, more) = reading_page(&ctx.library, subject, epoch, cursor, limit)
             .map_err(|error| {
-                log::error!("新しい棚の読書位置を読めません: {error}");
+                log::error!("棚の読書位置を読めません: {error}");
                 internal()
             })?;
         let page = MobileShelfReadingPage {
@@ -460,7 +460,7 @@ pub(super) async fn put(
                 Err(invalid())
             }
             Err(error) => {
-                log::error!("新しい棚の読書位置を書けません: {error}");
+                log::error!("棚の読書位置を書けません: {error}");
                 Err(internal())
             }
         }

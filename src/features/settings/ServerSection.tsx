@@ -287,7 +287,7 @@ function ConnectedRemote(props: CardProps) {
   const last = status.lastSend;
   const view = remoteView({ name, details: data, offline, registrationLost, sending: send.running, checkedAt: details.dataUpdatedAt });
   const phones = (data?.devices ?? []).filter((device) => device.role === "reader");
-  // 新しい棚を配っているサーバーだけ、携帯ごとに棚を読む許可を付け外しできる。
+  // 棚を配っているサーバーだけ、携帯ごとに棚を読む許可を付け外しできる。
   const shelfPhones = phones.filter((phone) => phone.readsShelf !== undefined);
   const next = offline ? null : nextAction(data, phones.length);
   const update = data?.update;
@@ -358,8 +358,8 @@ function ConnectedRemote(props: CardProps) {
           </Fact>
         </div>
         {shelfPhones.length > 0 && (
-          <Stack gap={6} mt="md" role="group" aria-label="新しい棚を読む携帯">
-            <Text size="sm" fw={650}>新しい棚を読む携帯</Text>
+          <Stack gap={6} mt="md" role="group" aria-label="ライブラリを読める携帯">
+            <Text size="sm" fw={650}>ライブラリを読める携帯</Text>
             {shelfPhones.map((phone) => (
               <Switch
                 key={phone.id}

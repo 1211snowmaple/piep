@@ -41,7 +41,7 @@ test("capture readme screenshots", async ({ page }, testInfo) => {
   await page.addInitScript(() => {
     localStorage.setItem("piep.nav-railed", "false");
     localStorage.setItem("piep.library-view", "gallery");
-    localStorage.setItem("piep.epub-queue.v2", JSON.stringify([101, 103, 108]));
+    localStorage.setItem("piep.epub-queue", JSON.stringify(["101", "103", "108"]));
     // The browser-preview banner is about the harness, not the product, and it
     // comes back on every re-render, so it stays hidden for as long as we shoot.
     const hideBanner = () => {

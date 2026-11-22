@@ -29,7 +29,6 @@ function existing(id: string, name: string) {
     name,
     description: null,
     collectionKind: "ordered" as const,
-    coverDownloadId: null,
     coverPath: null,
     coverMode: "mosaic" as const,
     coverImagePath: null,

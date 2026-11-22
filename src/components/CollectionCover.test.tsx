@@ -20,7 +20,6 @@ function summary(overrides: Partial<WorkCollectionSummary> = {}): WorkCollection
     name: "雨の記憶",
     description: null,
     collectionKind: "ordered",
-    coverDownloadId: null,
     coverPath: null,
     coverMode: "mosaic",
     coverImagePath: null,

@@ -956,13 +956,10 @@ fn collect_assets_recursive_inner(
             };
 
             assets.push(NewAsset {
-                download_id: 0,
                 asset_type: asset_type.to_string(),
                 filename,
                 local_path: path.to_string_lossy().to_string(),
-                original_url: None,
                 mime_type: mime,
-                file_size_bytes: size,
             });
         } else {
             return Err(format!(

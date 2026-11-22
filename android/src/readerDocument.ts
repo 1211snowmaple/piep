@@ -110,7 +110,7 @@ export async function fillDocumentImages({ root, scroller, source, isCancelled, 
     }
   }, { root: scroller, rootMargin: nearViewport }) : null;
   for (const image of images) {
-    // 新しい棚の本文は画像を 0 から数える（旧 API は 1 から）。空や数でない番号は断る。
+    // 棚の本文は画像を 0 から数える（旧 API は 1 から）。空や数でない番号は断る。
     const raw = image.dataset.assetId ?? "";
     const id = Number(raw);
     if (!/^\d+$/.test(raw) || !Number.isSafeInteger(id)) { missingImage(image); continue; }

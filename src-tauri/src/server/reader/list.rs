@@ -156,7 +156,7 @@ fn decode_cursor(value: &str, epoch: Id, subject: Id) -> Result<WorkCursor, ApiE
 /// 作者の指名（取得元と ID）。棚の作者の ID は要求ごとに棚で引く。
 type PersonKey = (String, String);
 
-/// 旧 API の検索の条件を、新しい棚の問い合わせにする。値の検査は旧 API と同じものを通す。
+/// 旧 API の検索の条件を、棚の問い合わせにする。値の検査は旧 API と同じものを通す。
 pub(super) fn shelf_request(
     request: MobileSearchRequest,
     epoch: Id,

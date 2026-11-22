@@ -471,7 +471,7 @@ impl Library {
                 pixiv_interpretation,
             }
         };
-        self.capture_prepared(capture, None, Some(context))
+        self.capture_prepared(capture, Some(context))
     }
 
     pub fn cancel_acquisition(&self, id: LibraryId) -> Result<AcquisitionInfo> {

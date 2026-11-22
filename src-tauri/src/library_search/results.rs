@@ -1,5 +1,5 @@
 //! 本文の検索の一覧に付けるもの：作者やシリーズそのものを指す問い合わせの解釈と、
-//! 一致した箇所の抜粋・理由。どちらも旧棚の判定と抜粋の関数をそのまま使う。
+//! 一致した箇所の抜粋・理由。どちらも `crate::database` の判定と抜粋の関数を使う。
 
 use super::index::Space;
 use super::query::parse_query;
@@ -21,7 +21,7 @@ pub enum EntityIntent {
     /// この名前の作者の作品に絞った（本文に名前が出てくるだけの作品は含めない）。
     Author { label: String },
     /// このシリーズの作品に絞った。同じ題のシリーズが複数あれば（取得元の違いなど）、
-    /// `series` は空で、その題のシリーズすべてに絞る（旧棚と同じ）。
+    /// `series` は空で、その題のシリーズすべてに絞る。
     Series {
         label: String,
         series: Option<LibraryId>,
@@ -47,7 +47,7 @@ pub enum SearchMode {
     #[default]
     Words,
     /// 意味の近さ（意味検索の索引）。過去の改稿は持たないので、過去の改稿も探すときは
-    /// 語の一致にする（旧棚と同じ）。
+    /// 語の一致にする。
     Meaning,
 }
 
@@ -96,8 +96,7 @@ impl TextSearch {
 
 /// 過去の改稿だけで一致した作品の関連度に掛ける重み。過去の改稿の索引は文書が少なく、
 /// 語の珍しさの重みがいまの版の索引と揃わないので、関連度は目安でしかない。いまの版で同じ
-/// くらいに一致した作品を先に出すために、半分にする（旧棚も、過去の版の一致は控えめな点に
-/// していた）。
+/// くらいに一致した作品を先に出すために、半分にする。
 const HISTORY_WEIGHT: f32 = 0.5;
 
 /// 本文の検索の一ページ。
@@ -132,7 +131,7 @@ struct PastMatch {
     count: u32,
 }
 
-/// 一致した箇所。旧棚の検索結果の `match_fields`・`score_reasons`・`match_highlights` と同じ
+/// 一致した箇所。検索結果の `match_fields`・`score_reasons`・`match_highlights` と同じ
 /// （抜粋の `text` だけは、項目の全文でなく一致の前後の窓）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchDecoration {
@@ -140,7 +139,7 @@ pub struct SearchDecoration {
     pub match_fields: Vec<String>,
     pub score_reasons: Vec<ScoreReason>,
     pub highlights: Vec<SearchHighlight>,
-    /// 一致した項目の重みから出した点。旧棚は表示する関連度にこれを足していた（並びには使わない）。
+    /// 一致した項目の重みから出した点（並びには使わない）。
     pub field_score: f64,
 }
 
@@ -152,7 +151,7 @@ fn truncate(text: &str, max_chars: usize) -> String {
     out
 }
 
-/// 作者・シリーズの名前として扱ってよい問い合わせ（旧棚と同じ）。引用符・除外・項目の指定を
+/// 作者・シリーズの名前として扱ってよい問い合わせ。引用符・除外・項目の指定を
 /// 含むものは、名前でなく検索の式として扱う。
 fn plain_entity_query(query: &str) -> bool {
     !query.is_empty()
@@ -167,7 +166,7 @@ impl Library {
     /// 本文の検索で一致した作品の一覧。
     ///
     /// 問い合わせが一人の作者名、または一つのシリーズ名と大文字小文字を除いてそのまま
-    /// 一致し、もう一方には一致しなければ、その作者・シリーズの作品に絞る（旧棚と同じ）。
+    /// 一致し、もう一方には一致しなければ、その作者・シリーズの作品に絞る。
     /// このときは本文の一致を使わないので、関連度の順は保存日の新しい順に置き換える。
     ///
     /// 過去の改稿も探すときは、作品ごとに一件にまとめる。いまの版で一致した作品はその関連度、
@@ -255,10 +254,10 @@ impl Library {
     }
 
     /// 意味の近い作品の一覧。近さの下限に届いた作品すべてが一致で、絞り込み・並べ替え・
-    /// 続きのページは語の一致と同じ。作者・シリーズの解釈はしない（旧棚と同じ）。
+    /// 続きのページは語の一致と同じ。作者・シリーズの解釈はしない。
     ///
     /// 除く語（`-語`）は、語の一致でその語を含む作品を除く。意味の問い合わせには除く語を
-    /// 入れない（旧棚は問い合わせをそのまま埋め込んでいて、除きたい語に近い作品が上がっていた）。
+    /// 入れない（埋め込むと、除きたい語に近い作品が上がる）。
     fn search_by_meaning(&self, text: &str, query: &WorkListQuery) -> Result<SearchPage> {
         let parsed = parse_search_query(text);
         let meaning = if parsed.exclude.is_empty() {
@@ -427,7 +426,7 @@ impl Library {
     }
 
     /// 一ページぶんの一致について、問い合わせに一致した箇所の抜粋と理由を作る。文書は索引に
-    /// 入っている形（旧棚と同じ文書）から読む。過去の改稿だけで一致した作品は、その改稿の
+    /// 入っている形から読む。過去の改稿だけで一致した作品は、その改稿の
     /// 文書から作る。索引に文書がない作品は飛ばす。
     pub fn search_decorations(
         &self,
@@ -484,8 +483,8 @@ impl Library {
             let mut highlights: Vec<SearchHighlight> = make_match_highlights(&document, &parsed)
                 .into_iter()
                 .map(|mut highlight| {
-                    // 旧棚は項目の全文（本文なら作品まるごと）を `text` に入れていた。
-                    // 一覧の一件ごとに本文を運ぶことになるので、一致の前後の窓だけにする。
+                    // 項目の全文（本文なら作品まるごと）を入れると、一覧の一件ごとに本文を
+                    // 運ぶことになるので、一致の前後の窓だけにする。
                     highlight.text = highlight
                         .segments
                         .iter()
@@ -494,7 +493,7 @@ impl Library {
                     highlight
                 })
                 .collect();
-            // 意味検索で出た作品は、近さを理由の一つに、根拠の文を抜粋の先頭に置く（旧棚と同じ）。
+            // 意味検索で出た作品は、近さを理由の一つに、根拠の文を抜粋の先頭に置く。
             if let Some(semantic) = &hit.semantic {
                 score_reasons.push(ScoreReason {
                     field: semantic.field.clone(),

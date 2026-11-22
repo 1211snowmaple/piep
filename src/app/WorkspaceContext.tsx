@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-/** EPUB キューの一件。旧棚は番号、新しい棚は作品の ID（文字列）。 */
-export type EpubQueueId = number | string;
+/** EPUB キューの一件。作品の ID（文字列）。 */
+export type EpubQueueId = string;
 
 interface WorkspaceContextValue {
   epubQueue: EpubQueueId[];
@@ -15,7 +15,7 @@ const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 const STORAGE_KEY = "piep.epub-queue";
 
 function isQueueId(id: unknown): id is EpubQueueId {
-  return (typeof id === "number" && Number.isInteger(id) && id > 0) || (typeof id === "string" && id.trim().length > 0);
+  return typeof id === "string" && id.trim().length > 0;
 }
 
 function readQueue(): EpubQueueId[] {

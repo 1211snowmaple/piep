@@ -1,7 +1,7 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { Badge, Divider, NavLink, ScrollArea, Stack, Text, Tooltip } from "@mantine/core";
 import { useLocalStorage } from "@mantine/hooks";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
 import { ProviderGlyph } from "@/lib/providers";
 import { useAppNavigate, useAppRouter, type NavigationOptions } from "@/app/router";
@@ -11,7 +11,7 @@ import { countActiveActivities } from "@/features/jobs/activityAggregation";
 import { useUpdateJobSummaries } from "@/features/updates/updateJobs";
 import { countSavedDeferredUpdateCandidatesCommand } from "@/services/updateJobApi";
 import { parseAcquisitionFilter } from "@/lib/acquisition";
-import { readingKeysAdopted, readingWorkIds, subscribeReadingPositions } from "@/features/library/readingShelf";
+import { subscribeReadingPositions } from "@/features/library/readingShelf";
 import { shelfCounts } from "@/services/shelfHealthApi";
 import { formatCompactCount, formatNumber } from "@/lib/format";
 import { isTauriRuntime } from "@/services/dbApi";
@@ -116,16 +116,14 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
     defaultValue: DEFAULT_OPEN,
   });
 
-  // Reading positions live in per-device storage, so their ids have to be read
-  // here and resolved by the library, which alone knows what still exists.
-  const [readingIds, setReadingIds] = useState(() => readingWorkIds());
-  useEffect(() => subscribeReadingPositions(() => setReadingIds(readingWorkIds())), []);
-  // 読みかけは、端末の記録を棚へ引き取ったあとは棚の読書位置で、引き取る前は端末の旧棚の番号で数える。
+  // 読みかけは棚の読書位置で数える。読む画面が位置を書いたら数え直す。
+  const queryClient = useQueryClient();
+  useEffect(() => subscribeReadingPositions(() => {
+    void queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] });
+  }), [queryClient]);
   const counts = useQuery({
-    queryKey: ["library-shelf-counts", readingIds],
-    queryFn: () => !runtime
-      ? Promise.resolve(PREVIEW_COUNTS)
-      : shelfCounts(readingKeysAdopted() ? null : readingIds),
+    queryKey: ["library-shelf-counts"],
+    queryFn: () => runtime ? shelfCounts() : Promise.resolve(PREVIEW_COUNTS),
     staleTime: 30_000,
   });
   const attentionCount = useQuery({

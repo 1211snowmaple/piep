@@ -1,8 +1,7 @@
 //! 更新確認が見つけた、作品の属性ではない事実：まだ取り込んでいない改稿と、一部保存の補完。
 //!
-//! 補完は「今の版で一度だけ」試す。旧棚から移した印（`repair_attempt_markers`）は原記録として
-//! 変えず、切り替えた後の試行は `incomplete_save_attempts` に書く。版（現在の写し）が進めば、
-//! どちらの印も効かなくなる。
+//! 補完は「今の版で一度だけ」試す。試した印は `incomplete_save_attempts` に書く。
+//! 版（現在の写し）が進めば、印は効かなくなる。
 
 use super::{Error, Library, LibraryId, Result};
 use rusqlite::params;
@@ -60,8 +59,6 @@ impl Library {
               WHERE p.provider='pixiv' AND c.decision='held' AND c.hold_kind='incomplete'
                 AND NOT EXISTS(SELECT 1 FROM incomplete_save_attempts a
                                 WHERE a.work_id=c.work_id AND a.snapshot_id=p.snapshot_id)
-                AND NOT EXISTS(SELECT 1 FROM repair_attempt_markers m
-                                WHERE m.entity_id=c.work_id AND m.snapshot_id=p.snapshot_id)
               ORDER BY c.work_id
               LIMIT ?1",
         )?;

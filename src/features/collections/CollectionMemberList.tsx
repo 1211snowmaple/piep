@@ -5,6 +5,8 @@ import { WorkCover } from "@/components/WorkCover";
 import { formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { ProviderMark } from "@/lib/providers";
+import { getAssetUrl, isTauriRuntime } from "@/services/dbApi";
+import { shelfFileUrl } from "@/services/shelfApi";
 import type { ViewMode } from "@/lib/viewMode";
 import type { WorkCollectionMember } from "@/types/collections";
 
@@ -18,7 +20,7 @@ interface MemberListProps {
   view: MemberView;
   busy: boolean;
   selectionMode: boolean;
-  /** 選んだ回。鍵は `取得元:作品の番号`（旧棚・新しい棚で同じ）。 */
+  /** 選んだ回。鍵は `取得元:作品の番号`。 */
   selected: ReadonlySet<string>;
   onSelect: (memberKey: string, selected: boolean) => void;
   onMove: (index: number, delta: number) => void | boolean | Promise<boolean>;
@@ -325,7 +327,7 @@ function MissingMemberCard({ member }: { member: WorkCollectionMember }) {
             sourceId: member.sourceId,
             title: member.title,
             authorName: member.authorName,
-            coverPath: member.coverPath,
+            coverUrl: isTauriRuntime() ? shelfFileUrl(member.coverPath) : getAssetUrl(member.coverPath),
           }}
           variant="compact"
         />
@@ -386,7 +388,7 @@ function EditionFold({ member }: { member: WorkCollectionMember }) {
   );
 }
 
-/** コレクションの回を選ぶときの鍵（旧棚・新しい棚で同じ）。 */
+/** コレクションの回を選ぶときの鍵。 */
 export function collectionMemberKey(member: { source: string; sourceId: string }): string {
   return `${member.source}:${member.sourceId}`;
 }

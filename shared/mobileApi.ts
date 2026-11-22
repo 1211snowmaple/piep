@@ -162,7 +162,7 @@ export interface MobileRevision {
   activeEditHash: string | null;
 }
 
-/** 新しい棚の作品の一件（棚の UUID で指し、旧棚の番号を持たない）。項目は `MobileWork` に揃える。 */
+/** 棚の作品の一件（棚の UUID で指す）。項目は `MobileWork` に揃える。 */
 export interface MobileShelfWork {
   /** 作品の UUID。 */
   id: string;
@@ -196,7 +196,7 @@ export interface MobileShelfWork {
   downloadedAt: string;
 }
 
-/** 新しい棚の作品のお気に入りを付け外しする。`request_id` は端末が作る UUID で、送り直しても */
+/** 棚の作品のお気に入りを付け外しする。`request_id` は端末が作る UUID で、送り直しても */
 /** 一度だけ効く。`expected` は手元の更新世代（十進の文字列）。違えば 409 で今の値が返る。 */
 export interface MobileShelfFavoriteUpdate {
   requestId: string;
@@ -210,7 +210,7 @@ export interface MobileShelfFavorite {
   generation: string;
 }
 
-/** 新しい棚の読書位置の場所。`view_kind` は `snapshot`（版の写し）か `edit`（編集）で、 */
+/** 棚の読書位置の場所。`view_kind` は `snapshot`（版の写し）か `edit`（編集）で、 */
 /** `view_id` はその UUID。ページは本文の区切り（pixiv の `[newpage]`、編集の改ページ）で数えた */
 /** 0 からの番号、`ratio_ppm` はそのページの中のスクロールの割合（百万分率）。 */
 export interface MobileShelfReadingLocation {
@@ -220,7 +220,7 @@ export interface MobileShelfReadingLocation {
   ratioPpm: number;
 }
 
-/** 新しい棚の作品の読書位置（認証した利用者のもの）。`location` が空なのは、消した位置か、 */
+/** 棚の作品の読書位置（認証した利用者のもの）。`location` が空なのは、消した位置か、 */
 /** ページで表せない位置。`mine` はこの端末が書いた位置か。`updated_at` は棚が受けた時刻 */
 /** （ミリ秒）。`generation` は更新世代（十進の文字列。まだ位置が無ければ "0"）。 */
 export interface MobileShelfReading {
@@ -240,7 +240,7 @@ export interface MobileShelfReadingPage {
   more: boolean;
 }
 
-/** 新しい棚の作品の読書位置を書く。`request_id` は端末が作る UUID で、送り直しても一度だけ */
+/** 棚の作品の読書位置を書く。`request_id` は端末が作る UUID で、送り直しても一度だけ */
 /** 効く。`expected` は手元の更新世代（十進の文字列）。違えば 409 で今の位置が返る。 */
 export interface MobileShelfReadingUpdate {
   requestId: string;
@@ -249,7 +249,7 @@ export interface MobileShelfReadingUpdate {
   finished: boolean;
 }
 
-/** 新しい棚の一覧の一ページ。続きは `next_cursor` を変えずに次の要求へ渡す。 */
+/** 棚の一覧の一ページ。続きは `next_cursor` を変えずに次の要求へ渡す。 */
 export interface MobileShelfPage {
   items: MobileShelfWork[];
   nextCursor: string | null;
@@ -257,7 +257,7 @@ export interface MobileShelfPage {
   indexComplete: boolean;
 }
 
-/** 新しい棚の作品の保存した版の一つ。 */
+/** 棚の作品の保存した版の一つ。 */
 export interface MobileShelfVersion {
   /** その版の写しの ID。以前の版を読むときはこの写しの本を引く。 */
   snapshotId: string;
@@ -267,7 +267,7 @@ export interface MobileShelfVersion {
   savedAt: string;
 }
 
-/** 新しい棚の作品の画面。`work.excerpt` は取得元の説明。 */
+/** 棚の作品の画面。`work.excerpt` は取得元の説明。 */
 export interface MobileShelfWorkDetail {
   work: MobileShelfWork;
   people: MobilePerson[];
@@ -278,7 +278,7 @@ export interface MobileShelfWorkDetail {
   editBaseVersion: number | null;
 }
 
-/** 新しい棚の検索欄の候補（旧 API の `search/suggest` の一件と同じ形）。作者・シリーズは */
+/** 棚の検索欄の候補（旧 API の `search/suggest` の一件と同じ形）。作者・シリーズは */
 /** `source`・`source_key` が取得元と ID、題は `value` が取得元の ID で `source_key` が棚の */
 /** 作品の ID、タグは `value` がタグ。 */
 export interface MobileSearchSuggestion {
@@ -291,12 +291,12 @@ export interface MobileSearchSuggestion {
   sourceKey: string | null;
 }
 
-/** 新しい棚の検索欄の候補の一覧。 */
+/** 棚の検索欄の候補の一覧。 */
 export interface MobileSearchSuggestions {
   items: MobileSearchSuggestion[];
 }
 
-/** 新しい棚のコレクションの一回。棚に無い（未保存の）回は `work` が空で、入れた時の題と作者。 */
+/** 棚のコレクションの一回。棚に無い（未保存の）回は `work` が空で、入れた時の題と作者。 */
 export interface MobileShelfCollectionMember {
   title: string;
   authorName: string;
@@ -304,7 +304,7 @@ export interface MobileShelfCollectionMember {
   work: MobileShelfWork | null;
 }
 
-/** 新しい棚のコレクションの画面。`id` は棚の UUID、表紙は `cover_mode` の枠ごとに */
+/** 棚のコレクションの画面。`id` は棚の UUID、表紙は `cover_mode` の枠ごとに */
 /** `/collections/{id}/cover/{single|file|tile-N}` から引く。 */
 export interface MobileShelfCollectionDetail extends MobileCollection {
   members: MobileShelfCollectionMember[];

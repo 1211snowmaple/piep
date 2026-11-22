@@ -29,7 +29,7 @@ import { reportJobAction } from "@/features/jobs/operationJobs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { BrowserListShortcuts } from "./BrowserListShortcuts";
-import { useAppNavigate, useAppSearchParams } from "@/app/router";
+import { useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
@@ -49,8 +49,8 @@ import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
 import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
 import { TargetsPanel, type GroupAction, type TargetAction } from "./WatchTargetsPanel";
 import type { UpdateTarget, WatchGroup, WatchId } from "@/types/library";
-import { watchGroupMatches } from "@/lib/watchIdentity";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
+import { SHELF_WORK_ID } from "@/services/shelfApi";
 
 export { TargetHealthBadge } from "./WatchTargetsPanel";
 
@@ -93,14 +93,12 @@ export function isSettledCandidateStatus(status: string): boolean {
 const SHELF_SCOPE_LIMIT = 500;
 const CANDIDATE_DISPLAY_PAGE_SIZE = 60;
 
-export function parseWorkId(value: string | null): number | null {
-  if (!value || !/^\d+$/.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+/** `?work=` の作品。棚の作品の ID（UUID）だけを受け取る。 */
+export function parseWorkId(value: string | null): string | null {
+  return value && SHELF_WORK_ID.test(value) ? value.toLowerCase() : null;
 }
 
 export default function UpdatesPage() {
-  const navigate = useAppNavigate();
   const runtime = isTauriRuntime();
   const [searchParams, setSearchParams] = useAppSearchParams();
   const workId = parseWorkId(searchParams.get("work"));
@@ -155,13 +153,13 @@ export default function UpdatesPage() {
   // 一覧に出すのは「自分で選んだ作者・シリーズ」だけ。作品の監視は
   // 作品カードのトグルが持っていて、ここに混ぜると名前が並んで分かりにくい。
   const targets = useQuery({ queryKey: ["update-targets"], queryFn: async () => runtime ? (await listUpdateTargets<UpdateTarget>(null, false)).filter((target) => target.targetType === "author" || target.targetType === "series") : ([
-    { id: 1, targetType: "author", source: "pixiv", sourceKey: "8001234", displayName: "青葉しおり", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12002", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), watchGroups: ["毎日見る"] },
-    { id: 2, targetType: "series", source: "pixiv", sourceKey: "778120", displayName: "星を編む人", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12001", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), watchGroups: ["毎日見る"] },
-    { id: 3, targetType: "author", source: "fanbox", sourceKey: "mizu-atelier", displayName: "mizu atelier", enabled: false, lastCheckedAt: new Date(Date.now() - 86_400_000).toISOString(), lastSeenSourceId: null, lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+    { id: "demo-target-1", targetType: "author", source: "pixiv", sourceKey: "8001234", displayName: "青葉しおり", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12002", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), watchGroups: ["毎日見る"] },
+    { id: "demo-target-2", targetType: "series", source: "pixiv", sourceKey: "778120", displayName: "星を編む人", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12001", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), watchGroups: ["毎日見る"] },
+    { id: "demo-target-3", targetType: "author", source: "fanbox", sourceKey: "mizu-atelier", displayName: "mizu atelier", enabled: false, lastCheckedAt: new Date(Date.now() - 86_400_000).toISOString(), lastSeenSourceId: null, lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
   ] as UpdateTarget[]) });
   // 利用者が作った監視グループ。確認する範囲にも、自動確認の範囲にも出る。
   const groups = useQuery({ queryKey: ["watch-groups"], queryFn: async (): Promise<WatchGroup[]> => runtime ? listWatchGroups() : [
-    { id: 1, name: "毎日見る", sortOrder: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), targetIds: [1, 2] },
+    { id: "demo-group-1", name: "毎日見る", sortOrder: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), targetIds: ["demo-target-1", "demo-target-2"] },
   ] });
   const groupList = groups.data ?? [];
   /** グループの中で、止めていない対象。確認に送るのはこれだけ。 */
@@ -346,7 +344,8 @@ export default function UpdatesPage() {
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["update-targets"] }),
   });
   const groupMutation = useMutation({
-    mutationFn: async (input: GroupAction): Promise<WatchId | null> => {
+    // 作ったグループの ID か、入れた・外した件数。
+    mutationFn: async (input: GroupAction): Promise<WatchId | number | null> => {
       if (!runtime) return null;
       if (input.action === "create") {
         const id = await createWatchGroup(input.name);
@@ -359,7 +358,7 @@ export default function UpdatesPage() {
         // 自動確認の範囲だったなら、すべてへ戻す。消えたグループを指したままだと、
         // 自動確認が黙って止まる。
         const current = await loadSchedule();
-        if (watchGroupMatches(input.group, current.groupId)) {
+        if (input.group.id === current.groupId) {
           await saveSchedule({ ...current, groupId: null });
           setScheduleRevision((value) => value + 1);
         }
@@ -581,7 +580,6 @@ export default function UpdatesPage() {
               onSave={() => saveCandidatesMutation.mutate(selectedSavableIds)}
               onLoadMore={() => runtime && updateJobs.loadMoreCandidates()}
               onDismiss={(candidate) => dismissMutation.mutate(candidate)}
-              onOpenWork={(id) => navigate(`/works/${id}`)}
             />
           ) : (
             <EmptyState icon={Icons.versionHistory} title="更新ジョブはまだありません" description="上の対象と方法を選び、「確認を開始」を押してください。" />
@@ -600,13 +598,12 @@ export default function UpdatesPage() {
               onRetry={() => void (resultIsTerminal ? jobItems.refetch() : heldItems.refetch())}
               onShowLogs={() => selectTab("logs")}
               onShowDeferred={() => selectTab("deferred")}
-              onOpenWork={(id) => navigate(`/works/${id}`)}
             />
           ) : <EmptyState icon={Icons.confirm} title="結果はまだありません" description="確認を開始すると、処理結果をここで確認できます。" />}
         </Tabs.Panel>
 
         <Tabs.Panel value="deferred" pt="lg">
-          <DeferredCandidatesPanel runtime={runtime} onOpenWork={(id) => navigate(`/works/${id}`)} onRechecked={(jobId) => { void updateJobs.selectJob(jobId); selectTab("candidates"); }} />
+          <DeferredCandidatesPanel runtime={runtime} onRechecked={(jobId) => { void updateJobs.selectJob(jobId); selectTab("candidates"); }} />
         </Tabs.Panel>
 
         <Tabs.Panel value="logs" pt="lg">
@@ -674,7 +671,7 @@ export default function UpdatesPage() {
 }
 
 /** A selected job's outcome, including holds that exist only in its history. */
-export function JobResultsPanel({ job, subject, items, loading, error, onRetry, onShowLogs, onShowDeferred, onOpenWork }: {
+export function JobResultsPanel({ job, subject, items, loading, error, onRetry, onShowLogs, onShowDeferred }: {
   job: UpdateJobSnapshot;
   subject?: string;
   items: UpdateJobItemState[] | null;
@@ -683,7 +680,6 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
   onRetry: () => void;
   onShowLogs: () => void;
   onShowDeferred: () => void;
-  onOpenWork?: (downloadId: number) => void;
 }) {
   const [visibleHeldCount, setVisibleHeldCount] = useState(50);
   const terminal = isUpdateJobTerminal(job.status);
@@ -723,7 +719,7 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
               <UpdateWorkMetadata metadata={item.metadata} />
             </Stack>
             <UpdateStatusBadge title={item.title || item.sourceId || "作品"} {...acquisitionStatusMeta(heldAcquisitionKind(reason))} detail={item.error || "確認を保留しました。保存済みの内容は保持されています。"} />
-            {item.source && item.sourceId && <UpdateWorkLinks source={item.source} sourceId={item.sourceId} downloadId={item.downloadId} workId={item.workId} title={item.title || item.sourceId} onOpenWork={onOpenWork} />}
+            {item.source && item.sourceId && <UpdateWorkLinks source={item.source} sourceId={item.sourceId} workId={item.workId} title={item.title || item.sourceId} />}
           </Group>
         </Paper>;
       })}
@@ -833,7 +829,7 @@ function JobStageProgress({ label, processed, total, animated }: { label: string
   </Box>;
 }
 
-export function CandidatesPanel({ candidates, selectedIds, selectableIds, running, saving, allowQueuedSelection, hasMore, jobActive, onToggle, onSelectMany, onClearSelection, onSave, onLoadMore, onDismiss, onOpenWork }: {
+export function CandidatesPanel({ candidates, selectedIds, selectableIds, running, saving, allowQueuedSelection, hasMore, jobActive, onToggle, onSelectMany, onClearSelection, onSave, onLoadMore, onDismiss }: {
   candidates: UpdateJobSnapshot["candidates"];
   selectedIds: Set<number>;
   selectableIds: number[];
@@ -848,7 +844,6 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
   onSave: () => void;
   onLoadMore: () => void;
   onDismiss: (candidate: UpdateJobSnapshot["candidates"][number]) => void;
-  onOpenWork?: (downloadId: number) => void;
 }) {
   const [kind, setKind] = useState<string>("all");
   // 済んだものは畳む。数は残す - 「無かったこと」にはしない。
@@ -939,7 +934,7 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
                 <UpdateWorkMetadata metadata={candidate.metadata} fallback={[candidate.targetLabel, candidate.subtitle].filter(Boolean).join(" · ")} />
               </Stack>
               <UpdateStatusBadge title={candidate.title} {...candidateStatusMeta(candidate)} detail={candidate.error} />
-              <UpdateWorkLinks source={candidate.source} sourceId={candidate.sourceId} downloadId={candidate.downloadId} workId={candidate.workId} title={candidate.title} onOpenWork={onOpenWork} />
+              <UpdateWorkLinks source={candidate.source} sourceId={candidate.sourceId} workId={candidate.workId} title={candidate.title} />
               {isSavableCandidate(candidate) && (
                 <Tooltip label="候補から外す（保留・非表示の一覧から戻せます）">
                   <ActionIcon variant="subtle" color="gray" aria-label={`${candidate.title}を候補から外す`} onClick={() => onDismiss(candidate)}>
@@ -992,7 +987,7 @@ function describeSchedule(schedule: UpdateScheduleSettings | undefined, groups: 
   if (!when.length) return "オフ";
   if (schedule.groupId === null) return `${when.join(" · ")}・${mode}`;
   if (!groups) return "…";
-  const group = groups.find((item) => watchGroupMatches(item, schedule.groupId));
+  const group = groups.find((item) => item.id === schedule.groupId);
   return group ? `${when.join(" · ")}・「${group.name}」を${mode}` : "グループが見つからず停止中";
 }
 

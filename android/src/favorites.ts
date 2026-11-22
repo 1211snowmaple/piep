@@ -10,7 +10,7 @@ import { favoriteReadRevision, nextFavoriteRevision } from "./favoriteFreshness"
  *
  * 一覧・詳細・読書画面はそれぞれ別の時点の作品を持っているので、ここを通して同じ値を見る。
  * 鍵は取得元の番号。サーバーの作品番号は同じ作品でも機械ごとに違う。
- * 新しい棚の作品は更新世代（`generation`）も覚え、次の付け外しの `expected` に使う。
+ * 棚の作品は更新世代（`generation`）も覚え、次の付け外しの `expected` に使う。
  */
 type Entry = { favorite: boolean; busy: boolean; revision: number; generation?: string };
 

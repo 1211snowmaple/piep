@@ -33,7 +33,7 @@ function block(order: number, blockType: WorkBlock["blockType"], text: string): 
 /** リンクは8番目に置く。エディタは窓に入る分しか描かないので、9番目へ送ると
  *  その行は本当にアンマウントされ、戻すと組み立て直される。 */
 function documentWithLinkAtIndexSeven(): EditorDocument {
-  const base = getDemoEditor(101);
+  const base = getDemoEditor("101");
   const blocks: WorkBlock[] = [
     ...Array.from({ length: 7 }, (_, index) => block(index, "paragraph", `段落${index + 1}`)),
     block(7, "link", "https://example.com/before"),

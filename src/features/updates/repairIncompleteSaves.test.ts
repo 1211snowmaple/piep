@@ -32,14 +32,6 @@ it("queues missing details through the normal save job and does not repeat accep
   expect(api.start).toHaveBeenCalledOnce();
 });
 
-it("moves attempts recorded by older builds into the library once", async () => {
-  localStorage.setItem("piep.incomplete-save-repair.v2", JSON.stringify(["pixiv:1","fanbox:9"]));
-  expect(await startIncompleteSaveRepair()).toEqual({waiting:false});
-  expect(api.record).toHaveBeenCalledWith(["1"]);
-  expect(localStorage.getItem("piep.incomplete-save-repair.v2")).toBeNull();
-  expect(api.start).not.toHaveBeenCalled();
-});
-
 it("waits for an existing download job instead of adding background traffic", async () => {
   api.jobs.mockResolvedValue([{status:"running"}]);
   expect(await startIncompleteSaveRepair()).toEqual({ waiting:true });

@@ -753,7 +753,7 @@ async fn the_phone_list_sorts_filters_and_pages_the_shelf_with_the_v1_conditions
     assert_eq!(numbered.items[0].id, south.entity_id.to_string());
     assert!(numbered.next_cursor.is_none());
 
-    // 絞り込みは新しい棚の一覧の意味で効く。
+    // 絞り込みは棚の一覧の意味で効く。
     let none = shelf_page(
         server
             .search(json!({"source": "fanbox"}))
@@ -1405,7 +1405,7 @@ async fn people_series_and_collections_come_from_the_shelf_in_the_v1_shapes() {
         .await;
     assert!(none.is_empty());
 
-    // 棚に無いもの・知らない条件は、旧棚へ回さず断る。
+    // 棚に無いもの・知らない条件は断る。
     for (rest, status) in [
         (
             "/people/detail?provider=pixiv&key=nobody".to_string(),
@@ -1528,7 +1528,7 @@ async fn search_suggestions_come_from_the_shelf_in_the_v1_shape() {
         ("tag", Some(3))
     );
 
-    // 前方一致で足りなければ、名前の途中も拾う（旧棚と同じ）。
+    // 前方一致で足りなければ、名前の途中も拾う。
     let infix: piep_mobile_api::MobileSearchSuggestions = server
         .read("/works/suggest?text=%E3%81%AE%E9%A1%8C", "fixture")
         .await;

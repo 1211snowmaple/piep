@@ -248,7 +248,7 @@ pub fn load_shelf_manifest(
     Ok((manifest, provider, title, staging))
 }
 
-/// 読み込んだ一冊。新しい棚の作品は、書き出した一時の置き場を手放すまで画像が読める。
+/// 読み込んだ一冊。棚の作品は、書き出した一時の置き場を手放すまで画像が読める。
 pub(crate) struct LoadedWork {
     pub manifest: EpubManifest,
     pub source: String,
@@ -836,13 +836,13 @@ fn deduplicate_download_ids(download_ids: Vec<EpubWork>) -> Vec<EpubWork> {
 /// 収録する回（表紙に選ばれているか・作品・題）と、収録できない回の題。
 type CollectionParts = (CollectionBook, Vec<(bool, EpubWork, String)>, Vec<String>);
 
-/// 新しい棚のコレクション。表紙は表紙に選んだ作品の表紙と同じ画像の回。
+/// 棚のコレクション。表紙は表紙に選んだ作品の表紙と同じ画像の回。
 fn collection_parts_on_shelf(
     shelf: &crate::commands::shelf::Shelf,
     id: &str,
 ) -> Result<CollectionParts, String> {
     let library = shelf.library()?;
-    let target = crate::commands::shelf::collection_target(&library, id)?;
+    let target = crate::commands::shelf::collection_target(id)?;
     let detail = library
         .collection_detail(target)
         .map_err(|e| e.to_string())?;
@@ -862,11 +862,7 @@ fn collection_parts_on_shelf(
         }
     }
     let book = CollectionBook {
-        id: detail
-            .summary
-            .legacy_id
-            .clone()
-            .unwrap_or_else(|| detail.summary.id.to_string()),
+        id: detail.summary.id.to_string(),
         name: detail.summary.name.clone(),
         description: detail.summary.description.clone(),
         revision: detail.summary.revision,
@@ -930,7 +926,7 @@ pub async fn export_collection_epub(
         },
     );
     let mut manifests = Vec::with_capacity(exportable.len());
-    // 新しい棚の作品の画像は、本を組み終えるまで一時の置き場に置いておく。
+    // 棚の作品の画像は、本を組み終えるまで一時の置き場に置いておく。
     let mut stagings = Vec::new();
     for (index, (chosen_cover, work, member_title)) in exportable.into_iter().enumerate() {
         emit_progress(
@@ -1538,7 +1534,7 @@ pub async fn preview_epub_template(
     let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
     let tm = get_template_manager(&app)?;
 
-    // 新しい棚の作品の画像は、見本を組み終えるまで一時の置き場に置いておく。
+    // 棚の作品の画像は、見本を組み終えるまで一時の置き場に置いておく。
     let mut _staging = None;
     let (manifest, source, title, resolved_id) = match download_id {
         Some(id) => {

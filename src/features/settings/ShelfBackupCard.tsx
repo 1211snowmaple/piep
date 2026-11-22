@@ -45,14 +45,14 @@ function join(directory: string, name: string): string {
 }
 
 /**
- * 新しい棚のバックアップと復元。
+ * 棚のバックアップと復元。
  *
  * バックアップは棚そのものの写し（フォルダー一つ）で、作ったときに全体を検査する。復元は開いている棚を
  * 入れ替えることになるので、検査を通った写しを予約し、次に起動したときに入れ替える。今の棚は消さずに
  * 隣へ退け、選んだ写しも手元に残る。
  *
  * 作者・シリーズのアーカイブ（棚の部分写し）を選んだときは、入れ替えずに今の棚へ取り込む。今の棚に
- * 無い作品だけを足し、ある作品・記録は変えない。切り替えた棚にだけ取り込める。
+ * 無い作品だけを足し、ある作品・記録は変えない。
  */
 export function ShelfBackupCard({ runtime, busy }: { runtime: boolean; busy: boolean }) {
   const queryClient = useQueryClient();
@@ -181,11 +181,10 @@ export function ShelfBackupCard({ runtime, busy }: { runtime: boolean; busy: boo
               <Text size="sm">{formatBytes(review.bytes)}</Text>
             </Group>
             {!review.sameLibrary && <Alert color="yellow">今の棚とは別の棚の写しです。入れ替えると、今の棚にある作品・編集・読書位置は、この写しの内容になります。</Alert>}
-            {!review.switched && <Alert color="yellow">正本に切り替える前の写しです。この写しでは棚を入れ替えられません。</Alert>}
             <Text size="xs" c="dimmed">今の棚は消さずに隣へ退けます。選んだ写しもそのまま残ります。</Text>
             <ActionRow>
               <Button variant="default" disabled={schedule.isPending} onClick={() => setReview(null)}>キャンセル</Button>
-              <DangerButton disabled={!review.switched} loading={schedule.isPending} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => schedule.mutate(review.path)}>次の起動で入れ替える</DangerButton>
+              <DangerButton loading={schedule.isPending} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => schedule.mutate(review.path)}>次の起動で入れ替える</DangerButton>
             </ActionRow>
           </Stack>
         )}

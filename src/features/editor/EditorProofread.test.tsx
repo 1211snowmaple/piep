@@ -52,7 +52,7 @@ function block(order: number, blockType: WorkBlock["blockType"], text: string | 
 }
 
 function documentWith(blocks: WorkBlock[], extra: Partial<EditorDocument> = {}): EditorDocument {
-  return { ...getDemoEditor(101), blocks, ...extra };
+  return { ...getDemoEditor("101"), blocks, ...extra };
 }
 
 function renderEditor() {

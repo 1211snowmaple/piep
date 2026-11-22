@@ -385,7 +385,6 @@ describe("series page", () => {
   it("opens the collections this series belongs to, the same way an author does", async () => {
     api.shelfEntityCollections.mockResolvedValue([{
       id: "0195f1c2-0000-7000-8000-0000000000d1",
-      legacy_id: null,
       name: "連作の棚",
       description: null,
       ordered: false,

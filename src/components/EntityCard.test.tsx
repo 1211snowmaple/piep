@@ -50,11 +50,11 @@ describe("EntityCard", () => {
     render(
       <MantineProvider>
         <AppRouter>
-          <EntityCard entity={entity} kind="series" watch="paused" watchHint="新しい棚では変えられません" />
+          <EntityCard entity={entity} kind="series" watch="paused" watchHint="棚では変えられません" />
         </AppRouter>
       </MantineProvider>,
     );
-    const button = screen.getByRole("button", { name: "このシリーズの更新監視は停止中（新しい棚では変えられません）" });
+    const button = screen.getByRole("button", { name: "このシリーズの更新監視は停止中（棚では変えられません）" });
     expect(button).toHaveAttribute("aria-disabled", "true");
     expect(button).toHaveAttribute("data-state", "paused");
     fireEvent.click(button);
