@@ -1020,4 +1020,38 @@ mod tests {
         server.abort();
         assert!(server.await.unwrap_err().is_cancelled());
     }
+
+    /// 一覧や関係で識別だけ先にできた作品（版が無い）でも、初めての保存として保存できる。
+    #[tokio::test]
+    async fn a_work_known_only_by_its_identity_is_saved_as_a_first_save() {
+        let fixture =
+            Fixture(std::env::temp_dir().join(format!("piep-app-save-{}", LibraryId::now_v7())));
+        let library = Arc::new(Library::create(&fixture.0.join("shelf")).unwrap());
+        let shelf = Arc::new(Shelf::with_test_library(Arc::clone(&library)));
+        let early = LibraryId::now_v7();
+        library
+            .begin_acquisition(early, "fanbox", EntityKind::Work, "1", "save")
+            .unwrap();
+        library.cancel_acquisition(early).unwrap();
+        let known = library.work_by_key("fanbox", "1").unwrap().unwrap();
+        assert_eq!(library.saved_work_by_key("fanbox", "1").unwrap(), None);
+        let saved = save_to_shelf(
+            Arc::clone(&shelf),
+            Arc::clone(&library),
+            json!({"title":"投稿","type":"text","body":{"text":"本文"}}),
+            "fanbox".into(),
+            "1".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.work, known);
+        assert_eq!(library.work_card(saved.work).unwrap().title, "投稿");
+        assert_eq!(
+            library.saved_work_by_key("fanbox", "1").unwrap(),
+            Some(known)
+        );
+        library.verify().unwrap();
+    }
 }

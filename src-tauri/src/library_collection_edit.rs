@@ -105,6 +105,22 @@ impl Library {
             .transpose()
     }
 
+    /// 保存した版のある作品だけを引く。取得元の一覧や関係から識別だけが先にできた作品
+    /// （版がまだ無い）は、保存済みとして扱わない。
+    pub fn saved_work_by_key(&self, provider: &str, key: &str) -> Result<Option<LibraryId>> {
+        self.reader()?
+            .query_row(
+                "SELECT x.entity_id FROM external_identities x
+                 JOIN entity_current c ON c.entity_id=x.entity_id
+                 WHERE x.provider=?1 AND x.kind='work' AND x.external_key=?2",
+                params![provider, key],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .map(id_of)
+            .transpose()
+    }
+
     fn current_collection(&self, collection: LibraryId) -> Result<Option<Current>> {
         let conn = self.reader()?;
         let head: Option<(String, Option<String>, bool, i64)> = conn

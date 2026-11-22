@@ -197,12 +197,24 @@ fn work_reader_bindings(
         .collect()
 }
 
-/// 画像を pixiv の品質の印から分ける（縮小版・原寸・不明）。
-fn quality(url: Option<&str>) -> &'static str {
-    if url.is_some_and(|u| u.contains("/c/")) {
+/// 画像を URL の印から分ける（縮小版・原寸・不明）。
+///
+/// pixiv の画像サーバーは縮小・切り抜きを `/c/…/` で表し、原寸を `…-original/` に置く。FANBOX は
+/// 本文の画像の原寸を `downloads.fanbox.cc` から配り、表紙の原寸は同じ画像サーバーの
+/// `fanbox/public/` にある（作り直した版は `/c/…/` の下）。
+pub(crate) fn quality(url: Option<&str>) -> &'static str {
+    let Some(url) = url else {
+        return "unknown";
+    };
+    if url.contains("/c/") {
         "thumbnail"
-    } else if url.is_some_and(|u| u.contains("-original/")) {
+    } else if url.contains("-original/")
+        || url.starts_with("https://downloads.fanbox.cc/")
+        || url.starts_with("https://pixiv.pximg.net/fanbox/public/")
+    {
         "original"
+    } else if url.contains("-master/") {
+        "master"
     } else {
         "unknown"
     }
@@ -229,7 +241,14 @@ pub(crate) fn staged_assets(
         match asset_reference(&role, &name)? {
             ResourceReference::Media { slot } => {
                 let media_key = if role == "cover" {
-                    url.as_deref()
+                    // FANBOX の表紙は、作り直した版の URL（`coverImageUrl`）で同じ画像とみる。原寸を
+                    // 取っても別の画像にならず、版も増えない（pixiv は同一性の規則が縮小の印を外す）。
+                    let listed = (provider == "fanbox")
+                        .then(|| data.get("coverImageUrl").and_then(Value::as_str))
+                        .flatten()
+                        .filter(|url| !url.trim().is_empty());
+                    listed
+                        .or(url.as_deref())
                         .or_else(|| data.get("cover_url").and_then(Value::as_str))
                         .or_else(|| detail.get("cover_url").and_then(Value::as_str))
                         .or_else(|| data.get("coverImageUrl").and_then(Value::as_str))

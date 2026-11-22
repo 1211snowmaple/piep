@@ -330,7 +330,7 @@ pub(super) async fn save_to_shelf(
     .await
 }
 
-/// 保存済みの pixiv の応答に原寸の在り処を足したものを、保存し直す（縮小版の画像の取り直し）。
+/// 保存済みの応答（pixiv・FANBOX）に原寸の在り処を足したものを、保存し直す（縮小版の画像の取り直し）。
 ///
 /// 手元の版と同じ応答でも保存する（表紙の枠は名前によらず一つなので、普段の保存は「持っている」と
 /// みて何もしない）。URL が変わらない画像・添付は棚から戻し、原寸に変わった画像だけを取りに行く。
@@ -339,19 +339,10 @@ pub(crate) async fn save_originals_to_shelf(
     shelf: Arc<Shelf>,
     library: Arc<Library>,
     data: Value,
+    source: String,
     source_id: String,
 ) -> Result<ShelfSaved, String> {
-    save_to_shelf_as(
-        shelf,
-        library,
-        data,
-        "pixiv".into(),
-        source_id,
-        None,
-        None,
-        true,
-    )
-    .await
+    save_to_shelf_as(shelf, library, data, source, source_id, None, None, true).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -371,11 +362,12 @@ async fn save_to_shelf_as(
     if source == "fanbox" && data.get("isRestricted").and_then(Value::as_bool) == Some(true) {
         return Err(fanbox_missing_material_error(&data));
     }
+    // 一覧や関係で識別だけ先にできた作品（版が無い）は、初めての保存として扱う。
     let existing = {
         let (library, source, key) = (Arc::clone(&library), source.clone(), source_id.clone());
         blocking(move || {
             library
-                .work_by_key(&source, &key)
+                .saved_work_by_key(&source, &key)
                 .map_err(|e| e.to_string())
         })
         .await?
@@ -448,11 +440,13 @@ async fn save_to_shelf_as(
     }
 
     // 原寸は、実際に保存すると決まったここで探す。
-    if source == "pixiv" && !reader_only && !upgrade_images {
-        match crate::downloader::pixiv_originals::cdn_client() {
-            Ok(client) => {
-                crate::downloader::pixiv_originals::add_original_urls(&client, &mut data).await
+    if matches!(source.as_str(), "pixiv" | "fanbox") && !reader_only && !upgrade_images {
+        use crate::downloader::pixiv_originals as originals;
+        match originals::cdn_client() {
+            Ok(client) if source == "pixiv" => {
+                originals::add_original_urls(&client, &mut data).await
             }
+            Ok(client) => originals::add_fanbox_original_cover(&client, &mut data).await,
             Err(error) => log::warn!("原寸の画像を探さずに保存します: {error}"),
         }
     }

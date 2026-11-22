@@ -129,6 +129,7 @@ pub(super) fn refingerprint_unclassified(conn: &Connection) -> Result<()> {
         let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
+    let mut stale = 0usize;
     for id in ids {
         let snapshot = LibraryId::from_slice(&id)
             .map_err(|_| Error::Integrity("保存状態の識別子が不正です".into()))?;
@@ -143,14 +144,24 @@ pub(super) fn refingerprint_unclassified(conn: &Connection) -> Result<()> {
                 "保存状態 {snapshot} の内容が記録された指紋と一致しません"
             )));
         }
+        let entity: Vec<u8> = conn.query_row(
+            "SELECT entity_id FROM revision_snapshots WHERE id=?1",
+            [id.as_slice()],
+            |r| r.get(0),
+        )?;
+        let entity = LibraryId::from_slice(&entity)
+            .map_err(|_| Error::Integrity("保存状態の識別子が不正です".into()))?;
+        // 対応表の指紋は構成の指紋を含むので、保存状態を書き換える前に今の指紋で確かめて移す。
+        if super::reader::move_to_manifest(conn, entity, snapshot, manifest)? {
+            stale += 1;
+        }
         conn.execute(
             "UPDATE revision_snapshots SET manifest_hash=?2 WHERE id=?1",
             rusqlite::params![id.as_slice(), manifest.0.as_slice()],
         )?;
-        conn.execute(
-            "UPDATE reader_binding_sets SET source_manifest=?2 WHERE snapshot_id=?1",
-            rusqlite::params![id.as_slice(), manifest.0.as_slice()],
-        )?;
+    }
+    if stale > 0 {
+        log::info!("指紋が古いまま残っていた読書用の対応表を {stale} 件直しました");
     }
     Ok(())
 }

@@ -77,7 +77,7 @@ fn a_reduced_cover_is_found_and_the_original_replaces_it_without_a_new_version()
         },
     );
     assert_eq!(
-        library.reduced_pixiv_works().unwrap(),
+        library.reduced_works().unwrap(),
         vec![ReducedShelfWork {
             work: first.entity_id,
             covers: 1,
@@ -114,6 +114,70 @@ fn a_reduced_cover_is_found_and_the_original_replaces_it_without_a_new_version()
             .id,
         crate::library::Fingerprint::of(&std::fs::read(&original).unwrap())
     );
-    assert!(library.reduced_pixiv_works().unwrap().is_empty());
+    assert!(library.reduced_works().unwrap().is_empty());
+    library.verify().unwrap();
+}
+
+const FANBOX_REMADE: &str =
+    "https://pixiv.pximg.net/c/1200x630_90_a2_g5/fanbox/public/images/post/9/cover/abc.jpeg";
+const FANBOX_ORIGINAL: &str = "https://pixiv.pximg.net/fanbox/public/images/post/9/cover/abc.jpeg";
+
+#[test]
+fn a_remade_fanbox_cover_is_found_and_the_original_replaces_it_as_the_same_image() {
+    let root = std::env::temp_dir().join(format!("piep-originals-{}", LibraryId::now_v7()));
+    let _temp = Temp(root.clone());
+    let library = Library::create(&root.join("shelf")).unwrap();
+    let post = json!({
+        "id": "9", "title": "投稿", "type": "text", "creatorId": "c", "user": {"userId": "1", "name": "作者"},
+        "publishedDatetime": "2026-01-01T00:00:00+09:00", "updatedDatetime": "2026-01-01T00:00:00+09:00",
+        "coverImageUrl": FANBOX_REMADE, "body": {"text": "本文"},
+    });
+    let save = |data: &serde_json::Value, name: &str, url: &str, shade: u8| {
+        let path = root.join(name);
+        png(&path, shade);
+        library
+            .save_readable_work(
+                WorkSave {
+                    request: LibraryId::now_v7(),
+                    provider: "fanbox",
+                    key: "9",
+                    route: "save",
+                    data,
+                    assets: vec![StagedAsset {
+                        role: "cover".into(),
+                        name: "abc.jpeg".into(),
+                        path,
+                        url: Some(url.into()),
+                        mime_type: Some("image/png".into()),
+                    }],
+                },
+                None,
+            )
+            .unwrap()
+    };
+    let first = save(&post, "remade.png", FANBOX_REMADE, 1);
+    assert_eq!(
+        library.reduced_works().unwrap(),
+        vec![ReducedShelfWork {
+            work: first.entity_id,
+            covers: 1,
+            illustrations: 0
+        }]
+    );
+    let mut upgraded = post.clone();
+    upgraded[crate::downloader::pixiv_originals::COVER_ORIGINAL_FIELD] = json!(FANBOX_ORIGINAL);
+    let second = save(&upgraded, "original.png", FANBOX_ORIGINAL, 2);
+    assert_eq!(second.entity_id, first.entity_id);
+    assert!(!second.created_revision, "画質の違いで版を増やさない");
+    assert!(library.reduced_works().unwrap().is_empty());
+    let resources = library
+        .resource_manifest(
+            first.entity_id,
+            crate::library::ResourceScope::Snapshot(second.snapshot_id),
+        )
+        .unwrap()
+        .resources;
+    let cover = resources.iter().find(|r| r.quality.is_some()).unwrap();
+    assert_eq!(cover.quality.as_deref(), Some("original"));
     library.verify().unwrap();
 }

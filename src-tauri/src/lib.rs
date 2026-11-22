@@ -453,7 +453,7 @@ pub fn run() -> tauri::Result<()> {
             commands::backup_shelf::shelf_schedule_restore,
             commands::backup_shelf::shelf_restore_state,
             commands::backup_shelf::shelf_cancel_restore,
-            commands::original_images::shelf_upgrade_pixiv_images_to_original,
+            commands::original_images::shelf_upgrade_images_to_original,
             commands::original_images::cancel_original_image_upgrade,
             // 更新ジョブ (commands::update_jobs)
             commands::update_jobs::start_update_job,

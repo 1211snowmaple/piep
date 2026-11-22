@@ -13,6 +13,11 @@
 //! 判断（内容の指紋）は `cover_url` で行うので、そこを原寸の URL に替えると、
 //! 何も変わっていない作品がすべて改稿として数えられる。原寸は別の欄
 //! `cover_original_url` に持つ。
+//!
+//! FANBOX の表紙も同じ形で扱う。応答の `coverImageUrl` は、画像サーバー
+//! （`pixiv.pximg.net`）が `c/1200x630_90_a2_g5/` で 1200×630 に作り直した版で、
+//! 同じ道の `c/…/` を抜いた場所に作者が上げたままの画像がある。大きいものも、
+//! 1200×630 より小さく引き伸ばされていたものもある。
 
 use regex::Regex;
 use serde_json::Value;
@@ -23,6 +28,7 @@ use std::time::Duration;
 pub(crate) const COVER_ORIGINAL_FIELD: &str = "cover_original_url";
 
 const PIXIV_REFERER: &str = "https://www.pixiv.net/";
+const FANBOX_REFERER: &str = "https://www.fanbox.cc/";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 /// 表紙の縮小版と、縮めていない master 版。
@@ -40,6 +46,21 @@ static ILLUST: LazyLock<Regex> = LazyLock::new(|| {
     )
     .unwrap()
 });
+
+/// FANBOX の表紙の作り直した版（`c/1200x630_90_a2_g5/` など）。
+static FANBOX_COVER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^https://pixiv\.pximg\.net/c/[^/]+/(?P<path>fanbox/public/images/post/[0-9]+/cover/[^/?#]+)$",
+    )
+    .unwrap()
+});
+
+/// FANBOX の表紙の作り直した版から、作者が上げたままの版の URL を作る。
+pub(crate) fn fanbox_original_cover(url: &str) -> Option<String> {
+    FANBOX_COVER
+        .captures(url.trim())
+        .map(|captures| format!("https://pixiv.pximg.net/{}", &captures["path"]))
+}
 
 /// 縮小された画像の URL から、良い順に試す候補を作る。
 ///
@@ -83,6 +104,11 @@ pub(crate) fn is_reduced_pixiv_image(url: &str) -> bool {
     !original_candidates(url).is_empty()
 }
 
+/// 作り直した版として保存されている FANBOX の表紙か。
+pub(crate) fn is_reduced_fanbox_cover(url: &str) -> bool {
+    fanbox_original_cover(url).is_some()
+}
+
 /// 画像サーバー用の接続。認証は付けない。
 pub(crate) fn cdn_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -109,17 +135,27 @@ pub(crate) async fn find_original(
     client: &reqwest::Client,
     url: &str,
 ) -> Result<OriginalLookup, String> {
-    find_first_existing(client, original_candidates(url)).await
+    find_first_existing(client, original_candidates(url), PIXIV_REFERER).await
+}
+
+/// FANBOX の表紙の作り直した版から、作者が上げたままの版を探す。
+pub(crate) async fn find_fanbox_original_cover(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<OriginalLookup, String> {
+    let candidates = fanbox_original_cover(url).into_iter().collect();
+    find_first_existing(client, candidates, FANBOX_REFERER).await
 }
 
 async fn find_first_existing(
     client: &reqwest::Client,
     candidates: Vec<String>,
+    referer: &str,
 ) -> Result<OriginalLookup, String> {
     for candidate in candidates {
         let response = client
             .head(&candidate)
-            .header("Referer", PIXIV_REFERER)
+            .header("Referer", referer)
             .header("User-Agent", USER_AGENT)
             .send()
             .await
@@ -161,6 +197,50 @@ pub(crate) async fn add_original_urls(client: &reqwest::Client, data: &mut Value
         }
     })
     .await
+}
+
+/// 保存する直前の FANBOX の投稿に、表紙の原寸の URL を `cover_original_url` として書き足す
+/// （`coverImageUrl` はそのまま）。探せなかったときは触らない。
+pub(crate) async fn add_fanbox_original_cover(client: &reqwest::Client, data: &mut Value) {
+    add_fanbox_original_cover_with(data, |url| async move {
+        match find_fanbox_original_cover(client, &url).await {
+            Ok(OriginalLookup::Found(found)) => Some(found),
+            Ok(OriginalLookup::Unavailable) => None,
+            Err(error) => {
+                log::warn!(
+                    "表紙の原寸を確認できません（作り直した版で保存します）: {url}: {error}"
+                );
+                None
+            }
+        }
+    })
+    .await
+}
+
+/// `add_fanbox_original_cover` の本体。探し方を差し替えて試験できるように分けてある。
+pub(crate) async fn add_fanbox_original_cover_with<F, Fut>(data: &mut Value, find: F)
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    if data
+        .get(COVER_ORIGINAL_FIELD)
+        .and_then(Value::as_str)
+        .is_some_and(|url| !url.is_empty())
+    {
+        return;
+    }
+    let Some(cover) = data
+        .get("coverImageUrl")
+        .and_then(Value::as_str)
+        .filter(|url| is_reduced_fanbox_cover(url))
+        .map(str::to_string)
+    else {
+        return;
+    };
+    if let Some(found) = find(cover).await {
+        data[COVER_ORIGINAL_FIELD] = Value::String(found);
+    }
 }
 
 /// `add_original_urls` の本体。探し方を差し替えて試験できるように分けてある。
@@ -255,6 +335,45 @@ mod tests {
                 "https://i.pximg.net/novel-cover-master/img/2024/11/15/19/39/13/ci23413112_bbb0c381096512a7d02ab80ef9ec4d6b_master1200.jpg",
             ]
         );
+    }
+
+    #[test]
+    fn a_remade_fanbox_cover_points_at_the_uploaded_original() {
+        let remade = "https://pixiv.pximg.net/c/1200x630_90_a2_g5/fanbox/public/images/post/11376477/cover/IAUxB8EvcNrLPrfEWX0MPgx0.jpeg";
+        assert_eq!(
+            fanbox_original_cover(remade).as_deref(),
+            Some("https://pixiv.pximg.net/fanbox/public/images/post/11376477/cover/IAUxB8EvcNrLPrfEWX0MPgx0.jpeg")
+        );
+        for other in [
+            "https://pixiv.pximg.net/fanbox/public/images/post/11376477/cover/IAUxB8EvcNrLPrfEWX0MPgx0.jpeg",
+            "https://downloads.fanbox.cc/images/post/3275512/0ibdpmEmncEH.jpeg",
+            "https://pixiv.pximg.net/c/1200x630_90_a2_g5/fanbox/public/images/post/1/cover/a.jpeg?x=1",
+            "http://pixiv.pximg.net/c/1200x630_90_a2_g5/fanbox/public/images/post/1/cover/a.jpeg",
+            COVER_240,
+        ] {
+            assert_eq!(fanbox_original_cover(other), None, "{other}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fanbox_post_gains_the_original_cover_and_keeps_the_listed_one() {
+        let remade =
+            "https://pixiv.pximg.net/c/1200x630_90_a2_g5/fanbox/public/images/post/1/cover/a.jpeg";
+        let mut post = json!({"id":"1","coverImageUrl":remade});
+        add_fanbox_original_cover_with(&mut post, |url| async move { fanbox_original_cover(&url) })
+            .await;
+        assert_eq!(post["coverImageUrl"], remade);
+        assert_eq!(
+            post[COVER_ORIGINAL_FIELD],
+            "https://pixiv.pximg.net/fanbox/public/images/post/1/cover/a.jpeg"
+        );
+        // 見つからなければ触らない。表紙の無い投稿も同じ。
+        let mut missing = json!({"id":"1","coverImageUrl":remade});
+        add_fanbox_original_cover_with(&mut missing, |_| async { None }).await;
+        assert!(missing.get(COVER_ORIGINAL_FIELD).is_none());
+        let mut bare = json!({"id":"1","coverImageUrl":null});
+        add_fanbox_original_cover_with(&mut bare, |_| async { panic!("探さない") }).await;
+        assert!(bare.get(COVER_ORIGINAL_FIELD).is_none());
     }
 
     #[test]
@@ -379,7 +498,7 @@ mod tests {
             .into_iter()
             .map(|url| url.replacen("https://i.pximg.net", &format!("http://{address}"), 1))
             .collect();
-        let found = find_first_existing(&cdn_client().unwrap(), candidates)
+        let found = find_first_existing(&cdn_client().unwrap(), candidates, PIXIV_REFERER)
             .await
             .unwrap();
         let paths = server.await.unwrap();
@@ -414,7 +533,7 @@ mod tests {
             .map(|url| url.replacen("https://i.pximg.net", &format!("http://{address}"), 1))
             .collect();
         assert_eq!(
-            find_first_existing(&cdn_client().unwrap(), candidates).await,
+            find_first_existing(&cdn_client().unwrap(), candidates, PIXIV_REFERER).await,
             Ok(OriginalLookup::Unavailable)
         );
         server.await.unwrap();

@@ -1,7 +1,7 @@
-//! 縮小版で保存された pixiv の表紙・イラストを、原寸に取り直す。
+//! 縮小版で保存された pixiv の表紙・イラストと FANBOX の表紙を、原寸に取り直す。
 //!
-//! 取りに行くのは画像サーバー（`i.pximg.net`）だけで、pixiv の API も
-//! アカウントも使わない。原寸の在り処は保存済みの縮小版の URL から決まる。
+//! 取りに行くのは画像サーバー（`i.pximg.net`・`pixiv.pximg.net`）だけで、pixiv・FANBOX の
+//! API もアカウントも使わない。原寸の在り処は保存済みの縮小版の URL から決まる。
 //! 決め方は `downloader::pixiv_originals` にある。
 //!
 //! 版は増やさず、今の版の画像をその場で差し替える。作者が何かを変えたわけ
@@ -10,7 +10,9 @@
 //! 再開位置は持たない。差し替えた画像は縮小版の URL ではなくなるので、
 //! 次に走らせたときは残りだけが対象になる。
 
-use crate::downloader::pixiv_originals::{cdn_client, find_original, OriginalLookup};
+use crate::downloader::pixiv_originals::{
+    cdn_client, find_fanbox_original_cover, find_original, OriginalLookup,
+};
 use crate::AppState;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -109,7 +111,7 @@ async fn shelf_reduced_works(
     tokio::task::spawn_blocking(move || {
         shelf
             .library()?
-            .reduced_pixiv_works()
+            .reduced_works()
             .map_err(|error| error.to_string())
     })
     .await
@@ -156,35 +158,43 @@ async fn upgrade_shelf_work(
         .await
         .map_err(|error| format!("棚の読み込みが途中で止まりました: {error}"))??
     };
-    if card.provider != "pixiv" {
+    if !matches!(card.provider.as_str(), "pixiv" | "fanbox") {
         return Ok((Lookups::default(), card.title));
     }
     let raw = raw.ok_or("取得元の応答が残っていないため、原寸を探せません")?;
     let mut data: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     let lookups = std::sync::Mutex::new(Lookups::default());
-    crate::downloader::pixiv_originals::add_original_urls_with(&mut data, |url| {
-        let lookups = &lookups;
-        async move {
-            let result = find_original(client, &url).await;
-            let mut lookups = lookups.lock().unwrap_or_else(|error| error.into_inner());
-            match result {
-                Ok(OriginalLookup::Found(found)) => {
-                    lookups.found += 1;
-                    Some(found)
-                }
-                Ok(OriginalLookup::Unavailable) => {
-                    lookups.unavailable += 1;
-                    None
-                }
-                Err(error) => {
-                    lookups.failed += 1;
-                    lookups.last_error = Some(error);
-                    None
-                }
+    let count = |result: Result<OriginalLookup, String>| {
+        let mut lookups = lookups.lock().unwrap_or_else(|error| error.into_inner());
+        match result {
+            Ok(OriginalLookup::Found(found)) => {
+                lookups.found += 1;
+                Some(found)
+            }
+            Ok(OriginalLookup::Unavailable) => {
+                lookups.unavailable += 1;
+                None
+            }
+            Err(error) => {
+                lookups.failed += 1;
+                lookups.last_error = Some(error);
+                None
             }
         }
-    })
-    .await;
+    };
+    if card.provider == "pixiv" {
+        crate::downloader::pixiv_originals::add_original_urls_with(&mut data, |url| {
+            let count = &count;
+            async move { count(find_original(client, &url).await) }
+        })
+        .await;
+    } else {
+        crate::downloader::pixiv_originals::add_fanbox_original_cover_with(&mut data, |url| {
+            let count = &count;
+            async move { count(find_fanbox_original_cover(client, &url).await) }
+        })
+        .await;
+    }
     let mut lookups = lookups
         .into_inner()
         .unwrap_or_else(|error| error.into_inner());
@@ -195,6 +205,7 @@ async fn upgrade_shelf_work(
         Arc::clone(shelf),
         Arc::clone(library),
         data,
+        card.provider.clone(),
         card.external_key.clone(),
     )
     .await
@@ -209,7 +220,7 @@ async fn upgrade_shelf_work(
 
 /// 棚で、縮小版で保存された表紙・イラストを原寸に取り直す。
 #[tauri::command]
-pub async fn shelf_upgrade_pixiv_images_to_original(
+pub async fn shelf_upgrade_images_to_original(
     app: tauri::AppHandle,
 ) -> Result<OriginalImageResult, String> {
     let shelf = app
@@ -299,7 +310,7 @@ pub async fn shelf_upgrade_pixiv_images_to_original(
         if lookups.failed > 0 && lookups.found == 0 && lookups.unavailable == 0 {
             consecutive_failures += 1;
             log::warn!(
-                "pixiv の画像を原寸に取り直せません（作品 {}）: {}",
+                "画像を原寸に取り直せません（作品 {}）: {}",
                 reduced.work,
                 lookups.last_error.as_deref().unwrap_or_default()
             );
@@ -357,7 +368,7 @@ pub async fn shelf_upgrade_pixiv_images_to_original(
         ),
     );
     log::info!(
-        "棚の pixiv の画像の取り直し: 原寸{upgraded}件、公開元に無し{unavailable}件、失敗{failed}件、残り{remaining}件"
+        "棚の画像の取り直し: 原寸{upgraded}件、公開元に無し{unavailable}件、失敗{failed}件、残り{remaining}件"
     );
     Ok(OriginalImageResult {
         attempted: completed,

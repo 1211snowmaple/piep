@@ -582,6 +582,7 @@ mod tests {
             Arc::clone(&shelf),
             Arc::clone(&library),
             upgraded,
+            "pixiv".into(),
             "1".into(),
         )
         .await
