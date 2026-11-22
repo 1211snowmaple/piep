@@ -69,7 +69,7 @@ const summary: DashboardSummary = {
   monthlyDownloads: [],
 };
 
-describe("新しい棚のホーム", () => {
+describe("棚のホーム", () => {
   beforeEach(() => {
     shelfApi.shelfStatus.mockResolvedValue({ state: "ready", path: "C:/shelf" });
     shelfApi.shelfSearch.mockResolvedValue({ page: { items: [], next: null, total: 1 }, intent: null, matches: [], cards: [card] });
@@ -81,7 +81,7 @@ describe("新しい棚のホーム", () => {
     vi.clearAllMocks();
   });
 
-  it("数も最近の保存も新しい棚から出し、旧棚には聞かない", async () => {
+  it("数も最近の保存も棚から出し、旧棚には聞かない", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <MantineProvider>

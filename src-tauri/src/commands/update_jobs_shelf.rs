@@ -1,4 +1,4 @@
-//! 切り替えた棚の作品を更新確認する。ジョブには取得元の鍵だけを残し、処理時に現在版を読む。
+//! 棚の作品を更新確認する。ジョブには取得元の鍵だけを残し、処理時に現在版を読む。
 
 use super::*;
 use crate::library::{EntityKind, Library, WorkCard, WorkFilter, WorkListQuery};

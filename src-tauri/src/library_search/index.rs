@@ -336,7 +336,7 @@ impl Library {
 
     /// 索引の形式と世代を確かめ、合わなければ空から作り直す準備をする。作り直すなら `true`。
     fn prepare_space(&self, space: Space, storage: &Path) -> Result<bool> {
-        // 旧棚と同じ形式に、新しい棚だけの作り方（タグごとの読み）の版を足す。
+        // 旧棚と同じ形式に、棚だけの作り方（タグごとの読み）の版を足す。
         let format = format!("{}+tag-readings-1", tantivy_index::index_format_version());
         let marker_path = storage.join("search-index").join(MARKER);
         let state = space.state_table();

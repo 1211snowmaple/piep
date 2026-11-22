@@ -124,7 +124,7 @@ describe("ShelfWorkPage", () => {
     expect(await screen.findByText("2ページ本文")).toBeInTheDocument();
     expect(api.shelfContent).toHaveBeenCalledWith(WORK, null, 1);
 
-    // 読む画面へは、新しい棚の ID のまま進む。
+    // 読む画面へは、棚の ID のまま進む。
     fireEvent.click(screen.getByRole("button", { name: "読む" }));
     await waitFor(() => expect(window.location.hash).toBe(`#/reader/${WORK}`));
   });

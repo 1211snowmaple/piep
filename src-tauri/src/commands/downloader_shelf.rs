@@ -1,4 +1,4 @@
-//! 正本に切り替えた棚への保存。取り寄せた応答を、旧棚の保存と同じ形のまま棚へ入れる。
+//! 棚への保存。取り寄せた応答を、旧棚の保存と同じ形のまま棚へ入れる。
 //!
 //! 版を増やすかどうかは棚が決める（応答から作った項目・本文・画像と添付を今の版と比べる）。
 //! ここで決めるのは、画像と添付を落とし直さなくてよいか（応答の中身が今の版の原本と同じで、
@@ -21,7 +21,7 @@ use std::sync::Arc;
 #[path = "downloader_shelf_assets.rs"]
 mod repairs;
 
-/// 切り替えた棚へ保存した結果。
+/// 棚へ保存した結果。
 #[derive(Clone, Debug)]
 pub struct ShelfSaved {
     pub work: LibraryId,
@@ -314,7 +314,7 @@ pub(crate) async fn save_folder_to_shelf(
     .await
 }
 
-/// 取り寄せた応答を切り替えた棚へ保存する。
+/// 取り寄せた応答を棚へ保存する。
 pub(super) async fn save_to_shelf(
     shelf: Arc<Shelf>,
     library: Arc<Library>,

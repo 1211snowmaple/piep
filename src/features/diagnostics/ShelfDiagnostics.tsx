@@ -18,7 +18,7 @@ import {
 import { MaintenanceTaskCard, MetricCard } from "./diagnosticsParts";
 
 /**
- * 新しい棚の診断と手入れ。
+ * 棚の診断と手入れ。
  *
  * 棚のファイルは中身の指紋で台帳と結ばれているので、旧棚の「保存フォルダーとの照合」は
  * 「台帳と全ファイルの照合」に、「未登録ファイル」は「参照されない実体の回収」に置き換わる。

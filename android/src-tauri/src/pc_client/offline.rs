@@ -727,7 +727,7 @@ fn publish_snapshot(
     Ok(pointer)
 }
 
-/// 新しい棚の作品を保存する。読む画面と同じ一式から同じ組み立てでページを作るので、
+/// 棚の作品を保存する。読む画面と同じ一式から同じ組み立てでページを作るので、
 /// 保存版のページの切れ目と読書位置は、オンラインで読むときと同じ場所を指す。
 #[tauri::command]
 pub async fn offline_save_shelf_work(
@@ -1524,7 +1524,7 @@ pub(super) mod tests {
         let snapshot = work_dir.join(&snapshot_name);
         fs::create_dir_all(snapshot.join("pages")).unwrap();
         fs::create_dir_all(snapshot.join("assets")).unwrap();
-        // 新しい棚の画像の番号は 0 から。
+        // 棚の画像の番号は 0 から。
         let page = serde_json::to_vec(&serde_json::json!({
             "page": 0, "pageCount": 1, "html": "<p>棚の目印の文</p><img data-asset-id=\"0\">",
             "totalPlainTextChars": 7, "sourcePageStarts": [0]

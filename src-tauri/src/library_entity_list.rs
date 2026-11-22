@@ -1,8 +1,8 @@
-//! 新しい棚の作者・シリーズの一覧と、作者・シリーズに関わるコレクション（評価文書 6.22）。
+//! 棚の作者・シリーズの一覧と、作者・シリーズに関わるコレクション（評価文書 6.22）。
 //!
 //! ライブラリの「作者・クリエイター」「シリーズ」タブは旧棚の `search_entity_facets`・
 //! `count_entity_facets` を、作者・シリーズの画面のコレクションの欄は旧棚の
-//! `list_collections_for_person`・`list_collections_for_series` を、そのまま新しい棚で読む。
+//! `list_collections_for_person`・`list_collections_for_series` を、そのまま棚で読む。
 //! 数え方・並べ方は、旧棚と突き合わせて合わせたもの。
 
 use crate::library::{EntityKind, Library, LibraryId, Result, WorkFilter};
@@ -165,7 +165,7 @@ impl Library {
     ///
     /// 作品の絞り込みに当てはまる作品を作者・シリーズごとに集め、名前か説明の語・監視・完結・
     /// 作品の数で絞り、旧棚と同じ鍵で並べる。同じ値は作品の多い順・名前の順・取得元の ID の順。
-    /// 作者は名前の載った作品だけを数える（旧棚と同じ）。
+    /// 作者は名前の載った作品だけを数える。
     pub fn list_entities(&self, request: &EntityListQuery) -> Result<EntityListPage> {
         let rows =
             self.entity_rows(request.kind, &request.query, &request.filter, request.scope)?;
@@ -262,7 +262,7 @@ impl Library {
             watches.insert(entity, enabled);
         }
         // 版のない（プロフィールを取っていない）作者・シリーズは、作品に載った名前・題のうち
-        // 最も新しく更新された作品のもの（旧棚と同じく、絞り込みに依らない）。ほとんどの作者・
+        // 最も新しく更新された作品のもの。ほとんどの作者・
         // シリーズは版を持つので、持たないものだけを引く。
         let listed_sql = if series {
             "SELECT r.title FROM snapshot_series r JOIN work_current_projection p ON p.snapshot_id=r.snapshot_id
@@ -501,7 +501,7 @@ impl Library {
     }
 }
 
-/// コレクションの要約を、条件（`c` が `collections`）に当てはまるものだけ、旧棚と同じく更新の新しい順で。
+/// コレクションの要約を、条件（`c` が `collections`）に当てはまるものだけ、更新の新しい順で。
 /// 値は `?1` から順に束縛する。
 pub(crate) fn collection_summaries(
     conn: &rusqlite::Connection,

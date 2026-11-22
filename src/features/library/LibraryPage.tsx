@@ -1006,7 +1006,7 @@ export default function LibraryPage() {
     staleTime: 15_000,
   });
   const [selected, setSelected] = useState<number[]>([]);
-  // 新しい棚の作品は UUID で、一覧から外れても操作できるよう作品ごと憶える。
+  // 棚の作品は UUID で、一覧から外れても操作できるよう作品ごと憶える。
   const [shelfSelected, setShelfSelected] = useState<ShelfEntry[]>([]);
   const shelfSelectedIds = useMemo(() => new Set(shelfSelected.map((work) => work.id)), [shelfSelected]);
   const toggleShelfSelected = useCallback((work: ShelfEntry, next: boolean) => setShelfSelected((current) => next
@@ -1215,7 +1215,7 @@ export default function LibraryPage() {
       if (flagMutationsInFlight.current === 0) queryClient.invalidateQueries({ queryKey: ["library"] });
     },
   });
-  // 新しい棚では消さずに棚から外す（版・編集・コレクションの記録は残り、もう一度保存すると戻る）。
+  // 棚では消さずに棚から外す（版・編集・コレクションの記録は残り、もう一度保存すると戻る）。
   const shelfRemoveMutation = useMutation({
     mutationFn: async (works: ShelfEntry[]) => {
       for (const work of works) await shelfRemoveWork(work.id);
@@ -1650,7 +1650,7 @@ export default function LibraryPage() {
   const watchTargets = useQuery({
     queryKey: ["update-targets", "library"],
     queryFn: () => runtime ? listUpdateTargets<UpdateTarget>(null, false) : Promise.resolve([] as UpdateTarget[]),
-    // 新しい棚の行は、移した時点の監視の登録を自分で持っている。
+    // 棚の行は、移した時点の監視の登録を自分で持っている。
     enabled: (tab === "people" || tab === "series") && !shelfMode,
     staleTime: 30_000,
   });
@@ -2208,7 +2208,7 @@ export function searchSuggestionAction(item: SearchSuggestion): SearchSuggestion
   if (item.kind === "series" && source && sourceKey) {
     return { kind: "navigate", target: `/series/${encodeURIComponent(source)}/${encodeURIComponent(sourceKey)}` };
   }
-  // 題の候補の `sourceKey` は作品の ID（旧棚は番号、新しい棚は UUID）。
+  // 題の候補の `sourceKey` は作品の ID（旧棚は番号、棚は UUID）。
   if (item.kind === "title" && sourceKey && (/^\d+$/.test(sourceKey) || SHELF_WORK_ID.test(sourceKey))) {
     return { kind: "navigate", target: `/works/${sourceKey.toLowerCase()}` };
   }
@@ -2225,7 +2225,7 @@ const SUGGESTION_KIND_LABEL: Record<string, string> = {
   tag: "タグで絞る",
 };
 
-function LibrarySearch({ value, onChange, runtime, shelf, versionScope, method, onMethodChange }: { value: string; onChange: (value: string) => void; runtime: boolean; /** 新しい棚の一覧を出しているか。候補も棚から引く。 */ shelf: boolean; versionScope: LibraryVersionScope; method?: import("@/types/library").LibrarySearchMode; onMethodChange: (mode: import("@/types/library").LibrarySearchMode) => void }) {
+function LibrarySearch({ value, onChange, runtime, shelf, versionScope, method, onMethodChange }: { value: string; onChange: (value: string) => void; runtime: boolean; /** 棚の一覧を出しているか。候補も棚から引く。 */ shelf: boolean; versionScope: LibraryVersionScope; method?: import("@/types/library").LibrarySearchMode; onMethodChange: (mode: import("@/types/library").LibrarySearchMode) => void }) {
   const navigate = useAppNavigate();
   const [composing, setComposing] = useState(false);
   const [debounced] = useDebouncedValue(value, 180);
@@ -2642,7 +2642,7 @@ function FilterForm({ value, scope, versionScope, tab, runtime, shelfMode, autho
   versionScope: LibraryVersionScope;
   tab: LibraryTab;
   runtime: boolean;
-  /** 新しい棚を見ているか。選択肢を名前で探す先が変わる。 */
+  /** 棚を見ているか。選択肢を名前で探す先が変わる。 */
   shelfMode: boolean;
   authors: FacetCount[];
   tags: FacetCount[];

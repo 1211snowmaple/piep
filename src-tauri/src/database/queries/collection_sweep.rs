@@ -176,13 +176,13 @@ impl SweepBundle {
     }
 }
 
-/// 走査で見つけ、保存する前の候補。保存の仕方（旧棚・新しい棚）だけが違う。
+/// 走査で見つけ、保存する前の候補。保存の仕方（旧棚・棚）だけが違う。
 pub(crate) struct PreparedSweep {
     pub track: &'static str,
     pub strength: f64,
     pub ids_json: String,
     pub names: Vec<CollectionNameCandidate>,
-    /// `download_id` は出どころの作品の番号（新しい棚では作業用の表の番号）。
+    /// `download_id` は出どころの作品の番号（棚では作業用の表の番号）。
     pub members: Vec<CollectionSuggestionMember>,
     pub evidence: String,
 }

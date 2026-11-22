@@ -87,10 +87,10 @@ pub(crate) fn schedule_semantic_sync(library: Arc<Library>) {
                     &mut |_, _| {},
                 ) {
                     Ok(report) => log::info!(
-                        "新しい棚の意味検索の索引を合わせました: {} ms, {report:?}",
+                        "棚の意味検索の索引を合わせました: {} ms, {report:?}",
                         started.elapsed().as_millis()
                     ),
-                    Err(error) => log::warn!("新しい棚の意味検索の索引を合わせられません: {error}"),
+                    Err(error) => log::warn!("棚の意味検索の索引を合わせられません: {error}"),
                 }
             }
             SEMANTIC_RUNNING.store(false, Ordering::Release);

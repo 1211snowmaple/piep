@@ -10,7 +10,7 @@ import { searchShelf } from "@/features/library/shelf";
 import type { WorkCollection } from "@/types/collections";
 import type { ListedWork, SearchParams } from "@/types/library";
 
-/** 作品を取得元と取得元の ID で指す（旧棚の番号も新しい棚の ID も持たない回を含めて一つの形）。 */
+/** 作品を取得元と取得元の ID で指す（旧棚の番号も棚の ID も持たない回を含めて一つの形）。 */
 function keyOf(work: { source: string; sourceId: string }): string {
   return `${work.source}\u0000${work.sourceId}`;
 }

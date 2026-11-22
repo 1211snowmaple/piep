@@ -113,7 +113,7 @@ export default function TemplateStudioPage() {
 
   // The work the preview renders. Kept in the address so a reload comes back to
   // the same comparison rather than to an arbitrary book.
-  // 旧棚の作品は番号、新しい棚の作品は ID（文字列）。
+  // 旧棚の作品は番号、棚の作品は ID（文字列）。
   const sampleId = parseSample(params.get("sample"));
   const setSample = (id: SampleId | null) => {
     const next = new URLSearchParams(params);
@@ -297,7 +297,7 @@ function NewTemplateModal({ opened, onClose, templates, pending, onCreate }: {
 // 編集の中身
 // ============================================================
 
-/** 見本の作品。旧棚は番号、新しい棚は作品の ID。 */
+/** 見本の作品。旧棚は番号、棚は作品の ID。 */
 type SampleId = number | string;
 
 function parseSample(value: string | null): SampleId | null {

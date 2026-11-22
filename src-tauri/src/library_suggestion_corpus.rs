@@ -1,4 +1,4 @@
-//! コレクションの提案の材料を、新しい棚から作業用の表へ写す。
+//! コレクションの提案の材料を、棚から作業用の表へ写す。
 //!
 //! 提案の計算（`database::queries` の走査・種からの提案・追加の候補・名前の案）は、旧棚の形の表を
 //! SQL で引く。ここでは棚の今の姿から同じ形の表をメモリ上に組み、その計算をそのまま走らせる。
@@ -237,7 +237,7 @@ impl<'a> ShelfSuggestions<'a> {
             drop(rows);
             drop(stmt);
 
-            // 本文リンク。根拠ごとに一行（旧棚と同じ）。
+            // 本文リンク。根拠ごとに一行。
             let mut stmt = shelf.prepare(
                 "SELECT l.from_work_id,fx.provider,fx.external_key,l.to_work_id,tx.provider,tx.external_key,
                         l.relation,e.kind,e.anchor_text,e.context_text,e.confidence,

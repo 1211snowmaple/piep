@@ -13,11 +13,11 @@ const PAGE_LIMIT: usize = 500;
 const OFFSET_LIMIT: usize = 100_000;
 
 /// 一作品の一覧の行。?1 作品、?2 一覧の持ち主、?3 有効な編集、?4 編集の題、?5 作り方の版。
-/// 題は旧棚と同じく、編集の題（前後の空白を除いて空でなければ）か、保存版の題。空白は改行や
+/// 題は編集の題（前後の空白を除いて空でなければ）か、保存版の題。空白は改行や
 /// 全角の空白を含む Unicode の空白（旧棚の題は保存時にこれを除いていた）。
 /// 容量は保存した原本・画像・添付で、同じ中身は一度だけ数える。原本から取り出した本文は数えない。
 /// 改稿（revised）は作者の改稿を保存したか。旧棚の「修復」の版から分けた版だけなら数えない。
-/// 画像の数は画像と image/ の添付、添付の数はそれ以外の添付（旧棚と同じく MIME で分ける）。
+/// 画像の数は画像と image/ の添付、添付の数はそれ以外の添付。
 const ROW_SQL: &str = "SELECT c.entity_id,c.snapshot_id,?3,
  coalesce((SELECT provider FROM external_identities INDEXED BY external_identity_entity WHERE entity_id=c.entity_id AND kind='work' ORDER BY provider,external_key LIMIT 1),''),
  coalesce((SELECT external_key FROM external_identities INDEXED BY external_identity_entity WHERE entity_id=c.entity_id AND kind='work' ORDER BY provider,external_key LIMIT 1),''),
@@ -504,7 +504,7 @@ impl Conditions {
     }
 }
 
-/// 前後の空白を除き、空の名前を捨てる（旧棚と同じ）。
+/// 前後の空白を除き、空の名前を捨てる。
 fn names(values: &[String]) -> Vec<String> {
     let mut names: Vec<String> = values
         .iter()

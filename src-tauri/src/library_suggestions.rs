@@ -1,4 +1,4 @@
-//! コレクションの提案を、新しい棚で作る・読む・採る・断る（評価文書 4.1 の 4）。
+//! コレクションの提案を、棚で作る・読む・採る・断る（評価文書 4.1 の 4）。
 //!
 //! 提案の計算は旧棚と同じものを使う（`library_suggestion_corpus` が棚から作業用の表を組む）。
 //! ここは計算の結果を棚の表（`collection_suggestions`・`collection_suggestion_seeds`・
@@ -544,8 +544,8 @@ impl Library {
         Ok(ids.len())
     }
 
-    /// 候補を断る。`member_keys` を渡すと、その作品と基準の作品の組だけを「別の束」と覚える
-    /// （旧棚と同じ規則）。`false` は「未判断のその候補が無かった」。
+    /// 候補を断る。`member_keys` を渡すと、その作品と基準の作品の組だけを「別の束」と覚える。
+    /// `false` は「未判断のその候補が無かった」。
     pub fn reject_collection_suggestion_view(
         &self,
         id: &str,

@@ -132,7 +132,7 @@ export function invalidateAfterUpdateJob(client: QueryClient): void {
   client.invalidateQueries({ queryKey: ["entity-versions"] });
   client.invalidateQueries({ queryKey: ["entity-json"] });
   invalidateWorkSetViews(client);
-  // 正本に切り替えた棚では、保存は棚へ入る。棚から出している画面も読み直させる（棚の状態は除く）。
+  // 保存は棚へ入る。棚から出している画面も読み直させる（棚の状態は除く）。
   client.invalidateQueries({
     predicate: (query) => {
       const head = query.queryKey[0];

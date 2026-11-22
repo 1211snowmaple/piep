@@ -843,7 +843,7 @@ fn every_filter_selects_the_works_with_that_property_and_pages_through_them() {
             },
             &["c", "d", "e", "f", "g"],
         ),
-        // 画像の添付は画像に数える（旧棚と同じく MIME で分ける）。
+        // 画像の添付は画像に数える。
         (
             "画像",
             WorkFilter {

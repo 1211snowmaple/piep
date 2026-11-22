@@ -338,7 +338,7 @@ function ReaderPreview({ member, runtime, onBack }: { member: CollectionSuggesti
   const content = useQuery({
     queryKey: ["collection-preview", member.work ?? member.downloadId, page],
     queryFn: async () => {
-      // 新しい棚の候補は作品の UUID で読む。読む画面と同じ HTML を平文にして見せる。
+      // 棚の候補は作品の UUID で読む。読む画面と同じ HTML を平文にして見せる。
       if (runtime && member.work) {
         const shelfPage = await shelfContent(member.work, null, page);
         return { ...shelfPage, plainText: htmlText(shelfPage.html) };

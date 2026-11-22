@@ -216,7 +216,7 @@ pub fn run() -> tauri::Result<()> {
         .manage(commands::startup::StartupGate::default())
         .manage(commands::startup::WindowSchemeFile::default())
         .manage(Arc::new(commands::shelf::Shelf::default()))
-        // 新しい棚の画像（評価文書 4.1 の 2）。開いていなければ 503。
+        // 棚の画像（評価文書 4.1 の 2）。開いていなければ 503。
         .register_asynchronous_uri_scheme_protocol(
             commands::shelf::URI_SCHEME,
             |context, request, responder| {
@@ -286,7 +286,7 @@ pub fn run() -> tauri::Result<()> {
             // 起動 (commands::startup)
             commands::startup::startup_wait_for_library,
             commands::startup::startup_remember_color_scheme,
-            // 新しい棚の読み取り (commands::shelf)
+            // 棚の読み取り (commands::shelf)
             commands::shelf::shelf_status,
             commands::shelf::shelf_set_user_state,
             commands::shelf::shelf_remove_work,
@@ -320,7 +320,7 @@ pub fn run() -> tauri::Result<()> {
             commands::shelf::shelf_entities,
             commands::shelf::shelf_entity_collections,
             commands::shelf::shelf_work_collections,
-            // 新しい棚の数と手入れ (commands::library_health)
+            // 棚の数と手入れ (commands::library_health)
             commands::library_health::shelf_search_index_status,
             commands::library_health::shelf_dashboard,
             commands::library_health::shelf_counts,

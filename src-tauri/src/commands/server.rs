@@ -27,7 +27,7 @@ pub async fn server_create_reader_pairing(app: tauri::AppHandle) -> Result<Pairi
     controller(&app)?.create_reader_pairing().await
 }
 
-/// 単独サーバーの携帯に、新しい棚を読む許可を付け外しする。
+/// 単独サーバーの携帯に、棚を読む許可を付け外しする。
 #[tauri::command]
 pub async fn server_set_remote_shelf_reader(
     app: tauri::AppHandle,

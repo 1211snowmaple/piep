@@ -67,7 +67,7 @@ pub fn render_page(path: &Path, index: usize, target_width: u32) -> Result<Rende
     render_page_bytes(&bytes, index, target_width)
 }
 
-/// 中身から描く。新しい棚の添付はファイルの識別子で指すので、場所を持たない。
+/// 中身から描く。棚の添付はファイルの識別子で指すので、場所を持たない。
 pub fn render_page_bytes(
     bytes: &[u8],
     index: usize,

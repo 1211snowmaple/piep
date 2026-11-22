@@ -92,11 +92,11 @@ impl Context {
             .spawn(
                 move || match ctx.library.sync_search_index(&mut |_, _| {}) {
                     Ok(_) => ctx.search_ready.store(true, Ordering::Release),
-                    Err(error) => log::error!("新しい棚の検索の索引を作れません: {error}"),
+                    Err(error) => log::error!("棚の検索の索引を作れません: {error}"),
                 },
             );
         if let Err(error) = spawned {
-            log::error!("新しい棚の検索の索引を作るスレッドを作れません: {error}");
+            log::error!("棚の検索の索引を作るスレッドを作れません: {error}");
         }
     }
 
@@ -304,7 +304,7 @@ fn authorize_reader_view(
     Ok(())
 }
 
-/// 新しい棚と明示的な権限設定があるときだけ既存 router に merge する。
+/// 棚と明示的な権限設定があるときだけ既存 router に merge する。
 /// この関数だけで旧ライブラリを開き直したり、本番を切り替えたりしない。
 pub fn router(ctx: Arc<Context>) -> Router {
     Router::new()

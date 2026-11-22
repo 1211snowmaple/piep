@@ -4,13 +4,13 @@ import type { PdfPageImage } from "@/services/dbApi";
 import type { RevisionMetadata } from "@/services/workInspectionApi";
 
 /**
- * 新しい棚（読み取り専用の写し）の命令。`src-tauri/src/commands/shelf.rs` と対になる。
+ * 棚（読み取り専用の写し）の命令。`src-tauri/src/commands/shelf.rs` と対になる。
  *
- * 作品は新しい棚の ID（UUID の文字列）で指し、画像はファイルの識別子（中身の SHA-256 の
+ * 作品は棚の ID（UUID の文字列）で指し、画像はファイルの識別子（中身の SHA-256 の
  * 16 進）で指す。旧棚の番号やパスへの読み替えはしない。
  */
 
-/** 新しい棚の作品の ID（UUID）。旧棚の作品は番号なので、画面の ID の形で見分ける。 */
+/** 棚の作品の ID（UUID）。旧棚の作品は番号なので、画面の ID の形で見分ける。 */
 export const SHELF_WORK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** 作者のシリーズの一覧の一ページの件数。 */
@@ -53,7 +53,7 @@ export interface ShelfFilter {
   content_type?: string | null;
   favorite?: boolean | null;
   watching?: boolean | null;
-  /** 読みかけ（棚の読書位置があり、読み終えていない）。正本に切り替えた棚の読みかけの棚。 */
+  /** 読みかけ（棚の読書位置があり、読み終えていない）。 */
   reading?: boolean | null;
   edited?: boolean | null;
   has_cover?: boolean | null;
@@ -173,7 +173,7 @@ export interface ShelfUserState {
   generation: number;
 }
 
-/** お気に入り・更新の監視を変える（正本に切り替えた棚だけ）。書かない項目は今のまま。 */
+/** お気に入り・更新の監視を変える。書かない項目は今のまま。 */
 export function shelfSetUserState(work: string, change: { favorite?: boolean; watching?: boolean }): Promise<ShelfUserState> {
   return invoke<ShelfUserState>("shelf_set_user_state", {
     request: crypto.randomUUID(),
@@ -194,7 +194,7 @@ export interface ShelfReading {
   updatedAt: number;
 }
 
-/** 読書位置（正本に切り替えた棚だけ）。`snapshot` を省くと今読む本文。ほかの本文の位置なら null。 */
+/** 読書位置。`snapshot` を省くと今読む本文。ほかの本文の位置なら null。 */
 export function shelfReadingPosition(work: string, snapshot: string | null): Promise<ShelfReading | null> {
   return invoke<ShelfReading | null>("shelf_reading_position", { work, snapshot });
 }
@@ -203,12 +203,12 @@ export function shelfSetReadingPosition(work: string, snapshot: string | null, p
   return invoke<void>("shelf_set_reading_position", { request: crypto.randomUUID(), work, snapshot, page, ratio, finished });
 }
 
-/** 読みかけから外す（読書位置を消す。正本に切り替えた棚だけ）。外した数を返す。 */
+/** 読みかけから外す（読書位置を消す）。外した数を返す。 */
 export function shelfClearReadingPositions(works: string[]): Promise<number> {
   return invoke<number>("shelf_clear_reading_positions", { works });
 }
 
-/** 作品を棚から外す（正本に切り替えた棚だけ）。 */
+/** 作品を棚から外す。 */
 export function shelfRemoveWork(work: string): Promise<void> {
   return invoke<void>("shelf_remove_work", { request: crypto.randomUUID(), work });
 }
@@ -223,7 +223,7 @@ export function shelfSearch(search: ShelfTextSearch, query: ShelfListQuery, pers
   return invoke<ShelfSearchView>("shelf_search", { search, query, person });
 }
 
-/** 検索欄の候補（旧棚の `search_suggest` と同じ形）。題の候補の `sourceKey` は新しい棚の作品の ID。 */
+/** 検索欄の候補（旧棚の `search_suggest` と同じ形）。題の候補の `sourceKey` は棚の作品の ID。 */
 export function shelfSearchSuggest(text: string, limit = 8): Promise<SearchSuggestResult> {
   const trimmed = text.trim();
   if (!trimmed) return Promise.resolve({ items: [] });
@@ -332,7 +332,7 @@ export function shelfMedia(work: string, snapshot: string | null): Promise<Shelf
 
 /**
  * 作品の添付の PDF の1ページを絵にする（「原本を見る」）。`file` はファイルの識別子、
- * `page` は 0 から。旧棚の `renderPdfAttachmentPage` の新しい棚の版。
+ * `page` は 0 から。旧棚の `renderPdfAttachmentPage` の棚の版。
  */
 export function shelfRenderPdfPage(work: string, file: string, page: number, width: number): Promise<PdfPageImage> {
   return invoke<PdfPageImage>("shelf_render_pdf_page", { work, file, page, width });
@@ -602,7 +602,7 @@ export function shelfCollections(): Promise<ShelfCollectionSummary[]> {
   return invoke<ShelfCollectionSummary[]>("shelf_collections");
 }
 
-/** コレクションの画面。`id` は旧棚の ID（移したもの）か新しい棚の ID。 */
+/** コレクションの画面。`id` は棚のコレクションの ID。 */
 export function shelfCollection(id: string): Promise<ShelfCollection> {
   return invoke<ShelfCollection>("shelf_collection", { id });
 }
@@ -646,7 +646,7 @@ export function shelfEditor(work: string): Promise<ShelfEditorView> {
   return invoke<ShelfEditorView>("shelf_editor", { work });
 }
 
-/** 段を下書きに保存する（`publish` なら続けて反映する）。正本に切り替えた棚だけ。 */
+/** 段を下書きに保存する（`publish` なら続けて反映する）。 */
 export function shelfSaveEditor(work: string, save: {
   base: string;
   expected: number;
@@ -678,7 +678,7 @@ export type ShelfEditChange =
   | { kind: "discard" | "unpublish" | "forget_all" }
   | { kind: "restore" | "forget"; edit: string };
 
-/** 編集の指し先を変える。正本に切り替えた棚だけ。 */
+/** 編集の指し先を変える。 */
 export function shelfEditPointer(work: string, expected: number, change: ShelfEditChange): Promise<ShelfEditState> {
   return invoke<ShelfEditState>("shelf_edit_pointer", { request: crypto.randomUUID(), work, expected, change });
 }
@@ -706,7 +706,7 @@ export type ShelfCollectionChange =
   | { kind: "delete" };
 
 /**
- * コレクションを一回編集する（正本に切り替えた棚だけ）。作るときは `id` に新しい ID を渡す。
+ * コレクションを一回編集する。作るときは `id` に新しい ID を渡す。
  * 編集した後の中身を返す（消したときは null）。送り直しは同じ `request` で一度きりになる。
  */
 export function shelfEditCollection(id: string, change: ShelfCollectionChange): Promise<ShelfCollection | null> {

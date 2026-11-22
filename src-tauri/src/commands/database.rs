@@ -209,7 +209,7 @@ pub async fn search_set_semantic_enabled(
     .await
 }
 
-/// 正本に切り替えた棚の索引を追いつかせる（全文、続けて意味検索を入れていれば意味の索引）。
+/// 棚の索引を追いつかせる（全文、続けて意味検索を入れていれば意味の索引）。
 /// 進み具合は旧棚の作り直しと同じ知らせで流し、走っている作り直しがあればそれに合流する。
 fn spawn_shelf_index_job(
     app: tauri::AppHandle,
@@ -369,7 +369,7 @@ fn emit_search_index_progress(
     );
 }
 
-/// 保存した検索の一覧を返す。ID は文字列（切り替えた棚では検索の UUID）。
+/// 保存した検索の一覧を返す。ID は検索の UUID の文字列。
 #[tauri::command]
 pub async fn db_list_saved_searches(app: tauri::AppHandle) -> Result<Vec<SavedSearchView>, String> {
     run_db_blocking(app, move |state| {
@@ -613,7 +613,7 @@ pub async fn db_dismiss_collection_suggestion(
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcceptedCollection {
-    /// 旧棚ではコレクションの ID、切り替えた棚ではコレクションの UUID。
+    /// コレクションの UUID。
     pub id: String,
     pub name: String,
 }

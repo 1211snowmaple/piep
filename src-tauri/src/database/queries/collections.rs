@@ -124,7 +124,7 @@ pub(crate) struct SeedPlan {
     pub collection_kind: String,
     pub score: f64,
     pub evidence_summary: String,
-    /// `download_id` は出どころの作品の番号（新しい棚では作業用の表の番号）。
+    /// `download_id` は出どころの作品の番号（棚では作業用の表の番号）。
     pub members: Vec<CollectionSuggestionMember>,
 }
 

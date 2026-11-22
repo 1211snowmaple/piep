@@ -75,7 +75,7 @@ function view() {
   );
 }
 
-describe("新しい棚の一覧の操作", () => {
+describe("棚の一覧の操作", () => {
   beforeAll(() => {
     Element.prototype.scrollIntoView = () => {};
   });
@@ -125,7 +125,7 @@ describe("新しい棚の一覧の操作", () => {
   });
 
 
-  it("絞り込みの選択肢を新しい棚から数える", async () => {
+  it("絞り込みの選択肢を棚から数える", async () => {
     view();
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     await waitFor(() => expect(health.shelfFilterFacets).toHaveBeenCalled());

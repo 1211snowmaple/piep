@@ -66,13 +66,13 @@ interface ReadingContextRow {
   currentId: ReaderWorkKey;
 }
 
-/** 旧棚の作品は番号、新しい棚の作品は UUID。 */
+/** 旧棚の作品は番号、棚の作品は UUID。 */
 /** 前後の作品は棚の作品だけ（UUID）。 */
 type ReaderWorkKey = string;
 interface NeighborRef { id: ReaderWorkKey; title: string }
 
 /**
- * 新しい棚の前後の作品を、旧棚と同じ札の行にする。旧棚と同じ名乗り方・同じ数え方で、
+ * 棚の前後の作品を、旧棚と同じ札の行にする。旧棚と同じ名乗り方・同じ数え方で、
  * 隣の作品の詳しい情報（表紙・作者・字数）は、引いた並びにもう入っている。
  */
 function shelfReadingContexts(rows: ShelfNeighbors[], currentId: string, authorName: string) {
@@ -324,8 +324,7 @@ function Reader({ source }: { source: ReaderSource }) {
     select: source.head.select,
     enabled: validId,
   });
-  // 読書位置・しおりの鍵。新しい棚の作品でも、旧棚から移したものは旧棚の番号で引く（両方の棚で
-  // 同じ記録）。頭が届くまでは分からないので、位置を戻すのも書くのも頭が届いてから。
+  // 読書位置・しおりの鍵（作品の ID）。位置を戻すのも書くのも頭が届いてから。
   const readingId = metadataQuery.data?.head.id ?? null;
   // 読書位置を棚にも書く（携帯と同じ形：ページとその中の割合）。端末の記録（何行目か）は
   // この端末で開き直すための控えとして残す。

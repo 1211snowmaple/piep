@@ -1,7 +1,7 @@
-//! 新しい棚のコレクションの一覧と中身（評価文書 6.23）。
+//! 棚のコレクションの一覧と中身（評価文書 6.23）。
 //!
 //! ライブラリの「コレクション」タブは旧棚の `list_work_collections`、コレクションの画面は
-//! `get_work_collection` を、そのまま新しい棚で読む。並び・数え方・別版の畳み方は旧棚に合わせ、
+//! `get_work_collection` を、そのまま棚で読む。並び・数え方・別版の畳み方は旧棚に合わせ、
 //! `piep-library compare-collections` で突き合わせる。
 
 use crate::database::collection_rules::edition_match_key;
@@ -22,7 +22,7 @@ pub struct CollectionMember {
     pub provider: String,
     pub external_key: String,
     /// 棚にある作品の、一覧の一件の形。棚に無い回（未保存）は None。
-    /// 画面へは命令の側が表紙の識別子と旧棚の番号を添えて渡すので、空のときは書き出さない。
+    /// 画面へは命令の側が表紙の識別子を添えて渡すので、空のときは書き出さない。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work: Option<WorkCard>,
     /// 今の版の題と作者。棚に無い回は入れた時の題と作者。

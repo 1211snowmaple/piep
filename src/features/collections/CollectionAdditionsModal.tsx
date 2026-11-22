@@ -9,7 +9,7 @@ import { suggestCollectionAdditions } from "@/services/collectionApi";
 import { shelfFileUrl } from "@/services/shelfApi";
 import type { CollectionAdditionCandidate, WorkCollection } from "@/types/collections";
 
-/** 候補の作品を指す鍵。新しい棚は作品の UUID、旧棚は作品の番号。 */
+/** 候補の作品を指す鍵。棚は作品の UUID、旧棚は作品の番号。 */
 function candidateKey(candidate: CollectionAdditionCandidate): string {
   return candidate.work ?? String(candidate.downloadId);
 }

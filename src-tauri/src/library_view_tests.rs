@@ -190,7 +190,7 @@ fn image_and_file_posts_bind_their_lists_by_position() {
     let dir = temp("lists");
     let library = Library::create(&dir.0).unwrap();
     // 画像だけ・添付だけの投稿は配列の何番目かで指す。ID の無い項目や、別の保存物を
-    // 指しそうな置き場の手がかりがあっても、新しい棚の対応どおりに結ぶ。
+    // 指しそうな置き場の手がかりがあっても、棚の対応どおりに結ぶ。
     let body = SourceBody::FanboxBody(json!({
         "text": "本文",
         "images": [{"localPath": "./elsewhere.png"}, {"id": "i2"}],
@@ -245,7 +245,7 @@ fn image_and_file_posts_bind_their_lists_by_position() {
         "{html}"
     );
     assert_eq!(html.matches("data-image-missing").count(), 1, "{html}");
-    // 照合の印は画像の説明に残さない（旧棚と同じく取得元の ID。ID の無い項目は空）。
+    // 照合の印は画像の説明に残さない。
     assert!(!html.contains("piep-image-z"), "{html}");
     assert!(html.contains(r#"alt="image_""#), "{html}");
     assert!(
@@ -255,7 +255,7 @@ fn image_and_file_posts_bind_their_lists_by_position() {
     assert!(html.contains("lost.psd(見つかりません)"), "{html}");
 }
 
-/// 添付のテキスト・PDF の本文は、旧棚と同じく添付の位置へ差し込む。読む画面と検索の文書は
+/// 添付のテキスト・PDF の本文は、添付の位置へ差し込む。読む画面と検索の文書は
 /// 同じ差し込みを通すので、読める本文は検索にも入る。
 #[test]
 fn attachment_bodies_are_inserted_for_reading_and_search_alike() {
@@ -296,7 +296,7 @@ fn attachment_bodies_are_inserted_for_reading_and_search_alike() {
     assert!(html.contains("取り込む本文"), "{html}");
     assert!(html.contains("二段落目"), "{html}");
     assert!(html.contains("attachment-notice"), "{html}");
-    // 差し込んだあとの `blocks` も、添付の箱は新しい棚のファイルを指す。
+    // 差し込んだあとの `blocks` も、添付の箱は棚のファイルを指す。
     let file = Fingerprint::of(
         "取り込む本文
 
@@ -308,7 +308,7 @@ fn attachment_bodies_are_inserted_for_reading_and_search_alike() {
         html.contains(&format!(r#"data-local-path="{file}/piep-file-z"#)),
         "{html}"
     );
-    // テキストには紙面が無いので「原本を見る」は出さない（旧棚と同じ）。
+    // テキストには紙面が無いので「原本を見る」は出さない。
     assert!(!html.contains("attachment-original"), "{html}");
     // 残り時間の字数も、検索の文書の本文も、取り込んだ本文を含む。
     let document = library.search_document(saved.entity_id).unwrap().unwrap();
@@ -410,7 +410,7 @@ fn the_reader_gets_pages_outline_search_and_length_like_the_old_shelf() {
     let rendered = library
         .render_document(saved.entity_id, scope, "pixiv")
         .unwrap();
-    // pixiv の [newpage] は原稿のページ。転送のページとの対応も旧棚と同じ形で返す。
+    // pixiv の [newpage] は原稿のページ。転送のページとの対応も返す。
     assert_eq!(rendered.pages.len(), 2);
     assert_eq!(rendered.source_page_starts, vec![0, 1]);
     // 字数は HTML ではなく本文の平文で数える（旧棚の残り時間の目安と同じ）。

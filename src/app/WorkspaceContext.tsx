@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-/** EPUB キューの一件。旧棚は番号、新しい棚は作品の ID（文字列）。 */
+/** EPUB キューの一件。旧棚は番号、棚は作品の ID（文字列）。 */
 export type EpubQueueId = number | string;
 
 interface WorkspaceContextValue {

@@ -42,9 +42,9 @@ export interface DownloadEntry {
 }
 
 /**
- * 新しい棚の作品を、一覧のカードが読む形にしたもの（試験中・読むだけ）。
+ * 棚の作品を、一覧のカードが読む形にしたもの。
  *
- * `id` は新しい棚の作品の ID（UUID の文字列）で、旧棚の番号ではない。旧棚の番号で
+ * `id` は棚の作品の ID（UUID の文字列）で、旧棚の番号ではない。旧棚の番号で
  * 動く操作（お気に入り・更新監視・EPUB・削除・選択）には渡さない。表紙は
  * `coverUrl` に URL で持つ（旧棚のパスではない）。
  */
@@ -54,7 +54,7 @@ export interface ShelfEntry extends Omit<DownloadEntry, "id"> {
   coverUrl: string | null;
 }
 
-/** 一覧に並ぶ作品。旧棚か新しい棚か。 */
+/** 一覧に並ぶ作品。旧棚か棚か。 */
 export type ListedWork = DownloadEntry | ShelfEntry;
 
 export interface ScoreReason {
@@ -308,7 +308,7 @@ export interface FacetCount {
 }
 
 export interface EntityFacet {
-  /** 新しい棚（試験中）から引いたもの。画像の欄はパスでなくファイルの識別子。 */
+  /** 棚から引いたもの。画像の欄はパスでなくファイルの識別子。 */
   shelf?: true;
   source: string;
   sourceKey: string;
@@ -420,7 +420,7 @@ export interface EntityVersion {
 }
 
 export type WatchId = number | string;
-/** 旧棚の番号か、新しい棚の作品 UUID。 */
+/** 旧棚の番号か、棚の作品 UUID。 */
 export type WorkId = number | string;
 
 export interface UpdateTarget {
@@ -482,7 +482,7 @@ export interface DashboardSummary {
   pendingIndexCount: number;
   topTags: FacetCount[];
   topAuthors: FacetCount[];
-  /** 新しい棚の集計では棚の作品（`ShelfEntry`）が入る。 */
+  /** 棚の集計では棚の作品（`ShelfEntry`）が入る。 */
   recentDownloads: ListedWork[];
   sourceBreakdown: SourceBreakdown[];
   monthlyDownloads: DashboardTrendPoint[];
@@ -527,7 +527,7 @@ export interface LibraryShelfCounts {
 }
 
 export interface SavedSearchRecord {
-  /** 切り替えた棚では検索の UUID、旧棚では番号の文字列。中身を解釈しない。 */
+  /** 検索の UUID の文字列。中身を解釈しない。 */
   id: string;
   name: string;
   query: string | null;

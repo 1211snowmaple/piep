@@ -46,7 +46,7 @@ enum Route {
         work_id: OfflineKey,
         collection_id: String,
     },
-    /// 新しい棚の本文の画像。開いた文書の鍵と、その文書の中の画像の番号。
+    /// 棚の本文の画像。開いた文書の鍵と、その文書の中の画像の番号。
     Native {
         key: String,
         asset: usize,
@@ -274,7 +274,7 @@ fn parse_route(path: &str) -> Option<Route> {
     let decoded = percent_decode(path.trim_start_matches('/'))?;
     let parts: Vec<&str> = decoded.split('/').collect();
     match parts.as_slice() {
-        // 新しい棚の作品の表紙。版の UUID は端末の覚えの鍵で、版が変わると取り直す。
+        // 棚の作品の表紙。版の UUID は端末の覚えの鍵で、版が変わると取り直す。
         ["shelf", library, work, snapshot, rest @ ..] if rest.is_empty() || rest == ["large"] => {
             let library = uuid::Uuid::parse_str(library).ok()?;
             let work = uuid::Uuid::parse_str(work).ok()?;
@@ -285,7 +285,7 @@ fn parse_route(path: &str) -> Option<Route> {
                 refreshes: false,
             })
         }
-        // 新しい棚の作者のアイコン・ヘッダーとシリーズの表紙。版を持たないので、古くなったら取り直す。
+        // 棚の作者のアイコン・ヘッダーとシリーズの表紙。版を持たないので、古くなったら取り直す。
         [
             "shelf-entity",
             library,
@@ -310,7 +310,7 @@ fn parse_route(path: &str) -> Option<Route> {
                 refreshes: true,
             })
         }
-        // 新しい棚のコレクションの表紙。コレクションの世代は端末の覚えの鍵で、変わると取り直す。
+        // 棚のコレクションの表紙。コレクションの世代は端末の覚えの鍵で、変わると取り直す。
         [
             "shelf-collection",
             library,
@@ -499,7 +499,7 @@ pub(super) fn sniffed_mime(bytes: &[u8]) -> Option<&'static str> {
     })
 }
 
-/// 新しい棚の本文の画像。開いた文書の一式に載っているファイルだけを取りに行く。
+/// 棚の本文の画像。開いた文書の一式に載っているファイルだけを取りに行く。
 /// 中身のハッシュで決まるので、接続先とハッシュで残す（改稿で古い絵が出ることはない）。
 async fn serve_native<R: Runtime>(
     app: &AppHandle<R>,

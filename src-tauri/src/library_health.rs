@@ -136,7 +136,7 @@ impl Library {
             })?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         };
-        // 旧棚と同じく名前でまとめる（取得元が違っても同じ名前のタグは一つ）。
+        // 名前でまとめる（取得元が違っても同じ名前のタグは一つ）。
         let top_tags = facets(
             "SELECT t.name,count(*) AS n FROM work_current_projection p
              JOIN snapshot_tags st ON st.snapshot_id=p.snapshot_id JOIN tags t ON t.id=st.tag_id

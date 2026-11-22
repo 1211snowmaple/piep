@@ -1,4 +1,4 @@
-//! 保存フォルダーの再取り込みを新しい棚で行う。
+//! 保存フォルダーの再取り込みを棚で行う。
 //!
 //! 旧棚の保存先（`<取得元>/<作品の番号>/v<版>/`）に残った作品のうち、棚にまだ一度も入っていない
 //! ものを、取り寄せずにフォルダーの中身のまま棚へ保存する。版は番号の順に保存するので、棚の版の
@@ -104,7 +104,7 @@ fn safe_key(key: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
-/// 保存先の作品のフォルダーを数える。リンクや保存先の外を指すフォルダーは断る（旧棚と同じ）。
+/// 保存先の作品のフォルダーを数える。リンクや保存先の外を指すフォルダーは断る。
 pub(crate) fn folder_works(storage: &Path) -> Result<Vec<FolderWork>, String> {
     if !storage.try_exists().map_err(|e| e.to_string())? {
         return Ok(Vec::new());
@@ -266,7 +266,7 @@ pub(crate) async fn reimport_into_shelf(
     Ok(outcome)
 }
 
-/// 保存フォルダーを調べ、棚にまだ無い作品を棚へ戻す（切り替えた棚だけ）。
+/// 保存フォルダーを調べ、棚にまだ無い作品を棚へ戻す。
 #[tauri::command]
 pub async fn shelf_reimport_folders(app: tauri::AppHandle) -> Result<ReimportOutcome, String> {
     let shelf = app.state::<Arc<Shelf>>().inner().clone();

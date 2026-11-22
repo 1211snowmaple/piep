@@ -276,7 +276,7 @@ describe("author and series pages on the new shelf", () => {
     renderEntity("person", "#/people/pixiv/77?tab=history");
     expect(await screen.findByText("バージョン 2")).toBeInTheDocument();
     expect(screen.getByText("バージョン 1")).toBeInTheDocument();
-    // 版ごとの大きさは新しい棚に無いので出さない。
+    // 版ごとの大きさは棚に無いので出さない。
     expect(screen.queryByText(/ B$|KB|MB/)).toBeNull();
     expect(await screen.findByText("4件")).toBeInTheDocument();
     expect(api.shelfEntityOriginal).toHaveBeenCalledWith(PERSON, SNAPSHOT);

@@ -14,7 +14,7 @@ export function generateCollectionSuggestion(seedDownloadIds: number[], limit = 
   });
 }
 
-/** 新しい棚の作品（UUID）を種に候補を作る。正本に切り替えた棚だけ。 */
+/** 棚の作品（UUID）を種に候補を作る。 */
 export function generateShelfCollectionSuggestion(seedWorks: string[], limit = 60): Promise<CollectionSuggestion> {
   return invoke<CollectionSuggestion>("db_generate_collection_suggestion", {
     request: { seedWorks, limit },
@@ -76,7 +76,7 @@ export function acceptCollectionSuggestion(input: {
   return invoke<AcceptedCollection>("db_accept_collection_suggestion", { input });
 }
 
-/** 候補を採って作ったコレクション。新しい棚では ID が UUID。 */
+/** 候補を採って作ったコレクション。棚では ID が UUID。 */
 export interface AcceptedCollection {
   id: string;
   name: string;

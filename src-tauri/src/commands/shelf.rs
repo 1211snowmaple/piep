@@ -28,7 +28,7 @@ pub const DIR_ENV: &str = "PIEP_SHELF_DIR";
 pub const INSIDE_DIR: &str = "library";
 pub const URI_SCHEME: &str = "piep-library";
 
-/// 新しい棚の状態。
+/// 棚の状態。
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub enum ShelfState {
@@ -123,8 +123,8 @@ impl Shelf {
     fn searchable(&self) -> Result<Arc<Library>, String> {
         match self.status() {
             ShelfState::Ready { .. } => self.library(),
-            ShelfState::Indexing { .. } => Err("新しい棚の検索の索引を準備しています".to_string()),
-            _ => Err("新しい棚は開いていません".to_string()),
+            ShelfState::Indexing { .. } => Err("棚の検索の索引を準備しています".to_string()),
+            _ => Err("棚は開いていません".to_string()),
         }
     }
 
@@ -260,7 +260,7 @@ pub fn respond(state: &Shelf, path: &str) -> tauri::http::Response<Vec<u8>> {
     };
     let mut bytes = Vec::with_capacity(file.length as usize);
     if let Err(error) = library.objects.export(&file, &mut bytes) {
-        log::error!("新しい棚のファイルを読めません: {id}: {error}");
+        log::error!("棚のファイルを読めません: {id}: {error}");
         return respond(500, Vec::new(), None);
     }
     let mime = sniff(&bytes);
@@ -281,7 +281,7 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// 新しい棚の状態（ない・開いている・索引の同期中・使える・失敗）。使えるときは移行の
+/// 棚の状態（ない・開いている・索引の同期中・使える・失敗）。使えるときは移行の
 /// 未解決の記録も返す。
 #[tauri::command]
 pub fn shelf_status(state: State<'_, Arc<Shelf>>) -> ShelfState {
@@ -292,7 +292,7 @@ fn parse_id(value: &str) -> Result<LibraryId, String> {
     LibraryId::parse_str(value).map_err(|_| "識別子が不正です".to_string())
 }
 
-/// お気に入り・更新の監視を変える（正本に切り替えた棚だけ）。`request` は画面が一回の操作ごとに
+/// お気に入り・更新の監視を変える。`request` は画面が一回の操作ごとに
 /// 作る ID で、送り直しても二度書かない。
 #[tauri::command]
 pub async fn shelf_set_user_state(
@@ -409,7 +409,7 @@ fn location_scope(location: &crate::library::ReadingLocation) -> ResourceScope {
     }
 }
 
-/// 読書位置（正本に切り替えた棚だけ）。`snapshot` を省くと今読む本文。その本文の位置でなければ
+/// 読書位置。`snapshot` を省くと今読む本文。その本文の位置でなければ
 /// （別の版・編集で読んでいた、ページの位置でない）返さない。
 #[tauri::command]
 pub async fn shelf_reading_position(
@@ -449,7 +449,7 @@ pub async fn shelf_reading_position(
     .map_err(|e| e.to_string())?
 }
 
-/// 読書位置を書く（正本に切り替えた棚だけ）。ページは 1 から、割合は 0〜1。`snapshot` を省くと
+/// 読書位置を書く。ページは 1 から、割合は 0〜1。`snapshot` を省くと
 /// 今読む本文。読み終えたら `finished`（読みかけの棚から降りる）。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -501,7 +501,7 @@ pub async fn shelf_set_reading_position(
     .map_err(|e| e.to_string())?
 }
 
-/// 読みかけから外す（読書位置を消す。正本に切り替えた棚だけ）。位置の無い作品は何もしない。
+/// 読みかけから外す（読書位置を消す）。位置の無い作品は何もしない。
 /// 外した作品の数を返す。
 #[tauri::command]
 pub async fn shelf_clear_reading_positions(
@@ -539,7 +539,7 @@ pub async fn shelf_clear_reading_positions(
     .map_err(|e| e.to_string())?
 }
 
-/// 作品を棚から外す（正本に切り替えた棚だけ）。保存版・編集・コレクションの行は残る。
+/// 作品を棚から外す。保存版・編集・コレクションの行は残る。
 /// 本文の検索の索引からは、続けて同期して消す。
 #[tauri::command]
 pub async fn shelf_remove_work(
@@ -967,7 +967,7 @@ pub async fn shelf_entity(
     .map_err(|e| e.to_string())?
 }
 
-/// 検索欄の候補（旧棚の `search_suggest` と同じ形）。題の候補の `sourceKey` は新しい棚の作品の ID。
+/// 検索欄の候補（旧棚の `search_suggest` と同じ形）。題の候補の `sourceKey` は棚の作品の ID。
 #[tauri::command]
 pub async fn shelf_search_suggest(
     state: State<'_, Arc<Shelf>>,
@@ -1198,7 +1198,7 @@ pub async fn shelf_collections(
     .map_err(|e| e.to_string())?
 }
 
-/// コレクションの画面の中身。回の作品は一覧と同じ形（表紙の識別子と旧棚の番号つき）。
+/// コレクションの画面の中身。回の作品は一覧と同じ形（表紙の識別子つき）。
 #[derive(Serialize)]
 pub struct CollectionView {
     #[serde(flatten)]
@@ -1214,7 +1214,7 @@ pub struct CollectionMemberView {
     pub editions: Vec<CardView>,
 }
 
-/// コレクションの画面。`id` は旧棚の ID（移したもの）か新しい棚の ID。
+/// コレクションの画面。`id` は棚のコレクションの ID。
 #[tauri::command]
 pub async fn shelf_collection(
     state: State<'_, Arc<Shelf>>,
@@ -1367,7 +1367,7 @@ fn collection_change(
     })
 }
 
-/// コレクションを一回編集する（正本に切り替えた棚だけ）。作るときは `id` に画面が作った新しい ID を
+/// コレクションを一回編集する。作るときは `id` に画面が作った新しい ID を
 /// 渡す。編集した後の中身を返す（消したときは None）。
 #[tauri::command]
 pub async fn shelf_edit_collection(
@@ -1403,7 +1403,7 @@ pub async fn shelf_edit_collection(
     .map_err(|e| e.to_string())?
 }
 
-/// 作品の編集画面を開く（下書き、反映中の版、今の版の本文の順）。読むだけなので切り替える前も開ける。
+/// 作品の編集画面を開く（下書き、反映中の版、今の版の本文の順）。
 #[tauri::command]
 pub async fn shelf_editor(
     state: State<'_, Arc<Shelf>>,
@@ -1432,7 +1432,7 @@ fn after_edit(state: &Shelf, library: &Arc<Library>, work: LibraryId) {
     super::library_health::schedule_semantic_sync(Arc::clone(library));
 }
 
-/// 作品の編集のようす（下書き・反映中の版・以前の編集版）。読むだけなので切り替える前も開ける。
+/// 作品の編集のようす（下書き・反映中の版・以前の編集版）。
 #[tauri::command]
 pub async fn shelf_edit_history(
     state: State<'_, Arc<Shelf>>,
@@ -1449,7 +1449,7 @@ pub async fn shelf_edit_history(
     .map_err(|e| e.to_string())?
 }
 
-/// 編集画面の段を下書きに保存する（`publish` なら続けて反映する。正本に切り替えた棚だけ）。
+/// 編集画面の段を下書きに保存する（`publish` なら続けて反映する）。
 #[tauri::command]
 pub async fn shelf_save_editor(
     state: State<'_, Arc<Shelf>>,
@@ -1474,7 +1474,7 @@ pub async fn shelf_save_editor(
     .map_err(|e| e.to_string())?
 }
 
-/// 編集の指し先を変える（下書きを捨てる・反映をやめる。正本に切り替えた棚だけ）。
+/// 編集の指し先を変える（下書きを捨てる・反映をやめる）。
 #[tauri::command]
 pub async fn shelf_edit_pointer(
     state: State<'_, Arc<Shelf>>,
@@ -1505,7 +1505,7 @@ pub async fn shelf_edit_pointer(
     .map_err(|e| e.to_string())?
 }
 
-/// 編集に使う画像を棚へ取り込む（正本に切り替えた棚だけ）。`id` は 0 で返し、画面が番号を付ける。
+/// 編集に使う画像を棚へ取り込む。`id` は 0 で返し、画面が番号を付ける。
 #[tauri::command]
 pub async fn shelf_import_edit_image(
     state: State<'_, Arc<Shelf>>,

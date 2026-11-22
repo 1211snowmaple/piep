@@ -40,7 +40,7 @@ describe("reading shelf membership", () => {
   });
 
   it("keeps positions of new-shelf works under their id without putting them on the shelf", () => {
-    // 新しい棚（試験中）の作品は UUID で憶える。頭が数字の UUID を `parseInt` すると、
+    // 棚の作品は UUID で憶える。頭が数字の UUID を `parseInt` すると、
     // 旧棚の別の作品の番号（ここでは 3）として棚に載っていた。
     const shelfWork = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
     writeReadingPosition(shelfWork, null, { page: 2, top: 40 });

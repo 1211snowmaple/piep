@@ -33,9 +33,9 @@ interface WorkCardProps {
   selectionMode?: boolean;
   /** Receives the work id so lists can pass one stable handler for every card. */
   onSelect?: (id: number, selected: boolean) => void;
-  /** 一枚ごとの選択の受け口。新しい棚の作品（番号を持たない）も選べる。あれば `onSelect` より先。 */
+  /** 一枚ごとの選択の受け口。棚の作品（番号を持たない）も選べる。あれば `onSelect` より先。 */
   onToggleSelect?: (selected: boolean) => void;
-  /** 新しい棚の作品の選択。一覧が全カードに同じ受け口を渡せるよう、作品ごと返す。 */
+  /** 棚の作品の選択。一覧が全カードに同じ受け口を渡せるよう、作品ごと返す。 */
   onSelectShelf?: (work: ShelfEntry, selected: boolean) => void;
   onToggleFavorite?: (id: number, favorite: boolean) => void;
   onToggleWatch?: (id: number, watch: boolean) => void;
@@ -265,8 +265,8 @@ export const WorkCard = memo(function WorkCard({
 }: WorkCardProps) {
   const navigate = useAppNavigate();
   const { addToEpubQueue, removeFromEpubQueue, isQueuedForEpub } = useWorkspace();
-  // 新しい棚の作品は旧棚の番号を持たない。番号で動く操作（選択・印の照合）には渡さない。
-  // EPUB のキューは、旧棚は番号、新しい棚は作品の ID で持つ。
+  // 棚の作品は旧棚の番号を持たない。番号で動く操作（選択・印の照合）には渡さない。
+  // EPUB のキューは、旧棚は番号、棚は作品の ID で持つ。
   const legacyId = isShelfEntry(work) ? null : work.id;
   const queued = isQueuedForEpub(work.id);
   // 印の出どころをカードの中に置くのは、カードが出るところすべてで同じ顔に

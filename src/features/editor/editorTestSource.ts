@@ -33,7 +33,7 @@ export function editorTestSource(id: number, api: EditorTestApi): EditorSource {
     load: async () => toDoc(await api.getEditorDocument(id)),
     saveDraft: async (doc, title, blocks) => { await save(doc, title, blocks); },
     publish: async (doc, title, blocks) => {
-      // 旧棚と同じく、保存が版を返さなければ反映できずに止まる。
+      // 保存が版を返さなければ反映できずに止まる。
       const revision = await save(doc, title, blocks) as WorkEditRevision;
       await api.activateWorkEdit(revision.id);
     },

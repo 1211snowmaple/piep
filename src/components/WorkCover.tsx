@@ -7,7 +7,7 @@ import type { DownloadEntry } from "@/types/library";
 
 type WorkCoverData = Pick<DownloadEntry, "coverPath" | "source" | "sourceId" | "title" | "authorName"> &
   Partial<Pick<DownloadEntry, "personName" | "seriesTitle">> & {
-    /** 新しい棚の作品の表紙。パスではなく、そのまま読める URL。 */
+    /** 棚の作品の表紙。パスではなく、そのまま読める URL。 */
     coverUrl?: string | null;
   };
 

@@ -88,9 +88,9 @@ pub fn cancel_original_image_upgrade() -> bool {
     true
 }
 
-// ---- 新しい棚 ----
+// ---- 棚 ----
 //
-// 新しい棚では、作品ごとに保存し直す。保存済みの応答に原寸の在り処を足し、同じ応答の保存と
+// 棚では、作品ごとに保存し直す。保存済みの応答に原寸の在り処を足し、同じ応答の保存と
 // 同じ道で保存する（URL の変わらない画像・添付は棚から戻し、原寸に変わった画像だけを取りに行く）。
 // 棚は画質の違いを版の違いとして扱わないので、版は増えない。
 
@@ -116,7 +116,7 @@ async fn shelf_reduced_works(
     .map_err(|error| format!("棚の読み込みが途中で止まりました: {error}"))?
 }
 
-/// 新しい棚の、原寸になっていない画像の数と、走っている取り直しの進み具合。
+/// 棚の、原寸になっていない画像の数と、走っている取り直しの進み具合。
 #[tauri::command]
 pub async fn shelf_original_image_status(
     app: tauri::AppHandle,
@@ -207,7 +207,7 @@ async fn upgrade_shelf_work(
     Ok((lookups, card.title))
 }
 
-/// 新しい棚で、縮小版で保存された表紙・イラストを原寸に取り直す。
+/// 棚で、縮小版で保存された表紙・イラストを原寸に取り直す。
 #[tauri::command]
 pub async fn shelf_upgrade_pixiv_images_to_original(
     app: tauri::AppHandle,
@@ -216,7 +216,7 @@ pub async fn shelf_upgrade_pixiv_images_to_original(
         .state::<Arc<crate::commands::shelf::Shelf>>()
         .inner()
         .clone();
-    // 書き換えるのは正本に切り替えた棚だけ。
+    // 書き換えるのは
     let library = shelf.library()?;
     RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -357,7 +357,7 @@ pub async fn shelf_upgrade_pixiv_images_to_original(
         ),
     );
     log::info!(
-        "新しい棚の pixiv の画像の取り直し: 原寸{upgraded}件、公開元に無し{unavailable}件、失敗{failed}件、残り{remaining}件"
+        "棚の pixiv の画像の取り直し: 原寸{upgraded}件、公開元に無し{unavailable}件、失敗{failed}件、残り{remaining}件"
     );
     Ok(OriginalImageResult {
         attempted: completed,

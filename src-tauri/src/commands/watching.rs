@@ -1,4 +1,4 @@
-//! 監視の画面とジョブが使う口。切り替えた棚では旧 DB の監視表を読まず、書かない。
+//! 監視の画面とジョブが使う口。監視は棚に持つ。
 
 use crate::database::{UpdateTarget, WatchGroup};
 use crate::library::{

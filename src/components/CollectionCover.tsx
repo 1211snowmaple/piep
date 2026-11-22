@@ -32,7 +32,7 @@ export function CollectionCover({
   className?: string;
 }) {
   const tiles = collection.coverTiles ?? [];
-  // 新しい棚の表紙はパスでなくファイルの識別子。
+  // 棚の表紙はパスでなくファイルの識別子。
   const asset = collection.shelf === true ? shelfFileUrl : getAssetUrl;
   const requestedMode = resolveMode(collection, tiles);
   const [failedImage, setFailedImage] = useState<string | null>(null);

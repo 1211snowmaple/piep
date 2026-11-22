@@ -88,7 +88,7 @@ describe("shelfRequest", () => {
       any_tag: true,
       excluded_tags: ["y"],
       authors: ["A"],
-      // 旧棚と同じく UTC の日で、終わりの日を含む。
+      //  UTC の日で、終わりの日を含む。
       date: { field: "published", from: Date.UTC(2026, 0, 1), until: Date.UTC(2026, 1, 1) },
     });
   });
@@ -214,7 +214,7 @@ describe("searchShelfEntities", () => {
     expect(page.total).toBe(9);
     const [facet] = page.items;
     expect(facet).toMatchObject({ shelf: true, source: "pixiv", sourceKey: "77", displayName: "作者一", count: 4, watch: "paused", sampleTitle: "見本" });
-    // アイコンのない作者はヘッダーを顔にする（旧棚と同じ）。
+    // アイコンのない作者はヘッダーを顔にする。
     expect(facet.coverPath).toBe("ef".repeat(32));
     expect(facet.latestDownloadedAt).toBe("2026-01-02T00:00:00.000Z");
   });

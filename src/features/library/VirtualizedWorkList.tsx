@@ -12,7 +12,7 @@ interface VirtualizedWorkListProps {
   selectionMode?: boolean;
   selected?: ReadonlySet<number>;
   onSelect?: (id: number, selected: boolean) => void;
-  /** 新しい棚の作品の選択（ID は UUID なので番号の集合と分けて持つ）。 */
+  /** 棚の作品の選択（ID は UUID なので番号の集合と分けて持つ）。 */
   shelfSelected?: ReadonlySet<string>;
   onSelectShelf?: (work: ShelfEntry, selected: boolean) => void;
   onToggleFavorite?: (id: number, favorite: boolean) => void;
@@ -133,7 +133,7 @@ export function VirtualizedWorkList({
   const virtualRows = virtualizer.getVirtualItems();
 
   const renderWork = (work: ListedWork) => {
-    // 新しい棚の作品は旧棚の番号を持たないので、番号の集合（選択）とは照らさない。
+    // 棚の作品は旧棚の番号を持たないので、番号の集合（選択）とは照らさない。
     const legacyId = isShelfEntry(work) ? null : work.id;
     return (
     <WorkCard

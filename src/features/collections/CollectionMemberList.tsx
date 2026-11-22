@@ -18,7 +18,7 @@ interface MemberListProps {
   view: MemberView;
   busy: boolean;
   selectionMode: boolean;
-  /** 選んだ回。鍵は `取得元:作品の番号`（旧棚・新しい棚で同じ）。 */
+  /** 選んだ回。鍵は `取得元:作品の番号`（旧棚・棚で同じ）。 */
   selected: ReadonlySet<string>;
   onSelect: (memberKey: string, selected: boolean) => void;
   onMove: (index: number, delta: number) => void | boolean | Promise<boolean>;
@@ -386,7 +386,7 @@ function EditionFold({ member }: { member: WorkCollectionMember }) {
   );
 }
 
-/** コレクションの回を選ぶときの鍵（旧棚・新しい棚で同じ）。 */
+/** コレクションの回を選ぶときの鍵（旧棚・棚で同じ）。 */
 export function collectionMemberKey(member: { source: string; sourceId: string }): string {
   return `${member.source}:${member.sourceId}`;
 }

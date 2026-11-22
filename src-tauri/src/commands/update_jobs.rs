@@ -1871,7 +1871,7 @@ pub async fn count_dismissed_update_candidates(app: tauri::AppHandle) -> Result<
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingRevisionWork {
-    /// 作品の画面と同じ ID。切り替えた棚では作品 UUID、そうでなければ旧棚の番号。
+    /// 作品の画面と同じ ID（作品の UUID）。
     pub work: String,
     /// 更新確認がこの改稿を見つけた時刻。取得元が直した日そのものは持っていない。
     pub found_at: String,

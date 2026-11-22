@@ -45,14 +45,14 @@ function join(directory: string, name: string): string {
 }
 
 /**
- * 新しい棚のバックアップと復元。
+ * 棚のバックアップと復元。
  *
  * バックアップは棚そのものの写し（フォルダー一つ）で、作ったときに全体を検査する。復元は開いている棚を
  * 入れ替えることになるので、検査を通った写しを予約し、次に起動したときに入れ替える。今の棚は消さずに
  * 隣へ退け、選んだ写しも手元に残る。
  *
  * 作者・シリーズのアーカイブ（棚の部分写し）を選んだときは、入れ替えずに今の棚へ取り込む。今の棚に
- * 無い作品だけを足し、ある作品・記録は変えない。切り替えた棚にだけ取り込める。
+ * 無い作品だけを足し、ある作品・記録は変えない。
  */
 export function ShelfBackupCard({ runtime, busy }: { runtime: boolean; busy: boolean }) {
   const queryClient = useQueryClient();

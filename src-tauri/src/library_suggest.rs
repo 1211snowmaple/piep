@@ -1,8 +1,8 @@
-//! 新しい棚の検索欄の候補（旧棚の `search_suggest`）。
+//! 棚の検索欄の候補（旧棚の `search_suggest`）。
 //!
 //! 作者・シリーズ・題・タグの前方一致を集め、足りなければよく使う名前の束から正規化と
 //! 作者の読みで足す（組み立ては [`crate::search_suggest`]、旧棚と共通）。候補を押した先は
-//! 旧棚と同じ形で返す：作者・シリーズは取得元と ID、題は取得元の ID と新しい棚の作品の ID。
+//! 返す：作者・シリーズは取得元と ID、題は取得元の ID と棚の作品の ID。
 
 use crate::database::models::SearchSuggestion;
 use crate::library::{Library, Result};
@@ -11,7 +11,7 @@ use crate::search_suggest::{self, Candidate, POOL_PER_KIND};
 use rusqlite::{params, Connection};
 use std::sync::{Arc, Mutex};
 
-/// 候補の上限。旧棚と同じく 1〜50。
+/// 候補の上限。 1〜50。
 pub const SUGGESTION_LIMIT_MAX: i64 = 50;
 
 /// 正規化で足す候補の束を、棚の世代ごとに覚えておく。

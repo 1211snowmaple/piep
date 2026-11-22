@@ -1,4 +1,4 @@
-//! 新しい棚の読書用の文書（`piep-reader-v1`）から、読む画面の HTML とページを組む。
+//! 棚の読書用の文書（`piep-reader-v1`）から、読む画面の HTML とページを組む。
 //!
 //! 文書はデスクトップでは棚から作り、携帯ではサーバーから JSON で受け取る。どちらもこの形に
 //! 読み込んでから組むので、同じ版はどの端末でも同じページになる。
@@ -159,7 +159,7 @@ pub fn render_html(document: &ReaderView) -> String {
             let mut body = body.clone();
             let restore = marks.apply(&mut body);
             let mut html = parse_fanbox_value_to_html(&json!({ "body": body }), &assets);
-            // 照合のために置いた画像の印は、画像の説明（alt）と参照にそのまま出る。旧棚と同じく
+            // 照合のために置いた画像の印は、画像の説明（alt）と参照にそのまま出る。
             // 取得元の画像の ID に戻す（ID の無い項目は空）。
             for (token, original) in restore {
                 html = html.replace(&token, &escape_html(&original));

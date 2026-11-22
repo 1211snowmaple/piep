@@ -58,7 +58,7 @@ export interface ReadingPosition {
 export type ReadingWorkKey = number | string;
 
 function validKey(workId: ReadingWorkKey): boolean {
-  // 新しい棚の鍵は小文字にそろえたものだけ。大文字と小文字で同じ作品の位置が二つに割れない。
+  // 棚の鍵は小文字にそろえたものだけ。大文字と小文字で同じ作品の位置が二つに割れない。
   return typeof workId === "number"
     ? Number.isSafeInteger(workId) && workId > 0
     : SHELF_WORK_ID.test(workId) && workId === workId.toLowerCase();
@@ -165,7 +165,7 @@ export function readingWorkIds(): number[] {
   for (let index = 0; index < store.length; index += 1) {
     const key = store.key(index);
     if (!key || !key.startsWith(POSITION_PREFIX)) continue;
-    // piep.reader-position.{id}.{version}。数字だけの鍵が旧棚の作品。新しい棚の UUID を
+    // piep.reader-position.{id}.{version}。数字だけの鍵が旧棚の作品。棚の UUID を
     // `parseInt` すると頭の数字だけが読まれ、別の作品の番号になる。
     const segment = key.slice(POSITION_PREFIX.length).split(".")[0] ?? "";
     if (!/^\d+$/.test(segment)) continue;

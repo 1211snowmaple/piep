@@ -133,7 +133,7 @@ describe("collections on the shelf", () => {
     renderWith(<CollectionPage />, "#/collections/0195f1c2-0000-7000-8000-0000000000d1");
     expect(await screen.findByRole("heading", { name: "雨の束" })).toBeInTheDocument();
     expect(api.shelfCollection).toHaveBeenCalledWith("0195f1c2-0000-7000-8000-0000000000d1");
-    // 棚にある回は一覧と同じカード（新しい棚の作品の画面へ）、無い回は未保存の札。
+    // 棚にある回は一覧と同じカード（棚の作品の画面へ）、無い回は未保存の札。
     expect(screen.getByText("前の話")).toBeInTheDocument();
     expect(screen.getByText("後の話")).toBeInTheDocument();
     expect(screen.getByText("未保存")).toBeInTheDocument();
@@ -167,14 +167,14 @@ describe("collections on the shelf", () => {
       expect(screen.getByRole("button", { name: "一冊のEPUB" })).not.toHaveAttribute("data-disabled");
       expect(screen.getByRole("button", { name: "合う作品を探す" })).not.toHaveAttribute("data-disabled");
 
-      // 並べ替えは作品の鍵で、画面の ID（旧棚の ID）のまま送る。
+      // 並べ替えは作品の鍵で、画面の ID のまま送る。
       fireEvent.click(screen.getByRole("button", { name: "前の話を一つ後へ" }));
       await waitFor(() => expect(api.shelfEditCollection).toHaveBeenCalledWith("0195f1c2-0000-7000-8000-0000000000d1", {
         kind: "reorder",
         works: [{ source: "pixiv", sourceId: "2" }, { source: "pixiv", sourceId: "1" }],
       }));
 
-      // 削除は確認を経て、新しい棚の一回の編集で消す。
+      // 削除は確認を経て、棚の一回の編集で消す。
       fireEvent.click(screen.getByRole("button", { name: "このコレクションのその他の操作" }));
       fireEvent.click(await screen.findByRole("menuitem", { name: "コレクションを削除" }));
       api.shelfEditCollection.mockResolvedValueOnce(null);

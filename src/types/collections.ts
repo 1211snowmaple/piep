@@ -61,7 +61,7 @@ export interface WorkCollectionSummary {
   createdAt: string;
   updatedAt: string;
   /**
-   * 新しい棚から読んだもの。表紙（`coverPath`・`coverImagePath`・各マスの `coverPath`）は
+   * 棚から読んだもの。表紙（`coverPath`・`coverImagePath`・各マスの `coverPath`）は
    * パスでなくファイルの識別子で、`shelfFileUrl` で URL にする。
    */
   shelf?: true;
@@ -141,7 +141,7 @@ export interface CollectionSuggestionEvidence {
 
 export interface CollectionSuggestionMember extends WorkKey {
   downloadId: number | null;
-  /** 新しい棚の作品（UUID）。旧棚の候補には無い。 */
+  /** 棚の作品（UUID）。旧棚の候補には無い。 */
   work?: string | null;
   title: string;
   authorName: string;
@@ -204,9 +204,9 @@ export interface CollectionSweepResult {
 export interface CollectionAdditionCandidate {
   source: string;
   sourceId: string;
-  /** 旧棚の作品の番号。新しい棚では 0 で、作品は `work` で指す。 */
+  /** 旧棚の作品の番号。棚では 0 で、作品は `work` で指す。 */
   downloadId: number;
-  /** 新しい棚の作品（UUID）。 */
+  /** 棚の作品（UUID）。 */
   work?: string | null;
   title: string;
   authorName: string;

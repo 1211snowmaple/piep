@@ -1,4 +1,4 @@
-//! 正本に切り替えた棚のプロフィール更新。旧 DB と旧ファイルの配置へは戻らない。
+//! 棚のプロフィール更新。旧 DB と旧ファイルの配置へは戻らない。
 use super::RefreshEntityProfileParams;
 use crate::{
     library::{CaptureSource, EntityKind, Library, LibraryId, ProfileSave, PROFILE_REFRESH_ROUTE},

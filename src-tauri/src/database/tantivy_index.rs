@@ -79,8 +79,8 @@ pub struct TantivyIndexDocument {
     pub author_name: String,
     pub author_id: String,
     pub tags: String,
-    /// タグを一つずつ。空でなければ、読みの欄をタグごとの値にする（新しい棚）。つないだ
-    /// `tags` の読みは隣のタグとの境目をまたぐ 2〜3 文字にも当たる。空なら旧棚と同じく
+    /// タグを一つずつ。空でなければ、読みの欄をタグごとの値にする（棚）。つないだ
+    /// `tags` の読みは隣のタグとの境目をまたぐ 2〜3 文字にも当たる。空なら
     /// `tags` から作る（旧棚の索引は作り直さない）。
     pub tag_list: Vec<String>,
     pub series_title: String,
@@ -1426,7 +1426,7 @@ fn tantivy_document(fields: &TantivyFields, doc: &TantivyIndexDocument) -> Tanti
         );
     } else {
         // 読みはタグごとの値にする。一つの値の中でだけ字が続くので、隣のタグとの境目を
-        // またいで当たらない。ほかの欄はつないだ値のまま（旧棚と同じ）。
+        // またいで当たらない。ほかの欄はつないだ値のまま。
         let joined = index_text(&doc.tags);
         tantivy_doc.add_text(fields.tags_exact, &doc.tags);
         tantivy_doc.add_text(fields.tags_lower, joined.normalized);

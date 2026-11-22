@@ -291,7 +291,7 @@ pub async fn shelf_assist_interpret_search(
 // ---- 作風のメモ・分け方の案 -----------------------------------------------------
 
 /// この作者の作風を、題名とタグからまとめてもらう。本文は送らない。
-/// 覚え書きは正本に切り替えた棚にだけ残す（読むだけの棚では見せるだけ）。
+/// 覚え書きは棚にだけ残す（読むだけの棚では見せるだけ）。
 #[tauri::command]
 pub async fn shelf_assist_describe_author(
     state: State<'_, Arc<Shelf>>,
@@ -376,7 +376,7 @@ fn progress_sink(
     }
 }
 
-/// 覚え書きを残す。読むだけの棚（切り替える前）では残さない。
+/// 覚え書きを残す。
 async fn save_note(
     state: &State<'_, Arc<Shelf>>,
     subject_type: &'static str,
@@ -505,7 +505,7 @@ pub async fn shelf_assist_load_note(
     Ok(note)
 }
 
-/// 覚え書きを消す（正本に切り替えた棚だけ）。
+/// 覚え書きを消す。
 #[tauri::command]
 pub async fn shelf_assist_delete_note(
     state: State<'_, Arc<Shelf>>,

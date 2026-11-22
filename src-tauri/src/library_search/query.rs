@@ -122,7 +122,7 @@ pub fn work_from_url(value: &str) -> Option<(&'static str, String)> {
 }
 
 /// 問い合わせを絞り込みと本文の語に分ける。知らない項目名（`foo:bar`）と、除外を書けない
-/// 項目の除外（`-series:` `-source:` `-id:`）は、旧棚と同じく語のまま本文の検索に残す。
+/// 項目の除外（`-series:` `-source:` `-id:`）は、語のまま本文の検索に残す。
 pub fn parse_query(query: &str) -> QueryParts {
     let mut parts = QueryParts::default();
     let mut text = Vec::new();

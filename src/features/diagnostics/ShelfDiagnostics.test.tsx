@@ -63,7 +63,7 @@ function view() {
   );
 }
 
-describe("新しい棚の診断", () => {
+describe("棚の診断", () => {
   beforeEach(() => {
     status.shelfStatus.mockResolvedValue({ state: "ready", path: "C:/shelf" });
     status.shelfSearch.mockResolvedValue({ page: { items: [], next: null, total: 2 }, intent: null, matches: [], cards: [] });

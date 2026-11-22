@@ -17,7 +17,7 @@ use std::sync::{mpsc, Mutex};
 /// 文書の作り方。本文の検索の文書と同じものから作るので、変えるときは一緒に上げる。
 const RECIPE: i64 = super::index::RECIPE;
 
-/// 一度に埋め込む作品の数。中止の合図はこの単位で見る（旧棚と同じく、押してから止まるまでを
+/// 一度に埋め込む作品の数。中止の合図はこの単位で見る（押してから止まるまでを
 /// 短くするために小さくする）。
 const EMBED_BATCH: usize = 16;
 
@@ -370,7 +370,7 @@ impl Library {
     }
 
     /// 意味の近い作品を、本文の検索の索引の文書の鍵と近さで返す（順は決まらない）。
-    /// 近さが下限（旧棚と同じ 0.18）に届かない作品は入らない。
+    /// 近さが下限に届かない作品は入らない。
     pub(super) fn semantic_matches(&self, text: &str) -> Result<Vec<(i64, SemanticEvidence)>> {
         let storage = self.semantic_storage();
         if !semantic_index::index_exists(&storage) {

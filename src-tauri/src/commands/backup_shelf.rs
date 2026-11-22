@@ -1,4 +1,4 @@
-//! 新しい棚のバックアップと復元。
+//! 棚のバックアップと復元。
 //!
 //! バックアップは棚そのものの自立した写し（`Library::backup`）。写し元を止めずに作り、検査を通るまで
 //! 棚としては開けない形で置き、通ったら名前を付けて公開する。分割 ZIP は使わない（棚は実体を指紋で持つ
@@ -136,7 +136,7 @@ pub(crate) fn inspect(
     })
 }
 
-/// 今の棚の写しを `destination`（まだ無いフォルダー）に作る。試験中の写しからも作れる（棚は書き換えない）。
+/// 今の棚の写しを `destination`（まだ無いフォルダー）に作る。棚は書き換えない。
 #[tauri::command]
 pub async fn shelf_backup(app: tauri::AppHandle, destination: String) -> Result<String, String> {
     let shelf = app.state::<Arc<Shelf>>().inner().clone();
@@ -194,7 +194,7 @@ pub(crate) fn unused_folder(parent: &Path, name: &str) -> Result<PathBuf, String
 }
 
 /// 作者・シリーズの作品を、棚の部分写しとして `parent` の中の新しいフォルダーへ書き出す。
-/// 棚は読むだけなので、切り替える前の（読むだけの）棚からも書き出せる。
+/// 棚は読むだけで、書き換えない。
 #[tauri::command]
 pub async fn shelf_export_entity_archive(
     app: tauri::AppHandle,

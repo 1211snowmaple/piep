@@ -244,7 +244,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   // Relevance is walked with a score cursor and has no nth page, so numbers are
   // only offered once an ordering has been chosen.
   const searchingByRelevance = Boolean(workQuery) && sortBy === "relevance";
-  // 新しい棚の一覧は続きの位置で読み進めるだけで、ページ番号は持たない（ライブラリの一覧と同じ）。
+  // 棚の一覧は続きの位置で読み進めるだけで、ページ番号は持たない（ライブラリの一覧と同じ）。
   const numberedPages = pagingMode === "pages" && !searchingByRelevance && !shelfMode;
   const {
     page: pageParam,
