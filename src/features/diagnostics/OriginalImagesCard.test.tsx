@@ -14,7 +14,7 @@ vi.mock("@/services/eventBus", () => ({ subscribeTauriEvent: () => () => undefin
 vi.mock("@/services/shelfHealthApi", async (original) => ({
   ...await original<typeof import("@/services/shelfHealthApi")>(),
   shelfOriginalImageStatus: api.status,
-  shelfUpgradePixivImagesToOriginal: api.upgrade,
+  shelfUpgradeImagesToOriginal: api.upgrade,
 }));
 
 beforeEach(() => {
@@ -28,7 +28,7 @@ it("stays out of the way once every image is the original", async () => {
   api.status.mockResolvedValue({ covers: 0, illustrations: 0, running: false, progress: null });
   renderCard();
   await waitFor(() => expect(api.status).toHaveBeenCalled());
-  expect(screen.queryByText("pixiv の画像の画質")).not.toBeInTheDocument();
+  expect(screen.queryByText("画像の画質")).not.toBeInTheDocument();
 });
 
 it("counts the reduced images and starts the upgrade", async () => {

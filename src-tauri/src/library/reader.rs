@@ -148,6 +148,31 @@ fn load(
     snapshot: LibraryId,
     header: &Header,
 ) -> Result<Option<ReaderBindingSet>> {
+    let Some((bindings, bindings_hash)) = stored(conn, entity, snapshot, header)? else {
+        return Ok(None);
+    };
+    if hash(entity, snapshot, header, &bindings)? != bindings_hash {
+        return Err(Error::Integrity(
+            "読書用の対応表の指紋が一致しません".into(),
+        ));
+    }
+    Ok(Some(ReaderBindingSet {
+        entity,
+        snapshot,
+        recipe: 1,
+        source_manifest: header.manifest,
+        body_file: header.body,
+        bindings_hash,
+        bindings,
+    }))
+}
+/// 保存された対応表と、その指紋（確かめる前）。見出しが保存版と食い違えば断る。
+fn stored(
+    conn: &Connection,
+    entity: LibraryId,
+    snapshot: LibraryId,
+    header: &Header,
+) -> Result<Option<(Vec<ReaderBinding>, Fingerprint)>> {
     let row=conn.query_row("SELECT source_manifest,body_file_id,bindings_hash,sealed FROM reader_binding_sets WHERE entity_id=?1 AND snapshot_id=?2 AND recipe=1",params![entity.as_bytes().as_slice(),snapshot.as_bytes().as_slice()],|r|Ok(StoredBindingSet {manifest:r.get(0)?,body:r.get(1)?,hash:r.get(2)?,sealed:r.get(3)?})).optional()?;
     let Some(StoredBindingSet {
         manifest,
@@ -186,21 +211,46 @@ fn load(
         });
     }
     bindings.sort_by(|a, b| a.reference.cmp(&b.reference));
-    let bindings_hash = fingerprint(stored_hash)?;
-    if hash(entity, snapshot, header, &bindings)? != bindings_hash {
-        return Err(Error::Integrity(
-            "読書用の対応表の指紋が一致しません".into(),
-        ));
+    Ok(Some((bindings, fingerprint(stored_hash)?)))
+}
+
+/// 保存状態の構成の指紋を計算し直す移行で、読む形の見出しと対応表の指紋を新しい構成の指紋へ移す。
+/// 保存状態の指紋を書き換える前に呼ぶ。見出し（構成の指紋と本文）が保存版と一致することは確かめる。
+///
+/// 対応表の指紋は、今の構成の指紋で計算したものと一致しなくても計算し直す。28 が見出しだけを
+/// 移して対応表の指紋を移し忘れたため、移した版の一部（実棚で 1,907）はその形で残っている
+/// （読もうとすると「指紋が一致しません」で断られる）。対応表の行そのものは書き換えられない。
+/// 戻り値は、指紋が古いまま残っていた対応表か。
+pub(super) fn move_to_manifest(
+    conn: &Connection,
+    entity: LibraryId,
+    snapshot: LibraryId,
+    manifest: Fingerprint,
+) -> Result<bool> {
+    let held: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM reader_binding_sets WHERE snapshot_id=?1 AND recipe=1)",
+        [snapshot.as_bytes().as_slice()],
+        |r| r.get(0),
+    )?;
+    if !held {
+        return Ok(false);
     }
-    Ok(Some(ReaderBindingSet {
-        entity,
-        snapshot,
-        recipe: 1,
-        source_manifest: header.manifest,
-        body_file: header.body,
-        bindings_hash,
-        bindings,
-    }))
+    let mut current = header(conn, entity, snapshot)?;
+    let (bindings, stored_hash) = stored(conn, entity, snapshot, &current)?
+        .ok_or_else(|| Error::Integrity("読書用の対応表が保存版と一致しません".into()))?;
+    let stale = hash(entity, snapshot, &current, &bindings)? != stored_hash;
+    current.manifest = manifest;
+    let moved = hash(entity, snapshot, &current, &bindings)?;
+    conn.execute(
+        "UPDATE reader_binding_sets SET source_manifest=?2,bindings_hash=?3 WHERE snapshot_id=?1 AND recipe=1",
+        params![snapshot.as_bytes().as_slice(), manifest.0.as_slice(), moved.0.as_slice()],
+    )?;
+    // 取得が作った読む形の記録も、同じ対応表の指紋を持つ。
+    conn.execute(
+        "UPDATE acquisition_reader_outputs SET bindings_hash=?2 WHERE snapshot_id=?1 AND recipe=1",
+        params![snapshot.as_bytes().as_slice(), moved.0.as_slice()],
+    )?;
+    Ok(stale)
 }
 
 impl Library {

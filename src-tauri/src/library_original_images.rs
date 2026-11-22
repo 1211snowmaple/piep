@@ -1,4 +1,4 @@
-//! 棚で、縮小版のまま保存されている pixiv の表紙・挿絵を探す。
+//! 棚で、縮小版のまま保存されている pixiv の表紙・挿絵と FANBOX の表紙を探す。
 //!
 //! 取り直しそのものは、保存済みの応答に原寸の在り処を足して保存し直す（`commands::downloader` の
 //! 保存と同じ道）。棚は画質の違いを版の違いとして扱わないので、保存し直しても版は増えない
@@ -16,23 +16,26 @@ pub struct ReducedShelfWork {
 }
 
 impl Library {
-    /// 今の版に縮小版の表紙・挿絵が残っている pixiv の作品（作品の ID 順）。
+    /// 今の版に縮小版の画像が残っている作品（作品の ID 順）。pixiv の表紙・挿絵と、FANBOX の表紙。
     ///
-    /// 縮小版の URL（`novel-cover-master/`・`/img-master/`）で取得した画像のうち、原寸と確かめていない
-    /// ものを数える。縮小版の URL の観測から引くので、棚全体でも一度の索引の読みで済む。
-    pub fn reduced_pixiv_works(&self) -> Result<Vec<ReducedShelfWork>> {
+    /// 縮小版の URL（pixiv の `novel-cover-master/`・`/img-master/`、FANBOX の表紙の作り直した版
+    /// `pixiv.pximg.net/c/…/fanbox/`）で取得した画像のうち、原寸と確かめていないものを数える。
+    /// 縮小版の URL の観測から引くので、棚全体でも一度の索引の読みで済む。
+    pub fn reduced_works(&self) -> Result<Vec<ReducedShelfWork>> {
         let conn = self.reader()?;
         let mut stmt = conn.prepare(
             "WITH reduced AS (
                  SELECT DISTINCT rendition_id FROM media_observations
                  WHERE instr(url,'novel-cover-master/')>0 OR instr(url,'/img-master/')>0
+                    OR (url LIKE 'https://pixiv.pximg.net/c/%' AND instr(url,'/fanbox/public/images/post/')>0)
              )
              SELECT DISTINCT c.entity_id, sm.slot, sm.role FROM reduced x
              JOIN media_renditions r ON r.id=x.rendition_id AND r.quality<>'original'
              JOIN snapshot_media sm ON sm.rendition_id=r.id AND sm.role IN ('cover','illustration')
              JOIN entity_current c ON c.snapshot_id=sm.snapshot_id
              JOIN library_items li ON li.work_id=c.entity_id
-             JOIN source_media m ON m.id=sm.media_id AND m.provider='pixiv'",
+             JOIN source_media m ON m.id=sm.media_id
+              AND (m.provider='pixiv' OR (m.provider='fanbox' AND sm.role='cover'))",
         )?;
         let mut works: BTreeMap<LibraryId, ReducedShelfWork> = BTreeMap::new();
         let rows = stmt.query_map([], |row| {

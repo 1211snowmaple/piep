@@ -9,11 +9,11 @@ import { requestOperationCancel, startOperation, type OperationController } from
 import { errorMessage, formatNumber } from "@/lib/format";
 import { cancelOriginalImageUpgrade, type OriginalImageProgress } from "@/services/dbApi";
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
-import { shelfOriginalImageStatus, shelfUpgradePixivImagesToOriginal } from "@/services/shelfHealthApi";
+import { shelfOriginalImageStatus, shelfUpgradeImagesToOriginal } from "@/services/shelfHealthApi";
 import { invalidateShelf } from "@/features/library/shelf";
 
 /**
- * 縮小版で保存された pixiv の表紙・挿絵を、原寸に取り直す。
+ * 縮小版で保存された表紙・挿絵（pixiv と FANBOX の表紙）を、原寸に取り直す。
  *
  * 以前の保存は表紙を 240x480 の縮小版で、本文から参照したイラストを
  * 1200px の版で持っていた。取りに行くのは画像サーバーだけで、
@@ -53,7 +53,7 @@ export function OriginalImagesCard({ runtime, disabled }: { runtime: boolean; di
       const total = status.data ? status.data.covers + status.data.illustrations : null;
       operationRef.current = startOperation({
         kind: "maintenance",
-        label: "pixiv の画像を原寸に取り直す",
+        label: "画像を原寸に取り直す",
         detail: "縮小版で保存された表紙と挿絵を、原寸に置き換えます",
         total,
         onCancel: async () => { await cancelOriginalImageUpgrade(); },
@@ -69,7 +69,7 @@ export function OriginalImagesCard({ runtime, disabled }: { runtime: boolean; di
         if (payload.error) operationRef.current?.log(`${payload.activeLabel ?? "画像"}: ${payload.error}`, "warn");
       });
       try {
-        return await shelfUpgradePixivImagesToOriginal();
+        return await shelfUpgradeImagesToOriginal();
       } catch (error) {
         operationRef.current?.fail(error);
         throw error;
@@ -114,7 +114,7 @@ export function OriginalImagesCard({ runtime, disabled }: { runtime: boolean; di
         <ThemeIcon variant="light" color={remaining ? "yellow" : "green"}>{remaining ? <Icons.warning size={IconSize.menu} /> : <Icons.success size={IconSize.menu} />}</ThemeIcon>
         <Box miw={0}>
           <Group gap="xs">
-            <Text fw={720}>pixiv の画像の画質</Text>
+            <Text fw={720}>画像の画質</Text>
             <Badge color={remaining ? "yellow" : "green"} variant="light">{remaining ? `${formatNumber(remaining)}枚 縮小版` : "原寸"}</Badge>
           </Group>
           <Text size="xs" c="dimmed" mt={5}>{remaining

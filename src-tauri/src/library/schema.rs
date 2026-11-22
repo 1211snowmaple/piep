@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 29;
+pub(crate) const VERSION: i64 = 31;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -34,13 +34,27 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_027_drop_switched.sql"),
     include_str!("migration_028_drop_migration_records.sql"),
     include_str!("migration_029_restore_snapshot_guards.sql"),
+    include_str!("migration_030_acquisition_routes.sql"),
+    include_str!("migration_031_restore_reader_guards.sql"),
 ];
-/// この版の SQL を当てた直後に、移した版の指紋を計算し直す（区分を指紋から外したため）。
-const REFINGERPRINT_AFTER: usize = 28;
+/// これらの版の SQL を当てた直後に、触れた版の指紋を計算し直す。
+/// 28: 区分を指紋から外した。30: 移した取得の経路と画像の画質をそろえた。
+/// 試験で schema 29 の形を作るときに、公開済みの保存状態などを固め直す SQL（31 と、30 が外す制約）。
+#[cfg(test)]
+pub(super) fn guards_for_tests() -> String {
+    format!(
+        "CREATE TEMP TABLE unclassified_snapshots(id BLOB PRIMARY KEY);{}{}",
+        MIGRATIONS[30],
+        "CREATE TRIGGER acquisition_observations_immutable BEFORE UPDATE ON acquisition_observations BEGIN SELECT RAISE(ABORT,'published record is immutable'); END;
+         CREATE TRIGGER media_observations_immutable BEFORE UPDATE ON media_observations BEGIN SELECT RAISE(ABORT,'media observations are immutable'); END;
+         CREATE TRIGGER media_renditions_immutable BEFORE UPDATE ON media_renditions BEGIN SELECT RAISE(ABORT,'media renditions are immutable'); END;"
+    )
+}
+const REFINGERPRINT_AFTER: &[usize] = &[28, 30];
 
 fn run_migration(conn: &Connection, index: usize, sql: &str) -> Result<()> {
     conn.execute_batch(sql)?;
-    if index + 1 == REFINGERPRINT_AFTER {
+    if REFINGERPRINT_AFTER.contains(&(index + 1)) {
         super::integrity::refingerprint_unclassified(conn)?;
     }
     Ok(())

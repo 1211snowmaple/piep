@@ -338,9 +338,12 @@ pub fn extract_download_targets(data: &Value, is_fanbox: bool, targets: &mut Vec
     if is_fanbox {
         let data = crate::fanbox_api::payload::post_or_self(data);
         // 1. Fanboxのカバー画像
+        // 原寸が分かっていればそちら（`coverImageUrl` は 1200×630 に作り直した版）。
         if let Some(cover_url) = data
-            .get("coverImageUrl")
+            .get(super::pixiv_originals::COVER_ORIGINAL_FIELD)
             .and_then(|v| v.as_str())
+            .filter(|url| !url.trim().is_empty())
+            .or_else(|| data.get("coverImageUrl").and_then(|v| v.as_str()))
             .or_else(|| {
                 data.get("cover")
                     .and_then(|v| v.get("url"))
@@ -546,9 +549,12 @@ pub fn extract_download_targets(data: &Value, is_fanbox: bool, targets: &mut Vec
 pub fn inject_local_paths(data: &mut Value, assets_dir_name: &str, is_fanbox: bool) {
     if is_fanbox {
         let data = crate::fanbox_api::payload::post_mut_or_self(data);
+        // 原寸が分かっていればそちら（`coverImageUrl` は 1200×630 に作り直した版）。
         if let Some(cover_url) = data
-            .get("coverImageUrl")
+            .get(super::pixiv_originals::COVER_ORIGINAL_FIELD)
             .and_then(|v| v.as_str())
+            .filter(|url| !url.trim().is_empty())
+            .or_else(|| data.get("coverImageUrl").and_then(|v| v.as_str()))
             .or_else(|| {
                 data.get("cover")
                     .and_then(|v| v.get("url"))

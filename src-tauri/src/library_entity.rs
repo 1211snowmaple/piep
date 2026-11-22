@@ -272,14 +272,13 @@ impl Library {
     }
 
     /// 画面の「保存データ」の欄に出す、版を作った取得元の応答（最も新しく受け取ったもの）。
-    /// 移行で作品の行を写した記録（`legacy-current-row`）は取得元の応答ではないので除く。
     /// 最新の版の JSON は取り込みの記録の側にある。
     pub fn entity_profile(&self, entity: LibraryId, snapshot: LibraryId) -> Result<Option<String>> {
         let observation: Option<Vec<u8>> = self
             .reader()?
             .query_row(
                 "SELECT o.id FROM snapshot_observations so JOIN acquisition_observations o ON o.id=so.observation_id AND o.entity_id=so.entity_id
-                 WHERE so.snapshot_id=?1 AND so.entity_id=?2 AND o.raw_file_id IS NOT NULL AND o.route<>'legacy-current-row'
+                 WHERE so.snapshot_id=?1 AND so.entity_id=?2 AND o.raw_file_id IS NOT NULL
                  ORDER BY o.acquired_at DESC,o.recorded_at DESC,o.id DESC LIMIT 1",
                 params![snapshot.as_bytes().as_slice(), entity.as_bytes().as_slice()],
                 |r| r.get(0),

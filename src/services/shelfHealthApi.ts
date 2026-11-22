@@ -91,12 +91,12 @@ export function shelfSearchFilterFacets(kind: "tags" | "authors", query: string 
   return invoke<FacetCount[]>("shelf_search_filter_facets", { kind, query: query?.trim() || null, limit });
 }
 
-/** 棚の、縮小版のまま残る pixiv の表紙・挿絵の数と、走っている取り直しの進み具合。 */
+/** 棚の、縮小版のまま残る表紙・挿絵（pixiv と FANBOX の表紙）の数と、走っている取り直しの進み具合。 */
 export function shelfOriginalImageStatus(): Promise<OriginalImageStatus> {
   return invoke<OriginalImageStatus>("shelf_original_image_status");
 }
 
 /** 棚で、縮小版の表紙・挿絵を原寸に取り直す（版は増えない）。 */
-export function shelfUpgradePixivImagesToOriginal(): Promise<OriginalImageResult> {
-  return invoke<OriginalImageResult>("shelf_upgrade_pixiv_images_to_original");
+export function shelfUpgradeImagesToOriginal(): Promise<OriginalImageResult> {
+  return invoke<OriginalImageResult>("shelf_upgrade_images_to_original");
 }
