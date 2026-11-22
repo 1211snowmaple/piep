@@ -409,11 +409,10 @@ fn start_writer_reaper() {
                             state.ordinary.take()
                         }
                     };
-                    if removed.is_some() {
-                        // Dropping can join Tantivy merge threads. Do it after
-                        // releasing WriterState so a new foreground save does
-                        // not wait on teardown while holding the coordination lock.
-                        drop(removed);
+                    if let Some(removed) = removed {
+                        // 走っている統合を終わらせてから手放す。WriterState を放してから
+                        // 待つので、そのあいだに来た保存は新しい書き手で進む。
+                        retire_writer(removed);
                         log::info!("5分間使われていない全文索引writerを解放しました");
                     }
                 }
@@ -554,6 +553,18 @@ pub(crate) fn disable_automatic_merges_for_test(storage_dir: &Path) -> Result<()
     })
 }
 
+/// 書き手を、走っている統合を終わらせてから手放す。
+///
+/// **そのまま捨ててはならない。** tantivy の書き手は Drop で統合を打ち切り、統合の結果を
+/// 捨てる（`segment_updater.kill()`）。保存のたびに書き手を捨てていたころ、統合が一度も
+/// 終わらず、1文書だけのセグメントが4千個たまり、打ち切られた統合の書きかけが 39GB
+/// 残った。セグメントが多いほど次の統合も検索も重くなり、保存1件に15秒かかっていた。
+fn retire_writer(writer: IndexWriter<TantivyDocument>) {
+    if let Err(error) = writer.wait_merging_threads() {
+        log::warn!("Tantivy merge did not finish before releasing the writer: {error}");
+    }
+}
+
 fn exclusive_writer(
     runtime: &Arc<TantivyRuntime>,
     create: impl FnOnce() -> Result<IndexWriter<TantivyDocument>, String>,
@@ -564,17 +575,22 @@ fn exclusive_writer(
     }
     state.exclusive = true;
     // Tantivy permits one IndexWriter per directory. Release the cached
-    // ordinary writer before creating a rebuild/merge writer.
-    state.ordinary.take();
+    // ordinary writer before creating a rebuild/merge writer. 統合を待つあいだは
+    // 排他の印だけを立てて WriterState を放す（ほかの書き手は印を見て待つ）。
+    let ordinary = state.ordinary.take();
+    drop(state);
+    if let Some(ordinary) = ordinary {
+        retire_writer(ordinary);
+    }
     let writer = match create() {
         Ok(writer) => writer,
         Err(error) => {
+            let mut state = runtime.writer_state.lock();
             state.exclusive = false;
             runtime.writer_available.notify_all();
             return Err(error);
         }
     };
-    drop(state);
     Ok(ExclusiveWriter {
         runtime: runtime.clone(),
         writer: Some(writer),
@@ -821,6 +837,56 @@ impl BulkWriter {
         self.uncommitted = 0;
         Ok(())
     }
+}
+
+/// 少しずつの同期の書き込み。使い回す書き手で一度に確定する。
+///
+/// 排他の書き手（`bulk_writer`）は使い終わると捨てるので、確定と同時に始まった統合が
+/// 毎回打ち切られる。使い回す書き手なら、統合は次の保存をまたいで最後まで走る。
+pub fn upsert_prepared(storage_dir: &Path, docs: Vec<Prepared>) -> Result<(), String> {
+    if docs.is_empty() {
+        return Ok(());
+    }
+    if let Some(bad) = docs.iter().find(|doc| doc.download_id <= 0) {
+        return Err(format!(
+            "Invalid download id for indexing: {}",
+            bad.download_id
+        ));
+    }
+    let runtime = runtime(storage_dir)?;
+    with_ordinary_writer(&runtime, |writer| {
+        for doc in docs {
+            writer.delete_term(Term::from_field_u64(
+                runtime.fields.download_id,
+                doc.download_id as u64,
+            ));
+            writer
+                .add_document(doc.document)
+                .map_err(|e| format!("Tantivy document insert failed: {e}"))?;
+        }
+        writer
+            .commit()
+            .map_err(|e| format!("Tantivy commit failed: {e}"))?;
+        runtime
+            .content_generation
+            .fetch_add(1, AtomicOrdering::AcqRel);
+        runtime
+            .reader
+            .reload()
+            .map_err(|e| format!("Tantivy reader reload failed: {e}"))?;
+        Ok(())
+    })
+}
+
+/// 試験用: 使い回している書き手を、統合を終わらせてから手放す。
+#[cfg(test)]
+pub(crate) fn settle_ordinary_writer(storage_dir: &Path) -> Result<(), String> {
+    let runtime = runtime(storage_dir)?;
+    let ordinary = runtime.writer_state.lock().ordinary.take();
+    if let Some(ordinary) = ordinary {
+        retire_writer(ordinary);
+    }
+    Ok(())
 }
 
 pub fn delete_document(storage_dir: &Path, download_id: i64) -> Result<(), String> {
