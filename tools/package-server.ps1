@@ -53,7 +53,7 @@ try {
         $hello = $null
         for ($attempt = 0; $attempt -lt 60 -and -not $hello; $attempt++) {
             Start-Sleep -Milliseconds 500
-            try { $hello = Invoke-RestMethod -Uri 'http://127.0.0.1:38777/api/v2/hello' -TimeoutSec 2 } catch { }
+            try { $hello = Invoke-RestMethod -Uri 'http://127.0.0.1:38777/api/hello' -TimeoutSec 2 } catch { }
         }
         if (-not $hello -or -not $hello.apiVersion) { throw 'hello に答えません' }
     } finally {
