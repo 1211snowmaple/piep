@@ -497,8 +497,15 @@ async fn save_to_shelf_as(
                 staging.join("data_assets"),
             );
             let provider = source.clone();
-            blocking(move || repairs::restore_held(&library, existing, &data, &dir, &provider))
-                .await?
+            blocking(move || {
+                let aliases = repairs::restore_held(&library, existing, &data, &dir, &provider)?;
+                // 原寸への取り直しでは、ほかの作品が持つ同じ原寸も使い、取りに行かない。
+                if upgrade_images {
+                    repairs::restore_shared_originals(&library, &data, &dir, &provider)?;
+                }
+                Ok::<_, String>(aliases)
+            })
+            .await?
         } else {
             HashMap::new()
         };

@@ -14,8 +14,9 @@ use crate::downloader::pixiv_originals::{
     cdn_client, find_fanbox_original_cover, find_original, OriginalLookup,
 };
 use crate::AppState;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tauri::{Emitter, Manager};
 
@@ -139,11 +140,43 @@ pub async fn shelf_original_image_status(
     })
 }
 
+/// 一回の取り直しの間に確かめた在り処。同じシリーズの作品は同じ表紙を使うことが多いので、
+/// 同じ縮小版の URL を作品ごとに確かめ直さない。通信の失敗は覚えない（次の作品で確かめ直す）。
+type KnownLookups = Mutex<HashMap<String, OriginalLookup>>;
+
+async fn remembered<F, Fut>(
+    known: &KnownLookups,
+    url: String,
+    find: F,
+) -> Result<OriginalLookup, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<OriginalLookup, String>>,
+{
+    let hit = known
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&url)
+        .cloned();
+    if let Some(hit) = hit {
+        return Ok(hit);
+    }
+    let result = find(url.clone()).await;
+    if let Ok(found) = &result {
+        known
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(url, found.clone());
+    }
+    result
+}
+
 /// 一作品の縮小版を原寸に取り直す。原寸が一枚も見つからなければ保存しない。
 async fn upgrade_shelf_work(
     shelf: &Arc<crate::commands::shelf::Shelf>,
     library: &Arc<crate::library::Library>,
     client: &reqwest::Client,
+    known: &KnownLookups,
     work: crate::library::LibraryId,
 ) -> Result<(Lookups, String), String> {
     let (card, raw) = {
@@ -185,13 +218,27 @@ async fn upgrade_shelf_work(
     if card.provider == "pixiv" {
         crate::downloader::pixiv_originals::add_original_urls_with(&mut data, |url| {
             let count = &count;
-            async move { count(find_original(client, &url).await) }
+            async move {
+                count(
+                    remembered(known, url, |url| async move {
+                        find_original(client, &url).await
+                    })
+                    .await,
+                )
+            }
         })
         .await;
     } else {
         crate::downloader::pixiv_originals::add_fanbox_original_cover_with(&mut data, |url| {
             let count = &count;
-            async move { count(find_fanbox_original_cover(client, &url).await) }
+            async move {
+                count(
+                    remembered(known, url, |url| async move {
+                        find_fanbox_original_cover(client, &url).await
+                    })
+                    .await,
+                )
+            }
         })
         .await;
     }
@@ -237,6 +284,7 @@ pub async fn shelf_upgrade_images_to_original(
 
     let state = app.state::<Arc<AppState>>().inner().clone();
     let client = cdn_client()?;
+    let known = KnownLookups::default();
     let works = shelf_reduced_works(Arc::clone(&shelf)).await?;
     let total: usize = works
         .iter()
@@ -292,7 +340,7 @@ pub async fn shelf_upgrade_images_to_original(
         );
         let images = reduced.covers + reduced.illustrations;
         let (lookups, title) =
-            match upgrade_shelf_work(&shelf, &library, &client, reduced.work).await {
+            match upgrade_shelf_work(&shelf, &library, &client, &known, reduced.work).await {
                 Ok(result) => result,
                 Err(error) => (
                     Lookups {
@@ -379,4 +427,32 @@ pub async fn shelf_upgrade_images_to_original(
         stopped_reason,
         remaining,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test]
+    async fn the_same_reduced_url_is_looked_up_once_but_a_failure_is_tried_again() {
+        let known = KnownLookups::default();
+        let calls = AtomicUsize::new(0);
+        let find = |url: String| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move { Ok(OriginalLookup::Found(format!("{url}-original"))) }
+        };
+        let first = remembered(&known, "a".into(), find).await;
+        let second = remembered(&known, "a".into(), find).await;
+        assert_eq!(first, second);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let failing = |_: String| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<OriginalLookup, String>("接続できません".into()) }
+        };
+        assert!(remembered(&known, "b".into(), failing).await.is_err());
+        assert!(remembered(&known, "b".into(), failing).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
 }

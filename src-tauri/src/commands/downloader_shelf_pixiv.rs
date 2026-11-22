@@ -620,4 +620,110 @@ mod tests {
         );
         library.verify().unwrap();
     }
+
+    /// 同じシリーズの表紙を使う作品を続けて取り直しても、原寸は一度しか取りに行かない。
+    /// 二作品目は、一作品目が棚に入れた同じ URL の原寸を使う。
+    #[tokio::test]
+    async fn upgrading_works_that_share_a_series_cover_fetches_the_original_once() {
+        let mut served = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(4, 4, image::Rgb([10, 200, 10]))
+            .write_to(&mut served, image::ImageFormat::Png)
+            .unwrap();
+        let served = served.into_inner();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let paths = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = Arc::clone(&paths);
+        let body = served.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0u8; 4096];
+                let count = socket.read(&mut bytes).await.unwrap();
+                if count == 0 {
+                    continue;
+                }
+                let request = String::from_utf8_lossy(&bytes[..count]).to_string();
+                let path = request
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string();
+                seen.lock().unwrap().push(path.clone());
+                let mut response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                response.extend_from_slice(&body);
+                let _ = socket.write_all(&response).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        let temp = Temp(
+            std::env::temp_dir().join(format!("piep-pixiv-shared-cover-{}", LibraryId::now_v7())),
+        );
+        let library = Arc::new(Library::create(&temp.0.join("shelf")).unwrap());
+        let shelf = Arc::new(Shelf::with_test_library(Arc::clone(&library)));
+        let cover = format!("http://{address}/novel-cover-master/sci1_master1200.png");
+        let original_cover = format!("http://{address}/novel-cover-original/sci1.png");
+        let mut works = Vec::new();
+        for key in ["1", "2"] {
+            let data = json!({"detail":{"title":format!("題{key}"), "caption":"説明", "tags":["タグ"]},
+                "text":"本文", "cover_url":cover});
+            let path = temp.0.join(format!("cover_{key}.png"));
+            image::RgbImage::from_pixel(1, 1, image::Rgb([1, 34, 56]))
+                .save(&path)
+                .unwrap();
+            let saved = library
+                .save_readable_work(
+                    WorkSave {
+                        request: LibraryId::now_v7(),
+                        provider: "pixiv",
+                        key,
+                        route: "save",
+                        data: &data,
+                        assets: vec![StagedAsset {
+                            role: "cover".into(),
+                            name: "sci1_master1200.png".into(),
+                            path,
+                            url: Some(cover.clone()),
+                            mime_type: Some("image/png".into()),
+                        }],
+                    },
+                    None,
+                )
+                .unwrap();
+            works.push((key, data, saved.entity_id));
+        }
+        assert!(!library
+            .export_original_image_by_url(&original_cover, &temp.0.join("none.png"))
+            .unwrap());
+        for (key, data, _) in &works {
+            let mut upgraded = data.clone();
+            upgraded[crate::downloader::pixiv_originals::COVER_ORIGINAL_FIELD] =
+                json!(original_cover);
+            save_originals_to_shelf(
+                Arc::clone(&shelf),
+                Arc::clone(&library),
+                upgraded,
+                "pixiv".into(),
+                (*key).into(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{error} {:?}", paths.lock().unwrap()));
+        }
+        assert_eq!(
+            *paths.lock().unwrap(),
+            vec!["/novel-cover-original/sci1.png".to_string()]
+        );
+        for (_, _, work) in &works {
+            let snapshot = library.current_snapshot(*work).unwrap();
+            assert_eq!(
+                library.media_file(*work, snapshot, "cover").unwrap().id,
+                Fingerprint::of(&served)
+            );
+        }
+        library.verify().unwrap();
+    }
 }

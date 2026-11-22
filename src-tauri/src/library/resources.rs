@@ -1,5 +1,5 @@
 use super::{BodyFormat, ContentFile, Error, Fingerprint, Library, LibraryId, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
@@ -333,6 +333,37 @@ impl Library {
         self.objects
             .export_new(&file, destination)
             .map_err(Into::into)
+    }
+
+    /// 取得元の同じ URL から原寸として取った画像が棚にあれば、元バイト列を検証して新規の出力先へ
+    /// 書き出す。無ければ `false`。
+    ///
+    /// pixiv では、自分の表紙を持たない作品がシリーズの表紙をそのまま使う。原寸への取り直しで
+    /// 作品ごとに同じ画像を取りに行かないよう、ほかの作品が持っている同じ原寸を使い回す。
+    /// URL は取得元の住所そのものなので、同じ URL なら同じ画像である。
+    pub fn export_original_image_by_url(&self, url: &str, destination: &Path) -> Result<bool> {
+        let file = {
+            let conn = self.reader()?;
+            let id = conn
+                .query_row(
+                    "SELECT r.file_id FROM media_observations o \
+                     JOIN media_renditions r ON r.id=o.rendition_id \
+                     WHERE o.url=?1 AND r.quality='original' \
+                     ORDER BY o.acquired_at DESC LIMIT 1",
+                    [url],
+                    |r| r.get::<_, Vec<u8>>(0),
+                )
+                .optional()?;
+            let Some(id) = id else {
+                return Ok(false);
+            };
+            let id: [u8; 32] = id
+                .try_into()
+                .map_err(|_| Error::Integrity("ファイル識別子が不正です".into()))?;
+            Self::file_from_conn(&conn, Fingerprint(id))?
+        };
+        self.objects.export_new(&file, destination)?;
+        Ok(true)
     }
 }
 
