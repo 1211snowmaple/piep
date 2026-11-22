@@ -24,10 +24,6 @@ fn request() -> StartUpdateJobRequest {
         mode: "check_only".into(),
         work_ids: None,
         target_ids: None,
-        credentials: Some(
-            serde_json::from_value(serde_json::json!({"pixivRefreshToken":"DO_NOT_STORE"}))
-                .unwrap(),
-        ),
         watch_saved: Some(true),
         new_works_only: Some(true),
         adhoc_targets: None,

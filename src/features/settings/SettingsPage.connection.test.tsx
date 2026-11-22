@@ -6,11 +6,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { theme } from "@/theme";
 
-const storeApi = vi.hoisted(() => ({
-  get: vi.fn().mockResolvedValue(null),
-  set: vi.fn().mockResolvedValue(undefined),
-  delete: vi.fn().mockResolvedValue(undefined),
-  save: vi.fn().mockResolvedValue(undefined),
+const authApi = vi.hoisted(() => ({
+  getConnectionStatus: vi.fn(),
+  disconnectAccount: vi.fn(),
+  loginPixivWebview: vi.fn(),
+  connectPixivToken: vi.fn(),
+  loginFanboxWebview: vi.fn(),
+  connectFanboxSession: vi.fn(),
 }));
 
 vi.mock("@/services/dbApi", async (importOriginal) => ({
@@ -26,9 +28,7 @@ vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
   shelfDashboard: vi.fn().mockResolvedValue({ stats: { totalDownloads: 12, pixivCount: 12, fanboxCount: 0, totalAssets: 108, totalSizeBytes: 32_000_000 } }),
 }));
-vi.mock("@/store", () => ({
-  store: storeApi,
-}));
+vi.mock("@/services/authApi", () => authApi);
 vi.mock("@/features/search/searchIndexProgress", () => ({ useSearchIndexProgress: () => null }));
 
 import SettingsPage from "./SettingsPage";
@@ -48,22 +48,27 @@ function renderConnectionSettings() {
 describe("SettingsPage connection flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    storeApi.get.mockResolvedValue(null);
+    authApi.getConnectionStatus.mockResolvedValue({ pixiv: null, fanbox: { name: "FANBOX利用者" } });
+    authApi.disconnectAccount.mockResolvedValue({ pixiv: null, fanbox: null });
   });
 
-  it("removes the FANBOX user agent when disconnecting", async () => {
-    storeApi.get.mockImplementation(async (key: string) => key === "fanbox_user"
-      ? { userId: "fanbox-1", name: "FANBOX利用者" }
-      : null);
+  it("asks the backend to forget the FANBOX connection", async () => {
     renderConnectionSettings();
 
+    expect(await screen.findByText("FANBOX利用者")).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "接続解除" }));
     expect(await screen.findByRole("dialog", { name: "FANBOXとの接続を解除しますか？" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "接続を解除" }));
 
-    await waitFor(() => expect(storeApi.save).toHaveBeenCalledOnce());
-    expect(storeApi.delete).toHaveBeenCalledWith("fanbox_session_id");
-    expect(storeApi.delete).toHaveBeenCalledWith("fanbox_user");
-    expect(storeApi.delete).toHaveBeenCalledWith("fanbox_user_agent");
+    await waitFor(() => expect(authApi.disconnectAccount).toHaveBeenCalledWith("fanbox"));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "接続解除" })).not.toBeInTheDocument());
+  });
+
+  it("offers a browser reconnect when the pixiv connection lacks a web session", async () => {
+    authApi.getConnectionStatus.mockResolvedValue({ pixiv: { name: "pixiv利用者", webSession: false }, fanbox: null });
+    renderConnectionSettings();
+
+    expect(await screen.findByText("pixiv利用者")).toBeInTheDocument();
+    expect(screen.getByText("一覧を使った高速確認には、ブラウザでの再接続が必要です")).toBeInTheDocument();
   });
 });

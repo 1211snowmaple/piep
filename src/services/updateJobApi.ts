@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { store } from "@/store";
 import type { WatchId, WorkId } from "@/types/library";
 
 export type UpdateJobStatus =
@@ -17,16 +16,6 @@ export type UpdateJobStatus =
 /** `favorite`・`reading` は棚の範囲（棚が今その範囲にある作品を選ぶ）。 */
 export type UpdateJobScope = "all" | "work" | "author" | "series" | "targets" | "save" | "favorite" | "reading";
 export type UpdateJobMode = "check_only" | "auto_save" | "save";
-
-export interface UpdateJobCredentials {
-  pixivRefreshToken?: string | null;
-  /** pixivのwebセッション。無くても更新確認は動く（従来の経路になるだけ）。 */
-  pixivCookie?: string | null;
-  /** そのCookieを受け取ったときのUA。pixivCookieと対でだけ意味を持つ。 */
-  pixivUserAgent?: string | null;
-  fanboxCookie?: string | null;
-  fanboxUserAgent?: string | null;
-}
 
 export interface StartUpdateJobRequest {
   scope: UpdateJobScope;
@@ -46,7 +35,6 @@ export interface StartUpdateJobRequest {
         displayName: string;
       }[]
     | null;
-  credentials?: UpdateJobCredentials | null;
 }
 
 export interface UpdateJobSummary {
@@ -121,36 +109,13 @@ export interface UpdateJobSnapshot extends UpdateJobSummary {
   previousLogCursor: number | null;
 }
 
-export async function getUpdateJobCredentials(): Promise<UpdateJobCredentials> {
-  // CookieとUAは対でしか意味を持たない。片方だけを渡すと、Cloudflareが
-  // 発行時のUAと照らして弾く。揃っていないときは両方とも渡さない。
-  const pixivCookie = (await store.get<string>("pixiv_cookie")) || null;
-  const pixivUserAgent = (await store.get<string>("pixiv_user_agent")) || null;
-  const pixivSession =
-    pixivCookie && pixivUserAgent
-      ? { pixivCookie, pixivUserAgent }
-      : { pixivCookie: null, pixivUserAgent: null };
-  return {
-    pixivRefreshToken: (await store.get<string>("pixiv_refresh_token")) || null,
-    ...pixivSession,
-    fanboxCookie: (await store.get<string>("fanbox_session_id")) || null,
-    fanboxUserAgent:
-      (await store.get<string>("fanbox_user_agent")) || "Mozilla/5.0",
-  };
-}
-
-export async function startUpdateJobCommand(
-  request: Omit<StartUpdateJobRequest, "credentials"> & {
-    credentials?: UpdateJobCredentials | null;
-  },
-): Promise<UpdateJobSnapshot> {
-  const credentials = request.credentials ?? (await getUpdateJobCredentials());
-  return invoke<UpdateJobSnapshot>("start_update_job", {
-    request: {
-      ...request,
-      credentials,
-    },
-  });
+/**
+ * 更新確認を始める。
+ *
+ * 鍵は渡さない。バックエンドが保存してある接続から自分で読む。
+ */
+export function startUpdateJobCommand(request: StartUpdateJobRequest): Promise<UpdateJobSnapshot> {
+  return invoke<UpdateJobSnapshot>("start_update_job", { request });
 }
 
 /** まとめ保存に渡す1件。取得元とIDが分かれば、本文は向こうが取りに行く。 */
@@ -188,8 +153,8 @@ export function recordIncompleteSaveRepairAttemptsCommand(sourceIds: string[]): 
   return invoke("record_incomplete_save_repair_attempts", { sourceIds });
 }
 
-export async function recheckDeferredUpdateCandidatesCommand(keys: string[], refreshPostAccess = false): Promise<UpdateJobSnapshot> {
-  return invoke("recheck_deferred_update_candidates", { keys, refreshPostAccess, credentials: await getUpdateJobCredentials() });
+export function recheckDeferredUpdateCandidatesCommand(keys: string[], refreshPostAccess = false): Promise<UpdateJobSnapshot> {
+  return invoke("recheck_deferred_update_candidates", { keys, refreshPostAccess });
 }
 
 /**
@@ -198,16 +163,11 @@ export async function recheckDeferredUpdateCandidatesCommand(keys: string[], ref
  * 画面が閉じても、落ちても、保存は走り続ける。返ってくるのは開始直後の様子で、
  * 続きは `getUpdateJobCommand` と `update-job` イベントで追う。
  */
-export async function startSaveJobCommand(
+export function startSaveJobCommand(
   works: SaveJobWork[],
   watchSaved: boolean,
-  credentials?: UpdateJobCredentials | null,
 ): Promise<UpdateJobSnapshot> {
-  return invoke<UpdateJobSnapshot>("start_save_job", {
-    works,
-    watchSaved,
-    credentials: credentials ?? (await getUpdateJobCredentials()),
-  });
+  return invoke<UpdateJobSnapshot>("start_save_job", { works, watchSaved });
 }
 
 /** ジョブの項目ひとつひとつの、いまの状態。行に印を付けるために使う。 */
@@ -249,7 +209,6 @@ export async function resumeUpdateJobCommand(
 ): Promise<UpdateJobSnapshot> {
   return invoke<UpdateJobSnapshot>("resume_update_job", {
     jobId,
-    credentials: await getUpdateJobCredentials(),
     retryFailed,
   });
 }
@@ -313,10 +272,7 @@ export async function listPendingRevisionsCommand(): Promise<
 export async function previewPendingRevisionCommand(
   work: string,
 ): Promise<PendingRevisionPreview> {
-  return invoke<PendingRevisionPreview>("preview_pending_revision", {
-    work,
-    credentials: await getUpdateJobCredentials(),
-  });
+  return invoke<PendingRevisionPreview>("preview_pending_revision", { work });
 }
 
 export async function saveUpdateJobCandidatesCommand(
@@ -326,7 +282,6 @@ export async function saveUpdateJobCandidatesCommand(
   return invoke<UpdateJobSnapshot>("save_update_job_candidates", {
     jobId,
     candidateIds,
-    credentials: await getUpdateJobCredentials(),
   });
 }
 

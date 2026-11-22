@@ -23,12 +23,12 @@ impl SecretCipher for DevelopmentCipher {
 }
 
 #[cfg(target_os = "android")]
-pub use android::{init, KeystoreCipher};
+pub use android::{KeystoreCipher, init};
 
 #[cfg(target_os = "android")]
 mod android {
     use super::SecretCipher;
-    use base64::{engine::general_purpose::STANDARD, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD};
     use serde::{Deserialize, Serialize};
     use tauri::plugin::{Builder, PluginHandle, TauriPlugin};
     use tauri::{Manager, Runtime};

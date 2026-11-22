@@ -584,7 +584,6 @@ pub(super) mod tests {
             mode: "check_only".into(),
             work_ids: None,
             target_ids: None,
-            credentials: None,
             watch_saved: None,
             new_works_only: None,
             adhoc_targets: None,

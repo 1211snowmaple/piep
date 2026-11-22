@@ -505,18 +505,16 @@ pub struct UpdateTargetInput {
     pub metadata_json: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// 取得の仕事が使う鍵の組。
+///
+/// 画面からは受け取らない。保存してある接続（`auth::saved`）から Rust の中で
+/// 組み立てる。鍵を持つので `Debug` も付けない。
+#[derive(Clone)]
 pub struct UpdateCredentials {
     pub pixiv_refresh_token: Option<String>,
     /// pixiv の web セッション。無くても更新確認は動く（従来の経路になるだけ）。
-    ///
-    /// 既定を持たせてあるのは、この二つを知らない依頼が届いても
-    /// 更新確認そのものは動くべきだから。**新しい鍵が無いことは、故障ではない。**
-    #[serde(default)]
     pub pixiv_cookie: Option<String>,
     /// その Cookie を受け取ったときの UA。`pixiv_cookie` と対でだけ意味を持つ。
-    #[serde(default)]
     pub pixiv_user_agent: Option<String>,
     pub fanbox_cookie: Option<String>,
     pub fanbox_user_agent: Option<String>,
@@ -535,7 +533,6 @@ pub struct StartUpdateJobRequest {
     pub mode: String,
     pub work_ids: Option<Vec<crate::library::LibraryId>>,
     pub target_ids: Option<Vec<crate::library::LibraryId>>,
-    pub credentials: Option<UpdateCredentials>,
     /// このジョブが保存した作品を、そのまま更新監視に載せるか。
     /// 設定の「保存した作品を自動で監視する」から渡ってくる。
     #[serde(default)]
@@ -907,7 +904,6 @@ mod start_request_shape_tests {
         assert_eq!(request.scope, "all");
         assert!(request.work_ids.is_none());
         assert!(request.target_ids.is_none());
-        assert!(request.credentials.is_none());
         assert!(request.watch_saved.is_none());
         assert!(request.new_works_only.is_none());
         assert!(request.adhoc_targets.is_none());

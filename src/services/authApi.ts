@@ -1,53 +1,39 @@
 import { invoke } from "@tauri-apps/api/core";
 
 /**
- * pixiv の利用者。
+ * 取得用の接続の様子。
  *
- * `profile_image_urls` だけ snake_case なのは、Rust 側の `PixivUser` に
- * `rename_all` が付いていないからである（`src-tauri/src/pixiv_api/models.rs`）。
- * 中身は pixiv の応答をそのまま通した JSON なので、形は約束されていない。
+ * **鍵そのものは画面へ来ない。** pixiv の更新用トークン・Cookie、FANBOX の
+ * セッションはバックエンドが Windows の資格情報マネージャーに置き、保存や
+ * 更新確認のときに自分で読む。画面が知るのは、繋がっているかと名前だけ。
  */
-export interface PixivUser {
-  id: string;
-  name: string;
-  profile_image_urls?: { medium?: string };
+export interface ConnectionStatus {
+  pixiv: { name: string; webSession: boolean } | null;
+  fanbox: { name: string } | null;
 }
 
-/** FANBOX の利用者。 */
-export interface FanboxUser {
-  userId: string;
-  name: string;
-  iconUrl?: string | null;
+export function getConnectionStatus(): Promise<ConnectionStatus> {
+  return invoke<ConnectionStatus>("connection_status");
 }
 
-/**
- * pixiv と接続したときに受け取るもの。
- *
- * `cookie` と `userAgent` は対でしか意味を持たない。片方だけでは web の一覧を
- * 読めないので、揃っていないときは両方とも無いものとして扱う。
- */
-export interface PixivConnection {
-  refreshToken: string;
-  user: PixivUser;
-  cookie: string | null;
-  userAgent: string | null;
+export function loginPixivWebview(): Promise<ConnectionStatus> {
+  return invoke<ConnectionStatus>("login_pixiv_webview");
 }
 
-/** FANBOX のログイン窓が持ち帰るもの。順に セッション / 利用者 / そのときの UA。 */
-export type FanboxConnection = [session: string, user: FanboxUser, userAgent: string];
-
-export function verifyPixivToken(refreshToken: string): Promise<PixivUser> {
-  return invoke<PixivUser>("verify_pixiv_token", { refreshToken });
+/** 手で貼った更新用トークンを確かめ、通れば保存する。 */
+export function connectPixivToken(refreshToken: string): Promise<ConnectionStatus> {
+  return invoke<ConnectionStatus>("connect_pixiv_token", { refreshToken });
 }
 
-export function verifyFanboxSession(sessionId: string, userAgent: string): Promise<FanboxUser> {
-  return invoke<FanboxUser>("verify_fanbox_session", { sessionId, userAgent });
+export function loginFanboxWebview(): Promise<ConnectionStatus> {
+  return invoke<ConnectionStatus>("login_fanbox_webview");
 }
 
-export function loginPixivWebview(): Promise<PixivConnection> {
-  return invoke<PixivConnection>("login_pixiv_webview");
+/** 手で貼ったセッション ID と UA の組を確かめ、通れば保存する。 */
+export function connectFanboxSession(sessionId: string, userAgent: string): Promise<ConnectionStatus> {
+  return invoke<ConnectionStatus>("connect_fanbox_session", { sessionId, userAgent });
 }
 
-export function loginFanboxWebview(): Promise<FanboxConnection> {
-  return invoke<FanboxConnection>("login_fanbox_webview");
+export function disconnectAccount(source: "pixiv" | "fanbox"): Promise<ConnectionStatus> {
+  return invoke<ConnectionStatus>("disconnect_account", { source });
 }

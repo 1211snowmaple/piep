@@ -61,8 +61,8 @@ features:
 | | |
 |---|---:|
 | 画面 | <!--stat:screens.count-->10<!--/stat--> |
-| IPC コマンド | <!--stat:commands.total-->186<!--/stat--> |
-| うち説明のあるもの | <!--stat:commands.described-->186<!--/stat--> |
+| IPC コマンド | <!--stat:commands.total-->188<!--/stat--> |
+| うち説明のあるもの | <!--stat:commands.described-->188<!--/stat--> |
 | イベント | <!--stat:events.total-->12<!--/stat--> |
 | テーブル | <!--stat:tables.total-->78<!--/stat--> |
 

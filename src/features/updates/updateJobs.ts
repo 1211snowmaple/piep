@@ -13,7 +13,6 @@ import {
   cancelUpdateJobCommand,
   clearUpdateJobCommand,
   getUpdateJobCommand,
-  getUpdateJobCredentials,
   listUpdateJobsCommand,
   pauseUpdateJobCommand,
   resumeUpdateJobCommand,
@@ -23,7 +22,6 @@ import {
 
 import type {
   StartUpdateJobRequest,
-  UpdateJobCredentials,
   UpdateJobItemState,
   UpdateJobProgressDelta,
   UpdateJobSnapshot,
@@ -38,7 +36,6 @@ export type {
   UpdateJobStatus,
   UpdateJobScope,
   UpdateJobMode,
-  UpdateJobCredentials,
   StartUpdateJobRequest,
   UpdateJobSummary,
   UpdateJobLog,
@@ -332,12 +329,8 @@ export function isUpdateJobActive(status: UpdateJobStatus): boolean {
   return status === "queued" || status === "running" || status === "canceling";
 }
 
-export { getUpdateJobCredentials };
-
 export async function startUpdateJob(
-  request: Omit<StartUpdateJobRequest, "credentials"> & {
-    credentials?: UpdateJobCredentials | null;
-  },
+  request: StartUpdateJobRequest,
 ): Promise<UpdateJobSnapshot> {
   return startUpdateJobCommand(request);
 }

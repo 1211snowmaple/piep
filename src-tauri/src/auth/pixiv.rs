@@ -34,7 +34,8 @@ async fn bounded_response_text(mut response: reqwest::Response) -> Result<String
     Ok(String::from_utf8(body)?)
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+// **Debug を付けない。** トークンを持つので、`{:?}` 一つでログへ落ちる。
+#[derive(Serialize, Deserialize)]
 pub struct PixivAuthResponse {
     pub access_token: String,
     pub refresh_token: String,

@@ -16,8 +16,7 @@
 use crate::database::{
     AcceptCollectionSuggestionInput, CollectionAdditionResult, CollectionNameCandidate,
     CollectionSuggestion, CollectionSuggestionRequest, CollectionSweepResult,
-    EntityProfileRepairStatus, SearchIndexStatus, UpdateCredentials, UpdateTarget,
-    UpdateTargetInput, WorkKey,
+    EntityProfileRepairStatus, SearchIndexStatus, UpdateTarget, UpdateTargetInput, WorkKey,
 };
 use crate::AppState;
 use std::collections::HashMap;
@@ -75,8 +74,12 @@ pub struct RefreshEntityProfileParams {
     pub source: String,
     pub source_key: String,
     pub force: Option<bool>,
+    /// 鍵は画面から受け取らない。IPC の入口が保存してある接続から埋める。
+    #[serde(skip_deserializing)]
     pub refresh_token: Option<String>,
+    #[serde(skip_deserializing)]
     pub cookie: Option<String>,
+    #[serde(skip_deserializing)]
     pub user_agent: Option<String>,
 }
 
@@ -960,9 +963,21 @@ fn collect_profile_links(
 /// **呼びすぎないよう間隔を空けてある。** 前回から間が空いていなければ待たされる。
 /// 画面を開くたびに呼ばないこと。
 ///
-/// `force` を立てると、新しいと分かっていても取り直す。鍵が要る。
+/// `force` を立てると、新しいと分かっていても取り直す。鍵は保存してある接続から読む。
 #[tauri::command]
 pub async fn refresh_entity_profile(
+    app: tauri::AppHandle,
+    mut params: RefreshEntityProfileParams,
+) -> Result<serde_json::Value, String> {
+    let credentials = crate::auth::saved::Vault::app().update_credentials();
+    params.refresh_token = credentials.pixiv_refresh_token;
+    params.cookie = credentials.fanbox_cookie;
+    params.user_agent = credentials.fanbox_user_agent;
+    refresh_entity_profile_with(app, params).await
+}
+
+/// 鍵を添えた `params` で取り直す。更新ジョブと修復が、自分の持つ鍵で呼ぶ。
+pub(crate) async fn refresh_entity_profile_with(
     app: tauri::AppHandle,
     params: RefreshEntityProfileParams,
 ) -> Result<serde_json::Value, String> {
@@ -1007,8 +1022,8 @@ pub async fn db_get_entity_profile_repair_status(
 #[tauri::command]
 pub async fn repair_incomplete_entity_profiles(
     app: tauri::AppHandle,
-    credentials: UpdateCredentials,
 ) -> Result<EntityProfileRepairResult, String> {
+    let credentials = crate::auth::saved::Vault::app().update_credentials();
     ENTITY_PROFILE_REPAIR_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .map_err(|_| "作者・シリーズ情報の修復はすでに実行中です".to_string())?;
@@ -1065,7 +1080,7 @@ pub async fn repair_incomplete_entity_profiles(
                 error: None,
             },
         );
-        let result = refresh_entity_profile(app.clone(), params).await;
+        let result = refresh_entity_profile_with(app.clone(), params).await;
         completed += 1;
         let error = match result {
             Ok(_) => {

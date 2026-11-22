@@ -1,5 +1,6 @@
 pub mod fanbox;
 pub mod pixiv;
+pub mod saved;
 pub mod webview;
 
 /// 相手に送る意味のある Cookie の名前。
