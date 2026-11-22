@@ -8,6 +8,13 @@ const sizes = [
 const themes = ["light", "dark"] as const;
 const scales = [1, 1.5, 2] as const;
 
+// CI は組んだ物を別のポートで配る。重いジョブは利用者の PC の実行役（snow-1・snow-2）で走るので、
+// 開発中の piep（tauri dev は 1420 に固定）や、同じ PC のもう一つの実行役とぶつからないよう、
+// 実行役の名前の番号からポートを決める。手元は開発サーバー（1420）をそのまま使い回す。
+const runnerNumber = Number(/(\d+)$/.exec(process.env.RUNNER_NAME ?? "")?.[1] ?? 0) % 100;
+const port = process.env.CI ? 1430 + runnerNumber : 1420;
+const origin = `http://localhost:${port}`;
+
 export default defineConfig({
   testDir: "./e2e",
   outputDir: "./test-results/playwright",
@@ -44,7 +51,7 @@ export default defineConfig({
     // Match Vite/Tauri's default localhost binding. On Windows it commonly
     // listens on ::1; reusing that healthy server through 127.0.0.1 made the
     // visual suite fail intermittently with connection-refused chunk loads.
-    baseURL: "http://localhost:1420",
+    baseURL: origin,
     locale: "ja-JP",
     timezoneId: "Asia/Tokyo",
     // `use.reducedMotion` は Playwright の設定に無い。書いても黙って無視され、
@@ -64,9 +71,9 @@ export default defineConfig({
     // empty. Serving static files removes that; locally the dev server stays,
     // so a run still picks up edits without a build.
     command: process.env.CI
-      ? "npm run preview -- --host localhost --port 1420 --strictPort"
+      ? `npm run preview -- --host localhost --port ${port} --strictPort`
       : "npm run dev -- --host localhost",
-    url: "http://localhost:1420",
+    url: origin,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },
