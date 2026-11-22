@@ -2,7 +2,7 @@
 
 策定日: 2026-11-09。状態: 共通の保管処理を抽出。新しい端末保存・同期・配信への接続は未完了。
 
-Android 側の詳細は [Android の新ライブラリ基盤設計](https://github.com/1211snowmaple/piep-android/blob/codex/android-library-v2-design/LIBRARY-V2.md) を正本とする。
+Android 側の詳細は [Android の新ライブラリ基盤設計](android-library-v2-device.md) を正本とする。
 現行の Android は Tauri・React・Rust のアプリで、既存 API を使ったオンライン読書と
 選択保存を実装している。この文書は、そのアプリを新ライブラリへ接続する境界を定める。
 
