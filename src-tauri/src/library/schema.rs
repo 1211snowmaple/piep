@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 27;
+pub(crate) const VERSION: i64 = 29;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -32,7 +32,19 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_025_incomplete_save_attempts.sql"),
     include_str!("migration_026_ai_notes.sql"),
     include_str!("migration_027_drop_switched.sql"),
+    include_str!("migration_028_drop_migration_records.sql"),
+    include_str!("migration_029_restore_snapshot_guards.sql"),
 ];
+/// この版の SQL を当てた直後に、移した版の指紋を計算し直す（区分を指紋から外したため）。
+const REFINGERPRINT_AFTER: usize = 28;
+
+fn run_migration(conn: &Connection, index: usize, sql: &str) -> Result<()> {
+    conn.execute_batch(sql)?;
+    if index + 1 == REFINGERPRINT_AFTER {
+        super::integrity::refingerprint_unclassified(conn)?;
+    }
+    Ok(())
+}
 
 fn migration_checksum(sql: &str) -> Fingerprint {
     // Git のチェックアウト設定による CRLF/LF の違いは、スキーマの変更ではない。
@@ -52,8 +64,8 @@ pub(crate) fn create(conn: &mut Connection, library: LibraryId) -> Result<()> {
     }
     configure(conn)?;
     let tx = conn.transaction()?;
-    for sql in MIGRATIONS {
-        tx.execute_batch(sql)?;
+    for (index, sql) in MIGRATIONS.iter().enumerate() {
+        run_migration(&tx, index, sql)?;
     }
     tx.execute(
         "INSERT INTO library_meta(singleton,library_id) VALUES(1,?1)",
@@ -111,7 +123,7 @@ pub(crate) fn open(conn: &Connection, library: LibraryId) -> Result<()> {
     if version < VERSION {
         let tx = conn.unchecked_transaction()?;
         for (index, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-            tx.execute_batch(sql)?;
+            run_migration(&tx, index, sql)?;
             record_migration(&tx, index as i64 + 1, sql)?;
         }
         tx.pragma_update(None, "user_version", VERSION)?;
@@ -204,6 +216,114 @@ mod tests {
                 .get::<_, i64>(
                 0
             ))
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn dropping_revision_classes_refingerprints_only_the_unclassified_snapshots() {
+        let id = LibraryId::now_v7();
+        let conn = version_one(id);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(26) {
+            conn.execute_batch(sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 27).unwrap();
+        let work = LibraryId::now_v7();
+        conn.execute(
+            "INSERT INTO entities(id,kind,created_at) VALUES(?1,'work',1)",
+            [work.as_bytes().as_slice()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO works(id,content_type) VALUES(?1,'novel')",
+            [work.as_bytes().as_slice()],
+        )
+        .unwrap();
+        let mut snapshots = Vec::new();
+        for (ordinal, class) in [(1, "legacy_unclassified"), (2, "source")] {
+            let revision = LibraryId::now_v7();
+            let snapshot = LibraryId::now_v7();
+            conn.execute("INSERT INTO source_revisions(id,entity_id,ordinal,classification,discovered_at) VALUES(?1,?2,?3,?4,5)",rusqlite::params![revision.as_bytes().as_slice(),work.as_bytes().as_slice(),ordinal,class]).unwrap();
+            conn.execute("INSERT INTO revision_snapshots(id,entity_id,revision_id,sequence,metadata_json,field_states_json,interpretation_version,semantic_rule,semantic_hash,manifest_hash,created_at,published) VALUES(?1,?2,?3,?4,'{\"title\":\"t\"}','{}',1,1,zeroblob(32),zeroblob(32),7,1)",rusqlite::params![snapshot.as_bytes().as_slice(),work.as_bytes().as_slice(),revision.as_bytes().as_slice(),ordinal]).unwrap();
+            let (semantic, manifest) =
+                super::super::integrity::snapshot_fingerprints(&conn, snapshot).unwrap();
+            // 区分の入った旧い構成の指紋の代わり。移した版のものだけ計算し直されるはず。
+            let stored = if class == "source" {
+                manifest
+            } else {
+                Fingerprint([7; 32])
+            };
+            conn.execute_batch("DROP TRIGGER published_snapshot_immutable")
+                .unwrap();
+            conn.execute(
+                "UPDATE revision_snapshots SET semantic_hash=?2,manifest_hash=?3 WHERE id=?1",
+                rusqlite::params![
+                    snapshot.as_bytes().as_slice(),
+                    semantic.0.as_slice(),
+                    stored.0.as_slice()
+                ],
+            )
+            .unwrap();
+            conn.execute_batch("CREATE TRIGGER published_snapshot_immutable BEFORE UPDATE ON revision_snapshots WHEN OLD.published = 1 BEGIN SELECT RAISE(ABORT,'published snapshot is immutable'); END;").unwrap();
+            snapshots.push((snapshot, manifest));
+        }
+        open(&conn, id).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            VERSION
+        );
+        for (snapshot, manifest) in &snapshots {
+            let stored: Vec<u8> = conn
+                .query_row(
+                    "SELECT manifest_hash FROM revision_snapshots WHERE id=?1",
+                    [snapshot.as_bytes().as_slice()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, manifest.0);
+        }
+        super::super::integrity::verify_snapshots(&conn).unwrap();
+        assert!(conn
+            .execute(
+                "UPDATE revision_snapshots SET created_at=8 WHERE id=?1",
+                [snapshots[0].0.as_bytes().as_slice()],
+            )
+            .is_err());
+        for name in [
+            "migration_records",
+            "migration_requests",
+            "migration_fingerprints",
+            "repair_attempt_markers",
+            "asset_audit_markers",
+            "unclassified_snapshots",
+        ] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name=?1",
+                    [name],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap()
+                    + conn
+                        .query_row(
+                            "SELECT count(*) FROM sqlite_temp_master WHERE name=?1",
+                            [name],
+                            |r| r.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                0,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM pragma_table_info('source_revisions') WHERE name='classification'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
             .unwrap(),
             0
         );
@@ -603,8 +723,6 @@ mod tests {
                 .unwrap(),
             VERSION
         );
-        assert_eq!(conn.query_row("SELECT status FROM migration_records WHERE source_table='__normalization__' AND source_key='reader_bindings'",[],|r|r.get::<_,String>(0)).unwrap(),"unresolved");
-        assert_eq!(conn.query_row("SELECT target_id FROM migration_records WHERE source_table='download_versions' AND source_key='old'",[],|r|r.get::<_,Vec<u8>>(0)).unwrap(),id.as_bytes());
         assert_eq!(
             conn.query_row("SELECT generation FROM library_meta", [], |r| r
                 .get::<_, i64>(0))

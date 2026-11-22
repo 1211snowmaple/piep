@@ -134,13 +134,13 @@ erDiagram
 `snapshot_media` は未取得画像の識別だけを持てるため、選んだ品質が NULL の場合もある。
 `revision_snapshots` のメタデータ・本文・対応表・画像・添付はその保存状態に固定する。
 `work_current_projection` 等は現在の一覧を効率よく読むための投影で、過去版の正本とは分ける。
-旧履歴の分類が不明なものは `legacy_unclassified` のまま保持し、作者の改稿と断定しない。
+旧履歴の分類が不明なものも、スキーマ 28 からは取得元の版として扱う（区分 `legacy_unclassified` は無くした）。
 
 作者・シリーズ・コレクションはそれぞれ `people`・`series`・`collections` が
 `entities` の種類を制約して参照する。利用者ごとのお気に入り・タグ・位置は
 `work_user_state`・`work_user_tags`・`reading_positions` に分ける。
 取得は `acquisition_attempts` と `acquisition_observations`、更新履歴は `job_history` 一式、
-修復試行と旧検査は `repair_attempt_markers`・`asset_audit_markers` に対象版を固定して残す。
+旧棚から移した修復試行と旧検査の印はスキーマ 28 で落とした。今の版の補完の試行だけ `incomplete_save_attempts` に移した。
 旧表と全管理ファイルは移行記録へ保持し、未対応の行を読み捨てて移行完了にしない。
 
 ## 改稿・品質・圧縮を分ける

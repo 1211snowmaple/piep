@@ -1434,16 +1434,6 @@ fn snapshot_credentials_missing() -> UpdateCredentials {
 #[tauri::command]
 pub async fn clear_update_job(app: tauri::AppHandle, job_id: String) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
-    let library = state.shelf.library()?;
-    if let Some(job) = library
-        .migrated_job_history_id(&job_id)
-        .map_err(|e| e.to_string())?
-    {
-        return library
-            .set_job_history_hidden(crate::library::LibraryId::now_v7(), Some(job), true)
-            .map(|_| ())
-            .map_err(|e| e.to_string());
-    }
     state.jobs().clear_update_job(&job_id)
 }
 

@@ -96,13 +96,7 @@ impl Library {
     }
 
     pub(super) fn verify_asset_repairs(&self, conn: &Connection) -> Result<()> {
-        let invalid: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM asset_repair_state s WHERE s.legacy_evidence_file_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM migration_records m WHERE m.source_table='downloads' AND m.source_key='__all_rows__' AND m.evidence_file_id=s.legacy_evidence_file_id))",[],|r|r.get(0))?;
-        if invalid {
-            return Err(Error::Integrity(
-                "添付の覚え書きの原記録が一致しません".into(),
-            ));
-        }
-        let mut stmt=conn.prepare("SELECT s.snapshot_id,s.work_id,a.id,a.state,a.result_snapshot_id,a.input_manifest_file_id FROM asset_repair_state s LEFT JOIN acquisition_attempts a ON a.id=s.request_id WHERE s.request_id IS NOT NULL")?;
+        let mut stmt=conn.prepare("SELECT s.snapshot_id,s.work_id,a.id,a.state,a.result_snapshot_id,a.input_manifest_file_id FROM asset_repair_state s LEFT JOIN acquisition_attempts a ON a.id=s.request_id")?;
         for row in stmt.query_map([], |r| {
             Ok((
                 r.get::<_, Vec<u8>>(0)?,

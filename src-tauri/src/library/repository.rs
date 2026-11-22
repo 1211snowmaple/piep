@@ -441,22 +441,6 @@ impl Library {
         })
     }
 
-    /// 未解決の移行記録を、再起動後も確認できる。本番への切り替え前に必ず検査する。
-    pub fn activation_problems(&self) -> Result<Vec<String>> {
-        let conn = self.reader()?;
-        let mut statement=conn.prepare("SELECT source_table,source_key FROM migration_records WHERE status='unresolved' ORDER BY source_table,source_key")?;
-        let result = statement
-            .query_map([], |r| {
-                Ok(format!(
-                    "{}: {}",
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(result)
-    }
-
     /// 保管済みのファイルを DB へ登録する前に、実体を一度だけ読んで確かめる。
     /// いま保管したばかりのものは `store_bytes` を使い、読み直しを重ねない。
     pub(crate) fn prepare_file(&self, file: &ContentFile) -> Result<PreparedFile> {
@@ -1126,10 +1110,10 @@ impl Library {
                 [entity.as_bytes().as_slice()],
                 |r| r.get(0),
             )?;
-            // 旧棚から移した版には `legacy_unclassified` と `repair` が付いている。新しく
-            // 取得した版は取得元の改稿として記録する。
+            // 取り直して欠けを埋めた版（`repair`）は作者の改稿に数えない。新しく取得した版は
+            // 取得元の改稿として記録する。
             tx.execute(
-                "INSERT INTO source_revisions(id,entity_id,ordinal,classification,discovered_at,repair) VALUES(?1,?2,?3,'source',?4,0)",
+                "INSERT INTO source_revisions(id,entity_id,ordinal,discovered_at,repair) VALUES(?1,?2,?3,?4,0)",
                 params![
                     id.as_bytes().as_slice(),
                     entity.as_bytes().as_slice(),
@@ -1670,7 +1654,6 @@ impl Library {
         super::searches::verify_searches(&conn)?;
         self.verify_reader_bindings(&conn)?;
         self.verify_job_history(&conn)?;
-        Self::verify_maintenance_markers(&conn)?;
         super::integrity::verify_snapshots(&conn)?;
         Ok((count, read))
     }

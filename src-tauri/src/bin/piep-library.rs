@@ -33,11 +33,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         Some("verify") if args.len()==3=>{
             let library=Library::open(Path::new(&args[2]))?;
-            let unresolved=library.activation_problems()?;
-            println!("{}",serde_json::json!({"verified_files":library.verify()?,"storage":library.objects.stats()?,"unresolved_migration":unresolved}));
-            if !unresolved.is_empty() {
-                return Err("ファイルの検証は完了しましたが、未解決の移行データが残っています".into());
-            }
+            println!("{}",serde_json::json!({"verified_files":library.verify()?,"storage":library.objects.stats()?}));
         },
         Some("suggestion") if args.len()==4=>{
             let library=Library::open(Path::new(&args[2]))?;
@@ -53,12 +49,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let library=Library::open(Path::new(&args[2]))?;
             let id=LibraryId::parse_str(&args[3])?;
             println!("{}",serde_json::to_string_pretty(&library.source_entity_state(id)?)?);
-        },
-        Some("maintenance") if args.len()==5=>{
-            let library=Library::open(Path::new(&args[2]))?;
-            let entity=LibraryId::parse_str(&args[3])?;
-            let snapshot=LibraryId::parse_str(&args[4])?;
-            println!("{}",serde_json::to_string_pretty(&library.maintenance_history(entity,snapshot)?)?);
         },
         Some("saved-searches") if args.len()==4=>{
             let library=Library::open(Path::new(&args[2]))?;

@@ -14,7 +14,6 @@ pub struct SnapshotInfo {
     pub revision: i64,
     pub sequence: i64,
     pub saved_at: i64,
-    pub classification: String,
     pub metadata: BTreeMap<String, serde_json::Value>,
     pub field_states: BTreeMap<String, String>,
     pub body_file: Option<Fingerprint>,
@@ -91,19 +90,18 @@ impl Library {
     }
     pub fn snapshots(&self, entity: LibraryId) -> Result<Vec<SnapshotInfo>> {
         let conn = self.reader()?;
-        let mut stmt=conn.prepare("SELECT s.id,s.revision_id,r.ordinal,r.classification,s.metadata_json,s.field_states_json,s.body_file_id,s.sequence,s.created_at,s.body_format FROM revision_snapshots s JOIN source_revisions r ON r.id=s.revision_id WHERE s.entity_id=?1 AND s.published=1 ORDER BY s.sequence")?;
+        let mut stmt=conn.prepare("SELECT s.id,s.revision_id,r.ordinal,s.metadata_json,s.field_states_json,s.body_file_id,s.sequence,s.created_at,s.body_format FROM revision_snapshots s JOIN source_revisions r ON r.id=s.revision_id WHERE s.entity_id=?1 AND s.published=1 ORDER BY s.sequence")?;
         let rows = stmt.query_map([entity.as_bytes().as_slice()], |r| {
             Ok((
                 r.get::<_, Vec<u8>>(0)?,
                 r.get::<_, Vec<u8>>(1)?,
                 r.get(2)?,
-                r.get(3)?,
+                r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, Option<Vec<u8>>>(6)?,
+                r.get::<_, Option<Vec<u8>>>(5)?,
+                r.get(6)?,
                 r.get(7)?,
-                r.get(8)?,
-                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<String>>(8)?,
             ))
         })?;
         rows.map(|row| {
@@ -111,7 +109,6 @@ impl Library {
                 snapshot,
                 revision,
                 ordinal,
-                classification,
                 metadata,
                 states,
                 body,
@@ -125,7 +122,6 @@ impl Library {
                 revision: ordinal,
                 sequence,
                 saved_at,
-                classification,
                 metadata: serde_json::from_str(&metadata)?,
                 field_states: serde_json::from_str(&states)?,
                 body_file: body.map(fingerprint).transpose()?,
