@@ -140,8 +140,10 @@ fn the_index_follows_saves_tags_and_removals_and_rebuilds_when_lost() {
     assert_eq!((pruned.removed, pruned.indexed), (1, 0));
 
     // 索引の場所が消えたら、空から作り直す。
-    crate::database::tantivy_index::release_runtime(&temp.0.join("derived"));
-    std::fs::remove_dir_all(temp.0.join("derived")).unwrap();
+    let storage = library.search_storage();
+    crate::database::tantivy_index::release_runtime(&storage.join("history"));
+    crate::database::tantivy_index::release_runtime(&storage);
+    std::fs::remove_dir_all(&storage).unwrap();
     let rebuilt = library.sync_search_index(&mut quiet).unwrap();
     assert!(rebuilt.reset);
     assert_eq!(rebuilt.indexed, 3);
