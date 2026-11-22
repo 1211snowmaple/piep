@@ -11,7 +11,6 @@ fn clearing_finished_jobs_keeps_paused_jobs_and_sealed_history_goes_only_with_cl
             mode: "check_only".into(),
             work_ids: None,
             target_ids: None,
-            credentials: None,
             watch_saved: None,
             new_works_only: None,
             adhoc_targets: None,

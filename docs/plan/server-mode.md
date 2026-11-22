@@ -147,8 +147,9 @@ DB の形は、表と列を足す形で進めてきた（`schema.rs` の `ADD CO
 
 ### 取得元の認証情報と更新確認
 
-- pixiv の refresh token と FANBOX の cookie・UA は、**画面側の設定（`settings.json`）に平文で**
-  入っている。更新ジョブを始めるたびに、画面がそれを Rust 側へ渡している。DB には入っていない。
+- pixiv の refresh token と FANBOX の cookie・UA は、Windows の資格情報マネージャーに入っている
+  （`auth::saved`。以前は画面側の設定 `settings.json` に平文だった）。更新ジョブは Rust 側が自分で
+  読み、画面は鍵を持たない。DB には入っていない。
 - 定期の更新確認は画面側のスケジューラー（`useUpdateScheduler`、5 分ごとに期限を見る）が起こす。
   **アプリを開いている間しか走らない。**
 - 更新ジョブ本体（`commands/update_jobs.rs`、約 5,000 行）は `tauri::AppHandle` から状態を取り、

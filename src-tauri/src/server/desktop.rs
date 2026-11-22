@@ -193,92 +193,36 @@ fn save_settings(path: &Path, settings: &DesktopServerSettings) -> Result<(), St
 
 mod credential {
     //! 管理者の鍵は Windows の資格情報マネージャーに、サーバーの URL ごとに置く。
-    //!
-    //! 前の版は URL によらず一つの名前に置いていた。その名前の鍵は前の版が今もつないでいる
-    //! サーバーのものなので、書き換えも消しもしない。URL ごとの鍵が無いとき（前の版がつないだ
-    //! サーバーのまま）だけ読む。
-    use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Security::Credentials::{
-        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
-        CRED_TYPE_GENERIC,
-    };
-
-    const NOT_FOUND_HRESULT: i32 = 0x8007_0490_u32 as i32;
-    const LEGACY: &str = "io.github.u1211snowmaple.piep/server-admin-token";
+    use crate::credential_manager;
 
     /// サーバーの URL ごとの名前（大文字・小文字と末尾の `/` は区別しない）。
     pub(super) fn name(url: &str) -> String {
         format!(
-            "{LEGACY}/{}",
+            "{}/server-admin-token/{}",
+            credential_manager::PREFIX,
             url.trim().trim_end_matches('/').to_ascii_lowercase()
         )
     }
 
-    fn wide(name: &str) -> Vec<u16> {
-        name.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
     pub fn store(url: &str, token: &str) -> Result<(), String> {
-        let mut target = wide(&name(url));
-        let mut blob = token.as_bytes().to_vec();
-        let credential = CREDENTIALW {
-            Type: CRED_TYPE_GENERIC,
-            TargetName: PWSTR(target.as_mut_ptr()),
-            CredentialBlobSize: blob.len() as u32,
-            CredentialBlob: blob.as_mut_ptr(),
-            Persist: CRED_PERSIST_LOCAL_MACHINE,
-            ..Default::default()
-        };
-        unsafe { CredWriteW(&credential, 0) }
+        credential_manager::write(&name(url), token.as_bytes())
             .map_err(|_| "サーバーの鍵を資格情報マネージャーに保存できません".to_string())
     }
 
     pub fn load(url: &str) -> Result<Option<String>, String> {
-        match read(&name(url))? {
-            Some(token) => Ok(Some(token)),
-            None => read(LEGACY),
-        }
-    }
-
-    fn read(name: &str) -> Result<Option<String>, String> {
-        let target = wide(name);
-        let mut pointer: *mut CREDENTIALW = std::ptr::null_mut();
-        if let Err(error) = unsafe {
-            CredReadW(
-                PCWSTR(target.as_ptr()),
-                CRED_TYPE_GENERIC,
-                None,
-                &mut pointer,
-            )
-        } {
-            if error.code().0 == NOT_FOUND_HRESULT {
-                return Ok(None);
-            }
-            return Err("サーバーの鍵を資格情報マネージャーから読めません".into());
-        }
-        // CredReadW が確保した領域は、中身を読めなくても必ず CredFree する。
-        let value = unsafe {
-            let credential = &*pointer;
-            let bytes = std::slice::from_raw_parts(
-                credential.CredentialBlob,
-                credential.CredentialBlobSize as usize,
-            );
-            String::from_utf8(bytes.to_vec())
+        let Some(bytes) = credential_manager::read(&name(url))
+            .map_err(|_| "サーバーの鍵を資格情報マネージャーから読めません".to_string())?
+        else {
+            return Ok(None);
         };
-        unsafe { CredFree(pointer as *const _) };
-        value
+        String::from_utf8(bytes)
             .map(Some)
             .map_err(|_| "保存されたサーバーの鍵を読み取れません".to_string())
     }
 
-    /// この URL の鍵を消す。前の版の一つの名前の鍵は残す（前の版が使っている）。
     pub fn delete(url: &str) -> Result<(), String> {
-        let target = wide(&name(url));
-        match unsafe { CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, None) } {
-            Ok(()) => Ok(()),
-            Err(error) if error.code().0 == NOT_FOUND_HRESULT => Ok(()),
-            Err(_) => Err("サーバーの鍵を資格情報マネージャーから消せません".into()),
-        }
+        credential_manager::delete(&name(url))
+            .map_err(|_| "サーバーの鍵を資格情報マネージャーから消せません".to_string())
     }
 }
 

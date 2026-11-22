@@ -5,7 +5,6 @@ import type {
   WatchId,
   SearchIndexStatus,
 } from "@/types/library";
-import type { UpdateJobCredentials } from "@/services/updateJobApi";
 export type { SearchIndexStatus } from "@/types/library";
 
 export function isTauriRuntime(): boolean {
@@ -55,8 +54,8 @@ export function getEntityProfileRepairStatus(): Promise<EntityProfileRepairStatu
   return invoke<EntityProfileRepairStatus>("db_get_entity_profile_repair_status");
 }
 
-export function repairIncompleteEntityProfiles(credentials: UpdateJobCredentials): Promise<EntityProfileRepairResult> {
-  return invoke<EntityProfileRepairResult>("repair_incomplete_entity_profiles", { credentials });
+export function repairIncompleteEntityProfiles(): Promise<EntityProfileRepairResult> {
+  return invoke<EntityProfileRepairResult>("repair_incomplete_entity_profiles");
 }
 
 export function cancelEntityProfileRepair(): Promise<boolean> {

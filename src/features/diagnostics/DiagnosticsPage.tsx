@@ -36,7 +36,6 @@ import {
   repairIncompleteEntityProfiles,
   type EntityProfileRepairProgress,
 } from "@/services/dbApi";
-import { getUpdateJobCredentials } from "@/services/updateJobApi";
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
 import type { LibraryDiagnostics, LibraryFileIssue } from "@/types/library";
@@ -216,7 +215,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         });
       }
       try {
-        return await repairIncompleteEntityProfiles(await getUpdateJobCredentials());
+        return await repairIncompleteEntityProfiles();
       } catch (error) {
         profileRepairOperationRef.current?.fail(error);
         throw error;

@@ -39,7 +39,7 @@ vi.mock("@/services/eventBus", () => ({
     },
   ),
 }));
-vi.mock("@/store", () => ({ store: { get: vi.fn().mockResolvedValue(null), set: vi.fn(), save: vi.fn() } }));
+vi.mock("@/services/authApi", () => ({ getConnectionStatus: vi.fn().mockResolvedValue({ pixiv: null, fanbox: null }) }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
