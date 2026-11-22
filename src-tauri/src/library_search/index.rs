@@ -243,7 +243,17 @@ impl Library {
             .unwrap_or(4)
             .clamp(1, 8);
         let (sender, receiver) = mpsc::sync_channel::<Option<(i64, Prepared, Stamp)>>(256);
-        let mut writer = tantivy_index::bulk_writer(&storage).map_err(Error::Integrity)?;
+        // 作り直しと大きな同期だけ排他の書き手で書き、最後に一つにまとめる。保存のたびの
+        // 少しずつの同期は、使い回す書き手で書いて統合を既定の方針に任せる。排他の書き手は
+        // 使い終わると捨てるので、少しずつの同期に使うと統合が毎回打ち切られ、セグメントが
+        // 保存の数だけたまっていく（`tantivy_index::upsert_prepared`）。
+        let small = !report.reset && total < COMMIT_EVERY;
+        let mut writer = if small {
+            None
+        } else {
+            Some(tantivy_index::bulk_writer(&storage).map_err(Error::Integrity)?)
+        };
+        let mut collected: Vec<Prepared> = Vec::new();
         let mut done = 0usize;
         let mut pending: Vec<(i64, Stamp)> = Vec::new();
         std::thread::scope(|scope| -> Result<()> {
@@ -291,12 +301,15 @@ impl Library {
                 done += 1;
                 match item {
                     Some((key, prepared, stamp)) => {
-                        writer.upsert(prepared).map_err(Error::Integrity)?;
+                        match writer.as_mut() {
+                            Some(writer) => writer.upsert(prepared).map_err(Error::Integrity)?,
+                            None => collected.push(prepared),
+                        }
                         pending.push((key, stamp));
                     }
                     None => report.skipped += 1,
                 }
-                if pending.len() >= COMMIT_EVERY {
+                if let Some(writer) = writer.as_mut().filter(|_| pending.len() >= COMMIT_EVERY) {
                     writer.commit().map_err(Error::Integrity)?;
                     self.record_stamps(space, &mut pending)?;
                 }
@@ -308,10 +321,17 @@ impl Library {
         })?;
         if let Some(error) = failure.into_inner().unwrap_or_else(|e| e.into_inner()) {
             // 確定していない分は捨てる。状態は古いままなので、次の同期で作り直す。
-            let _ = writer.rollback();
+            if let Some(writer) = writer.as_mut() {
+                let _ = writer.rollback();
+            }
             return Err(error);
         }
-        writer.commit().map_err(Error::Integrity)?;
+        match writer.as_mut() {
+            Some(writer) => writer.commit().map_err(Error::Integrity)?,
+            None => {
+                tantivy_index::upsert_prepared(&storage, collected).map_err(Error::Integrity)?
+            }
+        }
         self.record_stamps(space, &mut pending)?;
         report.indexed = total - report.skipped;
         progress(total, total);
