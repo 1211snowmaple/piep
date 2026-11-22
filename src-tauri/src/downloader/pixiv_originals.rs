@@ -109,6 +109,55 @@ pub(crate) fn is_reduced_fanbox_cover(url: &str) -> bool {
     fanbox_original_cover(url).is_some()
 }
 
+/// 表紙の原寸の候補（良い順）。もう在り処が書き足されているときと、縮小版でないときは空。
+pub(crate) fn cover_original_candidates(data: &Value, provider: &str) -> Vec<String> {
+    if data
+        .get(COVER_ORIGINAL_FIELD)
+        .and_then(Value::as_str)
+        .is_some_and(|url| !url.is_empty())
+    {
+        return Vec::new();
+    }
+    match provider {
+        "pixiv" => data
+            .get("cover_url")
+            .and_then(Value::as_str)
+            .or_else(|| data.pointer("/detail/cover_url").and_then(Value::as_str))
+            .map(original_candidates)
+            .unwrap_or_default(),
+        "fanbox" => data
+            .get("coverImageUrl")
+            .and_then(Value::as_str)
+            .and_then(fanbox_original_cover)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// 棚がもう原寸を持っている表紙なら、画像サーバーに確かめずに在り処を書き足す。
+/// 書き足したら `true`。
+///
+/// 同じシリーズの作品は同じ表紙を使うので、二作品目からは `HEAD` で確かめなくてよい。
+/// 棚の記録は取得元の URL そのもので、原寸として実際に取ったものだけを数える。
+pub(crate) fn fill_cover_original_from_shelf(
+    library: &crate::library::Library,
+    data: &mut Value,
+    provider: &str,
+) -> Result<bool, String> {
+    let candidates = cover_original_candidates(data, provider);
+    match library
+        .first_original_image_url(&candidates)
+        .map_err(|error| error.to_string())?
+    {
+        Some(found) => {
+            data[COVER_ORIGINAL_FIELD] = Value::String(found);
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 /// 画像サーバー用の接続。認証は付けない。
 pub(crate) fn cdn_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -537,5 +586,69 @@ mod tests {
             Ok(OriginalLookup::Unavailable)
         );
         server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod shelf_tests {
+    use super::*;
+    use crate::library::{Library, LibraryId, StagedAsset, WorkSave};
+    use serde_json::json;
+
+    const REDUCED: &str = "https://i.pximg.net/c/240x480_80/novel-cover-master/img/2024/11/15/19/39/13/sci23413112_bbb0c381096512a7d02ab80ef9ec4d6b_master1200.jpg";
+    const ORIGINAL_JPG: &str = "https://i.pximg.net/novel-cover-original/img/2024/11/15/19/39/13/sci23413112_bbb0c381096512a7d02ab80ef9ec4d6b.jpg";
+
+    struct Temp(std::path::PathBuf);
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// 同じシリーズの表紙の原寸を棚が持っていれば、`HEAD` で確かめずに在り処を書き足す。
+    #[test]
+    fn a_series_cover_already_on_the_shelf_needs_no_lookup() {
+        let temp =
+            Temp(std::env::temp_dir().join(format!("piep-shelf-cover-{}", LibraryId::now_v7())));
+        let library = Library::create(&temp.0.join("shelf")).unwrap();
+        let mut data = json!({"detail":{"title":"題"}, "text":"本文", "cover_url":REDUCED});
+        // 棚に何も無ければ触らない（画像サーバーに確かめる）。
+        assert!(!fill_cover_original_from_shelf(&library, &mut data, "pixiv").unwrap());
+        assert!(data.get(COVER_ORIGINAL_FIELD).is_none());
+
+        // 一作品目が二番目の候補（.jpg）の原寸を持っている。
+        let path = temp.0.join("cover.jpg");
+        image::RgbImage::from_pixel(2, 2, image::Rgb([9, 9, 9]))
+            .save(&path)
+            .unwrap();
+        let first = json!({"detail":{"title":"一"}, "text":"本文", "cover_url":REDUCED,
+            COVER_ORIGINAL_FIELD: ORIGINAL_JPG});
+        library
+            .save_readable_work(
+                WorkSave {
+                    request: LibraryId::now_v7(),
+                    provider: "pixiv",
+                    key: "1",
+                    route: "save",
+                    data: &first,
+                    assets: vec![StagedAsset {
+                        role: "cover".into(),
+                        name: "cover.jpg".into(),
+                        path,
+                        url: Some(ORIGINAL_JPG.into()),
+                        mime_type: Some("image/jpeg".into()),
+                    }],
+                },
+                None,
+            )
+            .unwrap();
+
+        assert!(fill_cover_original_from_shelf(&library, &mut data, "pixiv").unwrap());
+        assert_eq!(data[COVER_ORIGINAL_FIELD], ORIGINAL_JPG);
+        // もう書き足してあれば何もしない。
+        let mut chosen =
+            json!({"cover_url":REDUCED, COVER_ORIGINAL_FIELD: "https://example.test/x.png"});
+        assert!(!fill_cover_original_from_shelf(&library, &mut chosen, "pixiv").unwrap());
+        assert_eq!(chosen[COVER_ORIGINAL_FIELD], "https://example.test/x.png");
     }
 }

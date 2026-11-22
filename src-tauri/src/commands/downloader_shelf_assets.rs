@@ -269,6 +269,44 @@ pub(super) fn restore_held(
     Ok(aliases)
 }
 
+/// まだ作業場所に無い表紙のうち、ほかの作品が同じ URL の原寸を棚に持っているものを書き出す。
+/// 書き出した数を返す。
+///
+/// 同じシリーズの作品は同じ表紙を使うことが多い（実際の棚で、表紙の取り直しの約1割が別の作品と
+/// 同じ画像だった。挿絵の重なりはほぼ無い）。シリーズの新しい作品を保存するときも、前の版が
+/// 無いので同じことが起きる。棚の問い合わせは一枚ごとなので、表紙だけを見る。
+/// 置いた物はダウンロードの段が「すでに保存されている」として飛ばす。
+pub(super) fn restore_shared_originals(
+    library: &Library,
+    data: &Value,
+    dir: &Path,
+    source: &str,
+) -> Result<usize, String> {
+    let mut targets = Vec::new();
+    extract_download_targets(data, source == "fanbox", &mut targets);
+    let mut restored = 0;
+    for target in targets.into_iter().filter(|t| t.sub_folder == "cover") {
+        if Path::new(&target.filename).components().count() != 1
+            || target.filename.contains(['/', '\\'])
+        {
+            return Err("添付の保存名が不正です".into());
+        }
+        let destination = dir.join(target.sub_folder).join(&target.filename);
+        if destination.exists() {
+            continue;
+        }
+        std::fs::create_dir_all(destination.parent().ok_or("添付の保存先がありません")?)
+            .map_err(|e| e.to_string())?;
+        if library
+            .export_original_image_by_url(&target.url, &destination)
+            .map_err(|e| e.to_string())?
+        {
+            restored += 1;
+        }
+    }
+    Ok(restored)
+}
+
 pub(super) fn require_all_held(
     library: &Library,
     work: LibraryId,

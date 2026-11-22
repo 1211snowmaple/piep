@@ -442,6 +442,20 @@ async fn save_to_shelf_as(
     // 原寸は、実際に保存すると決まったここで探す。
     if matches!(source.as_str(), "pixiv" | "fanbox") && !reader_only && !upgrade_images {
         use crate::downloader::pixiv_originals as originals;
+        // 棚がもう原寸を持っている表紙（同じシリーズの表紙）は、画像サーバーに確かめない。
+        let filled = {
+            let (library, filled, provider) = (Arc::clone(&library), data.clone(), source.clone());
+            blocking(move || {
+                let mut filled = filled;
+                originals::fill_cover_original_from_shelf(&library, &mut filled, &provider)
+                    .map(|_| filled)
+            })
+            .await
+        };
+        match filled {
+            Ok(filled) => data = filled,
+            Err(error) => log::warn!("棚の原寸の表紙を確かめられません: {error}"),
+        }
         match originals::cdn_client() {
             Ok(client) if source == "pixiv" => {
                 originals::add_original_urls(&client, &mut data).await
@@ -497,8 +511,13 @@ async fn save_to_shelf_as(
                 staging.join("data_assets"),
             );
             let provider = source.clone();
-            blocking(move || repairs::restore_held(&library, existing, &data, &dir, &provider))
-                .await?
+            blocking(move || {
+                let aliases = repairs::restore_held(&library, existing, &data, &dir, &provider)?;
+                // ほかの作品が持つ同じ原寸の表紙も使い、取りに行かない（シリーズの表紙）。
+                repairs::restore_shared_originals(&library, &data, &dir, &provider)?;
+                Ok::<_, String>(aliases)
+            })
+            .await?
         } else {
             HashMap::new()
         };
