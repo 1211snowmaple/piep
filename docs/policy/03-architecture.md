@@ -89,7 +89,8 @@ SQLite の操作は同期的で、そのまま async の中で走らせると We
 
 Tantivy は一つのディレクトリに対して `IndexWriter` を一つしか許さない。
 アプリは起動時にライブラリを一つ開き、排他ロックを取る。だから
-`cargo test` は `--test-threads=1` で走らせる。
+Rust の試験は `cargo nextest` でテストごとに別のプロセスに分けて走らせる
+（[09-quality](09-quality.md)）。
 
 ## フロント側の作法
 

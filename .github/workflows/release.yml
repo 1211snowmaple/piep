@@ -13,13 +13,15 @@ on:
 # ここでは試験を走らせない。同じコミットの main 上の Quality 成功を
 # 下のゲートでQualityとDocsのcontract成功を確認し、同じ試験を二重に走らせない。
 #
-# tauri-action は下書きの配布として作る。公開は別の操作で行う。
+# 配布は下書きとして作る。公開は別の操作で行う。
 jobs:
   release:
     permissions:
       contents: write
       actions: read
-    runs-on: windows-latest
+    # 組み立ては利用者の PC（self-hosted、ラベル snow）で、release の途中経過を使い回す。
+    # CI_RUNNER が self でなければ GitHub のランナーで素から組む。
+    runs-on: ${{ vars.CI_RUNNER == 'self' && fromJSON('["self-hosted","snow"]') || 'windows-latest' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -42,7 +44,7 @@ jobs:
             throw "Tag $expected does not match version files: $($versions -join ', ')"
           }
 
-      - name: Require Quality and contract success on main for the tagged commit
+      - name: Require the tagged commit to be on main
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -52,113 +54,36 @@ jobs:
           if ($relationship -notin @('ahead', 'identical')) {
             throw "Tagged commit $commit is not on main (compare status: $relationship)"
           }
-          for ($attempt = 0; $attempt -lt 120; $attempt++) {
-            $runs = @(gh run list --workflow quality.yml --commit $commit --branch main --limit 100 --json conclusion,createdAt,event,headSha,status | ConvertFrom-Json)
-            $latest = $runs | Where-Object { $_.headSha -eq $commit -and $_.event -eq 'push' } | Sort-Object createdAt -Descending | Select-Object -First 1
-            if ($latest.status -eq 'completed') {
-              if ($latest.conclusion -ne 'success') { throw "Quality for $commit ended with $($latest.conclusion)" }
-              break
-            }
-            if ($attempt -eq 119) { throw "Quality has not succeeded for $commit" }
-            Start-Sleep -Seconds 30
-          }
-          for ($attempt = 0; $attempt -lt 120; $attempt++) {
-            $runs = @(gh run list --workflow docs.yml --commit $commit --branch main --limit 100 --json databaseId,createdAt,event,headSha | ConvertFrom-Json)
-            $latest = $runs | Where-Object { $_.headSha -eq $commit -and $_.event -eq 'push' } | Sort-Object createdAt -Descending | Select-Object -First 1
-            if ($latest) {
-              $details = gh run view $latest.databaseId --json jobs | ConvertFrom-Json
-              $contract = $details.jobs | Where-Object { $_.name -eq 'contract' } | Select-Object -First 1
-              if ($contract.status -eq 'completed') {
-                if ($contract.conclusion -ne 'success') { throw "Contract for $commit ended with $($contract.conclusion)" }
-                break
-              }
-            }
-            if ($attempt -eq 119) { throw "Contract has not succeeded for $commit" }
-            Start-Sleep -Seconds 30
-          }
 
       - name: Install Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           check-latest: true
-          cache: 'npm'
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
 
-      # clippy と rustfmt はここでは使わない。走らせるのは quality.yml。
-      - name: Install Rust 1.99.1
-        run: |
-          rustup toolchain install 1.99.1 --profile minimal
-          rustup default 1.99.1
-
-      # 依存木に ort・DirectML・tantivy・lindera・画像コーデックが入るので、
-      # 素で組むと17分かかる。quality.yml と鍵を分けてあるのは、あちらが
-      # debug でしか組まないから。cargo は profile ごとに成果物を分けるので、
-      # debug の cache を引いてもここでは一つも再利用できない。数 GB を
-      # 落として捨てるだけになる。ここが引くのは前回のリリースが残した
-      # release の成果物で、依存が動いた回は restore-keys で近いものに落ちる。
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          workspaces: src-tauri
-          key: release
+      # 版は rust-toolchain.toml が決める。既定の版は変えない（self-hosted では利用者の rustup）。
+      - name: Install Rust
+        run: rustup toolchain install
 
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and Publish Release
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
+      # 組み立ては品質の確認を待たずに始める。以前は Quality の終わり（約30分）を
+      # 待ってから組み始めていたので、全体が足し算になっていた。ここで組むのは
+      # 手元の成果物だけで、配布（下書きの作成と載せる物）はすべて確認の後にある。
+      - name: Build the installer ahead of the quality gate
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # アプリ内更新は署名された配布物しか受け付けない。鍵が無いビルドは
-          # latest.json を作れないので、更新の告知だけが止まる。
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "piep v__VERSION__"
-          releaseBody: "Windows 向けインストーラーは下のアセットからダウンロードできます。"
-          releaseDraft: true
-          prerelease: false
-          # 一旦生成してから、識別子変更前のアプリと分離した名前で公開する。
-          includeUpdaterJson: true
-          updaterJsonPreferNsis: true
-
-      - name: Separate the updater feed from the previous app identity
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release download '${{ github.ref_name }}' --pattern latest.json --dir $env:RUNNER_TEMP
-          $manifest = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'latest.json') -Raw | ConvertFrom-Json -AsHashtable
-          $platforms = $manifest['platforms']
-          if (-not $platforms -or -not $platforms.ContainsKey('windows-x86_64')) {
-            throw 'Updater manifest has no generic Windows target for existing installs'
-          }
-          foreach ($target in @('windows-x86_64', 'windows-x86_64-nsis')) {
-            if ($platforms.ContainsKey($target)) {
-              if ($platforms[$target]['url'] -notmatch '_x64-setup\.exe$') {
-                throw "$target does not point to the branded NSIS installer"
-              }
-              if (-not $platforms[$target]['signature']) {
-                throw "$target has no updater signature"
-              }
-            }
-          }
-          if ($platforms.ContainsKey('windows-x86_64-msi')) {
-            throw 'Updater manifest still exposes the unbranded MSI path'
-          }
-          $renamed = Join-Path $env:RUNNER_TEMP 'latest-v2.json'
-          Move-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'latest.json') -Destination $renamed
-          gh release upload '${{ github.ref_name }}' $renamed --clobber
-          if ($LASTEXITCODE -ne 0) { throw 'Could not upload the new updater manifest' }
-          gh release delete-asset '${{ github.ref_name }}' latest.json --yes
-          if ($LASTEXITCODE -ne 0) { throw 'Could not remove the old updater manifest' }
+        run: npx --no-install tauri build
 
       # 単独サーバーは Tauri の成果物ではないので別に組む。デスクトップ版の
       # 自動更新と同じ鍵で署名し、組み込みの公開鍵で検証できることまで確かめる。
-      - name: Build, check and attach the standalone server
+      # 管理画面を埋め込むのはこちらだけ。インストーラーは上で組み終えている。
+      - name: Build, sign and check the standalone server ahead of the quality gate
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -184,5 +109,101 @@ jobs:
             url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$name"
             signature = (Get-Content -LiteralPath $signature -Raw).Trim()
           } | ConvertTo-Json | Set-Content -LiteralPath $manifest -Encoding utf8NoBOM
-          gh release upload $tag $zip $signature $manifest --clobber
-          if ($LASTEXITCODE -ne 0) { throw 'Could not upload the server package' }
+
+      - name: Require Quality and contract success on main for the tagged commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $commit = (git rev-parse HEAD).Trim()
+          for ($attempt = 0; $attempt -lt 120; $attempt++) {
+            $runs = @(gh run list --workflow quality.yml --commit $commit --branch main --limit 100 --json conclusion,createdAt,event,headSha,status | ConvertFrom-Json)
+            $latest = $runs | Where-Object { $_.headSha -eq $commit -and $_.event -eq 'push' } | Sort-Object createdAt -Descending | Select-Object -First 1
+            if ($latest.status -eq 'completed') {
+              if ($latest.conclusion -ne 'success') { throw "Quality for $commit ended with $($latest.conclusion)" }
+              break
+            }
+            if ($attempt -eq 119) { throw "Quality has not succeeded for $commit" }
+            Start-Sleep -Seconds 30
+          }
+          for ($attempt = 0; $attempt -lt 120; $attempt++) {
+            $runs = @(gh run list --workflow docs.yml --commit $commit --branch main --limit 100 --json databaseId,createdAt,event,headSha | ConvertFrom-Json)
+            $latest = $runs | Where-Object { $_.headSha -eq $commit -and $_.event -eq 'push' } | Sort-Object createdAt -Descending | Select-Object -First 1
+            if ($latest) {
+              $details = gh run view $latest.databaseId --json jobs | ConvertFrom-Json
+              $contract = $details.jobs | Where-Object { $_.name -eq 'contract' } | Select-Object -First 1
+              if ($contract.status -eq 'completed') {
+                if ($contract.conclusion -ne 'success') { throw "Contract for $commit ended with $($contract.conclusion)" }
+                break
+              }
+            }
+            if ($attempt -eq 119) { throw "Contract has not succeeded for $commit" }
+            Start-Sleep -Seconds 30
+          }
+
+      # 下書きを作って載せるのは、ここから先だけ。
+      #
+      # 以前は tauri-action が組み立てと下書きの作成を一度にしていた。組み立てを
+      # 確認の前へ出すと、あの action は同じ組み立てをもう一度呼ぶ。本体の
+      # build.rs は管理画面（admin-dist）を埋め込むので、単独サーバーのために
+      # 管理画面を組んだあとでは本体が組み直しになり、デスクトップ版にも管理画面が
+      # 入ってしまう。載せる物と更新の告知（latest-v2.json）は、あの action が
+      # 作っていたのと同じ形でここで作る。
+      #
+      # 告知は、識別子を変える前のアプリとは分けた名前（latest-v2.json）で出す。
+      # 既存のインストールが読む windows-x86_64 と、NSIS を指す
+      # windows-x86_64-nsis の二つを、署名済みの setup.exe に向ける。
+      - name: Create the draft release and attach every asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $version = $tag.Substring(1)
+          $notes = 'Windows 向けインストーラーは下のアセットからダウンロードできます。'
+          $bundle = 'src-tauri/target/release/bundle/nsis'
+          $setupName = "piep_${version}_x64-setup.exe"
+          $setup = Join-Path $bundle $setupName
+          $setupSignature = "$setup.sig"
+          foreach ($path in @($setup, $setupSignature)) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "Missing installer output: $path" }
+          }
+          $signature = (Get-Content -LiteralPath $setupSignature -Raw).Trim()
+          if (-not $signature) { throw 'The installer has no updater signature' }
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$setupName"
+          $entry = [ordered]@{ signature = $signature; url = $url }
+          $updater = Join-Path $env:RUNNER_TEMP 'latest-v2.json'
+          [ordered]@{
+            version = $version
+            notes = $notes
+            pub_date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+            platforms = [ordered]@{
+              'windows-x86_64' = $entry
+              'windows-x86_64-nsis' = $entry
+            }
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $updater -Encoding utf8NoBOM
+
+          $server = Join-Path $env:RUNNER_TEMP 'server'
+          $zip = Join-Path $server "piep-server-$version-windows-x64.zip"
+          $assets = @($setup, $setupSignature, $updater, $zip, "$zip.sig", (Join-Path $server 'latest-server.json'))
+          foreach ($path in $assets) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "Missing release asset: $path" }
+          }
+
+          # 再実行では、前の回が作った下書きへ載せ直す。
+          gh release view $tag --json tagName *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --draft --verify-tag --title "piep v$version" --notes $notes
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create the draft release' }
+          }
+          gh release upload $tag @assets --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not upload the release assets' }
+
+          $release = gh release view $tag --json tagName,isDraft,assets | ConvertFrom-Json
+          if ($release.tagName -ne $tag) { throw "Release is attached to $($release.tagName), not $tag" }
+          if (-not $release.isDraft) { throw 'Release is not a draft' }
+          $names = @($release.assets | ForEach-Object { $_.name } | Sort-Object)
+          $expected = @($assets | ForEach-Object { Split-Path $_ -Leaf } | Sort-Object)
+          if (Compare-Object $names $expected) {
+            throw "Release assets differ from the expected set: $($names -join ', ')"
+          }
