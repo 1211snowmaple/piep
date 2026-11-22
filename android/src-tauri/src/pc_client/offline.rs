@@ -49,7 +49,7 @@ impl OfflineKey {
         (!id.is_nil() && id.to_string() == text).then_some(Self(id))
     }
 
-    fn of(work: &piep_mobile_api::MobileShelfWork) -> Option<Self> {
+    fn of(work: &piep_mobile_api::MobileWork) -> Option<Self> {
         Self::parse(&work.id)
     }
 
@@ -171,17 +171,15 @@ impl OfflineState {
 #[serde(rename_all = "camelCase")]
 pub struct OfflineWork {
     /// 棚の一覧と同じ形で残す。
-    pub work: piep_mobile_api::MobileShelfWork,
+    pub work: piep_mobile_api::MobileWork,
     /// 保存した棚の UUID。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shelf_library: Option<String>,
+    pub shelf_library: String,
     #[serde(default)]
     pub people: Vec<MobilePerson>,
     #[serde(default)]
     pub series: Vec<MobileSeriesMembership>,
     pub saved_at_ms: u64,
     pub saved_version: i64,
-    pub saved_content_hash: Option<String>,
     pub saved_edit_hash: Option<String>,
     pub page_count: usize,
     #[serde(default)]
@@ -194,9 +192,7 @@ pub struct OfflineWork {
     pub has_author_cover: bool,
     #[serde(default)]
     pub has_series_cover: bool,
-    #[serde(default)]
     pub author_cover_entity: Option<OfflineEntityKey>,
-    #[serde(default)]
     pub series_cover_entity: Option<OfflineEntityKey>,
 }
 
@@ -258,15 +254,11 @@ struct Manifest {
     summary: OfflineWork,
     pages: Vec<PageRecord>,
     assets: Vec<AssetRecord>,
-    #[serde(default)]
     cover: Option<CoverRecord>,
-    #[serde(default)]
     author_cover: Option<CoverRecord>,
-    #[serde(default)]
     series_cover: Option<CoverRecord>,
     #[serde(default)]
     collection_covers: Vec<CollectionCoverRecord>,
-    #[serde(default)]
     outline_sha256: Option<String>,
 }
 
@@ -759,7 +751,7 @@ pub async fn offline_save_shelf_work(
 }
 
 /// 棚が今出している版と、作品の画面で見た版が同じか。
-fn same_view(view: &WorkReadingView, work: &piep_mobile_api::MobileShelfWork) -> bool {
+fn same_view(view: &WorkReadingView, work: &piep_mobile_api::MobileWork) -> bool {
     view.snapshot_id.get().to_string() == work.snapshot_id
         && view.edit_id.map(|id| id.get().to_string()) == work.edit_id
 }
@@ -769,7 +761,7 @@ async fn save_shelf_into(
     client: &reqwest::Client,
     saved: &SavedConnection,
     library: ShelfScope,
-    detail: &piep_mobile_api::MobileShelfWorkDetail,
+    detail: &piep_mobile_api::MobileWorkDetail,
     staging: &Path,
 ) -> Result<Manifest, ClientError> {
     fs::create_dir(staging.join("pages")).map_err(|_| storage())?;
@@ -799,7 +791,6 @@ async fn save_shelf_into(
             html: html.clone(),
             total_plain_text_chars: document.text_chars(),
             source_page_starts: document.source_page_starts().to_vec(),
-            revision: None,
         };
         let bytes = serde_json::to_vec(&page).map_err(|_| storage())?;
         if bytes.len() > MAX_PAGE_BYTES {
@@ -941,7 +932,7 @@ async fn save_shelf_into(
     }
     let summary = OfflineWork {
         work: work.clone(),
-        shelf_library: Some(library.library_id().get().to_string()),
+        shelf_library: library.library_id().get().to_string(),
         people: detail.people.clone(),
         series: detail.series.clone(),
         saved_at_ms: SystemTime::now()
@@ -949,8 +940,7 @@ async fn save_shelf_into(
             .map_err(|_| storage())?
             .as_millis() as u64,
         saved_version: work.current_version,
-        // 版は、残した作品の版と編集の UUID で見分ける（本文のハッシュは持たない）。
-        saved_content_hash: None,
+        // 版は、残した作品の版と編集の UUID で見分ける。
         saved_edit_hash: work.edit_id.as_ref().map(|id| format!("edit:{id}")),
         page_count,
         collections,
@@ -1188,7 +1178,7 @@ pub(super) mod tests {
     ) -> serde_json::Value {
         serde_json::json!({
             "work": work_json(key, source_id, title), "shelfLibrary": Uuid::from_u128(2).to_string(),
-            "savedAtMs": 1, "savedVersion": 1, "savedContentHash": null,
+            "savedAtMs": 1, "savedVersion": 1,
             "savedEditHash": null, "pageCount": pages
         })
     }
@@ -1371,8 +1361,8 @@ pub(super) mod tests {
             {"source": "pixiv", "key": "anthology", "title": "短編集", "contentOrder": null}
         ]);
         let snapshot = serde_json::json!({
-            "work": work, "people": people, "series": series,
-            "savedAtMs": 1, "savedVersion": 1, "savedContentHash": null,
+            "work": work, "shelfLibrary": Uuid::from_u128(2).to_string(),
+            "people": people, "series": series, "savedAtMs": 1, "savedVersion": 1,
             "savedEditHash": null, "pageCount": 1,
             "hasAuthorCover": true, "hasSeriesCover": true,
             "authorCoverEntity": {"source": "pixiv", "key": "co-author"},
@@ -1546,7 +1536,7 @@ pub(super) mod tests {
                     "seriesTitle": null, "seriesId": null, "sourceCreatedAt": null,
                     "savedAt": "2026-11-19T00:00:00Z"
                 }, "shelfLibrary": Uuid::now_v7().to_string(), "savedAtMs": 1, "savedVersion": 2,
-                    "savedContentHash": null, "savedEditHash": null,
+                    "savedEditHash": null,
                     "pageCount": 1},
                 "pages": [{"page": 0, "sha256": digest(&page)}],
                 "assets": [{"id": 0, "mimeType": "image/png", "sha256": digest(image)}]

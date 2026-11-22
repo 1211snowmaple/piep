@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
-import type { MobileCollection, MobileEntityDetail, MobileSearchSuggestions, MobileShelfCollectionDetail, MobileShelfPage, MobileShelfWork, MobileShelfWorkDetail } from "@shared/mobileApi";
+import type { MobileCollection, MobileEntityDetail, MobileSearchSuggestions, MobileCollectionDetail, MobileWorkPage, MobileWork, MobileWorkDetail } from "@shared/mobileApi";
 import type { PcCollection, PcCollectionDetail, PcConnectionStatus, PcEntityDetail, PcEntityPage, PcEntitySeriesPage, PcMetadata, PcOutlineEntry, PcPage, PcSearchPage, PcWork, PcWorkSearch, SearchSuggestion } from "./pcApi";
 
 type ShelfScope = NonNullable<PcConnectionStatus["shelf"]>["scope"];
@@ -70,7 +70,7 @@ export async function shelfSuggestions(library: ShelfScope, text: string): Promi
 
 /** 取得元と ID から棚の作品を引く。棚に無ければ失敗する。 */
 export async function lookupShelfWork(library: ShelfScope, source: string, key: string): Promise<PcWork> {
-  return shelfWork(await invoke<MobileShelfWork>("pc_lookup_work", { library, provider: source, key }));
+  return shelfWork(await invoke<MobileWork>("pc_lookup_work", { library, provider: source, key }));
 }
 
 /** 棚のコレクション。表紙は棚から引くので、棚の UUID を添える。 */
@@ -101,9 +101,9 @@ export async function shelfWorkCollections(library: ShelfScope, work: string): P
   return items.map((collection) => shelfCollection(collection, library));
 }
 
-/** コレクションの画面。`collection` は棚の UUID か、棚へ移したときの元の ID。 */
+/** コレクションの画面。`collection` は棚の UUID。 */
 export async function shelfCollectionDetail(library: ShelfScope, collection: string): Promise<PcCollectionDetail> {
-  const { members, ...summary } = await invoke<MobileShelfCollectionDetail>("pc_collection", { library, collection });
+  const { members, ...summary } = await invoke<MobileCollectionDetail>("pc_collection", { library, collection });
   return { ...shelfCollection(summary, library), members: members.map((member) => ({ ...member, work: member.work ? shelfWork(member.work) : null })) };
 }
 
@@ -113,36 +113,14 @@ export function shelfEntityCoverPath(kind: "people" | "series", source: string, 
   return shelf ? `shelf-entity/${shelf.libraryId}/${kind}/${source}/${encodeURIComponent(key)}${banner ? "/banner" : ""}` : null;
 }
 
-/** 棚の一件を、カードと画面が読む形にする。作品は棚の UUID のまま。 */
-export function shelfWork(work: MobileShelfWork): PcWork {
-  return {
-    id: work.id,
-    shelf: { snapshotId: work.snapshotId, edited: work.edited, editId: work.editId ?? null, favoriteGeneration: work.favoriteGeneration ?? "0" },
-    source: work.source,
-    sourceId: work.sourceId,
-    title: work.title,
-    authorName: work.authorName,
-    authorId: work.authorId,
-    contentType: work.contentType,
-    tags: work.tags,
-    excerpt: work.excerpt,
-    textLength: work.textLength,
-    assetCount: work.assetCount,
-    hasCover: work.hasCover,
-    currentVersion: work.currentVersion,
-    // 内容の印（ハッシュ）は棚にない。作りものの値で埋めない。
-    contentHash: null,
-    favorite: work.favorite,
-    seriesTitle: work.seriesTitle,
-    seriesId: work.seriesId,
-    sourceCreatedAt: work.sourceCreatedAt,
-    savedAt: work.savedAt,
-  };
+/** 棚の一件を、カードと画面が読む形にする。 */
+export function shelfWork(work: MobileWork): PcWork {
+  return { ...work };
 }
 
 /** 一覧の一ページを棚から引く。 */
 export async function searchShelf(library: ShelfScope, criteria: PcWorkSearch, cursor: string | null, entity: { kind: string; source: string; key: string } | null, offset: number | null, limit: number | null): Promise<PcSearchPage> {
-  const page = await invoke<MobileShelfPage>("pc_search", { library, criteria, cursor, offset, limit, scope: entity });
+  const page = await invoke<MobileWorkPage>("pc_search", { library, criteria, cursor, offset, limit, scope: entity });
   return { items: page.items.map(shelfWork), nextCursor: page.nextCursor, totalEstimate: page.totalEstimate, indexComplete: page.indexComplete };
 }
 
@@ -150,29 +128,19 @@ export async function searchShelf(library: ShelfScope, criteria: PcWorkSearch, c
 export async function shelfMetadata(workId: string): Promise<PcMetadata> {
   const library = connectedShelf();
   if (!library) throw NO_SHELF;
-  const detail = await invoke<MobileShelfWorkDetail>("pc_work", { library, work: workId });
+  const detail = await invoke<MobileWorkDetail>("pc_work", { library, work: workId });
   return {
     work: shelfWork(detail.work),
     people: detail.people,
     series: detail.series,
-    versions: detail.versions.map((version) => ({
-      version: version.version,
-      // 内容の印は棚にない。版は写しの ID で見分ける。
-      contentHash: null,
-      textLength: version.textLength ?? 0,
-      assetCount: version.version === detail.work.currentVersion ? detail.work.assetCount : 0,
-      createdAt: version.savedAt,
-      snapshotId: version.snapshotId,
-    })),
-    isEdited: detail.work.edited,
-    activeEditId: null,
+    versions: detail.versions,
     // 編集の中身の印は渡らない。編集の UUID で読書位置と保存版を分ける（編集し直せば別の本文）。
     activeEditHash: shelfEditHash(detail.work),
   };
 }
 
 /** 編集の印。端末に保存した版の印（Rust 側の `edit:{UUID}`）と同じ形。 */
-export function shelfEditHash(work: Pick<MobileShelfWork, "edited" | "editId" | "snapshotId">): string | null {
+export function shelfEditHash(work: Pick<MobileWork, "edited" | "editId" | "snapshotId">): string | null {
   if (!work.edited) return null;
   return work.editId ? `edit:${work.editId}` : `edit:${work.snapshotId}`;
 }
@@ -180,8 +148,8 @@ export function shelfEditHash(work: Pick<MobileShelfWork, "edited" | "editId" | 
 /** 棚の作品の表紙。版の UUID を鍵にして、版が変われば取り直す。 */
 export function shelfCoverPath(work: PcWork, large: boolean): string | null {
   const shelf = connectedShelf();
-  if (!shelf || !work.shelf) return null;
-  return `shelf/${shelf.libraryId}/${work.id}/${work.shelf.snapshotId}${large ? "/large" : ""}`;
+  if (!shelf) return null;
+  return `shelf/${shelf.libraryId}/${work.id}/${work.snapshotId}${large ? "/large" : ""}`;
 }
 
 /**

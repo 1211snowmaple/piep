@@ -24,7 +24,7 @@ use axum::{
 use chrono::{NaiveDate, SecondsFormat};
 use piep_mobile_api::{
     MobilePerson, MobileSearchSuggestion, MobileSearchSuggestions, MobileSeriesMembership,
-    MobileShelfPage, MobileShelfVersion, MobileShelfWork, MobileShelfWorkDetail,
+    MobileVersion, MobileWork, MobileWorkDetail, MobileWorkPage,
 };
 use serde::Deserialize;
 use std::collections::VecDeque;
@@ -95,8 +95,8 @@ pub(super) fn count(value: u64) -> i64 {
 }
 
 /// `state` はこの利用者のお気に入り（一覧の行は棚の持ち主のものなので、利用者ごとに引き直す）。
-pub(super) fn shelf_work(card: &WorkCard, keys: CardKeys, state: &UserState) -> MobileShelfWork {
-    MobileShelfWork {
+pub(super) fn shelf_work(card: &WorkCard, keys: CardKeys, state: &UserState) -> MobileWork {
+    MobileWork {
         id: card.id.to_string(),
         snapshot_id: card.snapshot_id.to_string(),
         source: card.provider.clone(),
@@ -313,7 +313,7 @@ pub(super) async fn search(
                 Ok(shelf_work(card, keys, &state))
             })
             .collect::<Result<Vec<_>, ApiError>>()?;
-        serde_json::to_vec(&MobileShelfPage {
+        serde_json::to_vec(&MobileWorkPage {
             items,
             next_cursor,
             total_estimate: page.page.total.map(count),
@@ -384,14 +384,14 @@ pub(super) async fn work(
             &state,
         );
         work.excerpt = head.caption.clone();
-        let detail = MobileShelfWorkDetail {
+        let detail = MobileWorkDetail {
             work,
             people,
             series,
             versions: head
                 .versions
                 .iter()
-                .map(|version| MobileShelfVersion {
+                .map(|version| MobileVersion {
                     snapshot_id: version.snapshot.to_string(),
                     version: version.version,
                     text_length: version.text_length,

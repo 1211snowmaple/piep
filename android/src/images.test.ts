@@ -23,7 +23,7 @@ async function load() {
 
 it("同じ作品でも接続を変えたら、WebView の古い画像キャッシュを使わない", async () => {
   const images = await load();
-  const work = { id, currentVersion: 1, shelf: { snapshotId: "0190a000-0000-7000-8000-000000000003", edited: false } } as PcWork;
+  const work = { id, currentVersion: 1, snapshotId: "0190a000-0000-7000-8000-000000000003", edited: false } as unknown as PcWork;
   const sources = () => [images.workCoverUrl(work), images.entityCoverUrl("people", "pixiv", "1")];
   const before = sources();
   expect(before.every((url) => url !== null)).toBe(true);

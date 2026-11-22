@@ -8,9 +8,9 @@ use piep_library_protocol::{
     ResourceReference, ResourceScope, WorkReadingView,
 };
 use piep_mobile_api::{
-    MobileCollection, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage,
-    MobileSearchSuggestions, MobileShelfCollectionDetail, MobileShelfFavorite,
-    MobileShelfFavoriteUpdate, MobileShelfPage, MobileShelfWork, MobileShelfWorkDetail,
+    MobileCollection, MobileCollectionDetail, MobileEntityDetail, MobileEntityPage,
+    MobileEntitySeriesPage, MobileFavorite, MobileFavoriteUpdate, MobileSearchSuggestions,
+    MobileWork, MobileWorkDetail, MobileWorkPage,
 };
 use piep_storage::Fingerprint;
 use reqwest::{Response, StatusCode, header::HeaderMap};
@@ -262,7 +262,7 @@ pub struct ShelfFavorite {
 #[derive(Deserialize)]
 struct FavoriteConflict {
     error: String,
-    current: MobileShelfFavorite,
+    current: MobileFavorite,
 }
 
 fn favorite_missing() -> ClientError {
@@ -281,7 +281,7 @@ fn parse_favorite(bytes: &[u8], conflict: bool) -> Result<ShelfFavorite, ClientE
         }
         body.current
     } else {
-        serde_json::from_slice::<MobileShelfFavorite>(bytes).map_err(|_| ClientError::protocol())?
+        serde_json::from_slice::<MobileFavorite>(bytes).map_err(|_| ClientError::protocol())?
     };
     if !canonical_generation(&current.generation) {
         return Err(ClientError::protocol());
@@ -313,7 +313,7 @@ pub async fn pc_set_favorite(
     }
     let saved = saved.ok_or_else(ClientError::invalid_pairing)?;
     let client = state.client(&saved)?;
-    let body = MobileShelfFavoriteUpdate {
+    let body = MobileFavoriteUpdate {
         request_id: request.get().to_string(),
         expected,
         favorite,
@@ -355,7 +355,7 @@ async fn favorite_response(
 }
 
 /// 一件が棚の作品として読めるか（UUID と取得元の鍵）。
-fn valid_shelf_work(work: &MobileShelfWork) -> bool {
+fn valid_shelf_work(work: &MobileWork) -> bool {
     uuid::Uuid::parse_str(&work.id).is_ok()
         && uuid::Uuid::parse_str(&work.snapshot_id).is_ok()
         && !work.source.is_empty()
@@ -374,7 +374,7 @@ pub async fn pc_search(
     offset: Option<i64>,
     scope: Option<PcWorkScope>,
     limit: Option<i64>,
-) -> Result<MobileShelfPage, ClientError> {
+) -> Result<MobileWorkPage, ClientError> {
     if limit.is_some_and(|value| !(1..=50).contains(&value)) {
         return Err(ClientError::remote());
     }
@@ -384,7 +384,7 @@ pub async fn pc_search(
     }
     let endpoint = format!("/api/libraries/{}/works/search", library.library_id.get());
     post_bounded(&state, library, &endpoint, &payload, |bytes| {
-        let page: MobileShelfPage =
+        let page: MobileWorkPage =
             serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
         if page.items.len() > 50
             || !page.items.iter().all(valid_shelf_work)
@@ -406,7 +406,7 @@ pub async fn pc_work(
     state: State<'_, PcClientState>,
     library: ShelfScope,
     work: Id,
-) -> Result<MobileShelfWorkDetail, ClientError> {
+) -> Result<MobileWorkDetail, ClientError> {
     work_detail(&state, library, work).await
 }
 
@@ -414,14 +414,14 @@ pub(super) async fn work_detail(
     state: &PcClientState,
     library: ShelfScope,
     work: Id,
-) -> Result<MobileShelfWorkDetail, ClientError> {
+) -> Result<MobileWorkDetail, ClientError> {
     let endpoint = format!(
         "/api/libraries/{}/works/{}",
         library.library_id.get(),
         work.get()
     );
     read(state, library, &endpoint, |bytes| {
-        let detail: MobileShelfWorkDetail =
+        let detail: MobileWorkDetail =
             serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
         if detail.work.id != work.get().to_string() || !valid_shelf_work(&detail.work) {
             return Err(ClientError::protocol());
@@ -720,7 +720,7 @@ pub async fn pc_collection(
     state: State<'_, PcClientState>,
     library: ShelfScope,
     collection: String,
-) -> Result<MobileShelfCollectionDetail, ClientError> {
+) -> Result<MobileCollectionDetail, ClientError> {
     // 棚のコレクションの UUID。サーバーが読み解くので、ここでは道に入れてよい文字かだけを見る。
     if collection.is_empty()
         || collection.len() > 128
@@ -735,7 +735,7 @@ pub async fn pc_collection(
         library.library_id.get(),
     );
     read(&state, library, &endpoint, |bytes| {
-        let detail: MobileShelfCollectionDetail = parse_json(bytes)?;
+        let detail: MobileCollectionDetail = parse_json(bytes)?;
         if !valid_collections(std::slice::from_ref(&detail.summary))
             || !detail
                 .members
@@ -771,7 +771,7 @@ pub async fn pc_lookup_work(
     library: ShelfScope,
     provider: String,
     key: String,
-) -> Result<MobileShelfWork, ClientError> {
+) -> Result<MobileWork, ClientError> {
     let found = lookup(&state, library, &provider, &key).await?;
     Ok(work_detail(&state, library, found.entity_id).await?.work)
 }

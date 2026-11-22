@@ -243,7 +243,6 @@ pub fn pc_page(
         html,
         total_plain_text_chars: document.text_chars,
         source_page_starts: document.source_page_starts.clone(),
-        revision: None,
     })
 }
 

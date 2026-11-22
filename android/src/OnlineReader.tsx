@@ -26,7 +26,7 @@ function offlineSnapshotChanged(error: unknown): boolean {
 
 /** 読書位置を書く本文の識別。作業中の値が変わったら、位置を書き直す合図にする。 */
 function readingKey(work: PcWork, editHash: string | null): string {
-  return `${work.source}:${work.sourceId}.${work.currentVersion}.${work.contentHash ?? ""}.${editHash ?? "original"}`;
+  return `${work.source}:${work.sourceId}.${work.currentVersion}.${editHash ?? "original"}`;
 }
 
 const savedPage = localPage;
@@ -184,7 +184,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       openedWork.current = opened;
       setSourceMetadata(original);
       setDetailWork(metadata.work);
-      setIsEdited(metadata.isEdited);
+      setIsEdited(metadata.work.edited);
       if (start) {
         // 時刻だけ新しくなると、次に開いたとき古い位置を「最新」と扱ってしまう。位置も同時に書く。
         const adopted = positionFromRemote(start, fontFamily);
@@ -878,6 +878,6 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
         <div className="reader-sheet-body">{typeTab === "type" ? <ReaderTypeControls value={type} onChange={changeType} /> : <ReaderBehaviorControls value={behavior} onChange={changeBehavior} />}</div>
       </aside>
     </div>}
-    {infoOpen && <ReaderInfoSheet versions={sourceMetadata ? readerVersions(sourceMetadata) : []} selectedVersion={selectedVersion} latestEdited={sourceMetadata?.isEdited ?? false} onVersion={(version) => navigation.replace({ reader: { kind: "online", work, ...(version === null ? {} : { version }) } })} tab={infoTab} onTabChange={setInfoTab} onClose={() => setInfoOpen(false)} work={sidebarWork} isEdited={isEdited} offline={offline} offlineAuthorCover={offlineAuthorCover} snapshotGeneration={snapshotGeneration} outline={outline} currentPage={pageIndex} pageCount={pageCount} progress={progress} collections={collections} saving={saving} saveMessage={saveMessage} onSave={() => void save()} onOutline={jumpToOutline} />}
+    {infoOpen && <ReaderInfoSheet versions={sourceMetadata ? readerVersions(sourceMetadata) : []} selectedVersion={selectedVersion} latestEdited={sourceMetadata?.work.edited ?? false} onVersion={(version) => navigation.replace({ reader: { kind: "online", work, ...(version === null ? {} : { version }) } })} tab={infoTab} onTabChange={setInfoTab} onClose={() => setInfoOpen(false)} work={sidebarWork} isEdited={isEdited} offline={offline} offlineAuthorCover={offlineAuthorCover} snapshotGeneration={snapshotGeneration} outline={outline} currentPage={pageIndex} pageCount={pageCount} progress={progress} collections={collections} saving={saving} saveMessage={saveMessage} onSave={() => void save()} onOutline={jumpToOutline} />}
   </div>;
 }

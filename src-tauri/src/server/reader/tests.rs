@@ -672,7 +672,7 @@ impl Server {
     }
 }
 
-async fn shelf_page(response: reqwest::Response) -> piep_mobile_api::MobileShelfPage {
+async fn shelf_page(response: reqwest::Response) -> piep_mobile_api::MobileWorkPage {
     response.error_for_status().unwrap().json().await.unwrap()
 }
 
@@ -830,7 +830,7 @@ async fn the_work_screen_and_cover_come_from_the_current_version_of_a_shelved_wo
     let bare = save(&server.library, capture("bare", None));
     let work = |id: uuid::Uuid| format!("/api/libraries/{}/works/{id}", server.library.id);
 
-    let detail: piep_mobile_api::MobileShelfWorkDetail = server
+    let detail: piep_mobile_api::MobileWorkDetail = server
         .get(&work(covered.entity_id))
         .send()
         .await
@@ -946,7 +946,7 @@ async fn a_favorite_from_the_phone_counts_once_and_refuses_a_stale_generation() 
 
     // 一度目で付き、同じ要求を送り直しても世代は進まない（受領を返す）。
     for _ in 0..2 {
-        let stored: piep_mobile_api::MobileShelfFavorite = server
+        let stored: piep_mobile_api::MobileFavorite = server
             .favorite_as(north.entity_id, body.clone(), "fixture")
             .send()
             .await
@@ -1371,7 +1371,7 @@ async fn people_series_and_collections_come_from_the_shelf() {
     assert_eq!((list[0].member_count, list[0].available_count), (2, 2));
     assert_eq!(list[0].cover_tiles.len(), 2);
     assert!(list[0].cover_tiles.iter().all(|tile| tile.has_cover));
-    let detail: piep_mobile_api::MobileShelfCollectionDetail = server
+    let detail: piep_mobile_api::MobileCollectionDetail = server
         .read(&format!("/collections/{collection}"), "fixture")
         .await;
     let order: Vec<_> = detail
@@ -1385,7 +1385,7 @@ async fn people_series_and_collections_come_from_the_shelf() {
     );
     assert_eq!(detail.members[1].position, 1);
     assert!(detail.members[1].work.as_ref().unwrap().favorite);
-    let other: piep_mobile_api::MobileShelfCollectionDetail = server
+    let other: piep_mobile_api::MobileCollectionDetail = server
         .read(&format!("/collections/{collection}"), "second")
         .await;
     assert!(!other.members[1].work.as_ref().unwrap().favorite);
@@ -1568,7 +1568,7 @@ impl Server {
         cursor: &str,
         limit: usize,
         token: &str,
-    ) -> piep_mobile_api::MobileShelfReadingPage {
+    ) -> piep_mobile_api::MobileReadingPage {
         self.client
             .get(format!(
                 "{}/api/libraries/{}/reading",
@@ -1608,7 +1608,7 @@ async fn reading_positions_are_written_once_refuse_stale_generations_and_come_ba
     let request = uuid::Uuid::now_v7().to_string();
     let body = json!({"requestId": request, "expected": "0", "location": at(north.snapshot_id, 1, 500_000), "finished": false});
     for _ in 0..2 {
-        let stored: piep_mobile_api::MobileShelfReading = server
+        let stored: piep_mobile_api::MobileReading = server
             .reading_as(north.entity_id, body.clone(), "fixture")
             .send()
             .await
@@ -1622,7 +1622,7 @@ async fn reading_positions_are_written_once_refuse_stale_generations_and_come_ba
         assert!(stored.mine && !stored.finished);
         assert_eq!(
             stored.location,
-            Some(piep_mobile_api::MobileShelfReadingLocation {
+            Some(piep_mobile_api::MobileReadingLocation {
                 view_kind: "snapshot".into(),
                 view_id: north.snapshot_id.to_string(),
                 page: 1,

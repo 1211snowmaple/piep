@@ -15,17 +15,17 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json,
 };
-use piep_mobile_api::MobileShelfFavorite;
+use piep_mobile_api::MobileFavorite;
 use std::sync::Arc;
 
-pub(super) fn favorite_state(state: &UserState) -> MobileShelfFavorite {
-    MobileShelfFavorite {
+pub(super) fn favorite_state(state: &UserState) -> MobileFavorite {
+    MobileFavorite {
         favorite: state.favorite,
         generation: state.generation.to_string(),
     }
 }
 
-/// `MobileShelfFavoriteUpdate` と同じ形。知らない項目は断る。
+/// `MobileFavoriteUpdate` と同じ形。知らない項目は断る。
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct FavoriteBody {

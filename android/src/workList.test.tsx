@@ -28,7 +28,8 @@ function WorkBrowser() {
 const work: PcWork = {
   id: "w1", source: "pixiv", sourceId: "1", title: "最初の作品", authorName: "作者", authorId: "1",
   contentType: "novel", tags: [], excerpt: null, textLength: 1, assetCount: 0, hasCover: false,
-  currentVersion: 1, contentHash: null, favorite: false, seriesTitle: null, seriesId: null,
+  currentVersion: 1, favorite: false, seriesTitle: null, seriesId: null,
+  snapshotId: "s1", edited: false, editId: null, favoriteGeneration: "0", sourceCreatedAt: null, savedAt: "2026-11-01T00:00:00Z",
 };
 const entity: PcEntity = {
   source: "pixiv", sourceKey: "1", displayName: "最初の作者", count: 1, description: null,

@@ -69,7 +69,7 @@ it("作者・シリーズ・コレクションの画面と画像を棚から引�
   expect(last()).toEqual(["pc_work_collections", { library: expect.objectContaining({ libraryId: library }), work }]);
   const opened = await pc.getPcCollection(collection);
   expect(opened.members[0].work?.id).toBe(work);
-  expect(opened.members[0].work?.shelf?.snapshotId).toBe(snapshot);
+  expect(opened.members[0].work?.snapshotId).toBe(snapshot);
   expect(opened.members[1].work).toBeNull();
 
   // 画像も棚から。単独の表紙は作品の番号ではなく `single` で引く。

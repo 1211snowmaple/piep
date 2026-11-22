@@ -24,7 +24,6 @@ const SCHEMA: &str = "CREATE TABLE readings (
     source TEXT NOT NULL,
     source_id TEXT NOT NULL,
     version INTEGER NOT NULL,
-    content_hash TEXT,
     edit_hash TEXT,
     page INTEGER NOT NULL,
     position TEXT,

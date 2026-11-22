@@ -13,8 +13,8 @@ vi.mock("./appHistory", () => ({ useAppNavigation: () => ({ canBrowseServer: tru
 
 const work = {
   id: "0197a000-0000-7000-8000-000000000009", source: "pixiv", sourceId: "1", favorite: false,
-  shelf: { snapshotId: "0197a000-0000-7000-8000-000000000008", edited: false, editId: null, favoriteGeneration: "0" },
-} as PcWork;
+  snapshotId: "0197a000-0000-7000-8000-000000000008", edited: false, editId: null, favoriteGeneration: "0",
+} as unknown as PcWork;
 const clients: QueryClient[] = [];
 function wrapper({ children }: PropsWithChildren) {
   const client = new QueryClient();
@@ -69,8 +69,8 @@ it("書き込み後の新しいサーバー値を採用し、書き込み前に�
 
 const shelfWork = {
   id: "0197a000-0000-7000-8000-000000000001", source: "pixiv", sourceId: "2", favorite: false,
-  shelf: { snapshotId: "0197a000-0000-7000-8000-000000000002", edited: false, editId: null, favoriteGeneration: "4" },
-} as PcWork;
+  snapshotId: "0197a000-0000-7000-8000-000000000002", edited: false, editId: null, favoriteGeneration: "4",
+} as unknown as PcWork;
 
 it("知っている世代を添えて付け外しし、次は返った世代を使う", async () => {
   api.setShelfFavorite.mockResolvedValueOnce({ favorite: true, generation: "5", conflict: false });

@@ -14,14 +14,13 @@ const MAX_WORK_JSON: usize = 64 * 1024;
 const MAX_POSITION_JSON: usize = 4 * 1024;
 const MAX_SHELF: i64 = 200;
 
-/// 1 作品の、端末での読書の記録。位置は `version`・`content_hash`・`edit_hash` の本文のもの。
+/// 1 作品の、端末での読書の記録。位置は `version`・`edit_hash` の本文のもの。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalReading {
     source: String,
     source_id: String,
     version: i64,
-    content_hash: Option<String>,
     edit_hash: Option<String>,
     page: i64,
     /// 画面の形を含む位置。中身は画面側が決める。
@@ -55,10 +54,6 @@ fn validate(reading: &LocalReading) -> Result<(), ClientError> {
         || !(0.0..=1.0).contains(&reading.progress)
         || reading.read_at < 0
         || reading
-            .content_hash
-            .as_ref()
-            .is_some_and(|hash| hash.len() > 128)
-        || reading
             .edit_hash
             .as_ref()
             .is_some_and(|hash| hash.len() > 128)
@@ -88,7 +83,6 @@ fn row_to_reading(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalReading> {
         source: row.get("source")?,
         source_id: row.get("source_id")?,
         version: row.get("version")?,
-        content_hash: row.get("content_hash")?,
         edit_hash: row.get("edit_hash")?,
         page: row.get("page")?,
         position: json(row.get("position")?),
@@ -118,10 +112,10 @@ fn get(
 fn put(tx: &rusqlite::Transaction<'_>, reading: &LocalReading) -> Result<(), ClientError> {
     let text = |value: &Option<serde_json::Value>| value.as_ref().map(serde_json::Value::to_string);
     tx.execute(
-        "INSERT INTO readings(key, source, source_id, version, content_hash, edit_hash, page, position,
+        "INSERT INTO readings(key, source, source_id, version, edit_hash, page, position,
              progress, finished, shelved, read_at, server_url, work)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-         ON CONFLICT(key) DO UPDATE SET version=excluded.version, content_hash=excluded.content_hash,
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+         ON CONFLICT(key) DO UPDATE SET version=excluded.version,
              edit_hash=excluded.edit_hash, page=excluded.page, position=excluded.position,
              progress=excluded.progress, finished=excluded.finished, shelved=excluded.shelved,
              read_at=excluded.read_at, server_url=excluded.server_url, work=excluded.work",
@@ -130,7 +124,6 @@ fn put(tx: &rusqlite::Transaction<'_>, reading: &LocalReading) -> Result<(), Cli
             reading.source,
             reading.source_id,
             reading.version,
-            reading.content_hash,
             reading.edit_hash,
             reading.page,
             text(&reading.position),
@@ -220,7 +213,6 @@ mod tests {
             source: "pixiv".into(),
             source_id: source_id.into(),
             version: 1,
-            content_hash: Some("hash".into()),
             edit_hash: None,
             page: 2,
             position: Some(serde_json::json!({ "page": 2, "top": 120, "ratio": 0.4 })),

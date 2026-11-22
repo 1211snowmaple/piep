@@ -59,9 +59,9 @@ it("候補と以前の版を出せる接続では、候補・作品の引き当�
   expect(found?.id).toBe(work);
   expect(last()).toEqual(["pc_lookup_work", { library: expect.objectContaining({ libraryId: library }), provider: "pixiv", key: "42" }]);
 
-  // 版の一覧は写しの ID つき。今の版だけ挿絵の数が分かる。
+  // 版の一覧は写しの ID つき。
   const metadata = await pc.getPcMetadata(work);
-  expect(metadata.versions.map((v) => [v.version, v.snapshotId, v.textLength, v.assetCount])).toEqual([[1, older, 8, 0], [2, snapshot, 0, 2]]);
+  expect(metadata.versions.map((v) => [v.version, v.snapshotId, v.textLength])).toEqual([[1, older, 8], [2, snapshot, null]]);
   expect(await shelf.openShelfSnapshot(work, older)).toEqual(opened);
   expect(last()).toEqual(["pc_open_snapshot", { scope: expect.objectContaining({ libraryId: library }), work, snapshot: older }]);
   // 二度目は組んだものを使い、開き直すときだけ取り直す。

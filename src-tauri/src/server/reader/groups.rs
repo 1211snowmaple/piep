@@ -17,9 +17,8 @@ use axum::{
     Extension,
 };
 use piep_mobile_api::{
-    MobileCollection, MobileCollectionCoverTile, MobileEntity, MobileEntityDetail,
-    MobileEntityPage, MobileEntitySeriesPage, MobileFacet, MobileShelfCollectionDetail,
-    MobileShelfCollectionMember,
+    MobileCollection, MobileCollectionCoverTile, MobileCollectionDetail, MobileCollectionMember,
+    MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage, MobileFacet,
 };
 use serde::Deserialize;
 use std::collections::VecDeque;
@@ -120,7 +119,6 @@ pub(super) fn mobile_collection(
         member_count: count(summary.member_count),
         available_count: count(summary.available_count),
         // 作品番号は無い。単独の表紙は `cover/single` から引く。
-        cover_work_id: None,
         cover_mode: summary.cover_mode,
         cover_revision: summary.revision,
         has_single_cover: summary.cover.is_some(),
@@ -590,14 +588,14 @@ pub(super) async fn collection(
                 }
                 None => None,
             };
-            members.push(MobileShelfCollectionMember {
+            members.push(MobileCollectionMember {
                 title: member.title,
                 author_name: member.author_name,
                 position: member.position,
                 work,
             });
         }
-        json(&MobileShelfCollectionDetail {
+        json(&MobileCollectionDetail {
             summary: mobile_collection(detail.summary, None),
             members,
         })

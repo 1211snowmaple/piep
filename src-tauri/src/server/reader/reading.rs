@@ -23,7 +23,7 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json,
 };
-use piep_mobile_api::{MobileShelfReading, MobileShelfReadingLocation, MobileShelfReadingPage};
+use piep_mobile_api::{MobileReading, MobileReadingLocation, MobileReadingPage};
 use std::sync::Arc;
 
 /// 一ページの既定と上限。
@@ -36,14 +36,14 @@ pub(super) fn reading_item(
     work: LibraryId,
     position: &ReadingPosition,
     device: LibraryId,
-) -> MobileShelfReading {
+) -> MobileReading {
     let location = position.location.as_ref().and_then(|location| {
         let (view_kind, view, anchor) = match location {
             ReadingLocation::Source { snapshot, anchor } => ("snapshot", snapshot, anchor),
             ReadingLocation::Edit { edit, anchor } => ("edit", edit, anchor),
         };
         match anchor {
-            ReadingAnchor::Page { page, ratio_ppm } => Some(MobileShelfReadingLocation {
+            ReadingAnchor::Page { page, ratio_ppm } => Some(MobileReadingLocation {
                 view_kind: view_kind.into(),
                 view_id: view.to_string(),
                 page: *page,
@@ -53,7 +53,7 @@ pub(super) fn reading_item(
             _ => None,
         }
     });
-    MobileShelfReading {
+    MobileReading {
         work: work.to_string(),
         location,
         finished: position.finished,
@@ -322,7 +322,7 @@ pub(super) async fn list(
                 log::error!("棚の読書位置を読めません: {error}");
                 internal()
             })?;
-        let page = MobileShelfReadingPage {
+        let page = MobileReadingPage {
             items: rows
                 .iter()
                 .map(|(work, position)| reading_item(*work, position, device))
@@ -337,7 +337,7 @@ pub(super) async fn list(
     Ok(super::representation(bytes, "application/json", false))
 }
 
-/// `MobileShelfReadingUpdate` と同じ形。知らない項目は断る。
+/// `MobileReadingUpdate` と同じ形。知らない項目は断る。
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ReadingBody {
@@ -362,7 +362,7 @@ pub(super) struct WorkPath {
     work: Id,
 }
 
-fn conflict(current: MobileShelfReading) -> Response {
+fn conflict(current: MobileReading) -> Response {
     let mut response = (
         StatusCode::CONFLICT,
         Json(serde_json::json!({ "error": "reading_conflict", "current": current })),

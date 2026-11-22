@@ -25,9 +25,9 @@ function saved(id: number, title: string): OfflineWork {
   const work: PcWork = {
     id: `w${id}`, source: "pixiv", sourceId: String(id), title, authorName: "作者", authorId: "1", contentType: "novel",
     tags: [], excerpt: null, textLength: 100, assetCount: 0, hasCover: false, favorite: false, seriesTitle: null, seriesId: null,
-    currentVersion: 1, contentHash: "h",
-  } as PcWork;
-  return { work, savedAtMs: id, savedVersion: 1, savedContentHash: "h", savedEditHash: null, pageCount: 5 };
+    currentVersion: 1, snapshotId: "s1", edited: false, editId: null, favoriteGeneration: "0", sourceCreatedAt: null, savedAt: "2026-11-01T00:00:00Z",
+  };
+  return { work, savedAtMs: id, shelfLibrary: "l1", savedVersion: 1, savedEditHash: null, pageCount: 5 };
 }
 
 afterEach(cleanup);

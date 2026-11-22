@@ -54,16 +54,15 @@ it("一覧・作品の画面・表紙を棚から引く", async () => {
   expect(api.invoke.mock.calls[0][1]).toMatchObject({ library: { libraryId: library }, cursor: null, scope: null });
   const [item] = page.items;
   expect(item.id).toBe(work);
-  expect(item.contentHash).toBeNull();
   expect(images.workCoverUrl(item)?.startsWith(`http://pcimg.localhost/shelf/${library}/${work}/${snapshot}?connection=`)).toBe(true);
   expect(images.workCoverUrl(item, true)?.startsWith(`http://pcimg.localhost/shelf/${library}/${work}/${snapshot}/large?connection=`)).toBe(true);
 
   const metadata = await pc.getPcMetadata(item.id);
   expect(api.invoke.mock.calls[1]).toEqual(["pc_work", { library: expect.objectContaining({ libraryId: library }), work }]);
-  expect(metadata.isEdited).toBe(true);
+  expect(metadata.work.edited).toBe(true);
   // 編集の UUID で読書位置と保存版を分ける（端末に保存した版の印と同じ形）。
   expect(metadata.activeEditHash).toBe(`edit:${edit}`);
-  expect(item.shelf).toEqual({ snapshotId: snapshot, edited: true, editId: edit, favoriteGeneration: "3" });
+  expect(item).toMatchObject({ snapshotId: snapshot, edited: true, editId: edit, favoriteGeneration: "3" });
 
   // 端末への保存は、今つながっている棚から組む。返った保存版は一覧の一件と同じ形になる。
   const saved = await pc.saveOfflineWork(item.id);
@@ -71,8 +70,8 @@ it("一覧・作品の画面・表紙を棚から引く", async () => {
   const { favoriteReadSequence: _read, ...listedItem } = item;
   expect(saved.work).toEqual(listedItem);
   expect(pc.sameSavedVersion(item, saved)).toBe(true);
-  expect(pc.sameSavedVersion({ ...item, shelf: { ...item.shelf!, editId: null } }, saved)).toBe(false);
-  expect(pc.sameSavedVersion({ ...item, shelf: { ...item.shelf!, snapshotId: work } }, saved)).toBe(false);
+  expect(pc.sameSavedVersion({ ...item, editId: null }, saved)).toBe(false);
+  expect(pc.sameSavedVersion({ ...item, snapshotId: work }, saved)).toBe(false);
   const listed = await pc.listOfflineWorks();
   expect(listed[0].work).toEqual(listedItem);
 

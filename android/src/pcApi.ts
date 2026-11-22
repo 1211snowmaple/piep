@@ -1,6 +1,6 @@
 import type {
   MobileCollection, MobileCollectionMember, MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage,
-  MobileMetadata, MobilePage, MobilePerson, MobileRevision, MobileSearchPage, MobileSeriesMembership, MobileShelfWork, MobileVersion, MobileWork,
+  MobilePage, MobilePerson, MobileSeriesMembership, MobileVersion, MobileWork, MobileWorkPage,
 } from "@shared/mobileApi";
 import { invoke } from "@tauri-apps/api/core";
 import { markFavoriteRead, nextFavoriteRevision } from "./favoriteFreshness";
@@ -43,24 +43,16 @@ export function pcConnectionIssue(status: PcConnectionStatus): string | null {
 }
 
 // サーバーから届く型は shared/mobileApi.ts（Rust の定義から生成）にある。
-// ここでは、画面だけが持つ項目と、端末に残っている古い保存分には無い項目を足し引きする。
+// ここでは、画面だけが持つ項目を足す。
 
-type Older<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
-
-export type PcWork = Omit<Older<MobileWork, "sourceCreatedAt" | "savedAt">, "id"> & {
-  /** 棚の作品の UUID。 */
-  id: string;
-  /** 棚の版と編集。`favoriteGeneration` はお気に入りの更新世代（十進の文字列）。 */
-  shelf?: { snapshotId: string; edited: boolean; editId?: string | null; favoriteGeneration?: string };
+export type PcWork = MobileWork & {
   /** フロント側だけの取得順。お気に入りの書き込みより新しい応答を見分ける。 */
   favoriteReadSequence?: number;
 };
 
 /** 端末に保存した版が、今サーバーにある版と同じか。版と編集の UUID で見る。 */
-export function sameSavedVersion(work: PcWork, saved: Pick<OfflineWork, "work">): boolean {
-  return Boolean(work.shelf && saved.work.shelf)
-    && work.shelf!.snapshotId === saved.work.shelf!.snapshotId
-    && (work.shelf!.editId ?? null) === (saved.work.shelf!.editId ?? null);
+export function sameSavedVersion(work: Pick<PcWork, "snapshotId" | "editId">, saved: Pick<OfflineWork, "work">): boolean {
+  return work.snapshotId === saved.work.snapshotId && (work.editId ?? null) === (saved.work.editId ?? null);
 }
 
 /** 棚に届かない接続で、棚を使う操作をしたとき。 */
@@ -74,9 +66,8 @@ export type PcEntitySeriesPage = MobileEntitySeriesPage;
 
 export type PcEntityDetail = Omit<MobileEntityDetail, "collections"> & { collections: PcCollection[] };
 
-export type PcCollection = Older<Omit<MobileCollection, "coverMode" | "position">, "coverRevision" | "hasSingleCover" | "hasFileCover" | "coverTiles"> & {
-  coverMode?: "mosaic" | "spine" | "single" | "sigil" | "file";
-  position?: number | null;
+export type PcCollection = Omit<MobileCollection, "coverMode"> & {
+  coverMode: "mosaic" | "spine" | "single" | "sigil" | "file";
   /** コレクションの棚の UUID。表紙は棚から引く。 */
   shelfLibrary?: string;
 };
@@ -91,7 +82,7 @@ export interface PcWorkScope {
   key: string;
 }
 
-export type PcSearchPage = Omit<MobileSearchPage, "items"> & { items: PcWork[] };
+export type PcSearchPage = Omit<MobileWorkPage, "items"> & { items: PcWork[] };
 
 export interface PcSearchCriteria {
   text: string;
@@ -126,23 +117,25 @@ export type PcWorkSearch = Omit<PcSearchCriteria, "sort"> & { sort: PcWorkSort }
 
 export const defaultPcSearch: PcSearchCriteria = { text: "", source: "", contentType: "", author: "", authorExclude: "", favorite: false, tag: "", tagExclude: "", tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", revision: "", edit: "", cover: "", dateField: "downloaded_at", dateFrom: "", dateTo: "", sort: "remembered" };
 
-/** 作品の保存した版。その版の写しの ID を添える（以前の版を棚から開く）。 */
-export type PcVersion = MobileVersion & { snapshotId?: string };
+/** 作品の保存した版。写しの ID で以前の版を棚から開く。 */
+export type PcVersion = MobileVersion;
 
-export type PcMetadata = Omit<MobileMetadata, "work" | "people" | "series" | "versions"> & {
+/** 作品の画面と読む画面が使う、作品・作者・シリーズ・版。 */
+export interface PcMetadata {
   work: PcWork;
+  people: PcPerson[];
+  series: PcSeriesMembership[];
+  /** 古い順。 */
   versions: PcVersion[];
-  people?: PcPerson[];
-  series?: PcSeriesMembership[];
-};
+  /** 編集の印（`edit:{UUID}`）。編集がなければ null。 */
+  activeEditHash: string | null;
+}
 
 export type PcPerson = MobilePerson;
 
 export type PcSeriesMembership = MobileSeriesMembership;
 
 export type PcPage = MobilePage;
-
-export type PcRevision = MobileRevision;
 
 export interface OfflinePage extends PcPage {
   generation: string;
@@ -162,12 +155,11 @@ export interface PcAsset {
 export interface OfflineWork {
   work: PcWork;
   /** 保存した棚の UUID。 */
-  shelfLibrary?: string;
+  shelfLibrary: string;
   people?: PcPerson[];
   series?: PcSeriesMembership[];
   savedAtMs: number;
   savedVersion: number;
-  savedContentHash: string | null;
   savedEditHash: string | null;
   pageCount: number;
   collections?: PcCollection[];
@@ -262,7 +254,7 @@ export const lookupPcWork = (source: string, key: string): Promise<PcWork | null
   return shelf ? lookupShelfWork(shelf, source, key) : Promise.resolve(null);
 };
 /** Rust が返す保存版の一覧の行。作品は棚の一覧と同じ形で残っている。 */
-type StoredOfflineWork = Omit<OfflineWork, "work"> & { work: MobileShelfWork };
+type StoredOfflineWork = Omit<OfflineWork, "work"> & { work: MobileWork };
 
 /** 保存版の行を画面の形にする。作品は一覧の一件と同じ変換を通す。 */
 const offlineWork = (stored: StoredOfflineWork): OfflineWork => ({ ...stored, work: shelfWork(stored.work) });

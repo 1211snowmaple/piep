@@ -88,8 +88,7 @@ export function CollectionMembers({ collectionId, query, savedRevision, onOpenWo
   const selected = detail.data;
   const needle = query.trim().toLocaleLowerCase();
   const members = selected?.members.filter((member) => !needle || `${member.title} ${member.authorName} ${member.work?.seriesTitle ?? ""} ${member.work?.tags.join(" ") ?? ""}`.toLocaleLowerCase().includes(needle)) ?? [];
-  const memberWorks = useMemo(() => members.flatMap((member) => member.work ? [member.work] : []), [selected, needle]);
-  const savedState = useSavedStates(memberWorks, savedRevision, true);
+  const savedState = useSavedStates(savedRevision);
   return <section className="group-browser">
     {detail.error ? <div className="inline-alert" role="alert">{pcErrorMessage(detail.error)}</div> : null}
     {detail.isPending ? <GroupSkeleton /> : selected && <>
