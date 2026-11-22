@@ -267,6 +267,7 @@ fn delegate_bootstrap(paths: &ServerPaths, executable: &Path) -> Option<i32> {
     };
     let delegated = (|| -> Result<i32, String> {
         let job = JobGuard::new();
+        launch_failures_without_dialogs();
         let mut child = Command::new(&target)
             // 旧版の serve は root exe を差し替える。専用commandを知らない旧版なら
             // 非0で終わらせ、固定入口の安全な見張り役へ戻す。
@@ -295,9 +296,30 @@ fn delegate_bootstrap(paths: &ServerPaths, executable: &Path) -> Option<i32> {
 }
 
 /// 本体を子として動かす。見張り役が消えたら一緒に消えるようにする。
+/// 起動できない exe で Windows に窓を出させず、失敗として返させる。
+///
+/// 中身が壊れた exe（PE でない物）を Windows は 16 ビットのプログラムとして扱い、
+/// 既定では「サポートされていない 16 ビット アプリケーション」の窓を出して、
+/// 閉じられるまで起動の呼び出しを返さない。見張り役は誰も見ていない所で動くので、
+/// そこで止まると戻しも再起動も進まない。設定はプロセス全体に効き、子も受け継ぐ。
+#[cfg(windows)]
+pub(crate) fn launch_failures_without_dialogs() {
+    use windows::Win32::System::Diagnostics::Debug::{
+        GetErrorMode, SetErrorMode, SEM_FAILCRITICALERRORS, THREAD_ERROR_MODE,
+    };
+    // SAFETY: このプロセスのエラーの扱いの印を足すだけで、ほかの値は変えない。
+    unsafe {
+        SetErrorMode(THREAD_ERROR_MODE(GetErrorMode()) | SEM_FAILCRITICALERRORS);
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn launch_failures_without_dialogs() {}
+
 fn spawn_body(paths: &ServerPaths, version: &str, job: &JobGuard) -> Result<Child, String> {
     let _ = fs::remove_file(paths.ready_mark());
     let executable = paths.version_dir(version).join("piep-server.exe");
+    launch_failures_without_dialogs();
     let child = body_command(paths, version)
         .spawn()
         .map_err(|error| format!("{} を起動できません: {error}", executable.display()))?;
@@ -790,6 +812,24 @@ mod tests {
             fs::read(paths.root.join("piep-server.exe")).unwrap(),
             b"fixed bootstrap"
         );
+    }
+
+    /// 壊れた exe を起動しても、見えない窓で止まらずにすぐ失敗が返る。
+    /// 中身が PE でない exe を Windows は 16 ビットのプログラムとして扱い、既定では
+    /// 「サポートされていない 16 ビット アプリケーション」の窓を出して閉じられるまで待つ。
+    /// 見張り役は画面のない所で動くので、待てば更新の戻しも再起動も止まる。
+    #[cfg(windows)]
+    #[test]
+    fn a_corrupt_program_fails_at_once_instead_of_waiting_on_a_dialog() {
+        use windows::Win32::System::Diagnostics::Debug::{SetErrorMode, THREAD_ERROR_MODE};
+        // 実行役のように、窓を抑える設定を親から受け継いでいない状態にする。
+        // nextest は試験ごとに別のプロセスなので、ほかの試験には残らない。
+        // SAFETY: このプロセスのエラーの扱いを既定に戻すだけである。
+        unsafe { SetErrorMode(THREAD_ERROR_MODE(0)) };
+        let (_dir, paths) = laid_out();
+        let started = Instant::now();
+        assert!(spawn_body(&paths, "1.1.0", &JobGuard::new()).is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

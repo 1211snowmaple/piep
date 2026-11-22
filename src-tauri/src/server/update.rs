@@ -348,6 +348,7 @@ pub fn extract_package(package: &Path, destination: &Path) -> Result<(), String>
 
 /// 展開したプログラムに版を尋ねる。署名を確かめたあとにだけ呼ぶ。
 fn reported_version(executable: &Path) -> Result<String, String> {
+    crate::server::watchdog::launch_failures_without_dialogs();
     let output = Command::new(executable)
         .arg("--version")
         .output()
