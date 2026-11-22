@@ -83,8 +83,8 @@ export interface TemplatePreview {
 export interface ExportBatchResult {
   successCount: number;
   failedCount: number;
-  /** 旧棚は番号、新しい棚は作品の ID（文字列）。 */
-  failedIds: Array<number | string>;
+  /** 棚の作品の ID。 */
+  failedIds: string[];
   /** Generated but not validated; these works remain in the export queue. */
   invalidIds: Array<number | string>;
   outputFiles: string[];

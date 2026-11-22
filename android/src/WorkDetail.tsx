@@ -56,7 +56,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
   const description = useMemo(() => plainText(work.excerpt), [work.excerpt]);
   const tags = work.tags ?? [];
   const resume = hasReadingPosition(work, selected.offline ? selected.snapshot.savedEditHash : metadata?.activeEditHash ?? null);
-  // 新しい棚の作品は版と編集の UUID で比べる。旧 API の作品は編集の印を作品の情報から見る。
+  // 棚の作品は版と編集の UUID で比べる。旧 API の作品は編集の印を作品の情報から見る。
   const outdated = Boolean(online && saved && (!sameSavedVersion(work, saved) || (!work.shelf && metadata && metadata.activeEditHash !== saved.savedEditHash)));
 
   useEffect(() => {

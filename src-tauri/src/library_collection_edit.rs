@@ -13,7 +13,7 @@ use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-/// 回を並べ直す決まり（旧棚の `sort_work_collection_members` と同じ）。
+/// 回を並べ直す決まり。
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CollectionOrder {

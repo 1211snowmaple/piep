@@ -155,20 +155,6 @@ impl Library {
         .ok_or(Error::ResourceUnavailable)
     }
 
-    /// 一覧から外した履歴も含め、旧実行キューの同じ記録を二重に表示しないための対応。
-    pub fn migrated_job_history_keys(&self) -> Result<std::collections::HashSet<String>> {
-        let conn = self.reader()?;
-        let mut statement=conn.prepare("SELECT m.source_key FROM migration_records m JOIN job_history j ON j.id=m.target_id WHERE m.source_table='update_jobs' AND m.status='imported' AND j.sealed=1")?;
-        let rows = statement
-            .query_map([], |row| row.get(0))?
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(rows)
-    }
-
-    pub fn migrated_job_history_id(&self, key: &str) -> Result<Option<LibraryId>> {
-        Ok(self.reader()?.query_row("SELECT j.id FROM migration_records m JOIN job_history j ON j.id=m.target_id WHERE m.source_table='update_jobs' AND m.source_key=?1 AND m.status='imported' AND j.sealed=1",[key],|r|id(r,0)).optional()?)
-    }
-
     /// 封をした履歴の原本を保ち、一覧での表示だけを変更する。同じ要求の再送は一度だけ。
     /// `job=None, hidden=true` は、現在ある完了履歴を一度に一覧から外す。
     pub fn set_job_history_hidden(

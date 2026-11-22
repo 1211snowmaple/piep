@@ -291,7 +291,7 @@ pub async fn shelf_assist_interpret_search(
 // ---- 作風のメモ・分け方の案 -----------------------------------------------------
 
 /// この作者の作風を、題名とタグからまとめてもらう。本文は送らない。
-/// 覚え書きは正本に切り替えた棚にだけ残す（読むだけの棚では見せるだけ）。
+/// 覚え書きは棚にだけ残す（読むだけの棚では見せるだけ）。
 #[tauri::command]
 pub async fn shelf_assist_describe_author(
     state: State<'_, Arc<Shelf>>,
@@ -334,7 +334,7 @@ pub async fn shelf_assist_propose_splits(
 ) -> Result<GeneratedAssist<Vec<BundleSplit>>, String> {
     let works = blocking(&state, move |state| {
         let library = state.library()?;
-        let id = collection_target(&library, &collection)?;
+        let id = collection_target(&collection)?;
         library
             .assist_collection_facts(id)
             .map_err(|e| e.to_string())
@@ -347,7 +347,7 @@ pub async fn shelf_assist_propose_splits(
 
 // ---- あらすじ ---------------------------------------------------------------
 
-/// 進み具合のイベント。旧棚と同じ名前で、作品は棚の ID（文字列）で送る。
+/// 進み具合のイベント。作品は棚の ID（文字列）で送る。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShelfProgressEvent {
@@ -376,7 +376,7 @@ fn progress_sink(
     }
 }
 
-/// 覚え書きを残す。読むだけの棚（切り替える前）では残さない。
+/// 覚え書きを残す。
 async fn save_note(
     state: &State<'_, Arc<Shelf>>,
     subject_type: &'static str,
@@ -387,9 +387,6 @@ async fn save_note(
 ) -> Result<(), String> {
     blocking(state, move |state| {
         let library = state.library()?;
-        if !matches!(library.switched_at(), Ok(Some(_))) {
-            return Ok(());
-        }
         library
             .save_ai_note(subject_type, &subject_key, note_kind, &note, &provenance)
             .map_err(|e| e.to_string())
@@ -508,7 +505,7 @@ pub async fn shelf_assist_load_note(
     Ok(note)
 }
 
-/// 覚え書きを消す（正本に切り替えた棚だけ）。
+/// 覚え書きを消す。
 #[tauri::command]
 pub async fn shelf_assist_delete_note(
     state: State<'_, Arc<Shelf>>,

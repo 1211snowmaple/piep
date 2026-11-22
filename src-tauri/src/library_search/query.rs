@@ -1,16 +1,15 @@
 //! 問い合わせの中の絞り込みの書き方（`tag:` `author:` `series:` `source:` `id:`、作品の URL）。
 //!
 //! 画面は作品のタグから `tag:…`、検索の候補から `author:"…"` `series:"…"` を作り、利用者も
-//! 手で打つ。旧棚と同じ書き方を受け、本文の検索に渡す前に一覧の絞り込みへ移す。
+//! 手で打つ。本文の検索に渡す前に一覧の絞り込みへ移す。
 //!
-//! 旧棚と変えたところ:
-//! - `id:` と作品の URL は、取得元の ID がそのまま一致する作品に絞る。旧棚は ID の数字を
-//!   検索語として本文の索引に渡していたので、本文に同じ数字が出てくる作品も当たり、
-//!   ほかの語と一緒に書くと一つも当たらなかった。複数書けば、そのどれか（URL を並べて
-//!   貼った作品を一度に出す）。
+//! 決まり:
+//! - `id:` と作品の URL は、取得元の ID がそのまま一致する作品に絞る。ID の数字を検索語として
+//!   本文の索引に渡すと、本文に同じ数字が出てくる作品も当たり、ほかの語と一緒に書くと一つも
+//!   当たらない。複数書けば、そのどれか（URL を並べて貼った作品を一度に出す）。
 //! - `series:` の題は大文字小文字を区別しない（作者やシリーズの指名と同じ）。
-//! - 一覧の絞り込みとぶつかる取得元（`source:` と画面の取得元が違う）は、旧棚では書いた側が
-//!   勝っていたが、両方を満たす作品（つまりなし）にする。
+//! - 一覧の絞り込みとぶつかる取得元（`source:` と画面の取得元が違う）は、書いた側を勝たせず、
+//!   両方を満たす作品（つまりなし）にする。
 
 use crate::library::{Error, Library, LibraryId, Result, WorkFilter};
 
@@ -67,7 +66,7 @@ fn push_unique(list: &mut Vec<String>, value: &str) {
     }
 }
 
-/// 空白で区切る。引用符の中の空白では区切らない（旧棚の `split_query_terms` と同じ）。
+/// 空白で区切る。引用符の中の空白では区切らない。
 fn split_terms(query: &str) -> Vec<String> {
     let mut terms = Vec::new();
     let mut term = String::new();
@@ -90,7 +89,7 @@ fn split_terms(query: &str) -> Vec<String> {
     terms
 }
 
-/// 作品の URL から取得元と ID を取る（旧棚の `work_id_from_url` と同じ）。
+/// 作品の URL から取得元と ID を取る。
 pub fn work_from_url(value: &str) -> Option<(&'static str, String)> {
     let url = url::Url::parse(value).ok()?;
     if !matches!(url.scheme(), "https" | "http") {
@@ -122,7 +121,7 @@ pub fn work_from_url(value: &str) -> Option<(&'static str, String)> {
 }
 
 /// 問い合わせを絞り込みと本文の語に分ける。知らない項目名（`foo:bar`）と、除外を書けない
-/// 項目の除外（`-series:` `-source:` `-id:`）は、旧棚と同じく語のまま本文の検索に残す。
+/// 項目の除外（`-series:` `-source:` `-id:`）は、語のまま本文の検索に残す。
 pub fn parse_query(query: &str) -> QueryParts {
     let mut parts = QueryParts::default();
     let mut text = Vec::new();

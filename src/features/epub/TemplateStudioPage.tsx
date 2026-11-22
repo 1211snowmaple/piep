@@ -53,8 +53,9 @@ import {
   saveTemplateFile,
   saveTemplateSettings,
 } from "@/services/epubApi";
-import type { DownloadEntry, ShelfEntry } from "@/types/library";
+import type { ShelfEntry } from "@/types/library";
 import { searchShelf, shelfEntriesByIds } from "@/features/library/shelf";
+import { SHELF_WORK_ID } from "@/services/shelfApi";
 import type {
   DataField,
   InfoField,
@@ -113,7 +114,6 @@ export default function TemplateStudioPage() {
 
   // The work the preview renders. Kept in the address so a reload comes back to
   // the same comparison rather than to an arbitrary book.
-  // 旧棚の作品は番号、新しい棚の作品は ID（文字列）。
   const sampleId = parseSample(params.get("sample"));
   const setSample = (id: SampleId | null) => {
     const next = new URLSearchParams(params);
@@ -297,17 +297,12 @@ function NewTemplateModal({ opened, onClose, templates, pending, onCreate }: {
 // 編集の中身
 // ============================================================
 
-/** 見本の作品。旧棚は番号、新しい棚は作品の ID。 */
-type SampleId = number | string;
+/** 見本の作品（棚の作品の ID）。 */
+type SampleId = string;
 
 function parseSample(value: string | null): SampleId | null {
   const text = value?.trim() ?? "";
-  if (!text) return null;
-  if (/^\d+$/.test(text)) {
-    const id = Number.parseInt(text, 10);
-    return Number.isSafeInteger(id) ? id : null;
-  }
-  return text;
+  return SHELF_WORK_ID.test(text) ? text : null;
 }
 
 function TemplateWorkspace({ template, runtime, sampleId, onSampleChange, onChanged }: {
@@ -826,7 +821,7 @@ function SamplePicker({ sampleId, onChange, runtime }: { sampleId: SampleId | nu
   // 見本は棚から選ぶ。
   const recent = useQuery({
     queryKey: ["template-preview-works", query],
-    queryFn: (): Promise<{ items: Array<DownloadEntry | ShelfEntry> }> => {
+    queryFn: (): Promise<{ items: ShelfEntry[] }> => {
       if (!runtime) return Promise.resolve({ items: [] });
       return searchShelf({ text: query || null, limit: 20, sortBy: "downloaded_at", sortOrder: "desc" });
     },
@@ -835,10 +830,9 @@ function SamplePicker({ sampleId, onChange, runtime }: { sampleId: SampleId | nu
   });
   const current = useQuery({
     queryKey: ["template-preview-work", sampleId],
-    queryFn: (): Promise<Array<DownloadEntry | ShelfEntry>> => {
+    queryFn: (): Promise<ShelfEntry[]> => {
       if (!runtime || sampleId === null) return Promise.resolve([]);
-      // 番号の見本は旧棚のころの残りなので引かない。
-      return typeof sampleId === "string" ? shelfEntriesByIds([sampleId]) : Promise.resolve([]);
+      return shelfEntriesByIds([sampleId]);
     },
     enabled: Boolean(runtime && sampleId !== null),
   });

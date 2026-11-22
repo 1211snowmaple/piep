@@ -31,7 +31,7 @@ describe("WorkPage", () => {
     expect(await screen.findByText("棚の作品 0195f1c2-0000-7000-8000-000000000001")).toBeInTheDocument();
   });
 
-  // 作品を番号で指すのは、旧棚のころのリンクとプレビューの見本だけ。アプリでは旧棚を開かない。
+  // 作品を番号で指すのはプレビューの見本だけ。アプリでは番号の作品を開かない。
   it("does not open a work by an old number in the app", async () => {
     renderWork("#/works/101");
     expect(await screen.findByText("作品が見つかりません")).toBeInTheDocument();
@@ -40,7 +40,7 @@ describe("WorkPage", () => {
   it("shows the sample work by its number in the browser preview", async () => {
     runtime.tauri = false;
     renderWork("#/works/101");
-    const title = getDemoReader(101).download.title;
+    const title = getDemoReader("101").download.title;
     const heading = await screen.findByRole("heading", { name: title });
     expect(heading).toHaveClass("work-hero__title");
     expect(heading).not.toHaveClass("line-clamp-2");

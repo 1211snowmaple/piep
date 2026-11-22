@@ -21,7 +21,7 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
 vi.mock("@/features/reader/readerSource", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/features/reader/readerSource")>();
   const { readerTestSource } = await import("@/features/reader/readerTestSource");
-  return { ...actual, previewReaderSource: (id: number) => readerTestSource(actual.previewReaderSource(id), dbApi) };
+  return { ...actual, previewReaderSource: (id: string) => readerTestSource(actual.previewReaderSource(id), dbApi) };
 });
 
 const PAGE_COUNT = 6;
@@ -64,7 +64,7 @@ describe("読み進む操作", () => {
     window.location.hash = "#/reader/101";
     scrolledInto.length = 0;
     Element.prototype.scrollIntoView = function scrollIntoView(this: Element) { scrolledInto.push(this); };
-    const demo = getDemoReader(101);
+    const demo = getDemoReader("101");
     dbApi.getReaderMetadata.mockResolvedValue({
       download: demo.download,
       versions: demo.versions,

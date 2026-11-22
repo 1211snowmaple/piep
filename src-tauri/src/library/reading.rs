@@ -327,7 +327,7 @@ fn reading_id(bytes: Vec<u8>) -> Result<LibraryId> {
 }
 
 /// 配信用サーバーの端末の識別子（登録の ID）から、棚に書く端末の識別子を決める。同じ端末は
-/// 必ず同じ値になる（旧 API の読書位置を移すときも、携帯が新しい棚へ書くときも同じ）。
+/// 必ず同じ値になる（旧 API の読書位置を移すときも、携帯が棚へ書くときも同じ）。
 pub fn server_device(device: &str) -> LibraryId {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(format!("piep-server-device\0{device}").as_bytes());

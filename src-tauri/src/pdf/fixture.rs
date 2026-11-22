@@ -7,8 +7,6 @@
 //! - 折り返した行が一つの `/P` に入っている
 //! - 段落の終わりの行は右端まで届かない
 //! - 段落がページをまたぐ
-//!
-//! 実物での確認は `cargo run --example pdf_attachment_probe` で行う。
 
 use std::path::PathBuf;
 

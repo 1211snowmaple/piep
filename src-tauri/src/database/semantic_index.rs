@@ -99,10 +99,6 @@ fn model_cache_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(FASTEMBED_DEFAULT_CACHE_DIR))
 }
 
-pub fn model_id() -> &'static str {
-    MODEL_ID
-}
-
 #[derive(Debug, Clone)]
 pub struct SemanticIndexDocument {
     pub download_id: i64,
@@ -117,7 +113,6 @@ pub struct SemanticIndexDocument {
 #[derive(Debug, Clone)]
 pub struct SemanticSearchHit {
     pub download_id: i64,
-    pub chunk_id: String,
     pub field: String,
     pub text: String,
     pub score: f64,
@@ -127,9 +122,6 @@ pub struct SemanticSearchHit {
 pub struct SemanticIndexStatus {
     /// Number of searchable works.  One row is always one library work.
     pub indexed_works: i64,
-    /// Kept as a wire-compatible alias while the UI is renamed from chunks to
-    /// works.  This is deliberately the work count, not a passage count.
-    pub indexed_chunks: i64,
     pub model_ready: bool,
     pub provider: String,
     pub gpu_enabled: bool,
@@ -153,13 +145,6 @@ struct EmbeddingRuntime {
 struct EmbeddingRuntimeSlot {
     runtime: Option<EmbeddingRuntime>,
     last_used: Option<Instant>,
-}
-
-pub fn upsert_documents(
-    storage_dir: &Path,
-    docs: &[SemanticIndexDocument],
-) -> Result<Vec<i64>, String> {
-    upsert_documents_reusing(storage_dir, docs, None).map(|report| report.indexed)
 }
 
 /// 前の索引にある、同じ文書から作ったベクトル。
@@ -479,10 +464,6 @@ pub fn index_exists(storage_dir: &Path) -> bool {
     index_path(storage_dir).exists()
 }
 
-pub fn clear_document(storage_dir: &Path, download_id: i64) -> Result<(), String> {
-    clear_documents(storage_dir, &[download_id])
-}
-
 /// Removes several works in one SQLite transaction and invalidates the ANN
 /// cache once. Bulk library deletion used to rebuild this cache boundary once
 /// per work, which made a large delete needlessly expensive.
@@ -529,7 +510,7 @@ pub fn search(
 ///
 /// 索引側は本文をそのまま `passage:` として渡すのに、検索側が何を `query:` と
 /// して渡すかで結果が変わる。**どちらが良いかは実測でしか言えない**ので、
-/// 前処理を外から与えられるようにしてある（`examples/semantic_query_probe.rs`）。
+/// 前処理を外から与えられるようにしてある。
 pub fn search_with_query_text(
     storage_dir: &Path,
     query_text: &str,
@@ -620,7 +601,6 @@ pub fn search_with_query_text(
                 .map_err(|e| format!("Semantic result text read failed: {e}"))?;
             Ok(SemanticSearchHit {
                 download_id: candidate.download_id,
-                chunk_id: "work".to_string(),
                 field: if candidate.content {
                     "content"
                 } else {
@@ -639,36 +619,6 @@ pub fn search_with_query_text(
             })
         })
         .collect()
-}
-
-/// 索引に残った、もう存在しない作品の行を落とす。
-///
-/// 削除のたびに `clear_documents` を呼んではいるが、取りこぼしはたまる。
-/// 実測で索引 3,946 件に対して実在 3,938 件 — 8 件が幽霊として残っていた。
-/// 検索の結果からは弾かれるので害は小さいが、走査のたびに読む無駄が残り、
-/// 「索引の件数」が棚の件数と合わない気持ち悪さも残る。
-///
-/// `alive` は実在する `download_id` の全体。**部分集合を渡してはいけない** —
-/// 渡した分以外が全部消える。
-pub fn prune_missing_documents(storage_dir: &Path, alive: &HashSet<i64>) -> Result<usize, String> {
-    let conn = open_index(storage_dir)?;
-    let indexed = conn
-        .prepare("SELECT download_id FROM semantic_works")
-        .and_then(|mut stmt| {
-            stmt.query_map([], |row| row.get::<_, i64>(0))?
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .map_err(|e| format!("Semantic prune scan failed: {e}"))?;
-    let orphans = indexed
-        .into_iter()
-        .filter(|id| !alive.contains(id))
-        .collect::<Vec<_>>();
-    if orphans.is_empty() {
-        return Ok(0);
-    }
-    drop(conn);
-    clear_documents(storage_dir, &orphans)?;
-    Ok(orphans.len())
 }
 
 /// 作品ごとの本文ベクトル。全チャンクの平均を、長さ1にそろえて返す。
@@ -822,70 +772,11 @@ pub fn similar_works(
     Ok(scored)
 }
 
-/// 測るために、索引から作品と本文の断片を拾う。
-///
-/// `examples/semantic_query_probe.rs` が使う。正解を人手で用意せずに問いの
-/// 作り方を比べるため、**作品自身を答えにする**ので、その材料がここから要る。
-pub struct ProbeSample {
-    pub download_id: i64,
-    pub text: String,
-}
-
-pub fn probe_samples(storage_dir: &Path, limit: usize) -> Result<Vec<ProbeSample>, String> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let conn = open_index(storage_dir)?;
-    let total: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM semantic_works
-              WHERE model_id = ?1 AND dimension = ?2 AND content_vector IS NOT NULL",
-            params![MODEL_ID, VECTOR_DIMENSION as i64],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("Semantic probe count failed: {e}"))?;
-    let total = total.max(0) as usize;
-    let sample_count = limit.min(total);
-    if sample_count == 0 {
-        return Ok(Vec::new());
-    }
-    // Pick the midpoint of equally sized slices of the entire index. Taking
-    // LIMIT from the start measured only the oldest download IDs and made a
-    // change in library order look like a search-quality change.
-    let targets = (0..sample_count)
-        .map(|sample| ((2 * sample + 1) * total) / (2 * sample_count))
-        .collect::<Vec<_>>();
-    let mut statement = conn
-        .prepare(
-            "SELECT download_id, content_preview
-               FROM semantic_works
-              WHERE model_id = ?1 AND dimension = ?2 AND content_vector IS NOT NULL
-              ORDER BY download_id",
-        )
-        .map_err(|e| format!("Semantic probe prepare failed: {e}"))?;
-    let rows = statement
-        .query_map(params![MODEL_ID, VECTOR_DIMENSION as i64], |row| {
-            Ok(ProbeSample {
-                download_id: row.get(0)?,
-                text: row.get(1)?,
-            })
-        })
-        .map_err(|e| format!("Semantic probe query failed: {e}"))?;
-    let mut out = Vec::with_capacity(sample_count);
-    for (index, row) in rows.enumerate() {
-        if targets.get(out.len()) == Some(&index) {
-            out.push(row.map_err(|e| format!("Semantic probe read failed: {e}"))?);
-        }
-    }
-    Ok(out)
-}
-
 pub fn status(storage_dir: &Path) -> SemanticIndexStatus {
     release_model_if_idle();
     let Ok(conn) = open_index(storage_dir) else {
         return SemanticIndexStatus {
             indexed_works: 0,
-            indexed_chunks: 0,
             model_ready: semantic_model_ready(),
             provider: embedding_provider(),
             gpu_enabled: embedding_gpu_enabled(),
@@ -900,44 +791,10 @@ pub fn status(storage_dir: &Path) -> SemanticIndexStatus {
         .unwrap_or(0);
     SemanticIndexStatus {
         indexed_works,
-        indexed_chunks: indexed_works,
         model_ready: semantic_model_ready(),
         provider: embedding_provider(),
         gpu_enabled: embedding_gpu_enabled(),
     }
-}
-
-/// IDs physically present in the current sidecar format/model.
-///
-/// Coverage metadata lives in the main database, so startup recovery compares
-/// it with this set. A count alone cannot detect a partially rebuilt sidecar
-/// whose surviving rows happen to be fewer but non-zero.
-pub fn indexed_download_ids(storage_dir: &Path) -> Result<HashSet<i64>, String> {
-    let conn = open_index(storage_dir)?;
-    let mut statement = conn
-        .prepare(
-            "SELECT download_id FROM semantic_works
-              WHERE model_id = ?1 AND dimension = ?2",
-        )
-        .map_err(|e| format!("Semantic id scan prepare failed: {e}"))?;
-    let rows = statement
-        .query_map(params![MODEL_ID, VECTOR_DIMENSION as i64], |row| row.get(0))
-        .map_err(|e| format!("Semantic id scan failed: {e}"))?;
-    rows.collect::<Result<HashSet<_>, _>>()
-        .map_err(|e| format!("Semantic id scan read failed: {e}"))
-}
-
-/// Cheap common-case coverage check used during startup. The full ID scan is
-/// reserved for a count mismatch, which avoids allocating every work ID on
-/// every launch of a healthy large library.
-pub fn indexed_download_count(storage_dir: &Path) -> Result<i64, String> {
-    let conn = open_index(storage_dir)?;
-    conn.query_row(
-        "SELECT COUNT(*) FROM semantic_works WHERE model_id = ?1 AND dimension = ?2",
-        params![MODEL_ID, VECTOR_DIMENSION as i64],
-        |row| row.get(0),
-    )
-    .map_err(|e| format!("Semantic work count failed: {e}"))
 }
 
 fn build_chunks(doc: &SemanticIndexDocument) -> Vec<ChunkInput> {
@@ -1019,7 +876,7 @@ fn split_text_chunks(text: &str) -> Vec<String> {
 /// | **そのまま**     | 69.7% | 0.739 |
 ///
 /// 題名を問いにしたときも 26.6% → 69.7%（MRR 0.340 → 0.756）で同じ向き。
-/// 測り直すときは `cargo run --release --example semantic_query_probe`。
+/// 測り直すときは、棚の実物で問いと当たりを数えて比べる。
 ///
 /// かなやローマ字で引き当てるのは**字面の索引（tantivy）の仕事**で、
 /// 検索はその二つを束ねている。ここで面倒を見る必要はない。
@@ -1108,36 +965,6 @@ fn start_model_reaper() {
             log::warn!("意味検索モデルの待機時解放スレッドを開始できません: {error}");
         }
     });
-}
-
-/// Releases the ONNX Runtime session and its DirectML allocations.
-///
-/// The mutex is held throughout embedding, so `take` cannot race an active
-/// inference. Drop outside the lock because ORT may synchronously tear down
-/// provider resources and that work must not block status readers.
-#[cfg(not(test))]
-pub fn release_model() -> bool {
-    let Some(model) = MODEL.get() else {
-        return false;
-    };
-    let removed = {
-        let Ok(mut slot) = model.lock() else {
-            return false;
-        };
-        slot.last_used = None;
-        slot.runtime.take()
-    };
-    let released = removed.is_some();
-    drop(removed);
-    if released {
-        log::info!("意味検索モデルをメモリから解放しました");
-    }
-    released
-}
-
-#[cfg(test)]
-pub fn release_model() -> bool {
-    false
 }
 
 #[cfg(not(test))]
@@ -1410,7 +1237,6 @@ fn hash_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     /// 内積を余弦として使う以上、しまう向きは長さ1でなければならない。
     ///
@@ -1492,7 +1318,7 @@ mod tests {
     ///
     /// ここに正規化や語の展開を足し戻すと、意味検索の当たりが目に見えて落ちる
     /// （[`semantic_query_text`] の表を見ること）。足すなら
-    /// `examples/semantic_query_probe` で測り直してからにすること。
+    /// 棚の実物で測り直してからにすること。
     #[test]
     fn the_query_reaches_the_model_the_way_it_was_typed() {
         for query in [
@@ -1504,117 +1330,5 @@ mod tests {
             assert_eq!(semantic_query_text(query), query);
         }
         assert_eq!(semantic_query_text("  余白  "), "余白");
-    }
-
-    #[test]
-    fn semantic_sidecar_returns_one_hit_per_work() {
-        let root =
-            std::env::temp_dir().join(format!("piep_semantic_test_{}", rand::random::<u32>()));
-        let storage = root.join("downloads");
-        fs::create_dir_all(&storage).unwrap();
-        upsert_documents(
-            &storage,
-            &[SemanticIndexDocument {
-                download_id: 1,
-                title: "静かな物語".to_string(),
-                author_name: "作者".to_string(),
-                tags: "小説".to_string(),
-                series_title: String::new(),
-                excerpt: String::new(),
-                body: "これは長い小説本文です。".to_string(),
-            }],
-        )
-        .unwrap();
-        let hits = search(&storage, "shousetsu", 10).unwrap();
-        assert!(hits.iter().any(|hit| hit.download_id == 1));
-        assert_eq!(hits.iter().filter(|hit| hit.download_id == 1).count(), 1);
-        assert_eq!(status(&storage).indexed_works, 1);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn a_body_only_work_is_indexed_and_reported_as_inserted() {
-        let root =
-            std::env::temp_dir().join(format!("piep_semantic_body_{}", rand::random::<u32>()));
-        let storage = root.join("downloads");
-        fs::create_dir_all(&storage).unwrap();
-        let inserted = upsert_documents(
-            &storage,
-            &[SemanticIndexDocument {
-                download_id: 2,
-                title: String::new(),
-                author_name: String::new(),
-                tags: String::new(),
-                series_title: String::new(),
-                excerpt: String::new(),
-                body: "題名が無くても、この本文は意味検索の対象になる。".to_string(),
-            }],
-        )
-        .unwrap();
-        assert_eq!(inserted, vec![2]);
-        let hits = search(&storage, "意味検索", 10).unwrap();
-        let hit = hits.iter().find(|hit| hit.download_id == 2).unwrap();
-        assert_eq!(hit.field, "content");
-        assert!(hit.text.contains("個別の一致箇所は特定していません"));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn probe_samples_cover_the_whole_index_instead_of_its_first_rows() {
-        let root =
-            std::env::temp_dir().join(format!("piep_semantic_probe_{}", rand::random::<u32>()));
-        let storage = root.join("downloads");
-        fs::create_dir_all(&storage).unwrap();
-        let docs = (1..=5)
-            .map(|download_id| SemanticIndexDocument {
-                download_id,
-                title: format!("作品{download_id}"),
-                author_name: String::new(),
-                tags: String::new(),
-                series_title: String::new(),
-                excerpt: String::new(),
-                body: format!("本文{download_id}"),
-            })
-            .collect::<Vec<_>>();
-        upsert_documents(&storage, &docs).unwrap();
-        let ids = probe_samples(&storage, 3)
-            .unwrap()
-            .into_iter()
-            .map(|sample| sample.download_id)
-            .collect::<Vec<_>>();
-        assert_eq!(ids, vec![1, 3, 5]);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn related_work_scan_keeps_only_the_requested_best_results() {
-        let root =
-            std::env::temp_dir().join(format!("piep_semantic_related_{}", rand::random::<u32>()));
-        let storage = root.join("downloads");
-        fs::create_dir_all(&storage).unwrap();
-        let document = |download_id, title: &str, body: &str| SemanticIndexDocument {
-            download_id,
-            title: title.to_string(),
-            author_name: "作者".to_string(),
-            tags: "小説".to_string(),
-            series_title: String::new(),
-            excerpt: String::new(),
-            body: body.to_string(),
-        };
-        upsert_documents(
-            &storage,
-            &[
-                document(1, "雨の図書室", "雨音を聞きながら本を読む。"),
-                document(2, "雨の図書室", "雨音を聞きながら本を読む。"),
-                document(3, "宇宙船", "遠い惑星へ向かう。"),
-            ],
-        )
-        .unwrap();
-
-        let related = similar_works(&storage, &[1], 1).unwrap();
-        assert_eq!(related.len(), 1);
-        assert_eq!(related[0].0, 2);
-        assert!(related[0].1 > 0.9);
-        let _ = fs::remove_dir_all(root);
     }
 }

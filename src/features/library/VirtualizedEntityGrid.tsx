@@ -13,7 +13,7 @@ interface VirtualizedEntityGridProps {
   /** 追いかけているかどうか。一覧を開くとき1回読んだ結果を渡す。 */
   watchState?: (entity: EntityFacet) => EntityWatchState;
   onToggleWatch?: (entity: EntityFacet, next: boolean) => void;
-  /** 監視を変えられない理由（新しい棚）。 */
+  /** 監視を変えられない理由（棚）。 */
   watchHint?: string;
 }
 

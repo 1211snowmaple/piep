@@ -1,7 +1,7 @@
-//! 取得元の応答（作品）から保存の入力を組む。旧棚の版の移行と、アプリの保存の両方が同じ規則を使う
-//! （移した作品と、切り替えた後に保存した作品が同じ形になるように）。
+//! 取得元の応答（作品）から保存の入力を組む。アプリの保存と保存フォルダーの再取り込みが同じ規則を使う
+//! （どちらから入った作品も同じ形になるように）。
 //!
-//! 入力は取得元の応答の JSON と、手元に落とした画像・添付のファイル。応答の形は旧棚の保存と同じ
+//! 入力は取得元の応答の JSON と、手元に落とした画像・添付のファイル。応答の形は保存フォルダーと同じ
 //! （pixiv は `detail` の下、FANBOX は投稿そのもの）。
 
 use super::{
@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// 手元に落とした画像・添付の一つ。`role` は旧棚の種類の名前（`cover`・`illustration`・`file`）。
+/// 手元に落とした画像・添付の一つ。`role` は種類の名前（`cover`・`illustration`・`file`）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StagedAsset {
     pub role: String,
@@ -279,7 +279,7 @@ pub struct WorkSave<'a> {
     pub key: &'a str,
     /// 何から保存したか（`save`・`update` など）。
     pub route: &'a str,
-    /// 取得元の応答（旧棚の保存と同じ形）。原本としてそのまま残す。
+    /// 取得元の応答。原本としてそのまま残す。
     pub data: &'a Value,
     pub assets: Vec<StagedAsset>,
 }

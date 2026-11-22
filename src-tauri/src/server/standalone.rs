@@ -58,7 +58,7 @@ pub struct ServerConfig {
     pub update: UpdateConfig,
 }
 
-/// サーバーの置き場にある新しい棚と、そこを読める端末を明示する。
+/// サーバーの置き場にある棚と、そこを読める端末を明示する。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReaderShelfConfig {
@@ -86,7 +86,7 @@ impl ReaderShelfConfig {
         let root = self.root(paths)?;
         let library = Arc::new(
             crate::library::Library::open_matching(&root, self.library_id.get())
-                .map_err(|error| format!("新しい棚を開けません: {error}"))?,
+                .map_err(|error| format!("棚を開けません: {error}"))?,
         );
         let authority = Arc::new(super::reader::DeviceAuthority::new(store));
         for (device, subject) in &self.readers {
@@ -851,12 +851,10 @@ fn lock_server(paths: &ServerPaths) -> Result<File, String> {
 }
 
 async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
-    // 0.40 までの名前（`library-v2` と `[library_v2]`）を棚の名前へ移し、
     // 送られた棚を組み終えていれば、設定を読む前に配る棚をそれへ切り替える。
     {
         let paths = paths.clone();
         tokio::task::spawn_blocking(move || {
-            native::rename_old_layout(&paths)?;
             shipment::apply_pending(&paths);
             Ok::<(), String>(())
         })
@@ -1053,7 +1051,7 @@ const USAGE: &str = "piep-server <command>
                                          管理画面を戻す、または止める
   status --data <dir>                    状態を出す
   stage-library --data <dir> --shelf <dir>
-                                         検証済みの新しい棚の写しを用意し、世代の UUID を出す
+                                         検証済みの棚の写しを用意し、世代の UUID を出す
   activate-library --data <dir> --generation <UUID>
                                          停止中のサーバーで配信する写しを選ぶ
   --version                              版を出す

@@ -49,7 +49,7 @@ pub async fn read_browser_page_work_candidates(
     source: String,
 ) -> Result<PageWorkCandidates, String> {
     let page = read_browser_page_works(app.clone(), browser, source.clone()).await?;
-    // 切り替えた棚では、棚に載っている作品を保存済みとする（外した作品は載っていない）。
+    // 棚に載っている作品を保存済みとする（外した作品は載っていない）。
     let library = super::watching::active(&app)?;
     super::watching::blocking(move || {
         let works = page
@@ -100,7 +100,7 @@ pub async fn read_browser_page_user_candidates(
     browser: String,
 ) -> Result<PageUserCandidates, String> {
     let page = read_browser_page_users(app.clone(), browser).await?;
-    // 切り替えた棚では、棚の監視の登録で見る（止めた登録も「登録済み」）。
+    // 棚の監視の登録で見る（止めた登録も「登録済み」）。
     let library = super::watching::active(&app)?;
     super::watching::blocking(move || {
         let watched: std::collections::HashSet<String> =

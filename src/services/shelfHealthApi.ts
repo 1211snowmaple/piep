@@ -3,9 +3,9 @@ import type { OriginalImageResult, OriginalImageStatus } from "@/services/dbApi"
 import type { DashboardSummary, FacetCount, FilterFacets, LibraryMaintenanceResult, LibraryShelfCounts, SearchIndexOptimizationResult, SearchIndexStatus } from "@/types/library";
 
 /**
- * 新しい棚の数と手入れ。`src-tauri/src/commands/library_health.rs` と対になる。
+ * 棚の数と手入れ。`src-tauri/src/commands/library_health.rs` と対になる。
  *
- * 数える命令は開いた棚から読む（試験中の写しでも）。手入れの命令は正本に切り替えた棚だけに効く。
+ * 数える命令は開いた棚から読む。手入れの命令は
  */
 
 /** 診断の数（棚の台帳・索引の大きさ）。 */
@@ -55,9 +55,9 @@ export function shelfDashboard(): Promise<DashboardSummary> {
   return invoke<DashboardSummary>("shelf_dashboard");
 }
 
-/** 横の欄の件数。`legacyReading` は端末に旧棚の番号で残る読みかけ（棚へ引き取る前だけ渡す）。 */
-export function shelfCounts(legacyReading: number[] | null): Promise<LibraryShelfCounts> {
-  return invoke<LibraryShelfCounts>("shelf_counts", { legacyReading });
+/** 横の欄の件数。 */
+export function shelfCounts(): Promise<LibraryShelfCounts> {
+  return invoke<LibraryShelfCounts>("shelf_counts");
 }
 
 export function shelfDiagnostics(): Promise<ShelfDiagnostics> {
@@ -91,12 +91,12 @@ export function shelfSearchFilterFacets(kind: "tags" | "authors", query: string 
   return invoke<FacetCount[]>("shelf_search_filter_facets", { kind, query: query?.trim() || null, limit });
 }
 
-/** 新しい棚の、縮小版のまま残る pixiv の表紙・挿絵の数と、走っている取り直しの進み具合。 */
+/** 棚の、縮小版のまま残る pixiv の表紙・挿絵の数と、走っている取り直しの進み具合。 */
 export function shelfOriginalImageStatus(): Promise<OriginalImageStatus> {
   return invoke<OriginalImageStatus>("shelf_original_image_status");
 }
 
-/** 新しい棚で、縮小版の表紙・挿絵を原寸に取り直す（版は増えない）。正本に切り替えた棚だけ。 */
+/** 棚で、縮小版の表紙・挿絵を原寸に取り直す（版は増えない）。 */
 export function shelfUpgradePixivImagesToOriginal(): Promise<OriginalImageResult> {
   return invoke<OriginalImageResult>("shelf_upgrade_pixiv_images_to_original");
 }

@@ -482,8 +482,8 @@ struct ShelfReadingQuery {
     limit: Option<i64>,
 }
 
-/// 携帯が新しい棚に書いた読書位置を、デスクトップ版が自分の棚へ取り込むために読む。
-/// 棚の持ち主の位置だけ。新しい棚を配っているサーバーにだけある。
+/// 携帯が棚に書いた読書位置を、デスクトップ版が自分の棚へ取り込むために読む。
+/// 棚の持ち主の位置だけ。棚を配っているサーバーにだけある。
 async fn admin_shelf_reading(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
@@ -498,7 +498,7 @@ async fn admin_shelf_reading(
     Ok(shelf.owner_reading(query.cursor, query.limit).await)
 }
 
-/// 新しい棚の持ち主のお気に入り（携帯が付け外ししたものをデスクトップ版が取り込む）。
+/// 棚の持ち主のお気に入り（携帯が付け外ししたものをデスクトップ版が取り込む）。
 async fn admin_shelf_favorites(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
@@ -676,7 +676,7 @@ async fn admin_devices(
     Ok(Json(device_rows(&ctx)?))
 }
 
-/// 端末の一覧。新しい棚を配っているサーバーだけ、携帯ごとに棚を読めるかを添える。
+/// 端末の一覧。棚を配っているサーバーだけ、携帯ごとに棚を読めるかを添える。
 fn device_rows(ctx: &ServerContext) -> Result<Vec<serde_json::Value>, ApiError> {
     let devices = ctx.store.list_devices().map_err(|_| ApiError::internal())?;
     let shelf = ctx.reader_shelf.get().cloned();
@@ -684,7 +684,7 @@ fn device_rows(ctx: &ServerContext) -> Result<Vec<serde_json::Value>, ApiError> 
     for device in devices {
         let reads = shelf.as_ref().map(|shelf| shelf.reads(&device.id));
         let mut row = serde_json::to_value(&device).map_err(|_| ApiError::internal())?;
-        // 新しい棚を配っているサーバーだけ、携帯ごとに棚を読めるかを添える。
+        // 棚を配っているサーバーだけ、携帯ごとに棚を読めるかを添える。
         if let (Some(reads), Some(object)) = (reads, row.as_object_mut()) {
             object.insert("readsShelf".into(), serde_json::Value::Bool(reads));
         }

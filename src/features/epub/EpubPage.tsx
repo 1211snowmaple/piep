@@ -40,7 +40,7 @@ import { openSingleDialog } from "@/services/dialogApi";
 import { cancelEpubExport, exportEpubBatch, listEpubTemplates } from "@/services/epubApi";
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
-import type { DownloadEntry, ShelfEntry } from "@/types/library";
+import type { ShelfEntry } from "@/types/library";
 import { shelfEntriesByIds } from "@/features/library/shelf";
 import type { EpubQueueId } from "@/app/WorkspaceContext";
 import type { ExportBatchResult, ExportProgress, TemplateInfo } from "@/types/epub";
@@ -52,10 +52,10 @@ import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 type EpubValues = EpubExportSettings;
 /**
  * キューの作品を棚の ID でまとめて引く（並びはキューの順）。一件ずつ引くと、数百冊のキューで
- * 開くたびにその数だけ往復していた。番号の項目は旧棚のころの残りなので引かない。
+ * 開くたびにその数だけ往復していた。前に積んだ番号の項目は引かない。
  */
 async function queuedWorks(queue: EpubQueueId[]): Promise<ShelfEntry[]> {
-  const shelf = queue.filter((id): id is string => typeof id === "string");
+  const shelf = queue.filter((id) => typeof id === "string");
   if (!shelf.length) return [];
   // 書き出す順は積んだ順。
   const order = new Map(shelf.map((id, index) => [id, index]));
@@ -80,9 +80,9 @@ export default function EpubPage() {
   // hundred books fired that many IPC round trips on every visit.
   const queueQuery = useQuery({
     queryKey: ["epub-queue-works", epubQueue],
-    queryFn: (): Promise<(ShelfEntry | DownloadEntry)[]> => runtime
+    queryFn: (): Promise<ShelfEntry[]> => runtime
       ? queuedWorks(epubQueue)
-      : Promise.resolve(epubQueue.map((id) => demoWorks.find((work) => work.id === id)).filter((work): work is DownloadEntry => Boolean(work))),
+      : Promise.resolve(epubQueue.map((id) => demoWorks.find((work) => work.id === id)).filter((work): work is ShelfEntry => Boolean(work))),
     enabled: epubQueue.length > 0,
   });
   const works = useMemo(() => queueQuery.data ?? [], [queueQuery.data]);

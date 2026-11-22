@@ -11,12 +11,10 @@ mod catalogue;
 mod discovery;
 mod editing;
 mod execution;
-pub(crate) use execution::{legacy_recheck_generation, ExecutionMetadata};
+pub use execution::ExecutionMetadata;
 mod identity;
 mod integrity;
 mod job_history;
-mod legacy;
-mod maintenance;
 mod operations;
 mod partial;
 pub use partial::{PartTransfer, PART_MARKER};
@@ -62,8 +60,6 @@ pub use editing::{EditBlock, EditContent, EditInfo, EditMedia, EditState};
 pub use identity::{cover_identity, image_identity, Fingerprint, LibraryId};
 pub(crate) use identity::{is_pixiv_placeholder_image, masked_pixiv_metadata};
 pub use job_history::{JobHistory, JobHistoryItem, JobHistoryLog};
-pub use legacy::{LegacyImportReport, LegacyImporter};
-pub use maintenance::{AssetAuditMarker, MaintenanceHistory, RepairAttemptMarker};
 pub use operations::{EditPointerChange, EditRequest, SnapshotInfo, UserState, UserStateChange};
 pub use reader::{
     ReaderBinding, ReaderBindingSet, ReaderBody, ReaderDocument, ResolvedReaderBinding,
@@ -134,7 +130,3 @@ impl From<piep_storage::Error> for Error {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "legacy/job_fixture.rs"]
-pub(crate) mod job_fixture;

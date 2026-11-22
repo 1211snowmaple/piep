@@ -1,10 +1,10 @@
-//! 新しい棚の作品を、EPUB の変換が読む形（取得元の応答と、旧棚と同じ並びの画像・添付）へ書き出す。
+//! 棚の作品を、EPUB の変換が読む形（取得元の応答と、保存フォルダーと同じ並びの画像・添付）へ書き出す。
 //!
 //! EPUB の変換は、取得元の応答と `data_assets/`（`cover/`・`illustrations/`・`files/`）の実ファイルから
 //! 本を組む。棚は応答を原応答として、画像・添付を元の名前とともに持っているので、一冊ぶんを一時の
-//! 置き場へ書き出して同じ変換に渡す。変換の規則を二つ持たない（旧棚と同じ本になる）。
+//! 置き場へ書き出して同じ変換に渡す。変換の規則を二つ持たない。
 //!
-//! 反映した編集があれば、編集の基準版の応答と画像を使い、本文を編集で差し替える（旧棚と同じく、取得元が
+//! 反映した編集があれば、編集の基準版の応答と画像を使い、本文を編集で差し替える（取得元が
 //! 書いていたのと同じ形で渡す）。編集で足した画像は、本へ加える画像として返す。
 
 use crate::database::models::{AssetEntry, EditedSourceForm, WorkBlock};
@@ -233,7 +233,7 @@ impl Library {
                         attrs_json: (!block.attrs.is_null()).then(|| block.attrs.to_string()),
                     })
                     .collect();
-                // 本文が指していない足した画像は本に入れない（旧棚と同じ）。
+                // 本文が指していない足した画像は本に入れない。
                 added_images
                     .retain(|image| blocks.iter().any(|block| block.asset_id == Some(image.id)));
                 Some(EditedSourceForm {

@@ -46,7 +46,7 @@ import { openExternalUrl } from "@/services/openerApi";
 import { previewReaderSource, shelfReaderSource, SHELF_WORK_ID, type ReaderSource } from "@/features/reader/readerSource";
 import { RecapPanel } from "@/features/assist/RecapPanel";
 import { NeighborPlaceholder, NeighborTile, formatReadingTime } from "@/features/reader/ReaderNextUp";
-import type { DownloadEntry, ShelfEntry } from "@/types/library";
+import type { ShelfEntry } from "@/types/library";
 import { shelfNeighbors, type ShelfCard, type ShelfNeighbors } from "@/services/shelfApi";
 import { shelfEntry } from "@/features/library/shelf";
 
@@ -66,14 +66,12 @@ interface ReadingContextRow {
   currentId: ReaderWorkKey;
 }
 
-/** 旧棚の作品は番号、新しい棚の作品は UUID。 */
 /** 前後の作品は棚の作品だけ（UUID）。 */
 type ReaderWorkKey = string;
 interface NeighborRef { id: ReaderWorkKey; title: string }
 
 /**
- * 新しい棚の前後の作品を、旧棚と同じ札の行にする。旧棚と同じ名乗り方・同じ数え方で、
- * 隣の作品の詳しい情報（表紙・作者・字数）は、引いた並びにもう入っている。
+ * 棚の前後の作品を、札の行にする。 * 隣の作品の詳しい情報（表紙・作者・字数）は、引いた並びにもう入っている。
  */
 function shelfReadingContexts(rows: ShelfNeighbors[], currentId: string, authorName: string) {
   const neighbors = new Map<ReaderWorkKey, ShelfEntry>();
@@ -111,7 +109,7 @@ function shelfReadingContexts(rows: ShelfNeighbors[], currentId: string, authorN
 function ReadingContextCard({ context, neighbors, onOpen }: {
   context: ReadingContextRow;
   /** 隣の作品の詳しい情報。届くまでは題だけで描く。 */
-  neighbors: ReadonlyMap<ReaderWorkKey, DownloadEntry | ShelfEntry>;
+  neighbors: ReadonlyMap<ReaderWorkKey, ShelfEntry>;
   onOpen: (path: string) => void;
 }) {
   const href = (id: ReaderWorkKey) => `/reader/${id}${context.collectionId ? `?collection=${encodeURIComponent(context.collectionId)}` : ""}`;
@@ -265,9 +263,9 @@ const EDITED_VERSION = "edit";
 
 export default function ReaderPage() {
   const { workId } = useRouteParams("/reader/:workId");
-  // 棚の作品は UUID で来る。番号で来るのはプレビューの見本だけ。
+  // 棚の作品は UUID で来る。それ以外はプレビューの見本。
   const shelfId = SHELF_WORK_ID.test(workId ?? "") ? workId!.toLowerCase() : null;
-  const source = useMemo(() => shelfId ? shelfReaderSource(shelfId) : previewReaderSource(Number(workId)), [shelfId, workId]);
+  const source = useMemo(() => shelfId ? shelfReaderSource(shelfId) : previewReaderSource(workId ?? ""), [shelfId, workId]);
   return <Reader source={source} />;
 }
 
@@ -324,9 +322,8 @@ function Reader({ source }: { source: ReaderSource }) {
     select: source.head.select,
     enabled: validId,
   });
-  // 読書位置・しおりの鍵。新しい棚の作品でも、旧棚から移したものは旧棚の番号で引く（両方の棚で
-  // 同じ記録）。頭が届くまでは分からないので、位置を戻すのも書くのも頭が届いてから。
-  const readingId = metadataQuery.data?.head.readingKey ?? null;
+  // 読書位置・しおりの鍵（作品の ID）。位置を戻すのも書くのも頭が届いてから。
+  const readingId = metadataQuery.data?.head.id ?? null;
   // 読書位置を棚にも書く（携帯と同じ形：ページとその中の割合）。端末の記録（何行目か）は
   // この端末で開き直すための控えとして残す。
   const shelfReading = runtime && source.shelf ? source.shelfReading ?? null : null;
@@ -341,7 +338,6 @@ function Reader({ source }: { source: ReaderSource }) {
   const shelfReadingPending = Boolean(shelfReading) && shelfReadingQuery.isPending;
   const remoteReading = shelfReadingQuery.data ?? null;
   const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(readingId ?? id, version);
-  // 前後の作品・保存フォルダーは旧棚の作品だけ。
   const contentQuery = useQuery({
     queryKey: ["reader-content-page", id, version, sourcePage - 1],
     queryFn: () => source.page(version, sourcePage - 1),
@@ -388,7 +384,7 @@ function Reader({ source }: { source: ReaderSource }) {
     [id, metadataQuery.data?.head.authorName, shelfNeighborsQuery.data],
   );
   const readingContexts = shelfContexts?.contexts ?? [];
-  const neighbors: ReadonlyMap<ReaderWorkKey, DownloadEntry | ShelfEntry> = shelfContexts?.neighbors ?? new Map();
+  const neighbors: ReadonlyMap<ReaderWorkKey, ShelfEntry> = shelfContexts?.neighbors ?? new Map();
   // Only while reading: an address you cannot follow is noise here, whereas the
   // detail screen deliberately shows the work as its author wrote it.
   const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === sourcePage - 1;

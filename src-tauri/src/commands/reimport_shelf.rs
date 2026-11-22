@@ -1,6 +1,6 @@
-//! 保存フォルダーの再取り込みを新しい棚で行う。
+//! 保存フォルダーの再取り込みを棚で行う。
 //!
-//! 旧棚の保存先（`<取得元>/<作品の番号>/v<版>/`）に残った作品のうち、棚にまだ一度も入っていない
+//! 保存フォルダー（`<取得元>/<作品の番号>/v<版>/`）に残った作品のうち、棚にまだ一度も入っていない
 //! ものを、取り寄せずにフォルダーの中身のまま棚へ保存する。版は番号の順に保存するので、棚の版の
 //! 記録も同じ順に並ぶ。棚にある作品・棚から外した作品には触れない（外した作品を勝手に戻さない）。
 //! 保存フォルダーを手で組んで戻す使い方（削除された作品を EPUB から戻すなど）も同じ道を通る。
@@ -78,7 +78,7 @@ pub struct ReimportOutcome {
     pub skipped: Vec<String>,
 }
 
-/// 取り込む保存フォルダー。アプリのフォルダーの中の `downloads`（旧棚の保存先と同じ場所・同じ形）。
+/// 取り込む保存フォルダー。アプリのフォルダーの中の `downloads`（取得元・作品の番号・版で分けた形）。
 pub(crate) const FOLDER: &str = "downloads";
 
 fn folder(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -104,7 +104,7 @@ fn safe_key(key: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
-/// 保存先の作品のフォルダーを数える。リンクや保存先の外を指すフォルダーは断る（旧棚と同じ）。
+/// 保存先の作品のフォルダーを数える。リンクや保存先の外を指すフォルダーは断る。
 pub(crate) fn folder_works(storage: &Path) -> Result<Vec<FolderWork>, String> {
     if !storage.try_exists().map_err(|e| e.to_string())? {
         return Ok(Vec::new());
@@ -266,7 +266,7 @@ pub(crate) async fn reimport_into_shelf(
     Ok(outcome)
 }
 
-/// 保存フォルダーを調べ、棚にまだ無い作品を棚へ戻す（切り替えた棚だけ）。
+/// 保存フォルダーを調べ、棚にまだ無い作品を棚へ戻す。
 #[tauri::command]
 pub async fn shelf_reimport_folders(app: tauri::AppHandle) -> Result<ReimportOutcome, String> {
     let shelf = app.state::<Arc<Shelf>>().inner().clone();

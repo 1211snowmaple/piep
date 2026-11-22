@@ -74,9 +74,7 @@ fn files_sql() -> String {
  UNION SELECT file_id FROM src.media_renditions WHERE id IN px_r AND file_id IS NOT NULL
  UNION SELECT content_file_id FROM src.edit_revisions WHERE {EDITS}
  UNION SELECT file_id FROM src.edit_media WHERE edit_id IN (SELECT id FROM src.edit_revisions WHERE {EDITS})
- UNION SELECT body_file_id FROM src.reader_binding_sets WHERE snapshot_id IN px_s
- UNION SELECT evidence_file_id FROM src.repair_attempt_markers WHERE entity_id IN px_e AND snapshot_id IN px_s AND evidence_file_id IS NOT NULL
- UNION SELECT evidence_file_id FROM src.asset_audit_markers WHERE entity_id IN px_e AND snapshot_id IN px_s AND evidence_file_id IS NOT NULL"
+ UNION SELECT body_file_id FROM src.reader_binding_sets WHERE snapshot_id IN px_s"
     )
 }
 
@@ -116,9 +114,6 @@ const TABLES: &[&str] = &[
     "user_tags",
     "work_user_tag_state",
     "work_user_tags",
-    "repair_attempt_markers",
-    "asset_audit_markers",
-    "migration_records",
     "body_text_stats",
     "ai_notes",
     "library_items",
@@ -563,15 +558,6 @@ fn copy_work(
     )?;
     copy("work_user_tag_state", "work_id IN px_e")?;
     copy("work_user_tags", "work_id IN px_e")?;
-    // 保守の記録（修復を試した・画像を点検した）は、旧棚から移した原記録と照合する。その原記録の行も持つ。
-    copy(
-        "migration_records",
-        "source_key='__all_rows__' AND source_table IN ('incomplete_save_repairs','saved_asset_audits')
-         AND evidence_file_id IN px_f",
-    )?;
-    for table in ["repair_attempt_markers", "asset_audit_markers"] {
-        copy(table, "entity_id IN px_e AND snapshot_id IN px_s")?;
-    }
     copy("body_text_stats", "file_id IN px_f")?;
     // 作品の覚え書き（あらすじなど）は作り直すと重いので一緒に持つ。鍵は作品 ID の文字列。
     let key = work.to_string();

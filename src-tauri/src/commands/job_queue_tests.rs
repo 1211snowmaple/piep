@@ -13,7 +13,6 @@ fn fixture() -> (Temp, AppState, Arc<Library>) {
     let root = std::env::temp_dir().join(format!("piep-execution-{}", LibraryId::now_v7()));
     std::fs::create_dir_all(&root).unwrap();
     let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
-    library.switch_over().unwrap();
     let state = AppState::new(Arc::new(crate::commands::shelf::Shelf::with_test_library(
         library.clone(),
     )));
@@ -189,7 +188,6 @@ fn results_belong_to_the_work_and_survive_backup_without_numeric_legacy_ids() {
         (1, 1, 1)
     );
     assert_eq!(snapshot.candidates[0].work_id, Some(work));
-    assert!(snapshot.candidates[0].download_id.is_none());
     assert_eq!(
         state.jobs().list_update_job_item_states(&job).unwrap()[0].work_id,
         Some(work)

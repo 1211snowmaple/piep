@@ -1,7 +1,7 @@
-//! コレクションの提案の材料を、新しい棚から作業用の表へ写す。
+//! コレクションの提案の材料を、棚から作業用の表へ写す。
 //!
-//! 提案の計算（`database::queries` の走査・種からの提案・追加の候補・名前の案）は、旧棚の形の表を
-//! SQL で引く。ここでは棚の今の姿から同じ形の表をメモリ上に組み、その計算をそのまま走らせる。
+//! 提案の計算（`database::queries` の走査・種からの提案・追加の候補・名前の案）は、作品の番号で
+//! 結んだ表を SQL で引く。ここでは棚の今の姿から同じ形の表をメモリ上に組み、その計算をそのまま走らせる。
 //! 作品の番号は作業用の表の中だけのもので、棚の作品 ID との対応をここで持つ。
 //!
 //! 写すもの：
@@ -13,7 +13,6 @@
 //! - `work_collections`・`work_collection_members`：今あるコレクションの顔ぶれ。
 
 use crate::database::queries::{Corpus, SuggestionSource};
-use crate::database::Database;
 use crate::library::{Library, LibraryId};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
@@ -102,7 +101,7 @@ fn time(ms: i64) -> String {
         .unwrap_or_default()
 }
 
-/// 公開日時。旧棚は取得元の日本時間（`+09:00`）のまま持っていた。走査は日付の部分で前後や
+/// 公開日時。取得元の日本時間（`+09:00`）で書く。走査は日付の部分で前後や
 /// 同じ日の投稿を見るので、UTC で書くと日本時間の 0〜9 時の投稿が前の日になる。
 fn published_time(ms: i64) -> String {
     let japan = chrono::FixedOffset::east_opt(9 * 3600).expect("日本時間");
@@ -137,8 +136,7 @@ impl<'a> ShelfSuggestions<'a> {
         let mut by_work = HashMap::new();
         {
             let tx = conn.unchecked_transaction()?;
-            // 作品。番号は旧棚から移した作品は旧棚の番号の順、そのあとに保存した作品は保存した順
-            // （旧棚と同じく古いものほど小さい。強さが同じ候補は番号で並ぶので、旧棚と同じ順にする）。
+            // 作品。番号は保存した順（古いものほど小さい。強さが同じ候補は番号で並ぶ）。
             let mut stmt = shelf.prepare(
                 "SELECT p.work_id,p.provider,p.external_key,p.title,p.author_name,
                         CAST(coalesce(json_extract(s.metadata_json,'$.author_key'),'') AS TEXT),
@@ -149,11 +147,7 @@ impl<'a> ShelfSuggestions<'a> {
                  FROM work_current_projection p
                  JOIN library_items li ON li.work_id=p.work_id
                  JOIN revision_snapshots s ON s.id=p.snapshot_id
-                 LEFT JOIN (SELECT rs.entity_id AS work_id,min(CAST(r.source_key AS INTEGER)) AS legacy
-                              FROM migration_records r JOIN revision_snapshots rs ON rs.id=r.target_id
-                             WHERE r.source_table='download_current' AND r.status='imported'
-                             GROUP BY rs.entity_id) m ON m.work_id=p.work_id
-                 ORDER BY m.legacy IS NULL,m.legacy,p.saved_at,p.work_id",
+                 ORDER BY p.saved_at,p.work_id",
             )?;
             let mut rows = stmt.query([])?;
             let mut insert = tx.prepare(
@@ -243,7 +237,7 @@ impl<'a> ShelfSuggestions<'a> {
             drop(rows);
             drop(stmt);
 
-            // 本文リンク。根拠ごとに一行（旧棚と同じ）。
+            // 本文リンク。根拠ごとに一行。
             let mut stmt = shelf.prepare(
                 "SELECT l.from_work_id,fx.provider,fx.external_key,l.to_work_id,tx.provider,tx.external_key,
                         l.relation,e.kind,e.anchor_text,e.context_text,e.confidence,
@@ -295,7 +289,7 @@ impl<'a> ShelfSuggestions<'a> {
                      right_source_id,decision,rule_version) VALUES(?1,?2,?3,?4,?5,?6)",
             )?;
             while let Some(r) = rows.next()? {
-                // 旧棚の組は取得元の鍵の小さいほうを左に置く。
+                // 組は取得元の鍵の小さいほうを左に置く。
                 let mut left = (r.get::<_, String>(0)?, r.get::<_, String>(1)?);
                 let mut right = (r.get::<_, String>(2)?, r.get::<_, String>(3)?);
                 if left > right {
@@ -457,9 +451,5 @@ impl SuggestionSource for ShelfSuggestions<'_> {
             .ok()
             .flatten()
             .map(|doc| doc.body)
-    }
-
-    fn link_backfill(&self) -> Option<&Database> {
-        None
     }
 }

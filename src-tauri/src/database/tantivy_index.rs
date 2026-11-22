@@ -5,8 +5,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
-use rusqlite::{Connection, OpenFlags};
-use tantivy::collector::{Count, TopDocs};
+use tantivy::collector::TopDocs;
 use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWriteError};
 use tantivy::directory::{
     DirectoryLock, FileHandle, Lock, MmapDirectory, WatchCallback, WatchHandle, WritePtr,
@@ -80,9 +79,9 @@ pub struct TantivyIndexDocument {
     pub author_name: String,
     pub author_id: String,
     pub tags: String,
-    /// タグを一つずつ。空でなければ、読みの欄をタグごとの値にする（新しい棚）。つないだ
-    /// `tags` の読みは隣のタグとの境目をまたぐ 2〜3 文字にも当たる。空なら旧棚と同じく
-    /// `tags` から作る（旧棚の索引は作り直さない）。
+    /// タグを一つずつ。空でなければ、読みの欄をタグごとの値にする（棚）。つないだ
+    /// `tags` の読みは隣のタグとの境目をまたぐ 2〜3 文字にも当たる。空なら
+    /// `tags` から作る。
     pub tag_list: Vec<String>,
     pub series_title: String,
     pub excerpt: String,
@@ -93,19 +92,6 @@ pub struct TantivyIndexDocument {
     pub watch_updates: bool,
     pub asset_kinds: String,
     pub text_length: i64,
-}
-
-#[derive(Debug, Clone)]
-pub struct TantivySearchHit {
-    pub download_id: i64,
-    pub score: f32,
-    pub document: Arc<SearchDocument>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct TantivySearchResult {
-    pub hits: Vec<TantivySearchHit>,
-    pub total_hits: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -450,44 +436,6 @@ pub(crate) fn release_runtime(storage_dir: &Path) {
     drop(removed);
 }
 
-pub fn upsert_documents(storage_dir: &Path, docs: &[TantivyIndexDocument]) -> Result<(), String> {
-    if docs.is_empty() {
-        return Ok(());
-    }
-    // 削除側（`delete_documents_from_snapshot`）は 0 以下の id を弾いている。
-    // 書き込み側だけ素通しにすると、`as u64` が負を巨大な値へ折り返した文書が
-    // 索引に入り、**削除も更新も二度と当たらない**。片方だけ守っても意味がない。
-    if let Some(bad) = docs.iter().find(|doc| doc.download_id <= 0) {
-        return Err(format!(
-            "Invalid download id for indexing: {}",
-            bad.download_id
-        ));
-    }
-    let runtime = runtime(storage_dir)?;
-    with_ordinary_writer(&runtime, |writer| {
-        for doc in docs {
-            writer.delete_term(Term::from_field_u64(
-                runtime.fields.download_id,
-                doc.download_id as u64,
-            ));
-            writer
-                .add_document(tantivy_document(&runtime.fields, doc))
-                .map_err(|e| format!("Tantivy document insert failed: {e}"))?;
-        }
-        writer
-            .commit()
-            .map_err(|e| format!("Tantivy commit failed: {e}"))?;
-        runtime
-            .content_generation
-            .fetch_add(1, AtomicOrdering::AcqRel);
-        runtime
-            .reader
-            .reload()
-            .map_err(|e| format!("Tantivy reader reload failed: {e}"))?;
-        Ok(())
-    })
-}
-
 const ORDINARY_WRITER_MEMORY_BUDGET: usize = 64_000_000;
 #[cfg(not(test))]
 const ORDINARY_WRITER_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -540,17 +488,6 @@ pub(crate) fn ordinary_writer_is_cached(storage_dir: &Path) -> Result<bool, Stri
     let runtime = runtime(storage_dir)?;
     let is_cached = runtime.writer_state.lock().ordinary.is_some();
     Ok(is_cached)
-}
-
-/// Keep test fixtures fragmented before their first commit, so background
-/// merges cannot change the segment count between inspection and optimization.
-#[cfg(test)]
-pub(crate) fn disable_automatic_merges_for_test(storage_dir: &Path) -> Result<(), String> {
-    let runtime = runtime(storage_dir)?;
-    with_ordinary_writer(&runtime, |writer| {
-        writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
-        Ok(())
-    })
 }
 
 /// 書き手を、走っている統合を終わらせてから手放す。
@@ -656,8 +593,6 @@ pub struct BulkWriter {
     runtime: Arc<TantivyRuntime>,
     /// 手放しているあいだだけ `None` になる。`yield_now` の途中でしか空かない。
     writer: Option<ExclusiveWriter>,
-    threads: usize,
-    memory_budget: usize,
     uncommitted: usize,
 }
 
@@ -676,8 +611,6 @@ pub fn bulk_writer(storage_dir: &Path) -> Result<BulkWriter, String> {
     Ok(BulkWriter {
         runtime,
         writer: Some(writer),
-        threads,
-        memory_budget,
         uncommitted: 0,
     })
 }
@@ -758,35 +691,6 @@ impl BulkWriter {
             .ok_or_else(|| "Tantivy bulk writer was released".to_string())
     }
 
-    /// 索引の書き手を待っている保存や削除があるか。
-    pub fn has_waiting_writers(&self) -> bool {
-        ordinary_writers_waiting(&self.runtime)
-    }
-
-    /// いったん場所を空けて、待っている書き手に順番を渡してから取り直す。
-    ///
-    /// **未確定のものを抱えたまま呼んではならない。** 手放すと書き手ごと消える。
-    /// 呼ぶ側は commit と記録を済ませてから呼ぶ。
-    ///
-    /// 取り直しには書き手の作り直しが要る（tantivy は 1 ディレクトリに 1 つしか
-    /// 書き手を許さないので、先に新しいほうを作ってから差し替えることはできない）。
-    /// それでも、待っている人がいるときにしか起きない。誰も待っていなければ
-    /// 何もせずに戻るので、ふだんの再構築の速さは変わらない。
-    pub fn yield_now(&mut self) -> Result<(), String> {
-        if self.uncommitted != 0 {
-            return Err("Tantivy bulk writer yielded with uncommitted documents".to_string());
-        }
-        let runtime = self.runtime.clone();
-        let threads = self.threads;
-        let memory_budget = self.memory_budget;
-        hand_over_exclusive_writer(&runtime, &mut self.writer, || {
-            runtime
-                .index
-                .writer_with_num_threads(threads, memory_budget)
-                .map_err(|e| format!("Tantivy bulk writer creation failed: {e}"))
-        })
-    }
-
     pub fn upsert(&mut self, prepared: Prepared) -> Result<(), String> {
         if prepared.download_id <= 0 {
             return Err(format!(
@@ -803,10 +707,6 @@ impl BulkWriter {
             .map_err(|e| format!("Tantivy document insert failed: {e}"))?;
         self.uncommitted += 1;
         Ok(())
-    }
-
-    pub fn uncommitted(&self) -> usize {
-        self.uncommitted
     }
 
     pub fn commit(&mut self) -> Result<(), String> {
@@ -889,10 +789,6 @@ pub(crate) fn settle_ordinary_writer(storage_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn delete_document(storage_dir: &Path, download_id: i64) -> Result<(), String> {
-    delete_documents(storage_dir, &[download_id])
-}
-
 /// Deletes a group of works with one writer commit and one reader reload.
 /// Tantivy commits are intentionally expensive durability boundaries, so they
 /// must not be paid once per item by bulk library operations.
@@ -923,53 +819,6 @@ pub fn delete_documents(storage_dir: &Path, download_ids: &[i64]) -> Result<(), 
     })
 }
 
-/// Deletes every id stored in a disk-backed bulk-selection snapshot while
-/// holding one Tantivy writer. This avoids materializing an O(N) id vector and
-/// still pays only one commit/reload boundary.
-pub fn delete_documents_from_snapshot(
-    storage_dir: &Path,
-    snapshot_path: &Path,
-) -> Result<(), String> {
-    let selection = Connection::open_with_flags(
-        snapshot_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| format!("Bulk selection snapshot open failed: {e}"))?;
-    let runtime = runtime(storage_dir)?;
-    with_ordinary_writer(&runtime, |writer| {
-        let mut statement = selection
-            .prepare("SELECT id FROM bulk_matches ORDER BY id")
-            .map_err(|e| format!("Bulk lexical delete prepare failed: {e}"))?;
-        let rows = statement
-            .query_map([], |row| row.get::<_, i64>(0))
-            .map_err(|e| format!("Bulk lexical delete query failed: {e}"))?;
-        for row in rows {
-            let download_id =
-                row.map_err(|e| format!("Bulk lexical delete id read failed: {e}"))?;
-            if download_id <= 0 {
-                return Err(format!(
-                    "Bulk lexical delete snapshot contained invalid id {download_id}"
-                ));
-            }
-            writer.delete_term(Term::from_field_u64(
-                runtime.fields.download_id,
-                download_id as u64,
-            ));
-        }
-        writer
-            .commit()
-            .map_err(|e| format!("Tantivy bulk delete commit failed: {e}"))?;
-        runtime
-            .content_generation
-            .fetch_add(1, AtomicOrdering::AcqRel);
-        runtime
-            .reader
-            .reload()
-            .map_err(|e| format!("Tantivy reader reload failed: {e}"))?;
-        Ok(())
-    })
-}
-
 pub fn searchable_segment_count(storage_dir: &Path) -> Result<usize, String> {
     let runtime = runtime(storage_dir)?;
     runtime
@@ -977,14 +826,6 @@ pub fn searchable_segment_count(storage_dir: &Path) -> Result<usize, String> {
         .searchable_segment_ids()
         .map(|segments| segments.len())
         .map_err(|e| format!("Tantivy segment inspection failed: {e}"))
-}
-
-/// Identifies logical index content for query-result caches. Segment-only
-/// merges deliberately preserve this value because stable download-id ranking
-/// remains valid across a changed physical layout.
-pub fn index_generation(storage_dir: &Path) -> Result<u64, String> {
-    let runtime = runtime(storage_dir)?;
-    Ok(runtime.content_generation.load(AtomicOrdering::Acquire))
 }
 
 /// Atomically merges every searchable segment into one segment. Tantivy keeps
@@ -1154,63 +995,6 @@ fn merge_down(
     Ok((before, after))
 }
 
-/// Returns the current top candidates together with the complete number of
-/// lexical matches. Callers can grow `limit` as a relevance cursor advances,
-/// instead of silently making everything below a fixed top-N unreachable.
-pub fn search_with_total(
-    storage_dir: &Path,
-    query: &str,
-    limit: usize,
-) -> Result<TantivySearchResult, String> {
-    if query.trim().is_empty() || limit == 0 {
-        return Ok(TantivySearchResult::default());
-    }
-
-    let runtime = runtime(storage_dir)?;
-    let fields = runtime.fields;
-    let searcher = runtime.reader.searcher();
-    let mut parser = QueryParser::for_index(&runtime.index, search_fields(&fields));
-    configure_field_boosts(&mut parser, &fields);
-    let parsed_query = parse_search_query(query);
-    let Some(query_expr) = tantivy_query(&parsed_query) else {
-        return Ok(TantivySearchResult::default());
-    };
-    let expanded_query = expand_query_for_tantivy(query);
-    let parsed = parser
-        .parse_query(&query_expr)
-        .or_else(|_| parser.parse_query(&escape_query(&expanded_query)))
-        .map_err(|e| format!("Tantivy query parse failed: {}", e))?;
-
-    let (top_docs, total_hits) = searcher
-        .search(
-            &parsed,
-            &(TopDocs::with_limit(limit).order_by_score(), Count),
-        )
-        .map_err(|e| format!("Tantivy search failed: {}", e))?;
-
-    let mut hits = Vec::with_capacity(top_docs.len());
-    for (score, address) in top_docs {
-        let retrieved = searcher
-            .doc::<TantivyDocument>(address)
-            .map_err(|e| format!("Tantivy document read failed: {}", e))?;
-        if let Some(download_id) = retrieved
-            .get_first(fields.download_id)
-            .and_then(|value| value.as_u64())
-            .map(|value| value as i64)
-        {
-            hits.push(TantivySearchHit {
-                download_id,
-                score,
-                document: Arc::new(search_document_from_tantivy(&retrieved, &fields)),
-            });
-        }
-    }
-
-    Ok(TantivySearchResult { hits, total_hits })
-}
-
-const MATCH_ID_BATCH_SIZE: usize = 512;
-
 /// Streams every matching id to a bounded callback batch.
 ///
 /// This is used by column-sorted full-text search. Keeping the callback in the
@@ -1282,42 +1066,6 @@ pub fn prune_missing_documents(
     })?;
     log::info!("全文索引から、棚に無い {removed} 件を落としました");
     Ok(removed)
-}
-
-pub fn visit_matching_download_ids<F>(
-    storage_dir: &Path,
-    query: &str,
-    visitor: F,
-) -> Result<usize, String>
-where
-    F: Fn(&[i64]) -> Result<(), String> + Send + Sync + 'static,
-{
-    if query.trim().is_empty() {
-        return Ok(0);
-    }
-    let runtime = runtime(storage_dir)?;
-    let searcher = runtime.reader.searcher();
-    let mut parser = QueryParser::for_index(&runtime.index, search_fields(&runtime.fields));
-    configure_field_boosts(&mut parser, &runtime.fields);
-    let parsed_query = parse_search_query(query);
-    let Some(query_expr) = tantivy_query(&parsed_query) else {
-        return Ok(0);
-    };
-    let expanded_query = expand_query_for_tantivy(query);
-    let parsed = parser
-        .parse_query(&query_expr)
-        .or_else(|_| parser.parse_query(&escape_query(&expanded_query)))
-        .map_err(|e| format!("Tantivy query parse failed: {e}"))?;
-
-    searcher
-        .search(
-            &parsed,
-            &StreamingDownloadIdCollector {
-                visitor: Arc::new(visitor),
-                cancelled: Arc::new(AtomicBool::new(false)),
-            },
-        )
-        .map_err(|e| format!("Tantivy id collection failed: {e}"))?
 }
 
 const MATCH_SCORE_BATCH_SIZE: usize = 256;
@@ -1466,133 +1214,6 @@ where
         };
         self.scores.push((download_id, score));
         if self.scores.len() == MATCH_SCORE_BATCH_SIZE {
-            self.flush();
-        }
-    }
-
-    fn harvest(mut self) -> Result<usize, String> {
-        self.flush();
-        self.error.map_or(Ok(self.visited), Err)
-    }
-}
-
-/// Returns the download id of every document matching `query`.
-///
-/// Relevance paging cannot answer "the same matches, ordered by title", so a
-/// sorted search needs the whole match set handed to SQL, which owns the
-/// ordering. Ids come from the fast field, so this never touches stored data.
-#[cfg(test)]
-pub fn matching_download_ids(storage_dir: &Path, query: &str) -> Result<Vec<i64>, String> {
-    let ids = Arc::new(Mutex::new(Vec::new()));
-    let sink = ids.clone();
-    visit_matching_download_ids(storage_dir, query, move |batch| {
-        sink.lock().extend_from_slice(batch);
-        Ok(())
-    })?;
-    let result = std::mem::take(&mut *ids.lock());
-    Ok(result)
-}
-
-struct StreamingDownloadIdCollector<F> {
-    visitor: Arc<F>,
-    cancelled: Arc<AtomicBool>,
-}
-
-impl<F> tantivy::collector::Collector for StreamingDownloadIdCollector<F>
-where
-    F: Fn(&[i64]) -> Result<(), String> + Send + Sync + 'static,
-{
-    type Fruit = Result<usize, String>;
-    type Child = StreamingDownloadIdSegmentCollector<F>;
-
-    fn for_segment(
-        &self,
-        _segment_local_id: tantivy::SegmentOrdinal,
-        segment: &tantivy::SegmentReader,
-    ) -> tantivy::Result<Self::Child> {
-        Ok(StreamingDownloadIdSegmentCollector {
-            column: segment.fast_fields().u64("download_id")?,
-            visitor: self.visitor.clone(),
-            cancelled: self.cancelled.clone(),
-            ids: Vec::with_capacity(MATCH_ID_BATCH_SIZE),
-            visited: 0,
-            error: None,
-        })
-    }
-
-    fn requires_scoring(&self) -> bool {
-        false
-    }
-
-    fn merge_fruits(
-        &self,
-        segment_fruits: Vec<Result<usize, String>>,
-    ) -> tantivy::Result<Self::Fruit> {
-        let mut total = 0usize;
-        for fruit in segment_fruits {
-            match fruit {
-                Ok(count) => total = total.saturating_add(count),
-                Err(error) => return Ok(Err(error)),
-            }
-        }
-        Ok(Ok(total))
-    }
-}
-
-struct StreamingDownloadIdSegmentCollector<F> {
-    column: tantivy::fastfield::Column<u64>,
-    visitor: Arc<F>,
-    cancelled: Arc<AtomicBool>,
-    ids: Vec<i64>,
-    visited: usize,
-    error: Option<String>,
-}
-
-impl<F> StreamingDownloadIdSegmentCollector<F>
-where
-    F: Fn(&[i64]) -> Result<(), String> + Send + Sync + 'static,
-{
-    fn flush(&mut self) {
-        if self.ids.is_empty()
-            || self.error.is_some()
-            || self.cancelled.load(AtomicOrdering::Acquire)
-        {
-            return;
-        }
-        if let Err(error) = (self.visitor)(&self.ids) {
-            self.cancelled.store(true, AtomicOrdering::Release);
-            self.error = Some(error);
-            return;
-        }
-        self.visited = self.visited.saturating_add(self.ids.len());
-        self.ids.clear();
-    }
-}
-
-impl<F> tantivy::collector::SegmentCollector for StreamingDownloadIdSegmentCollector<F>
-where
-    F: Fn(&[i64]) -> Result<(), String> + Send + Sync + 'static,
-{
-    type Fruit = Result<usize, String>;
-
-    fn collect(&mut self, doc: tantivy::DocId, _score: tantivy::Score) {
-        if self.error.is_some() || self.cancelled.load(AtomicOrdering::Acquire) {
-            return;
-        }
-        let Some(value) = self.column.first(doc) else {
-            self.cancelled.store(true, AtomicOrdering::Release);
-            self.error = Some("Tantivy match was missing its download id".to_string());
-            return;
-        };
-        let Ok(download_id) = i64::try_from(value) else {
-            self.cancelled.store(true, AtomicOrdering::Release);
-            self.error = Some(format!(
-                "Tantivy match id {value} exceeds SQLite's integer range"
-            ));
-            return;
-        };
-        self.ids.push(download_id);
-        if self.ids.len() == MATCH_ID_BATCH_SIZE {
             self.flush();
         }
     }
@@ -1878,7 +1499,7 @@ fn tantivy_document(fields: &TantivyFields, doc: &TantivyIndexDocument) -> Tanti
         );
     } else {
         // 読みはタグごとの値にする。一つの値の中でだけ字が続くので、隣のタグとの境目を
-        // またいで当たらない。ほかの欄はつないだ値のまま（旧棚と同じ）。
+        // またいで当たらない。ほかの欄はつないだ値のまま。
         let joined = index_text(&doc.tags);
         tantivy_doc.add_text(fields.tags_exact, &doc.tags);
         tantivy_doc.add_text(fields.tags_lower, joined.normalized);
@@ -2372,88 +1993,6 @@ mod query_escaping_tests {
         assert_eq!(query_literal(""), "");
         assert_eq!(query_literal("   "), "");
         assert_eq!(escape_query("   "), "");
-    }
-}
-
-#[cfg(test)]
-mod optimize_stale_writer_tests {
-    use super::*;
-
-    struct TempRoot(PathBuf);
-
-    impl Drop for TempRoot {
-        fn drop(&mut self) {
-            release_runtime(&self.0.join("downloads"));
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn document(download_id: i64) -> TantivyIndexDocument {
-        TantivyIndexDocument {
-            download_id,
-            source: "pixiv".to_string(),
-            source_id: download_id.to_string(),
-            source_url: String::new(),
-            title: format!("統合 {download_id}"),
-            author_name: "作者".to_string(),
-            author_id: "1".to_string(),
-            tags: String::new(),
-            tag_list: Vec::new(),
-            series_title: String::new(),
-            excerpt: String::new(),
-            body: "本文".to_string(),
-            published_at: String::new(),
-            downloaded_at: String::new(),
-            favorite: false,
-            watch_updates: false,
-            asset_kinds: String::new(),
-            text_length: 2,
-        }
-    }
-
-    /// 手放した書き手の後始末は、次の書き手ができたあとで `meta.json` に届くことが
-    /// ある。すると一覧には、いまの書き手の知らないセグメントが載る。CI で
-    /// 「確定済みと未確定が混ざっている」と断られて落ちたのは、この形だった。
-    #[test]
-    fn optimization_survives_a_writer_older_than_the_segment_list() {
-        let rand_val: u32 = rand::random();
-        let root = std::env::temp_dir().join(format!("piep_optimize_stale_{rand_val}"));
-        let storage = root.join("downloads");
-        std::fs::create_dir_all(&storage).unwrap();
-        let _guard = TempRoot(root);
-
-        let runtime = runtime(&storage).unwrap();
-        disable_automatic_merges_for_test(&storage).unwrap();
-        for download_id in 1..=4 {
-            upsert_documents(&storage, &[document(download_id)]).unwrap();
-        }
-        let ids = runtime.index.searchable_segment_ids().unwrap();
-        assert_eq!(ids.len(), 4);
-
-        // 先の書き手が2つを統合し、いまの一覧を残す。
-        let mut earlier = exclusive_writer(&runtime, || optimize_writer(&runtime)).unwrap();
-        let merged = earlier.merge(&ids[..2]).wait().unwrap().unwrap().id();
-        drop(earlier);
-        let meta_path = storage
-            .join(INDEX_DIR_NAME)
-            .join(INDEX_VERSION_DIR)
-            .join("meta.json");
-        let latest = std::fs::read_to_string(&meta_path).unwrap();
-
-        // 統合してできたセグメントを知らない書き手を作り、一覧だけを先へ進める。
-        let merged = serde_json::to_value(merged).unwrap();
-        let mut older: serde_json::Value = serde_json::from_str(&latest).unwrap();
-        older["segments"]
-            .as_array_mut()
-            .unwrap()
-            .retain(|segment| segment["segment_id"] != merged);
-        std::fs::write(&meta_path, older.to_string()).unwrap();
-        let behind = exclusive_writer(&runtime, || optimize_writer(&runtime)).unwrap();
-        std::fs::write(&meta_path, &latest).unwrap();
-
-        assert_eq!(merge_down(&runtime, behind, 3).unwrap(), (3, 1));
-        runtime.reader.reload().unwrap();
-        assert_eq!(runtime.reader.searcher().num_docs(), 4);
     }
 }
 

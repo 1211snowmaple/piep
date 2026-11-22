@@ -1,30 +1,8 @@
 //! 新形式の棚を、本番の棚から独立して検証・バックアップ・原本復元する道具。
 
-use piep_lib::library::{
-    Fingerprint, LegacyImporter, Library, LibraryId, ResourceReference, ResourceScope,
-};
+use piep_lib::library::{Fingerprint, Library, LibraryId, ResourceReference, ResourceScope};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
-
-#[path = "piep-library/compare.rs"]
-mod compare;
-#[path = "piep-library/entities.rs"]
-mod entities;
-#[path = "piep-library/filters.rs"]
-mod filters;
-#[path = "piep-library/neighbors.rs"]
-mod neighbors;
-#[path = "piep-library/reader_pages.rs"]
-mod reader_pages;
-#[path = "piep-library/resave.rs"]
-mod resave;
-#[path = "piep-library/search_docs.rs"]
-mod search_docs;
-#[path = "piep-library/search_features.rs"]
-mod search_features;
-#[path = "piep-library/search_results.rs"]
-mod search_results;
 
 fn main() {
     if let Err(error) = run() {
@@ -55,11 +33,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
         Some("verify") if args.len()==3=>{
             let library=Library::open(Path::new(&args[2]))?;
-            let unresolved=library.activation_problems()?;
-            println!("{}",serde_json::json!({"verified_files":library.verify()?,"storage":library.objects.stats()?,"unresolved_migration":unresolved}));
-            if !unresolved.is_empty() {
-                return Err("ファイルの検証は完了しましたが、未解決の移行データが残っています".into());
-            }
+            println!("{}",serde_json::json!({"verified_files":library.verify()?,"storage":library.objects.stats()?}));
         },
         Some("suggestion") if args.len()==4=>{
             let library=Library::open(Path::new(&args[2]))?;
@@ -75,12 +49,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let library=Library::open(Path::new(&args[2]))?;
             let id=LibraryId::parse_str(&args[3])?;
             println!("{}",serde_json::to_string_pretty(&library.source_entity_state(id)?)?);
-        },
-        Some("maintenance") if args.len()==5=>{
-            let library=Library::open(Path::new(&args[2]))?;
-            let entity=LibraryId::parse_str(&args[3])?;
-            let snapshot=LibraryId::parse_str(&args[4])?;
-            println!("{}",serde_json::to_string_pretty(&library.maintenance_history(entity,snapshot)?)?);
         },
         Some("saved-searches") if args.len()==4=>{
             let library=Library::open(Path::new(&args[2]))?;
@@ -179,10 +147,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             receiver.verify(manifest.file())?;
             println!("{}",serde_json::json!({"manifest":manifest.id().to_string(),"file":manifest.file().id.to_string(),"length":manifest.file().length.to_string(),"verified":true}));
         },
-        Some("switch-over") if args.len()==3=>{
-            let library=Library::open(Path::new(&args[2]))?;
-            println!("{}",serde_json::json!({"switched_at":library.switch_over()?}));
-        },
         Some("reclaim") if args.len()==3=>{
             let library=Library::open(Path::new(&args[2]))?;
             let before=library.objects.stats()?;
@@ -200,44 +164,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             library.objects.export_new(&file,Path::new(&args[4]))?;
             println!("元ファイルのバイト列を復元しました");
         },
-        Some("import-legacy") if args.len()==4=>{
-            let source=LegacyImporter::open(Path::new(&args[2]))?;
-            let target_path=Path::new(&args[3]);
-            let target=if target_path.join("library.json").try_exists()? { Library::open(target_path)? } else { Library::create(target_path)? };
-            let report=source.import(&target,&AtomicBool::new(false),|report|eprintln!("{} 作品・{} 保存状態",report.works,report.snapshots))?;
-            println!("{}",serde_json::to_string_pretty(&report)?);
-            if !report.unresolved.is_empty() {
-                return Err("未解決のデータがあります。この移行先へ本番の棚を切り替えてはいけません".into());
-            }
-        },
-        Some("compare-list") if args.len()==5 || args.len()==6=>{
-            let samples=args.get(5).map(|s|s.parse::<usize>()).transpose()?.unwrap_or(200);
-            let report=compare::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]),samples)?;
-            println!("{}",serde_json::to_string_pretty(&report)?);
-        },
-        Some("compare-search-documents") if args.len()==5 || args.len()==6=>{
-            let modulus=args.get(5).map(|s|s.parse::<i64>()).transpose()?.unwrap_or(1);
-            let report=search_docs::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]),modulus)?;
-            println!("{}",serde_json::to_string_pretty(&report)?);
-        },
-        Some("compare-search-results") if args.len()==5 || args.len()==6=>{
-            let modulus=args.get(5).map(|s|s.parse::<i64>()).transpose()?.unwrap_or(1);
-            let report=search_results::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]),modulus)?;
-            println!("{}",serde_json::to_string_pretty(&report)?);
-        },
-        Some("compare-search-features") if args.len()==5=>{
-            let report=search_features::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]))?;
-            println!("{}",serde_json::to_string_pretty(&report)?);
-        },
         Some("semantic-sync") if args.len()==4=>{
-            // 意味検索の索引を同期する。旧棚の保存フォルダー（その親に search/semantic-v2 と models）
-            // から、同じ文のベクトルを引き継ぐ。
-            let previous=Path::new(&args[3]);
-            piep_lib::database::semantic_index::set_model_cache_dir(previous.parent().unwrap_or(previous));
+            // 意味検索の索引を同期する。モデルは <モデルの置き場>/models から読む。
+            piep_lib::library_search::set_model_cache_dir(Path::new(&args[3]));
             let library=Library::open(Path::new(&args[2]))?;
             let started=std::time::Instant::now();
             let mut last=std::time::Instant::now();
-            let report=library.sync_semantic_index(Some(previous),&||false,&mut |done,total|{
+            let report=library.sync_semantic_index(&||false,&mut |done,total|{
                 if last.elapsed().as_secs()>=30 { eprintln!("{done}/{total}"); last=std::time::Instant::now(); }
             })?;
             println!("{}",serde_json::to_string_pretty(&serde_json::json!({
@@ -246,7 +179,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }))?);
         },
         Some("app-open") if args.len()==3=>{
-            // アプリと同じ手順で新しい棚を開き、索引を同期して、一覧と検索を一度ずつ引く。
+            // アプリと同じ手順で棚を開き、索引を同期して、一覧と検索を一度ずつ引く。
             let state=piep_lib::commands::shelf::Shelf::default();
             let started=std::time::Instant::now();
             state.open(Path::new(&args[2]))?;
@@ -262,27 +195,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "list_total":list.page.total,"list_items":list.page.items.len(),"list_ms":list_ms,
             }))?);
         },
-        Some("compare-filters") if args.len()==5=>{
-            let report=filters::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]))?;
-            println!("{}",serde_json::to_string_pretty(&report)?);
-        },
-        Some("compare-reader-pages") if args.len()==5=>{
-            let report=reader_pages::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]))?;
-            println!("{}",serde_json::to_string_pretty(&report)?);
-        },
-        Some("compare-entities") if args.len()==5=>{
-            let report=entities::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]))?;
-            println!("{}",serde_json::to_string_pretty(&report)?);
-        },
-        Some("compare-neighbors") if args.len()==5=>{
-            let report=neighbors::run(Path::new(&args[2]),Path::new(&args[3]),Path::new(&args[4]))?;
-            println!("{}",serde_json::to_string_pretty(&report)?);
-        },
-        Some("resave-legacy") if args.len()==4=>{
-            let report=resave::run(Path::new(&args[2]),Path::new(&args[3]))?;
-            println!("{}",serde_json::to_string_pretty(&report)?);
-        },
-        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / source-state <新棚> <対象UUID> / maintenance <新棚> <作品UUID> <保存状態UUID> / saved-searches <新棚> <利用者UUID> / job-history <新棚> [前のページ末尾のジョブUUID] / job-history-items|job-history-logs <新棚> <ジョブUUID> [前のページ末尾のsequence] / job-history-payload <新棚> <ジョブUUID> <項目UUID> / resources|reader <新棚> <対象UUID> snapshot|edit <保存状態UUID> / export-resource <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] <新規出力先> / transfer-manifest <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] / verify-transfer <新棚> <転送記録JSON> <検証用の実体領域> / backup <新棚> <新規出力先> / reclaim <新棚> / switch-over <新棚> / export-original <新棚> <ファイルSHA-256> <新規ファイル> / import-legacy <旧棚> <新棚> / compare-list <旧棚の piep.db の写し> <空の作業フォルダー> <新棚> [読書を比べる作品数] / resave-legacy <旧棚> <捨ててよい新棚> / compare-filters|compare-neighbors|compare-reader-pages|compare-entities <旧棚の piep.db の写し> <空の作業フォルダー> <新棚>".into()),
+        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / acquisition <新棚> <取得UUID> / source-state <新棚> <対象UUID> / maintenance <新棚> <作品UUID> <保存状態UUID> / saved-searches <新棚> <利用者UUID> / job-history <新棚> [前のページ末尾のジョブUUID] / job-history-items|job-history-logs <新棚> <ジョブUUID> [前のページ末尾のsequence] / job-history-payload <新棚> <ジョブUUID> <項目UUID> / resources|reader <新棚> <対象UUID> snapshot|edit <保存状態UUID> / export-resource <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] <新規出力先> / transfer-manifest <新棚> <対象UUID> snapshot|edit <保存状態UUID> body|original|media|file [資産の識別] / verify-transfer <新棚> <転送記録JSON> <検証用の実体領域> / backup <新棚> <新規出力先> / reclaim <新棚> / export-original <新棚> <ファイルSHA-256> <新規ファイル>".into()),
     }
     Ok(())
 }

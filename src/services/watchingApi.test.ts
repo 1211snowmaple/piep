@@ -20,10 +20,10 @@ it("sends the target UUID, generation and a request ID with each declared change
   expect(invoke.mock.calls[3][1].requestId).not.toBe(first);
 });
 
-it("keeps group and member UUIDs and resolves only recorded old group aliases", async () => {
-  const groups = [{ id: group, legacyId: 7, watchGeneration: 3 }];
+it("keeps group and member UUIDs", async () => {
+  const groups = [{ id: group, watchGeneration: 3 }];
   invoke.mockResolvedValueOnce(groups).mockResolvedValueOnce(1);
-  await setWatchGroupMembers(7, [target], true);
+  await setWatchGroupMembers(group, [target], true);
   expect(invoke).toHaveBeenLastCalledWith("db_set_watch_group_members", expect.objectContaining({ groupId: group, targetIds: [target], expectedGeneration: 3 }));
   invoke.mockResolvedValueOnce(groups).mockResolvedValueOnce(undefined);
   await renameWatchGroup(group, "毎週");

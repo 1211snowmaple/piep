@@ -1,4 +1,4 @@
-//! 管理の口：新しい棚の写しの受け取りと、携帯が棚を読む許可（単独サーバーだけ）。
+//! 管理の口：棚の写しの受け取りと、携帯が棚を読む許可（単独サーバーだけ）。
 
 use super::{require_admin, ApiError, ApiJson, Ctx};
 use crate::library::{ContentFile, LibraryId};
@@ -170,7 +170,7 @@ pub(super) async fn forget_reader(ctx: &Ctx, device: String) {
     }
 }
 
-/// 携帯に新しい棚を読む許可を付け外しする。設定に書き、配っている棚にもすぐ効かせる。
+/// 携帯に棚を読む許可を付け外しする。設定に書き、配っている棚にもすぐ効かせる。
 pub(super) async fn set_reader(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
@@ -181,7 +181,7 @@ pub(super) async fn set_reader(
     let shelf = ctx.reader_shelf.get().cloned().ok_or(ApiError(
         StatusCode::CONFLICT,
         "no_shelf",
-        "このサーバーはまだ新しい棚を配っていません",
+        "このサーバーはまだ棚を配っていません",
     ))?;
     let paths = ctx.paths.get().cloned().ok_or_else(ApiError::not_found)?;
     let store = Arc::clone(&ctx.store);

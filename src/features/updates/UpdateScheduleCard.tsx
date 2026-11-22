@@ -11,7 +11,7 @@ import {
   type UpdateScheduleSettings,
 } from "@/features/updates/updateSchedule";
 import type { WatchGroup } from "@/types/library";
-import { watchGroupMatches, watchGroupSelection } from "@/lib/watchIdentity";
+import { watchGroupSelection } from "@/lib/watchIdentity";
 
 /**
  * When the check runs by itself, and what it does with what it finds.
@@ -58,7 +58,7 @@ export function UpdateScheduleCard({ onChanged, groups }: { onChanged?: () => vo
       });
   };
 
-  const scopeGroup = settings.groupId === null ? null : groups?.find((group) => watchGroupMatches(group, settings.groupId)) ?? null;
+  const scopeGroup = settings.groupId === null ? null : groups?.find((group) => group.id === settings.groupId) ?? null;
   // グループが読めるまでは、範囲の名前を決められない。
   const summaryReady = loaded && (settings.groupId === null || groups !== undefined);
   const scopeOptions = [

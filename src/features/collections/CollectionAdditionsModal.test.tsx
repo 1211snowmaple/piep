@@ -25,7 +25,6 @@ function candidate(index: number, reason = "同じ公式シリーズの作品で
   return {
     source: "pixiv",
     sourceId: String(index),
-    downloadId: index,
     title: `作品${index}`,
     authorName: "作者",
     coverPath: null,
@@ -84,7 +83,7 @@ describe("CollectionAdditionsModal", () => {
   it("sends every candidate that was left in", async () => {
     const onAdd = renderModal();
     await userEvent.click(await screen.findByRole("button", { name: "3作品を追加" }));
-    expect(onAdd.mock.calls[0][0].map((value: { downloadId: number }) => value.downloadId)).toEqual([1, 2, 3]);
+    expect(onAdd.mock.calls[0][0].map((value: { sourceId: string }) => value.sourceId)).toEqual(["1", "2", "3"]);
   });
 
   /**
@@ -98,7 +97,7 @@ describe("CollectionAdditionsModal", () => {
     expect(await screen.findByRole("button", { name: "作品2を候補に戻す" })).toBeInTheDocument();
 
     await userEvent.click(await screen.findByRole("button", { name: "2作品を追加" }));
-    expect(onAdd.mock.calls[0][0].map((value: { downloadId: number }) => value.downloadId)).toEqual([1, 3]);
+    expect(onAdd.mock.calls[0][0].map((value: { sourceId: string }) => value.sourceId)).toEqual(["1", "3"]);
   });
 
   /**

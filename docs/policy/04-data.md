@@ -27,13 +27,9 @@
 保管の形（可逆圧縮・重複排除・原本の復元・モバイルへの転送）は
 [ライブラリ全体の可逆圧縮](../plan/library-lossless-storage.md) に、台帳の設計は
 [ライブラリのデータモデル再設計](../plan/library-data-model.md) に定める。棚は旧形式
-（`piep.db` と `downloads/` の作品フォルダー）との後方互換を持たない。旧形式の台帳を読むのは
-移行器（`src-tauri/src/library/legacy/`）だけで、アプリからは呼ばない（`piep-library
-import-legacy` と試験だけが使う）。保存フォルダーからの取り込み（`commands/reimport_shelf.rs`）は、
-旧形式と同じフォルダーの形を読むが、台帳は読まない。
-
-単独サーバーと携帯の旧 API（v1）は、まだ旧形式のデータを使う。その持ち方はこの頁では扱わない
-（→ [サーバー](../guide/05-server.md)）。
+（`piep.db` と `downloads/` の作品フォルダー）との後方互換を持たず、旧形式の台帳を読むコードも
+もう無い。保存フォルダーからの取り込み（`commands/reimport_shelf.rs`）は、旧形式と同じ
+フォルダーの形を読むが、台帳は読まない。
 
 ## 棚の形
 
@@ -151,7 +147,7 @@ import-legacy` と試験だけが使う）。保存フォルダーからの取�
 
 アプリの外からは `piep-library`（`src-tauri/src/bin/piep-library.rs`）で、棚の `verify`・
 `backup`・`reclaim` などを行える。アプリと同じ `.library.lock` を取るので、アプリを閉じてから
-使う。`tools/maintain_library.py` は旧形式の `piep.db` のための道具で、棚には使えない。
+使う。
 
 ## 作品と、その周りのもの
 

@@ -1,4 +1,4 @@
-//! 作者の一覧を、切り替えた棚の現在版へ照合する。原応答を全作品ぶん開かない。
+//! 作者の一覧を、棚の現在版へ照合する。原応答を全作品ぶん開かない。
 
 use super::*;
 
@@ -331,7 +331,7 @@ mod tests {
 
     fn target(source: &str, author: &str) -> crate::database::UpdateTarget {
         crate::database::UpdateTarget {
-            id: 0.into(),
+            id: None,
             watch_generation: None,
             target_type: "author".into(),
             source: source.into(),

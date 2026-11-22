@@ -59,7 +59,6 @@ function card(index: number): ShelfCard {
     series_title: null,
     series_position: null,
     coverFile: null,
-    legacyId: null,
   } as unknown as ShelfCard;
 }
 
@@ -76,7 +75,7 @@ function view() {
   );
 }
 
-describe("新しい棚の一覧の操作", () => {
+describe("棚の一覧の操作", () => {
   beforeAll(() => {
     Element.prototype.scrollIntoView = () => {};
   });
@@ -100,7 +99,7 @@ describe("新しい棚の一覧の操作", () => {
     vi.clearAllMocks();
   });
 
-  it("選んだ棚の作品をまとめてお気に入りにし、旧棚には頼まない", async () => {
+  it("選んだ棚の作品をまとめてお気に入りにする", async () => {
     view();
     fireEvent.click(await screen.findByRole("button", { name: "複数選択" }));
     fireEvent.click(await screen.findByRole("button", { name: /棚の作品1を選択/ }));
@@ -126,7 +125,7 @@ describe("新しい棚の一覧の操作", () => {
   });
 
 
-  it("絞り込みの選択肢を新しい棚から数える", async () => {
+  it("絞り込みの選択肢を棚から数える", async () => {
     view();
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     await waitFor(() => expect(health.shelfFilterFacets).toHaveBeenCalled());

@@ -134,7 +134,6 @@ mod tests {
     async fn the_real_save_adapter_publishes_profiles_and_images_once_without_legacy_files() {
         let fixture = Fixture::new();
         let library = Arc::new(Library::create(&fixture.0.join("shelf")).unwrap());
-        library.switch_over().unwrap();
         let mut png = std::io::Cursor::new(Vec::new());
         image::DynamicImage::new_rgb8(1, 1)
             .write_to(&mut png, image::ImageFormat::Png)

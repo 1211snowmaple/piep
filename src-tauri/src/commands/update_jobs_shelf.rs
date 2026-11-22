@@ -1,4 +1,4 @@
-//! 切り替えた棚の作品を更新確認する。ジョブには取得元の鍵だけを残し、処理時に現在版を読む。
+//! 棚の作品を更新確認する。ジョブには取得元の鍵だけを残し、処理時に現在版を読む。
 
 use super::*;
 use crate::library::{EntityKind, Library, WorkCard, WorkFilter, WorkListQuery};
@@ -77,30 +77,7 @@ pub(super) fn work_items(
     let mut fanbox_author_checks = HashSet::new();
     if matches!(request.scope.as_str(), "all" | "work") {
         let filter = if let Some(ids) = &request.work_ids {
-            // 以前の画面の番号も移行先の対応で解く。旧 DB の作品は読まない。
-            let mut works = ids
-                .iter()
-                .filter_map(|id| match id {
-                    crate::database::WorkId::Shelf(work) => Some(*work),
-                    _ => None,
-                })
-                .collect::<HashSet<_>>();
-            let legacy = ids
-                .iter()
-                .filter_map(|id| match id {
-                    crate::database::WorkId::Legacy(number) => Some(*number),
-                    _ => None,
-                })
-                .collect::<HashSet<_>>();
-            if !legacy.is_empty() {
-                works.extend(
-                    library
-                        .legacy_work_numbers()
-                        .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .filter_map(|(work, number)| legacy.contains(&number).then_some(work)),
-                );
-            }
+            let works = ids.iter().copied().collect::<HashSet<_>>();
             WorkFilter {
                 works: Some(works.into_iter().collect()),
                 ..Default::default()
@@ -296,7 +273,7 @@ fn record_revision(
         .ok_or("保存日時が不正です")?
         .to_rfc3339();
     let target = crate::database::UpdateTarget {
-        id: 0.into(),
+        id: None,
         watch_generation: None,
         target_type: "work".into(),
         source: card.provider.clone(),
@@ -595,7 +572,6 @@ pub(super) mod tests {
         let root = std::env::temp_dir().join(format!("piep-update-shelf-{}", LibraryId::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
         let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
-        library.switch_over().unwrap();
         let state = AppState::new(Arc::new(
             super::super::super::shelf::Shelf::with_test_library(library.clone()),
         ));
@@ -856,7 +832,7 @@ pub(super) mod tests {
                     .unwrap();
             }
             let request = StartUpdateJobRequest {
-                work_ids: Some(vec![crate::database::WorkId::Shelf(id)]),
+                work_ids: Some(vec![id]),
                 ..request.clone()
             };
             assert!(build_initial_items(&state, &request, &library)
@@ -1145,10 +1121,7 @@ pub(super) mod tests {
         let author = create("author", "77");
         let series = create("series", "7");
         let req = StartUpdateJobRequest {
-            target_ids: Some(vec![
-                crate::database::WatchId::Shelf(author),
-                crate::database::WatchId::Shelf(series),
-            ]),
+            target_ids: Some(vec![author, series]),
             ..request("targets")
         };
         let items = build_initial_items(&state, &req, &library).unwrap();
@@ -1157,7 +1130,7 @@ pub(super) mod tests {
         let payload: Value = serde_json::from_str(&items[0].payload_json).unwrap();
         assert_eq!(payload["id"], author.to_string());
         let req = StartUpdateJobRequest {
-            target_ids: Some(vec![crate::database::WatchId::Shelf(series)]),
+            target_ids: Some(vec![series]),
             ..request("targets")
         };
         let items = build_initial_items(&state, &req, &library).unwrap();

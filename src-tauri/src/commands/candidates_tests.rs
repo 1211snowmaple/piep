@@ -10,7 +10,6 @@ fn fixture() -> (Temp, AppState, Arc<Library>) {
     let root = std::env::temp_dir().join(format!("piep-candidate-adapter-{}", LibraryId::now_v7()));
     std::fs::create_dir_all(&root).unwrap();
     let library = Arc::new(Library::create(&root.join("shelf")).unwrap());
-    library.switch_over().unwrap();
     let state = AppState::new(Arc::new(super::super::shelf::Shelf::with_test_library(
         library.clone(),
     )));
@@ -39,7 +38,6 @@ fn new_shelf_candidates_drive_display_blocking_and_user_choices_without_old_cand
     let rows = ledger.list_deferred_update_candidate_summaries(-1).unwrap();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].work_id.is_some());
-    assert_eq!(rows[0].download_id, None);
     assert!(rows[0].metadata.saved_at.is_some());
     assert!(!rows[0].payload_json.contains("本文を画面へ運ばない"));
     ledger
@@ -179,7 +177,6 @@ fn stale_recheck_cannot_reverse_a_choice_made_during_the_request() {
 fn native_fixture() {
     let root = std::env::temp_dir().join(format!("piep-candidate-native-{}", LibraryId::now_v7()));
     let library = Library::create(&root).unwrap();
-    library.switch_over().unwrap();
     save(&library, "11");
     for (key, kind) in [("11", "incomplete"), ("22", "restricted")] {
         let value = candidate(key, kind);

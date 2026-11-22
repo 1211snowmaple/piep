@@ -1,13 +1,13 @@
-//! 新しい棚の読書用の文書（`piep-reader-v1`）から、読む画面の HTML とページを組む。
+//! 棚の読書用の文書（`piep-reader-v1`）から、読む画面の HTML とページを組む。
 //!
 //! 文書はデスクトップでは棚から作り、携帯ではサーバーから JSON で受け取る。どちらもこの形に
 //! 読み込んでから組むので、同じ版はどの端末でも同じページになる。
 //!
-//! 本文の HTML は旧棚の変換（[`crate::parser`]）をそのまま使う。旧棚の変換は本文の中の
-//! 画像の指定を保存名で探すので、文書の「指定 → 画像」の対応から、旧棚の保存名の形をした
-//! 仮の添付の一覧を作って渡す。置き場には保存名ではなくファイルの識別子（中身の SHA-256）を
-//! 入れ、画面がそれを画像の在りかにする。指定と画像の結び付けは文書の対応が決め、旧棚の
-//! 名前の推測には頼らない（仮の名前は、旧棚の変換がその指定に対して探す名前そのもの）。
+//! 本文の HTML は取得元の応答の変換（[`crate::parser`]）で組む。変換は本文の中の画像の指定を
+//! 保存名で探すので、文書の「指定 → 画像」の対応から、保存名の形をした仮の添付の一覧を作って
+//! 渡す。置き場には保存名ではなくファイルの識別子（中身の SHA-256）を入れ、画面がそれを画像の
+//! 在りかにする。指定と画像の結び付けは文書の対応が決め、変換の名前の推測には頼らない
+//! （仮の名前は、変換がその指定に対して探す名前そのもの）。
 
 use crate::parser::{escape_html, parse_fanbox_value_to_html, parse_pixiv_value_to_html};
 use crate::{AssetEntry, WorkBlock};
@@ -159,7 +159,7 @@ pub fn render_html(document: &ReaderView) -> String {
             let mut body = body.clone();
             let restore = marks.apply(&mut body);
             let mut html = parse_fanbox_value_to_html(&json!({ "body": body }), &assets);
-            // 照合のために置いた画像の印は、画像の説明（alt）と参照にそのまま出る。旧棚と同じく
+            // 照合のために置いた画像の印は、画像の説明（alt）と参照にそのまま出る。
             // 取得元の画像の ID に戻す（ID の無い項目は空）。
             for (token, original) in restore {
                 html = html.replace(&token, &escape_html(&original));
@@ -176,7 +176,7 @@ pub fn render_pages(document: &ReaderView, provider: &str) -> (Vec<String>, Vec<
     crate::pages::paginate_reader_html(&render_html(document), provider)
 }
 
-/// 編集の平文。旧棚の `blocks_to_plain_text` と同じ数え方。
+/// 編集の平文。`blocks_to_plain_text` と同じ数え方。
 pub fn edit_text(content: &ViewEdit) -> String {
     content
         .blocks
@@ -201,7 +201,7 @@ fn local_path(info: &ViewResource, key: Option<&str>) -> Option<String> {
     })
 }
 
-/// 本文に付ける印。旧棚の変換は添付を「名前が一致する」か「置き場に取得元の ID を含む」で
+/// 本文に付ける印。変換は添付を「名前が一致する」か「置き場に取得元の ID を含む」で
 /// 探す。置き場の 16 進は短い ID（`f1` など）をたまたま含むので、別の画像や添付に当たる。
 /// 画像だけ・添付だけの投稿の配列（`images`・`files`）は項目に ID が無いこともある。
 /// そこで文書の対応が結んだ項目の ID を、16 進に現れない文字（`z`）で囲んだ印に
@@ -272,7 +272,7 @@ impl Marks {
     }
 }
 
-/// 文書の対応から、旧棚の変換が探す名前の仮の添付を作る。本文に付ける印も返す。
+/// 文書の対応から、変換が探す名前の仮の添付を作る。本文に付ける印も返す。
 pub fn bound_assets(document: &ReaderView) -> (Vec<AssetEntry>, Marks) {
     let mut assets = Vec::new();
     let mut marks = Marks::default();
@@ -337,11 +337,11 @@ pub fn bound_assets(document: &ReaderView) -> (Vec<AssetEntry>, Marks) {
     (assets, marks)
 }
 
-/// 編集の本文。旧棚の編集と同じ関数（`blocks_to_html`）で組む。
+/// 編集の本文。編集画面と同じ関数（`blocks_to_html`）で組む。
 ///
-/// 段の間の空行の数（`gap`）、見出し・引用・リンク・画像の説明の組み方、段の切れ目の印が旧棚と
+/// 段の間の空行の数（`gap`）、見出し・引用・リンク・画像の説明の組み方、段の切れ目の印が編集画面と
 /// 同じでなければ、「何ページ目の何行目」で憶えた読書位置としおりが別の行を指す。
-/// 移した編集は段の種類・属性・画像の枠（`legacy-asset:旧い番号`）を旧棚のまま持っている。
+/// 移した編集は段の種類・属性・画像の枠（`legacy-asset:旧い番号`）を移す前のまま持っている。
 fn edit_html(content: &ViewEdit, document: &ReaderView) -> String {
     // 枠 → (ファイルの識別子, 名前)。取り込んだ画像と、基準の版の画像。
     let mut files: BTreeMap<&str, (String, String)> = BTreeMap::new();

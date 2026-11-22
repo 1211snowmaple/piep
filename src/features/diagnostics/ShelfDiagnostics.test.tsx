@@ -63,7 +63,7 @@ function view() {
   );
 }
 
-describe("新しい棚の診断", () => {
+describe("棚の診断", () => {
   beforeEach(() => {
     status.shelfStatus.mockResolvedValue({ state: "ready", path: "C:/shelf" });
     status.shelfSearch.mockResolvedValue({ page: { items: [], next: null, total: 2 }, intent: null, matches: [], cards: [] });
@@ -84,7 +84,7 @@ describe("新しい棚の診断", () => {
     vi.clearAllMocks();
   });
 
-  it("棚の台帳と索引を数え、旧棚の保存フォルダーの照合は出さない", async () => {
+  it("棚の台帳と索引を数え、保存フォルダーの照合は出さない", async () => {
     view();
     expect(await screen.findByText("3件")).toBeTruthy();
     expect(screen.getByText("3セグメント")).toBeTruthy();

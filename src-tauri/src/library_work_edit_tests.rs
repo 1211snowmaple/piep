@@ -438,7 +438,15 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
     {
         let conn = library.conn.lock().unwrap();
         conn.execute_batch(
-            "DROP TABLE edit_archive;
+            "ALTER TABLE source_revisions ADD COLUMN classification TEXT NOT NULL DEFAULT 'source'
+                 CHECK(classification IN ('source','legacy_unclassified'));
+             CREATE TABLE migration_records(source_table TEXT, source_key TEXT);
+             CREATE TABLE migration_requests(source_table TEXT, source_key TEXT);
+             CREATE TABLE migration_fingerprints(source_table TEXT, source_key TEXT);
+             CREATE TABLE repair_attempt_markers(entity_id BLOB, snapshot_id BLOB, attempted_at INTEGER);
+             CREATE TABLE asset_audit_markers(entity_id BLOB, snapshot_id BLOB);
+             ALTER TABLE library_meta ADD COLUMN switched_at INTEGER CHECK(switched_at IS NULL OR switched_at > 0);
+             DROP TABLE edit_archive;
              DROP TABLE discovery_state;
              DROP TABLE discovery_summaries;
              DROP TABLE job_history_visibility;

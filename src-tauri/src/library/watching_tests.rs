@@ -11,7 +11,6 @@ impl Drop for Temp {
 fn fixture() -> (Temp, Library) {
     let root = std::env::temp_dir().join(format!("piep-watch-{}", LibraryId::now_v7()));
     let library = Library::create(&root).unwrap();
-    library.switch_over().unwrap();
     (Temp(root), library)
 }
 fn author(key: &str) -> WatchEdit {
@@ -260,7 +259,6 @@ fn watch_receipts_are_catalog_owned_and_cannot_be_reused_for_other_operations() 
 #[ignore]
 fn native_fixture() {
     let root = std::env::temp_dir().join(format!("piep-watch-native-{}", LibraryId::now_v7()));
-    let library = Library::create(&root).unwrap();
-    library.switch_over().unwrap();
+    Library::create(&root).unwrap();
     println!("WATCH_NATIVE_FIXTURE={}", root.display());
 }

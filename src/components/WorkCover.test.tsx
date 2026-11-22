@@ -1,16 +1,11 @@
 import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
-
-vi.mock("@/services/dbApi", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/services/dbApi")>()),
-  getAssetUrl: (path: string | null | undefined) => path ?? null,
-}));
+import { describe, expect, it } from "vitest";
 
 import { WorkCover } from "./WorkCover";
 
 const work = {
-  coverPath: "C:/library/cover.jpg",
+  coverUrl: "C:/library/cover.jpg",
   source: "pixiv",
   sourceId: "123",
   title: "縦長の表紙",

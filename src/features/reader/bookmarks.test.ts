@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
-import { rekeyBookmarks, useBookmarks } from "./bookmarks";
+import { useBookmarks } from "./bookmarks";
 
 const STORAGE_KEY = "piep.bookmarks";
 const values = new Map<string, string>();
@@ -43,15 +43,5 @@ describe("reader bookmarks", () => {
     expect(result.current.bookmarks).toEqual([valid]);
     expect(localStorage.getItem("piep.bookmarks.v1")).toBeNull();
     expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}")).toEqual({ 101: [valid] });
-  });
-
-  it("moves bookmarks of an old-shelf number to the shelf id, for every version", () => {
-    const valid = { id: "bookmark-1", page: 2, top: 120, label: "2ページ · 20%", createdAt: "2026-08-09T00:00:00.000Z" };
-    const shelfId = "0195f1c2-0000-7000-8000-000000000001";
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ 101: [valid], "101.3": [valid], 202: [valid] }));
-    rekeyBookmarks(new Map([[101, shelfId]]));
-    expect(Object.keys(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}")).sort()).toEqual([`${shelfId}`, `${shelfId}.3`, "202"].sort());
-    const { result } = renderHook(() => useBookmarks(shelfId, 3));
-    expect(result.current.bookmarks).toEqual([valid]);
   });
 });

@@ -62,7 +62,6 @@ fn a_backup_is_inspected_and_a_scheduled_restore_swaps_the_shelf_and_keeps_the_o
     let inspection = inspect(&backup, Some(id)).unwrap();
     assert_eq!(inspection.works, 1);
     assert!(inspection.same_library);
-    assert!(!inspection.switched);
     assert!(
         !inspect(&backup, Some(LibraryId::now_v7()))
             .unwrap()

@@ -1,6 +1,6 @@
 import { Avatar, Box, Divider, Group, Pagination, Text } from "@mantine/core";
 
-/** 作品の画面のタブ。旧棚の作品と新しい棚の作品で同じ。 */
+/** 作品の画面のタブ。 */
 export type WorkTab = "overview" | "content" | "assets" | "history" | "json";
 
 export function parseWorkTab(value: string | null): WorkTab {

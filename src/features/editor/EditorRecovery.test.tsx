@@ -33,7 +33,7 @@ function block(order: number, blockType: WorkBlock["blockType"], text: string | 
 
 function documentWithParagraphs(count: number): EditorDocument {
   return {
-    ...getDemoEditor(101),
+    ...getDemoEditor("101"),
     blocks: Array.from({ length: count }, (_, index) => block(index, "paragraph", `段落${index + 1}`)),
   };
 }
@@ -147,7 +147,7 @@ describe("題を直せること", () => {
   it("直した題を保存に載せる", async () => {
     renderEditor();
     const field = await screen.findByLabelText("この作品のタイトル");
-    expect(field).toHaveValue(getDemoEditor(101).download.title);
+    expect(field).toHaveValue(getDemoEditor("101").download.title);
 
     fireEvent.change(field, { target: { value: "直した題名" } });
     fireEvent.click(screen.getByRole("button", { name: "下書き保存" }));
@@ -163,7 +163,7 @@ describe("本文の置き換え", () => {
   beforeEach(() => {
     window.localStorage.clear();
     dbApi.getEditorDocument.mockResolvedValue({
-      ...getDemoEditor(101),
+      ...getDemoEditor("101"),
       blocks: [block(0, "paragraph", "雨と雨と雨"), block(1, "paragraph", "晴れ")],
     });
     dbApi.saveWorkDraft.mockResolvedValue(null);

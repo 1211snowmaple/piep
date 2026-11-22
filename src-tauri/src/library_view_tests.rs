@@ -118,11 +118,11 @@ fn pixiv_images_are_resolved_through_the_new_shelf_bindings() {
         2,
         "{html}"
     );
-    // 取得できなかった画像は、旧棚と同じ印のまま。
+    // 取得できなかった画像は、取れなかった印のまま。
     assert!(
         html.contains(r#"data-image-reference="[uploadedimage:404]" data-image-missing="true""#)
     );
-    // 保存名（saved-name.png）や旧棚のパスは出さない。
+    // 保存名（saved-name.png）や保存フォルダーのパスは出さない。
     assert!(!html.contains("saved-name"));
 }
 
@@ -190,7 +190,7 @@ fn image_and_file_posts_bind_their_lists_by_position() {
     let dir = temp("lists");
     let library = Library::create(&dir.0).unwrap();
     // 画像だけ・添付だけの投稿は配列の何番目かで指す。ID の無い項目や、別の保存物を
-    // 指しそうな置き場の手がかりがあっても、新しい棚の対応どおりに結ぶ。
+    // 指しそうな置き場の手がかりがあっても、棚の対応どおりに結ぶ。
     let body = SourceBody::FanboxBody(json!({
         "text": "本文",
         "images": [{"localPath": "./elsewhere.png"}, {"id": "i2"}],
@@ -245,7 +245,7 @@ fn image_and_file_posts_bind_their_lists_by_position() {
         "{html}"
     );
     assert_eq!(html.matches("data-image-missing").count(), 1, "{html}");
-    // 照合の印は画像の説明に残さない（旧棚と同じく取得元の ID。ID の無い項目は空）。
+    // 照合の印は画像の説明に残さない。
     assert!(!html.contains("piep-image-z"), "{html}");
     assert!(html.contains(r#"alt="image_""#), "{html}");
     assert!(
@@ -255,7 +255,7 @@ fn image_and_file_posts_bind_their_lists_by_position() {
     assert!(html.contains("lost.psd(見つかりません)"), "{html}");
 }
 
-/// 添付のテキスト・PDF の本文は、旧棚と同じく添付の位置へ差し込む。読む画面と検索の文書は
+/// 添付のテキスト・PDF の本文は、添付の位置へ差し込む。読む画面と検索の文書は
 /// 同じ差し込みを通すので、読める本文は検索にも入る。
 #[test]
 fn attachment_bodies_are_inserted_for_reading_and_search_alike() {
@@ -296,7 +296,7 @@ fn attachment_bodies_are_inserted_for_reading_and_search_alike() {
     assert!(html.contains("取り込む本文"), "{html}");
     assert!(html.contains("二段落目"), "{html}");
     assert!(html.contains("attachment-notice"), "{html}");
-    // 差し込んだあとの `blocks` も、添付の箱は新しい棚のファイルを指す。
+    // 差し込んだあとの `blocks` も、添付の箱は棚のファイルを指す。
     let file = Fingerprint::of(
         "取り込む本文
 
@@ -308,7 +308,7 @@ fn attachment_bodies_are_inserted_for_reading_and_search_alike() {
         html.contains(&format!(r#"data-local-path="{file}/piep-file-z"#)),
         "{html}"
     );
-    // テキストには紙面が無いので「原本を見る」は出さない（旧棚と同じ）。
+    // テキストには紙面が無いので「原本を見る」は出さない。
     assert!(!html.contains("attachment-original"), "{html}");
     // 残り時間の字数も、検索の文書の本文も、取り込んだ本文を含む。
     let document = library.search_document(saved.entity_id).unwrap().unwrap();
@@ -410,10 +410,10 @@ fn the_reader_gets_pages_outline_search_and_length_like_the_old_shelf() {
     let rendered = library
         .render_document(saved.entity_id, scope, "pixiv")
         .unwrap();
-    // pixiv の [newpage] は原稿のページ。転送のページとの対応も旧棚と同じ形で返す。
+    // pixiv の [newpage] は原稿のページ。転送のページとの対応も返す。
     assert_eq!(rendered.pages.len(), 2);
     assert_eq!(rendered.source_page_starts, vec![0, 1]);
-    // 字数は HTML ではなく本文の平文で数える（旧棚の残り時間の目安と同じ）。
+    // 字数は HTML ではなく本文の平文で数える。
     assert_eq!(
         rendered.text_chars,
         library
@@ -428,7 +428,7 @@ fn the_reader_gets_pages_outline_search_and_length_like_the_old_shelf() {
         .map(|entry| (entry.page, entry.title.as_str()))
         .collect();
     assert_eq!(titles, vec![(1, "一章"), (2, "二章")]);
-    // 本文内検索は旧棚と同じ畳み方（カタカナとひらがなを同じに見る）。
+    // 本文内検索はカタカナとひらがなを同じに見る。
     let hits = search_reader_pages(&rendered.pages, "かさ", 50);
     assert_eq!(
         hits.iter()
@@ -607,7 +607,7 @@ fn probe_a_real_shelf() {
             {
                 bad_starts.push(format!("{} {}", card.provider, card.external_key));
             }
-            // 移行した字数（旧棚の字数）と、読む画面の残り時間に使う字数。
+            // 移行した字数と、読む画面の残り時間に使う字数。
             if rendered.text_chars as u64 != card.text_length {
                 length_drift.push(format!(
                     "{} {} card={} reader={}",
@@ -689,7 +689,7 @@ fn probe_a_real_shelf() {
     }
 }
 
-/// 編集の本文は旧棚と同じ関数で組む。段の間の空行の数・見出し・画像の説明・改ページが旧棚と
+/// 編集の本文は編集画面と同じ関数で組む。段の間の空行の数・見出し・画像の説明・改ページが編集画面と
 /// 同じ行になり、「何ページ目の何行目」で憶えた読書位置としおりが同じ行を指す。
 /// 編集のあとに改稿を取り込むと、編集版は古い版の上に載ったまま。読む画面がそれを名乗れるよう、
 /// 基準の版の番号を返す。
@@ -819,7 +819,7 @@ fn an_edit_is_laid_out_line_for_line_like_the_old_shelf() {
             attrs_json: (!attrs.is_null()).then(|| attrs.to_string()),
         })
         .collect();
-    // 旧棚では画像 8 のファイルが無い（残っていない画像は渡さない）。
+    // 画像 8 のファイルが無い（残っていない画像は渡さない）。
     let old_assets = [AssetEntry {
         id: 7,
         download_id: 1,
@@ -832,6 +832,6 @@ fn an_edit_is_laid_out_line_for_line_like_the_old_shelf() {
     }];
     assert_eq!(
         render_html(&document).unwrap(),
-        crate::database::queries::blocks_to_html(&old_blocks, &old_assets)
+        piep_reader_render::blocks::blocks_to_html(&old_blocks, &old_assets)
     );
 }

@@ -50,7 +50,7 @@ export function useWorkList({ search, scope, pagingMode, page, enabled }: { sear
   // 関連度の順はカーソルでしか辿れない。
   const numbered = pagingMode === "pages" && !(search.text.trim() && search.sort === "standard");
   const scopeKey = scope ? { kind: scope.kind, source: scope.source, key: scope.key } : null;
-  // 新しい棚から引く接続では、棚と接続ごとに別の一覧として覚える（作品の指し方が違う）。
+  // 棚から引く接続では、棚と接続ごとに別の一覧として覚える（作品の指し方が違う）。
   const shelf = nativeShelfKey();
   const infinite = useInfiniteQuery({
     queryKey: ["works", search, scopeKey, shelf],
@@ -155,7 +155,7 @@ export function useSavedStates(items: PcWork[], savedRevision: number, reachable
     const saved = savedById.get(work.id);
     return saved && sameWork(saved.work, work) ? saved : null;
   };
-  // 新しい棚の作品は一覧の一件に編集の UUID まで載っているので、問い合わせずに比べられる。
+  // 棚の作品は一覧の一件に編集の UUID まで載っているので、問い合わせずに比べられる。
   const toCheck = items.filter((work) => {
     const saved = savedFor(work);
     return saved && !work.shelf ? sameSavedVersion(work, saved) : false;

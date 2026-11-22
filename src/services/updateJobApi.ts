@@ -14,7 +14,7 @@ export type UpdateJobStatus =
 
 /** `save` は「選んだ作品をまとめて保存する」ジョブ。監視対象は見に行かない。 */
 /** `targets` は監視グループの確認。`targetIds` に挙げた作者・シリーズだけを見る。 */
-/** `favorite`・`reading` は切り替えた棚の範囲（棚が今その範囲にある作品を選ぶ）。 */
+/** `favorite`・`reading` は棚の範囲（棚が今その範囲にある作品を選ぶ）。 */
 export type UpdateJobScope = "all" | "work" | "author" | "series" | "targets" | "save" | "favorite" | "reading";
 export type UpdateJobMode = "check_only" | "auto_save" | "save";
 
@@ -90,7 +90,6 @@ export interface UpdateWorkMetadata { authorName?: string | null; publishedAt?: 
 export interface UpdateJobCandidate {
   metadata?: UpdateWorkMetadata;
   id: number;
-  downloadId?: number | null;
   workId?: string | null;
   key: string;
   source: "pixiv" | "fanbox";
@@ -170,7 +169,6 @@ export interface DeferredUpdateCandidate {
   title: string;
   status: "held" | "dismissed";
   payloadJson: string;
-  downloadId?: number | null;
 }
 
 export function listDeferredUpdateCandidatesCommand(): Promise<DeferredUpdateCandidate[]> {
@@ -222,8 +220,6 @@ export interface UpdateJobItemState {
   /** Included in explicit item lists; omitted from small progress events. */
   itemType?: string | null;
   title?: string | null;
-  /** Local saved work ID when this job item resolves to the library. */
-  downloadId?: number | null;
   workId?: string | null;
 }
 
@@ -286,7 +282,7 @@ export async function restoreDismissedUpdateCandidatesCommand(): Promise<number>
 
 /** まだ取り込んでいない改稿。 */
 export interface PendingRevision {
-  /** 作品の画面と同じ ID の文字列（切り替えた棚では作品 UUID、旧棚では番号）。 */
+  /** 作品の画面と同じ ID の文字列（作品の UUID）。 */
   work: string;
   /** 更新確認がこの改稿を見つけた時刻。取得元が直した日そのものは持っていない。 */
   foundAt: string;

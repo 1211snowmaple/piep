@@ -76,7 +76,6 @@ const work: ShelfWork = {
   series_title: null,
   series_position: null,
   coverFile: null,
-  legacyId: null,
   caption: "説明",
   authorKey: "77",
   seriesKey: null,
@@ -125,7 +124,7 @@ describe("ShelfWorkPage", () => {
     expect(await screen.findByText("2ページ本文")).toBeInTheDocument();
     expect(api.shelfContent).toHaveBeenCalledWith(WORK, null, 1);
 
-    // 読む画面へは、新しい棚の ID のまま進む。
+    // 読む画面へは、棚の ID のまま進む。
     fireEvent.click(screen.getByRole("button", { name: "読む" }));
     await waitFor(() => expect(window.location.hash).toBe(`#/reader/${WORK}`));
   });
@@ -216,7 +215,7 @@ describe("ShelfWorkPage", () => {
   it("adds this work to a collection and seeds a suggestion from it", async () => {
     api.shelfStatus.mockResolvedValue({ state: "ready", path: "x" });
     const summary = (id: string, name: string) => ({
-      id, legacy_id: null, name, description: null, ordered: true, cover: null, cover_image: null, cover_mode: "mosaic",
+      id, name, description: null, ordered: true, cover: null, cover_image: null, cover_mode: "mosaic",
       name_source: "manual", track: "manual", tiles: [], revision: 1, member_count: 1, available_count: 1,
       total_text_length: 10, created_at: 0, updated_at: 0,
     });

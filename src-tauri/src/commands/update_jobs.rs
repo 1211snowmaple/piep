@@ -730,7 +730,7 @@ fn build_initial_items(
             &adhoc.source_key,
         )?;
         let target = registered.unwrap_or_else(|| crate::database::UpdateTarget {
-            id: 0.into(),
+            id: None,
             watch_generation: None,
             target_type: adhoc.target_type.clone(),
             source: adhoc.source.clone(),
@@ -1434,16 +1434,6 @@ fn snapshot_credentials_missing() -> UpdateCredentials {
 #[tauri::command]
 pub async fn clear_update_job(app: tauri::AppHandle, job_id: String) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
-    let library = state.shelf.library()?;
-    if let Some(job) = library
-        .migrated_job_history_id(&job_id)
-        .map_err(|e| e.to_string())?
-    {
-        return library
-            .set_job_history_hidden(crate::library::LibraryId::now_v7(), Some(job), true)
-            .map(|_| ())
-            .map_err(|e| e.to_string());
-    }
     state.jobs().clear_update_job(&job_id)
 }
 
@@ -1871,7 +1861,7 @@ pub async fn count_dismissed_update_candidates(app: tauri::AppHandle) -> Result<
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingRevisionWork {
-    /// 作品の画面と同じ ID。切り替えた棚では作品 UUID、そうでなければ旧棚の番号。
+    /// 作品の画面と同じ ID（作品の UUID）。
     pub work: String,
     /// 更新確認がこの改稿を見つけた時刻。取得元が直した日そのものは持っていない。
     pub found_at: String,
@@ -3598,16 +3588,12 @@ mod tests {
         let (_temp, state, _library) = super::shelf::tests::fixture();
         let item = crate::database::UpdateJobItem {
             id: 1,
-            job_id: "job".into(),
             item_type: "work".into(),
             source: Some("pixiv".into()),
             source_id: Some("42".into()),
             target_type: None,
             title: "作品".into(),
             payload_json: "{}".into(),
-            status: "running".into(),
-            error: None,
-            result_download_id: None,
         };
         let gone = super::unavailable_saved_pixiv_work_message("作品", "42");
         let partial = "[一部保存] 本文は保存しましたが、参照先の挿絵を閲覧できません";
@@ -3768,7 +3754,7 @@ mod tests {
         source_key: &str,
     ) -> crate::database::UpdateTarget {
         crate::database::UpdateTarget {
-            id: 1.into(),
+            id: None,
             watch_generation: None,
             target_type: target_type.into(),
             source: source.into(),
@@ -3816,7 +3802,7 @@ mod tests {
             metadata: Default::default(),
             source: "fanbox".into(), source_id: "11".into(), kind: "new".into(), title: "作品".into(),
             payload_json: serde_json::json!({"originSourceKey":"creator", "originalData":{"creatorId":"creator"}}).to_string(),
-            target_type: Some("author".into()), status: "pending".into(), first_seen_at: "now".into(), updated_at: "now".into(), download_id: None,
+            target_type: Some("author".into()), status: "pending".into(), first_seen_at: "now".into(), updated_at: "now".into(),
         };
         let works = HashSet::from([("fanbox".into(), "11".into())]);
         assert!(!super::candidate_matches_scope(

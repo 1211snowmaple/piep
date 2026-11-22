@@ -1,22 +1,17 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { WorkCard } from "@/components/WorkCard";
-import type { ListedWork, ShelfEntry } from "@/types/library";
-import { isShelfEntry } from "@/features/library/shelf";
+import type { ShelfEntry } from "@/types/library";
 
 type WorkListView = "gallery" | "compact";
 
 interface VirtualizedWorkListProps {
-  items: ListedWork[];
+  items: ShelfEntry[];
   view: WorkListView;
   selectionMode?: boolean;
-  selected?: ReadonlySet<number>;
-  onSelect?: (id: number, selected: boolean) => void;
-  /** 新しい棚の作品の選択（ID は UUID なので番号の集合と分けて持つ）。 */
-  shelfSelected?: ReadonlySet<string>;
-  onSelectShelf?: (work: ShelfEntry, selected: boolean) => void;
-  onToggleFavorite?: (id: number, favorite: boolean) => void;
-  onToggleWatch?: (id: number, watch: boolean) => void;
+  /** 選んだ作品の ID。 */
+  selected?: ReadonlySet<string>;
+  onSelect?: (work: ShelfEntry, selected: boolean) => void;
   /** 未保存の改稿がある作品の ID（作品の画面と同じ文字列）。 */
   revisedIds?: ReadonlySet<string>;
 }
@@ -65,10 +60,6 @@ export function VirtualizedWorkList({
   selectionMode = false,
   selected,
   onSelect,
-  shelfSelected,
-  onSelectShelf,
-  onToggleFavorite,
-  onToggleWatch,
   revisedIds,
 }: VirtualizedWorkListProps) {
   const listRef = useRef<HTMLDivElement>(null);
@@ -132,24 +123,17 @@ export function VirtualizedWorkList({
   });
   const virtualRows = virtualizer.getVirtualItems();
 
-  const renderWork = (work: ListedWork) => {
-    // 新しい棚の作品は旧棚の番号を持たないので、番号の集合（選択）とは照らさない。
-    const legacyId = isShelfEntry(work) ? null : work.id;
-    return (
+  const renderWork = (work: ShelfEntry) => (
     <WorkCard
       key={work.id}
       compact={view === "compact"}
       work={work}
-      revised={revisedIds?.has(String(work.id))}
+      revised={revisedIds?.has(work.id)}
       selectionMode={selectionMode}
-      selected={legacyId !== null ? selected?.has(legacyId) : shelfSelected?.has(String(work.id))}
+      selected={selected?.has(work.id)}
       onSelect={onSelect}
-      onSelectShelf={onSelectShelf}
-      onToggleFavorite={onToggleFavorite}
-      onToggleWatch={onToggleWatch}
     />
-    );
-  };
+  );
 
   // AppFrame supplies the scroll container in production. Keeping a bounded
   // regular layout until it is discovered avoids an empty first paint and

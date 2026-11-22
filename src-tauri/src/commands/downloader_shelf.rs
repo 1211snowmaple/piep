@@ -1,4 +1,4 @@
-//! 正本に切り替えた棚への保存。取り寄せた応答を、旧棚の保存と同じ形のまま棚へ入れる。
+//! 棚への保存。取り寄せた応答を、取得元の形のまま棚へ入れる。
 //!
 //! 版を増やすかどうかは棚が決める（応答から作った項目・本文・画像と添付を今の版と比べる）。
 //! ここで決めるのは、画像と添付を落とし直さなくてよいか（応答の中身が今の版の原本と同じで、
@@ -21,7 +21,7 @@ use std::sync::Arc;
 #[path = "downloader_shelf_assets.rs"]
 mod repairs;
 
-/// 切り替えた棚へ保存した結果。
+/// 棚へ保存した結果。
 #[derive(Clone, Debug)]
 pub struct ShelfSaved {
     pub work: LibraryId,
@@ -45,7 +45,7 @@ pub(super) async fn blocking<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-/// 取得元の画像・添付の種類（旧棚の保存と同じ名前）。
+/// 取得元の画像・添付の種類（保存フォルダーと同じ名前）。
 fn target_role(sub_folder: &str) -> &'static str {
     match sub_folder {
         "illustrations" => "illustration",
@@ -261,7 +261,7 @@ fn staged_from(dir: &Path, data: &Value, source: &str) -> Result<Vec<StagedAsset
 }
 
 /// 保存フォルダーの一つの版（応答の JSON と `data_assets/`）を、取り寄せずに棚へ保存する。
-/// 旧棚の保存フォルダーの再取り込みに使う。画像・添付はフォルダーにあるものだけを使う。
+/// 保存フォルダーの再取り込みに使う。画像・添付はフォルダーにあるものだけを使う。
 pub(crate) async fn save_folder_to_shelf(
     library: Arc<Library>,
     data: Value,
@@ -314,7 +314,7 @@ pub(crate) async fn save_folder_to_shelf(
     .await
 }
 
-/// 取り寄せた応答を切り替えた棚へ保存する。
+/// 取り寄せた応答を棚へ保存する。
 pub(super) async fn save_to_shelf(
     shelf: Arc<Shelf>,
     library: Arc<Library>,
@@ -447,7 +447,7 @@ async fn save_to_shelf_as(
         }
     }
 
-    // 原寸は、実際に保存すると決まったここで探す（旧棚の保存と同じ）。
+    // 原寸は、実際に保存すると決まったここで探す。
     if source == "pixiv" && !reader_only && !upgrade_images {
         match crate::downloader::pixiv_originals::cdn_client() {
             Ok(client) => {
@@ -660,80 +660,5 @@ mod tests {
         let missing = missing_references(&data, "pixiv", held);
         assert_eq!(missing.len(), 1);
         assert!(missing_references(&data, "fanbox", []).is_empty());
-    }
-
-    /// 旧棚と、それを移した棚で、保存の判断を全作品について確かめる（ネットには出ない）。
-    /// `PIEP_SHELF_SAVE_PROBE=<旧棚>|<移した棚>` で
-    /// `cargo test --lib downloader::shelf::tests::probe -- --ignored --nocapture`。
-    /// - 今の版の応答で「落とし直さなくてよい」と判断できるか（画像・添付の枠の対応）。
-    /// - 旧棚の版のフォルダーを落とした画像のフォルダーとして読んだ入力が、移行の入力と同じか。
-    #[test]
-    #[ignore]
-    fn probe_a_real_shelf() {
-        let Some(paths) = std::env::var("PIEP_SHELF_SAVE_PROBE").ok() else {
-            return;
-        };
-        let (old, new) = paths.split_once('|').unwrap();
-        let source = crate::library::LegacyImporter::open(Path::new(old)).unwrap();
-        let library = Library::open(Path::new(new)).unwrap();
-        let (mut works, mut unchanged) = (0, 0);
-        let (mut redownload, mut staged_differ, mut failures) =
-            (Vec::new(), Vec::new(), Vec::new());
-        source
-            .current_save_inputs(|provider, key, input| {
-                works += 1;
-                let label = format!("{provider}:{key}");
-                let (data, assets) = match input {
-                    Ok(input) => input,
-                    Err(error) => {
-                        failures.push(format!("{label}: {error}"));
-                        return Ok(());
-                    }
-                };
-                let work = library.work_by_key(provider, key)?.unwrap();
-                match unchanged_on_shelf(&library, work, &data, provider) {
-                    Ok(true) => unchanged += 1,
-                    Ok(false) => redownload.push(label.clone()),
-                    Err(error) => failures.push(format!("{label}: {error}")),
-                }
-                // 旧棚の版のフォルダー（…/data_assets/<種類>/<名前>）を、落とした画像として読む。
-                let Some(dir) = assets.first().and_then(|asset| {
-                    asset
-                        .path
-                        .ancestors()
-                        .find(|p| p.file_name().is_some_and(|n| n == "data_assets"))
-                        .map(Path::to_path_buf)
-                }) else {
-                    return Ok(());
-                };
-                let mut expected: Vec<_> = assets
-                    .iter()
-                    .map(|a| (a.role.clone(), a.name.clone()))
-                    .collect();
-                let mut staged: Vec<_> = match staged_from(&dir, &data, provider) {
-                    Ok(staged) => staged.into_iter().map(|a| (a.role, a.name)).collect(),
-                    Err(error) => {
-                        failures.push(format!("{label}: {error}"));
-                        return Ok(());
-                    }
-                };
-                expected.sort();
-                staged.sort();
-                if expected != staged {
-                    staged_differ.push(label);
-                }
-                Ok(())
-            })
-            .unwrap();
-        println!(
-            "{}",
-            serde_json::json!({
-                "works": works,
-                "unchanged": unchanged,
-                "redownload": redownload,
-                "staged_differ": staged_differ,
-                "failures": failures,
-            })
-        );
     }
 }

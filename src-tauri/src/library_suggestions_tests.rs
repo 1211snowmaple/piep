@@ -121,10 +121,10 @@ fn a_seed_suggestion_follows_the_body_links_and_accepting_it_makes_a_collection(
     for work in &works {
         assert!(found.contains(work), "{work} が候補に無い: {found:?}");
     }
-    assert!(suggestion
-        .members
-        .iter()
-        .all(|member| member.download_id.is_none()));
+    assert!(suggestion.members.iter().all(|member| {
+        let json = serde_json::to_value(member).unwrap();
+        json.get("corpusKey").is_none() && json.get("downloadId").is_none()
+    }));
     assert_eq!(suggestion.state, "pending");
 
     let pending = library
@@ -283,7 +283,8 @@ fn additions_and_names_are_proposed_from_the_collection_on_the_shelf() {
             .parse::<LibraryId>()
             .unwrap();
         assert!(!works[..2].contains(&work), "入っている作品は候補にしない");
-        assert_eq!(candidate.download_id, 0);
+        let json = serde_json::to_value(candidate).unwrap();
+        assert!(json.get("corpusKey").is_none() && json.get("downloadId").is_none());
     }
     assert!(
         additions
@@ -315,7 +316,6 @@ fn the_working_tables_see_the_shelf_text_and_have_no_old_shelf_to_backfill() {
     let id = corpus.id_of(first).unwrap();
     assert_eq!(corpus.work(id), Some(first));
     assert!(corpus.plain_text(id).unwrap().contains("本文です"));
-    assert!(corpus.link_backfill().is_none());
     let downloads: i64 = corpus
         .corpus()
         .unwrap()

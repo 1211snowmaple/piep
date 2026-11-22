@@ -9,15 +9,15 @@ use std::collections::BTreeMap;
 /// 一覧の行の作り方の版。変えたら、書き込みで開いたときに全行を作り直す。
 pub(super) const RECIPE: i64 = 5;
 const PAGE_LIMIT: usize = 500;
-/// ページ番号で読み飛ばせる件数。旧棚の一覧が直接開ける 251 ページ（60 件ずつ）より広い。
+/// ページ番号で読み飛ばせる件数。
 const OFFSET_LIMIT: usize = 100_000;
 
 /// 一作品の一覧の行。?1 作品、?2 一覧の持ち主、?3 有効な編集、?4 編集の題、?5 作り方の版。
-/// 題は旧棚と同じく、編集の題（前後の空白を除いて空でなければ）か、保存版の題。空白は改行や
-/// 全角の空白を含む Unicode の空白（旧棚の題は保存時にこれを除いていた）。
+/// 題は編集の題（前後の空白を除いて空でなければ）か、保存版の題。空白は改行や
+/// 全角の空白を含む Unicode の空白。
 /// 容量は保存した原本・画像・添付で、同じ中身は一度だけ数える。原本から取り出した本文は数えない。
-/// 改稿（revised）は作者の改稿を保存したか。旧棚の「修復」の版から分けた版だけなら数えない。
-/// 画像の数は画像と image/ の添付、添付の数はそれ以外の添付（旧棚と同じく MIME で分ける）。
+/// 改稿（revised）は作者の改稿を保存したか。移行で入った「修復」の版から分けた版だけなら数えない。
+/// 画像の数は画像と image/ の添付、添付の数はそれ以外の添付。
 const ROW_SQL: &str = "SELECT c.entity_id,c.snapshot_id,?3,
  coalesce((SELECT provider FROM external_identities INDEXED BY external_identity_entity WHERE entity_id=c.entity_id AND kind='work' ORDER BY provider,external_key LIMIT 1),''),
  coalesce((SELECT external_key FROM external_identities INDEXED BY external_identity_entity WHERE entity_id=c.entity_id AND kind='work' ORDER BY provider,external_key LIMIT 1),''),
@@ -56,7 +56,7 @@ const COLUMNS: &str = "work_id,snapshot_id,edit_id,provider,external_key,content
 /// ページの問い合わせで、`COLUMNS` の後ろに付ける並べ替えの鍵の列の位置。
 const VALUE_COLUMN: usize = 23;
 
-/// 並べ替えの鍵。旧棚の並べ替えと同じ意味を持たせ、同じ値の中は作品の登録順で並べる。
+/// 並べ替えの鍵。同じ値の中は作品の登録順で並べる。
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkSort {
@@ -73,7 +73,7 @@ pub enum WorkSort {
     Media,
     Version,
     /// シリーズの中の順（作品が属するシリーズの位置のうち最も小さいもの、位置のない作品は後ろ）、
-    /// 同じ位置は公開日の順。旧棚のシリーズ順と同じ鍵で、シリーズの画面の既定の並び。
+    /// 同じ位置は公開日の順。シリーズの画面の既定の並び。
     SeriesOrder,
     /// 本文の検索の関連度。本文の検索の一覧（`list_works_matching`）でだけ使える。
     /// 続きの位置の値は関連度（非負の f64）のビット列で、非負の f64 はビット列の大小と
@@ -173,7 +173,7 @@ impl Default for WorkListQuery {
 
 /// 一覧の絞り込み。項目はすべて「かつ」でつなぐ。空の項目は絞らない。
 ///
-/// 旧棚の絞り込みと同じ意味を持たせる。違えたのは次のところ。
+/// 気をつけるところ。
 /// - 日付は利用者の暦日でなく、ミリ秒の範囲で受け取る（日の区切りは画面が決める）。
 ///   公開日・更新日は並べ替えと同じく、なければ保存日へ寄せた値で絞る。
 /// - 作者の名前は、いま名乗っている名前のほかに、保存したどの版で名乗った名前でも引ける。
@@ -244,7 +244,7 @@ pub enum RevisionFilter {
     FirstVersion,
 }
 
-/// 取得元の候補への判断。旧棚の「要確認」。
+/// 取得元の候補への判断（「要確認」）。
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AcquisitionFilter {
@@ -504,7 +504,7 @@ impl Conditions {
     }
 }
 
-/// 前後の空白を除き、空の名前を捨てる（旧棚と同じ）。
+/// 前後の空白を除き、空の名前を捨てる。
 fn names(values: &[String]) -> Vec<String> {
     let mut names: Vec<String> = values
         .iter()
@@ -1036,7 +1036,7 @@ impl Library {
     /// 読む画面の「前後の作品」。作品が入っているコレクション・シリーズ・作者ごとに、並びの中の
     /// 位置と前後の作品を返す。前も後もない並び（その作品だけ）は返さない。
     ///
-    /// 並べ方は旧棚の読む画面と同じ。コレクションは並べた順、シリーズは取得元の話数（ないものは
+    /// 並べ方は読む画面と同じ。コレクションは並べた順、シリーズは取得元の話数（ないものは
     /// 後ろ）から公開日、作者は公開日の古い順。公開日のない作品は保存日で並べる。どれも今の版の
     /// 所属で引く（古い版でだけシリーズにいた作品は入れない）。
     pub fn work_neighbors(&self, work: LibraryId) -> Result<Vec<WorkNeighbors>> {
@@ -1151,30 +1151,6 @@ impl Library {
             .query_row(params![provider, kind.name(), key], |r| r.get::<_, Vec<u8>>(0))
             .optional()?;
         found.map(id).transpose()
-    }
-
-    /// 旧棚から移した作品の、旧棚での番号（`downloads.id`）。移行の記録から引く。
-    ///
-    /// 旧棚が正本で、新しい棚がその写しのあいだ、端末に残る作品ごとの記録（読書位置・しおり）は
-    /// 旧棚の番号で引く。両方の棚から同じ記録を読み書きすれば、どちらで読んでも続きから読める。
-    pub fn legacy_work_numbers(&self) -> Result<std::collections::HashMap<LibraryId, i64>> {
-        let conn = self.reader()?;
-        // 記録が指すのは移した時点の今の版（保存状態）なので、その版の作品へたどる。
-        let mut statement = conn.prepare(
-            "SELECT v.entity_id,m.source_key FROM migration_records m JOIN revision_snapshots v ON v.id=m.target_id WHERE m.source_table='download_current' AND m.status='imported'",
-        )?;
-        let rows = statement.query_map([], |r| {
-            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
-        })?;
-        let mut numbers = std::collections::HashMap::new();
-        for row in rows {
-            let (work, number) = row?;
-            let number = number
-                .parse::<i64>()
-                .map_err(|_| Error::Integrity("旧棚の作品の番号が不正です".into()))?;
-            numbers.insert(id(work)?, number);
-        }
-        Ok(numbers)
     }
 
     /// 棚の一覧を一ページ返す。続きは `next` を `after` に渡す。

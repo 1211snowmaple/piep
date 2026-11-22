@@ -1,9 +1,5 @@
-import { useEffect } from "react";
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { adoptDeviceReadingKeys, readingKeysAdopted } from "@/features/library/readingShelf";
-import { rekeyBookmarks } from "@/features/reader/bookmarks";
+import { useQuery, type QueryClient } from "@tanstack/react-query";
 import {
-  shelfAdoptDevicePositions,
   shelfDecorations,
   shelfEntities,
   shelfCollection as fetchShelfCollection,
@@ -32,7 +28,7 @@ import {
   type ShelfTextSearch,
 } from "@/services/shelfApi";
 import type { CollectionCoverMode, CollectionNameSource, WorkCollection, WorkCollectionSummary } from "@/types/collections";
-import type { EntityFacet, EntityFacetScope, EntitySortBy, EntityVersion, LibrarySortBy, ListedWork, PersonEntry, SearchParams, SearchResult, SeriesEntry, ShelfEntry, SourceKind } from "@/types/library";
+import type { EntityFacet, EntityFacetScope, EntitySortBy, EntityVersion, LibrarySortBy, PersonEntry, SearchParams, SearchResult, SeriesEntry, ShelfEntry, SourceKind } from "@/types/library";
 
 /**
  * ライブラリの一覧を棚から出す。
@@ -41,13 +37,9 @@ import type { EntityFacet, EntityFacetScope, EntitySortBy, EntityVersion, Librar
  * 読む形（`ShelfEntry`）にする。作品は棚の ID のまま。
  */
 
-export function isShelfEntry(work: ListedWork): work is ShelfEntry {
-  return typeof work.id === "string";
-}
-
 const SETTLED: ReadonlySet<ShelfState["state"]> = new Set(["ready", "failed"]);
 
-/** 新しい棚の状態。開いている途中と索引の同期中は、落ち着くまで読み直す。 */
+/** 棚の状態。開いている途中と索引の同期中は、落ち着くまで読み直す。 */
 export function useShelfStatus(enabled: boolean) {
   return useQuery({
     queryKey: ["shelf-status"],
@@ -66,7 +58,7 @@ export function shelfListable(status: ShelfState | undefined): boolean {
 }
 
 /**
- * 新しい棚へ書いたあと、画面が持っている問い合わせを読み直させる。印・件数・絞り込みの結果が
+ * 棚へ書いたあと、画面が持っている問い合わせを読み直させる。印・件数・絞り込みの結果が
  * どこに出ているかを一つずつ追わず、棚の状態のほかは全部古いことにする（今出ている画面だけが
  * 読み直す）。
  */
@@ -75,28 +67,6 @@ export function invalidateShelf(queryClient: QueryClient, keep?: readonly unknow
     predicate: (query) => query.queryKey[0] !== "shelf-status"
       && !(keep && keep.length === query.queryKey.length && keep.every((part, index) => part === query.queryKey[index])),
   });
-}
-
-/** 読みかけの棚を旧棚の番号で渡すか（端末の記録を棚の ID へ書き直す前だけ）。 */
-function legacyReadingWorks(params: SearchParams): number[] | null {
-  return readingKeysAdopted() ? null : params.idsInclude ?? null;
-}
-
-/**
- * 棚を正本に切り替えたら、端末に旧棚の番号で残した読書位置としおりを一度だけ棚の ID へ
- * 書き直し、読みかけを棚へ引き取る。アプリの頭で一度だけ使う。
- */
-export function useAdoptReadingKeys(runtime: boolean) {
-  const queryClient = useQueryClient();
-  const pending = runtime && !readingKeysAdopted();
-  const status = useShelfStatus(pending);
-  const ready = pending && shelfListable(status.data);
-  useEffect(() => {
-    if (!ready) return;
-    adoptDeviceReadingKeys(shelfAdoptDevicePositions, rekeyBookmarks)
-      .then(() => invalidateShelf(queryClient))
-      .catch((error: unknown) => console.error("端末の読書位置を棚へ引き取れません", error));
-  }, [ready, queryClient]);
 }
 
 /** 棚ではまだ使えない条件。画面はこれを出して、黙って外さない。 */
@@ -135,7 +105,7 @@ const MEDIA = {
   has_images_and_files: "images_and_files",
 } as const;
 
-/** 旧棚の日付の絞り込みは UTC の日で両端を含む。新しい棚はミリ秒で、終わりを含まない。 */
+/** 画面の日付の絞り込みは UTC の日で両端を含む。棚はミリ秒で、終わりを含まない。 */
 function utcDay(value: string | null | undefined, offsetDays = 0): number | null {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
   const [year, month, day] = value.split("-").map(Number);
@@ -150,7 +120,7 @@ function nonEmpty(values: string[] | null | undefined): string[] {
   return (values ?? []).filter((value) => value.trim() !== "");
 }
 
-/** 旧棚の続きの位置（文字列）と新しい棚の続きの位置を行き来する。 */
+/** 画面の続きの位置（文字列）と棚の続きの位置を行き来する。 */
 export function encodeShelfCursor(cursor: ShelfCursor | null): string | null {
   return cursor ? JSON.stringify(cursor) : null;
 }
@@ -171,15 +141,15 @@ export interface ShelfEntityScope {
   series?: string | null;
 }
 
-/** 作品の絞り込み（検索語・並び順・ページを除いたもの）を、新しい棚の絞り込みにする。 */
+/** 作品の絞り込み（検索語・並び順・ページを除いたもの）を、棚の絞り込みにする。 */
 export function shelfFilter(params: SearchParams, scope: ShelfEntityScope = {}): ShelfFilter {
   return {
     provider: params.source ?? null,
     content_type: params.contentType ?? null,
     favorite: params.favorite ?? null,
     watching: params.watchFilter ? params.watchFilter === "watched" : null,
-    // 読みかけの棚。端末の記録を棚の ID へ書き直したあとは、棚の読書位置で絞る。
-    reading: params.idsInclude && readingKeysAdopted() ? true : null,
+    // 読みかけの棚。棚の読書位置で絞る。
+    reading: params.readingOnly ? true : null,
     edited: params.editFilter ? params.editFilter === "edited" : null,
     has_cover: params.coverFilter ? params.coverFilter === "has_cover" : null,
     in_series: params.seriesFilter ? params.seriesFilter === "in_series" : null,
@@ -207,13 +177,13 @@ export function shelfFilter(params: SearchParams, scope: ShelfEntityScope = {}):
 }
 
 /**
- * 一覧の条件を新しい棚の問い合わせにする。使えない条件があれば `ShelfUnsupportedError`。
+ * 一覧の条件を棚の問い合わせにする。使えない条件があれば `ShelfUnsupportedError`。
  *
- * シリーズの指名（`seriesKey`）は検索語の書き方（`series:取得元:キー`）にして渡す。新しい棚は
+ * シリーズの指名（`seriesKey`）は検索語の書き方（`series:取得元:キー`）にして渡す。棚は
  * シリーズを自分の ID で指すので、取得元のキーは書き方の側で引く。作者・シリーズの画面は
  * 頭を引いた棚の ID を `scope` で渡す。
  */
-export function shelfRequest(params: SearchParams, scope: ShelfEntityScope = {}): { search: ShelfTextSearch; query: ShelfListQuery; legacyWorks: number[] | null; person: ShelfEntityKey | null } {
+export function shelfRequest(params: SearchParams, scope: ShelfEntityScope = {}): { search: ShelfTextSearch; query: ShelfListQuery; person: ShelfEntityKey | null } {
   const unsupported: string[] = [];
   if (params.personKey && !params.personSource) unsupported.push("取得元のない作者の指名");
   const sortBy = params.sortBy ?? "downloaded_at";
@@ -239,13 +209,11 @@ export function shelfRequest(params: SearchParams, scope: ShelfEntityScope = {})
       descending: (params.sortOrder ?? "desc") === "desc",
       limit: params.limit ?? 60,
       after: params.offset ? null : decodeShelfCursor(params.cursor),
-      // ページ番号の一覧は、旧棚と同じく何件目からかで開く。
+      // ページ番号の一覧は、何件目からかで開く。
       offset: params.offset ?? 0,
       filter,
       count: !params.cursor || Boolean(params.offset),
     },
-    // 読みかけの棚。読書位置を旧棚の番号で憶えているあいだは、番号のまま渡して棚の側で読み替える。
-    legacyWorks: legacyReadingWorks(params),
     // 作者の指名（前後の作品・作者からの一覧）。棚の側で取得元の ID から引く。
     person: params.personKey ? { provider: params.personSource ?? null, key: params.personKey } : null,
   };
@@ -255,13 +223,11 @@ function isoOrNull(ms: number | null): string | null {
   return ms === null ? null : new Date(ms).toISOString();
 }
 
-/** 新しい棚の一件を、カードが読む形にする。 */
+/** 棚の一件を、カードが読む形にする。 */
 export function shelfEntry(card: ShelfCard, match?: ShelfMatch, decoration?: ShelfDecoration): ShelfEntry {
   return {
     id: card.id,
-    shelf: true,
     coverUrl: shelfFileUrl(card.coverFile),
-    legacyId: card.legacyId,
     source: card.provider,
     sourceId: card.external_key,
     title: card.title,
@@ -271,8 +237,6 @@ export function shelfEntry(card: ShelfCard, match?: ShelfMatch, decoration?: She
     contentType: card.content_type,
     tags: card.tags,
     excerpt: card.excerpt,
-    coverPath: null,
-    jsonPath: "",
     assetCount: card.media_count,
     fileSizeBytes: card.logical_size,
     downloadedAt: new Date(card.saved_at).toISOString(),
@@ -293,16 +257,16 @@ export function shelfEntry(card: ShelfCard, match?: ShelfMatch, decoration?: She
   };
 }
 
-export type ShelfSearchResult = Omit<SearchResult, "items"> & { items: ShelfEntry[] };
+export type ShelfSearchResult = SearchResult;
 
 /**
- * 一覧の一ページを新しい棚から引く。一致した箇所と理由は、語の検索で一致があったときだけ
- * 続けて引く（旧棚の一覧と同じく、カードに一致の理由を出す）。
+ * 一覧の一ページを棚から引く。一致した箇所と理由は、語の検索で一致があったときだけ
+ * 続けて引く（カードに一致の理由を出す）。
  */
 /** 棚の一覧が一度に返す件数の上限。 */
 const SHELF_PAGE_LIMIT = 500;
 
-/** 新しい棚の作品を ID で引く（並びは渡した順。外した作品や無い ID は返らない）。 */
+/** 棚の作品を ID で引く（並びは渡した順。外した作品や無い ID は返らない）。 */
 export async function shelfEntriesByIds(ids: string[]): Promise<ShelfEntry[]> {
   const unique = [...new Set(ids)];
   const byId = new Map<string, ShelfEntry>();
@@ -319,8 +283,8 @@ export async function shelfEntriesByIds(ids: string[]): Promise<ShelfEntry[]> {
 }
 
 export async function searchShelf(params: SearchParams, scope: ShelfEntityScope = {}): Promise<ShelfSearchResult> {
-  const { search, query, legacyWorks, person } = shelfRequest(params, scope);
-  const view = await shelfSearch(search, query, legacyWorks, person);
+  const { search, query, person } = shelfRequest(params, scope);
+  const view = await shelfSearch(search, query, person);
   const decorations = search.text && view.matches.length
     ? await shelfDecorations(search.text, view.matches)
     : [];
@@ -328,7 +292,7 @@ export async function searchShelf(params: SearchParams, scope: ShelfEntityScope 
   const decorationByWork = new Map(decorations.map((decoration) => [decoration.work, decoration]));
   const items = view.cards.map((card) => shelfEntry(card, matchByWork.get(card.id), decorationByWork.get(card.id)));
   const total = view.page.total;
-  // 文言は旧棚の一覧（`search_explanations`）と同じにする。
+  // 文言は `search_explanations` と同じにする。
   const intent = view.intent;
   const explanations = intent
     ? [`${intent.kind === "series" ? "シリーズ" : "作者"}「${intent.label}」への完全一致として解釈し、関係する作品だけに限定しました`]
@@ -351,8 +315,8 @@ export async function searchShelf(params: SearchParams, scope: ShelfEntityScope 
 }
 
 /**
- * 作者・シリーズの頭を、画面が読む旧棚の形にする。画像はファイルの識別子のまま入れ、画面が
- * `shelfFileUrl` で URL にする（旧棚のパスとは読み方が違う）。
+ * 作者・シリーズの頭を、画面が読む形にする。画像はファイルの識別子のまま入れ、画面が
+ * `shelfFileUrl` で URL にする。
  */
 function entityCommon(head: ShelfEntityHead) {
   const first = head.versions[0];
@@ -392,7 +356,7 @@ export function shelfSeriesEntry(head: ShelfEntityHead): SeriesEntry {
   };
 }
 
-/** 保存した版を、画面の履歴の形にする（新しい順）。新しい棚は版ごとの大きさを持たない。 */
+/** 保存した版を、画面の履歴の形にする（新しい順）。棚は版ごとの大きさを持たない。 */
 export function shelfEntityVersions(head: ShelfEntityHead): EntityVersion[] {
   return [...head.versions].reverse().map((version) => ({
     id: version.version,
@@ -430,10 +394,10 @@ export function shelfSeriesFacet(item: ShelfSeriesFacet): EntityFacet {
 }
 
 /**
- * ライブラリの「作者・クリエイター」「シリーズ」タブの一ページを新しい棚から引く。
+ * ライブラリの「作者・クリエイター」「シリーズ」タブの一ページを棚から引く。
  *
  * 作品の絞り込みは作品の一覧と同じ関数で直す（二つのタブで同じ条件が別の意味にならない）。
- * シリーズの指名は取得元がなくても使える（検索語の `series:キー` と同じ）。行は旧棚の `EntityFacet` の形にし、監視の
+ * シリーズの指名は取得元がなくても使える（検索語の `series:キー` と同じ）。行は `EntityFacet` の形にし、監視の
  * 登録（移した時点の写し）を `watch` に添える。
  */
 export async function searchShelfEntities(
@@ -450,7 +414,6 @@ export async function searchShelfEntities(
   const page = await shelfEntities(kind, {
     query: searchText,
     filter: shelfFilter(params),
-    legacyWorks: legacyReadingWorks(params),
     series: params.seriesKey ? { provider: params.seriesSource ?? null, key: params.seriesKey } : null,
     scope: scope
       ? { watch: scope.watch ?? null, min_work_count: scope.minWorkCount ?? null, concluded: scope.concluded ?? null }
@@ -463,7 +426,7 @@ export async function searchShelfEntities(
   return { items: page.items.map(shelfEntityFacet), total: page.total };
 }
 
-/** 新しい棚の作者・シリーズの一覧の一件。`watch` は移した時点の更新監視の登録。 */
+/** 棚の作者・シリーズの一覧の一件。`watch` は移した時点の更新監視の登録。 */
 export type ShelfEntityFacet = EntityFacet & { shelf: true; watch: "watching" | "paused" | null };
 
 /** 一覧の一件を、カードが読む形にする。画像はファイルの識別子（`shelf: true`）。 */
@@ -474,7 +437,7 @@ export function shelfEntityFacet(row: ShelfEntityRow): ShelfEntityFacet {
     sourceKey: row.external_key,
     displayName: row.name,
     count: row.work_count,
-    // 旧棚と同じく、作者はアイコン（なければヘッダー）、シリーズは表紙。
+    // 作者はアイコン（なければヘッダー）、シリーズは表紙。
     coverPath: row.icon ?? row.banner ?? row.cover,
     description: row.description,
     updatedAt: isoOrNull(row.updated_at),
@@ -499,17 +462,15 @@ export async function shelfWorkCollections(work: string): Promise<WorkCollection
 }
 
 /**
- * 新しい棚のコレクションの要約を、旧棚の形にする。ID は旧棚の ID（コレクションの画面はまだ
- * 旧棚で開く）。表紙はファイルの識別子で、`shelf: true` で読み分ける。
+ * 棚のコレクションの要約を、画面の要約の形にする。ID は棚のコレクションの ID。表紙はファイルの識別子で、`shelf: true` で読み分ける。
  */
 export function shelfCollectionSummary(item: ShelfCollectionSummary): WorkCollectionSummary {
   return {
     shelf: true,
-    id: item.legacy_id ?? item.id,
+    id: item.id,
     name: item.name,
     description: item.description,
     collectionKind: item.ordered ? "ordered" : "unordered",
-    coverDownloadId: null,
     coverPath: item.cover,
     coverMode: item.cover_mode as CollectionCoverMode,
     coverImagePath: item.cover_image,
@@ -530,21 +491,21 @@ export function shelfCollectionSummary(item: ShelfCollectionSummary): WorkCollec
   };
 }
 
-/** ライブラリの「コレクション」タブの一覧を新しい棚から引く。 */
+/** ライブラリの「コレクション」タブの一覧を棚から引く。 */
 export async function shelfCollections(): Promise<WorkCollectionSummary[]> {
   return (await fetchShelfCollections()).map(shelfCollectionSummary);
 }
 
 /**
- * コレクションの画面を新しい棚から引く。回の作品は一覧と同じ `ShelfEntry`（作品の画面・読む画面は
- * 新しい棚の ID で開く）。`downloadId` は旧棚の番号（選んで外す操作は新しい棚には無い）。
+ * コレクションの画面を棚から引く。回の作品は一覧と同じ `ShelfEntry`（作品の画面・読む画面は
+ * 棚の ID で開く）。
  */
 export async function shelfCollection(id: string): Promise<WorkCollection> {
   return shelfCollectionView(await fetchShelfCollection(id));
 }
 
 /**
- * 新しい棚のコレクションを一回編集する（正本に切り替えた棚だけ）。編集した後の中身を返す
+ * 棚のコレクションを一回編集する。編集した後の中身を返す
  * （消したときは null）。
  */
 export async function editShelfCollection(id: string, change: ShelfCollectionChange): Promise<WorkCollection | null> {
@@ -560,7 +521,6 @@ function shelfCollectionView(item: ShelfCollection): WorkCollection {
       collectionId: summary.id,
       source: member.provider as SourceKind,
       sourceId: member.external_key,
-      downloadId: member.work?.legacyId ?? null,
       title: member.title,
       authorName: member.author_name,
       coverPath: member.cover,

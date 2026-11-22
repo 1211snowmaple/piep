@@ -133,13 +133,13 @@ function App() {
     queryFn: getPcStatus,
     enabled: isTauri(),
     staleTime: 15_000,
-    // 画面に戻ったら確かめ直す。つないだままでも、サーバー側で新しい棚へ切り替わったことに気づける。
+    // 画面に戻ったら確かめ直す。つないだままでも、サーバー側で棚へ切り替わったことに気づける。
     refetchOnWindowFocus: true,
     retry: false,
     refetchInterval: (query) => query.state.data?.reachable ? false : 15_000,
   });
   const pcConnection = statusQuery.data ?? null;
-  // 本文を新しい棚から読めるかは、接続の状態が決める。読む画面が開く前に揃える。
+  // 本文を棚から読めるかは、接続の状態が決める。読む画面が開く前に揃える。
   adoptNativeLibrary(pcConnection);
   const setPcConnection = useCallback((next: PcConnectionStatus | null | ((old: PcConnectionStatus | null) => PcConnectionStatus | null)) => {
     queryClient.setQueryData<PcConnectionStatus | null>(statusQueryKey, (old) => typeof next === "function" ? next(old ?? null) : next);

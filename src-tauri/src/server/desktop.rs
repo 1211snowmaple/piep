@@ -45,9 +45,9 @@ pub struct DesktopServerSettings {
     pub remote: Option<RemoteServer>,
     pub auto_send: bool,
     pub last_send: LastSend,
-    /// 単独サーバーの新しい棚から、携帯の読書位置をどこまで取り込んだか（サーバーの印）。
+    /// 単独サーバーの棚から、携帯の読書位置をどこまで取り込んだか（サーバーの印）。
     pub shelf_reading_cursor: String,
-    /// 単独サーバーの新しい棚から、携帯のお気に入りをどこまで取り込んだか（サーバーの印）。
+    /// 単独サーバーの棚から、携帯のお気に入りをどこまで取り込んだか（サーバーの印）。
     pub shelf_favorites_cursor: String,
     /// サーバーが配っている棚の写しの、変更の記録の最後の番号（0 は分からない）。これより後に
     /// この棚で変えた作品だけを、携帯の変更との食い違いとして扱う。
@@ -446,7 +446,7 @@ impl DesktopServer {
         Ok(())
     }
 
-    /// 単独サーバーの携帯に、新しい棚を読む許可を付け外しする。
+    /// 単独サーバーの携帯に、棚を読む許可を付け外しする。
     pub async fn set_remote_shelf_reader(&self, device_id: &str, read: bool) -> Result<(), String> {
         if device_id.is_empty()
             || !device_id
@@ -579,7 +579,7 @@ impl DesktopServer {
         Ok(settings.shelf_shipped_sequence)
     }
 
-    /// 単独サーバーの新しい棚から、携帯が書いた読書位置を正本に切り替えた棚へ取り込む。
+    /// 単独サーバーの棚から、携帯が書いた読書位置を棚へ取り込む。
     ///
     /// サーバーの棚は配る写しなので、写しを入れ替える前に取り込んでおけば携帯の位置は消えない。
     /// 一覧は初めに全部、そのあとは変わった分だけ。どちらの位置が新しいかは書いた時刻で決め、
@@ -605,7 +605,7 @@ impl DesktopServer {
         let mut applied = 0;
         loop {
             let path = format!("shelf/reading?cursor={cursor}&limit={SHELF_READING_PAGE}");
-            // 新しい棚を配っていないサーバーには口が無い。携帯も新しい棚へ書いていない。
+            // 棚を配っていないサーバーには口が無い。携帯も棚へ書いていない。
             let Some(page) = admin_get_if_present(&remote, &token, &path).await? else {
                 break;
             };
@@ -643,9 +643,9 @@ impl DesktopServer {
         Ok(applied)
     }
 
-    /// 単独サーバーの新しい棚から、携帯が付け外ししたお気に入りを正本に切り替えた棚へ取り込む。
-    /// 前に送ってからこの棚でも変えた作品はこの棚の値を残す。新しい棚を配っていないサーバー
-    /// （口が無い）や、切り替える前の棚なら `None`。
+    /// 単独サーバーの棚から、携帯が付け外ししたお気に入りを棚へ取り込む。
+    /// 前に送ってからこの棚でも変えた作品はこの棚の値を残す。棚を配っていないサーバー
+    /// （口が無い）なら `None`。
     async fn pull_shelf_favorites_locked(
         &self,
         state: &Arc<AppState>,

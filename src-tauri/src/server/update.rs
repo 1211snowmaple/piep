@@ -902,40 +902,27 @@ pub fn back_up_databases(paths: &ServerPaths) -> Result<(), String> {
 /// 写しへ戻す。WAL が残っていると古い変更が混ざるので一緒に消す。
 pub fn restore_databases(paths: &ServerPaths) -> Result<(), String> {
     let backup = paths.update_backup();
-    let manifest = backup.join("databases.json");
-    let present: Option<Vec<String>> = if manifest.exists() {
-        let bytes =
-            fs::read(&manifest).map_err(|error| format!("写しの目録を読めません: {error}"))?;
-        let names: Vec<String> = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("写しの目録を読めません: {error}"))?;
-        // どれかの写しが欠けていれば、いずれの DB にも手を付けない。
-        let names: Vec<String> = names
-            .into_iter()
-            .filter(|name| name != OLD_SHELF_DATABASE)
-            .collect();
-        for name in &names {
-            if !database_pairs(paths)
-                .iter()
-                .any(|(_, allowed)| name == allowed)
-                || !backup.join(name).is_file()
-            {
-                return Err("DB の写しが欠けているか、目録が正しくありません".into());
-            }
+    // 写しを作る前に戻すときは、戻すものが無い。
+    if !backup.exists() {
+        return Ok(());
+    }
+    let bytes = fs::read(backup.join("databases.json"))
+        .map_err(|error| format!("写しの目録を読めません: {error}"))?;
+    let names: Vec<String> = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("写しの目録を読めません: {error}"))?;
+    // どれかの写しが欠けていれば、いずれの DB にも手を付けない。
+    for name in &names {
+        if !database_pairs(paths)
+            .iter()
+            .any(|(_, allowed)| name == allowed)
+            || !backup.join(name).is_file()
+        {
+            return Err("DB の写しが欠けているか、目録が正しくありません".into());
         }
-        Some(names)
-    } else {
-        // この目録を持たない旧版が作った写しも引き続き戻せる。
-        None
-    };
+    }
     for (target, name) in database_pairs(paths) {
         let copy = backup.join(name);
-        let was_present = present.as_ref().map_or_else(
-            || copy.exists(),
-            |names| names.iter().any(|saved| saved == name),
-        );
-        if !was_present && present.is_none() {
-            continue;
-        }
+        let was_present = names.iter().any(|saved| saved == name);
         // 全部写してから置き換える。写している途中で中断しても、今の DB を
         // 途中までの内容で壊さず、戻しの印からもう一度始められる。
         let temporary = target.with_extension("restore");
@@ -964,9 +951,6 @@ pub fn restore_databases(paths: &ServerPaths) -> Result<(), String> {
 fn database_pairs(paths: &ServerPaths) -> [(PathBuf, &'static str); 1] {
     [(paths.store(), "state.db")]
 }
-
-/// 0.40 までの版が当てる前に写した旧棚の DB。目録に載っていても戻さない。
-const OLD_SHELF_DATABASE: &str = "piep.db";
 
 #[cfg(test)]
 mod tests {
@@ -1284,38 +1268,5 @@ mod tests {
 
         assert!(restore_databases(&paths).is_err());
         assert_eq!(fs::read(paths.store()).unwrap(), b"current database");
-    }
-
-    #[test]
-    fn the_old_shelf_database_in_an_older_snapshot_is_not_restored() {
-        let dir = crate::server::tests::TestRoot::created("update_old_shelf_snapshot");
-        let paths = ServerPaths::new(&dir.0).unwrap();
-        fs::create_dir_all(paths.state()).unwrap();
-        fs::create_dir_all(paths.update_backup()).unwrap();
-        fs::write(paths.update_backup().join("state.db"), b"previous").unwrap();
-        fs::write(paths.update_backup().join("piep.db"), b"old shelf").unwrap();
-        fs::write(
-            paths.update_backup().join("databases.json"),
-            br#"["piep.db","state.db"]"#,
-        )
-        .unwrap();
-        fs::write(paths.store(), b"current").unwrap();
-
-        restore_databases(&paths).unwrap();
-        assert_eq!(fs::read(paths.store()).unwrap(), b"previous");
-        assert!(!paths.root.join("library").exists());
-    }
-
-    #[test]
-    fn older_database_snapshots_without_a_manifest_can_still_be_restored() {
-        let dir = crate::server::tests::TestRoot::created("update_legacy_snapshot");
-        let paths = ServerPaths::new(&dir.0).unwrap();
-        fs::create_dir_all(paths.state()).unwrap();
-        fs::create_dir_all(paths.update_backup()).unwrap();
-        fs::write(paths.update_backup().join("state.db"), b"previous").unwrap();
-        fs::write(paths.store(), b"current").unwrap();
-
-        restore_databases(&paths).unwrap();
-        assert_eq!(fs::read(paths.store()).unwrap(), b"previous");
     }
 }

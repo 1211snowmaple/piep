@@ -1,15 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Box, Image, Text } from "@mantine/core";
 import { getProvider } from "@/lib/providers";
-import { getAssetUrl } from "@/services/dbApi";
 import { coverSigil, titleScale } from "@shared/coverSigil";
-import type { DownloadEntry } from "@/types/library";
+import type { ShelfEntry } from "@/types/library";
 
-type WorkCoverData = Pick<DownloadEntry, "coverPath" | "source" | "sourceId" | "title" | "authorName"> &
-  Partial<Pick<DownloadEntry, "personName" | "seriesTitle">> & {
-    /** 新しい棚の作品の表紙。パスではなく、そのまま読める URL。 */
-    coverUrl?: string | null;
-  };
+/** 表紙はパスではなく、そのまま読める URL（`coverUrl`）。無ければ印を描く。 */
+type WorkCoverData = Pick<ShelfEntry, "source" | "sourceId" | "title" | "authorName"> &
+  Partial<Pick<ShelfEntry, "coverUrl" | "personName" | "seriesTitle">>;
 
 /**
  * A work without a cover still has to be findable in a shelf of two thousand.
@@ -21,7 +18,7 @@ type WorkCoverData = Pick<DownloadEntry, "coverPath" | "source" | "sourceId" | "
  * At thumbnail size the text is unreadable, so only the mark is drawn.
  */
 export function WorkCover({ work, variant = "card", className }: { work: WorkCoverData; variant?: "compact" | "card" | "detail"; className?: string }) {
-  const cover = work.coverUrl ?? getAssetUrl(work.coverPath);
+  const cover = work.coverUrl ?? null;
   const [failed, setFailed] = useState(false);
   // 表紙そのものの縦横比。棚のタイルは揃っていないと読めないので使わないが、
   // 作品ページには揃える相手がいない。**表紙の形は表紙が決める。**

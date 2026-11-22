@@ -26,7 +26,7 @@ export interface UpdateScheduleSettings {
   notify: boolean;
   /**
    * 確認する範囲。null はすべての監視対象（作品の監視も含む）。グループの
-   * UUID（旧棚では数値 ID）なら、そのグループの作者・シリーズだけを確認する。
+   * UUID なら、そのグループの作者・シリーズだけを確認する。
    */
   groupId: WatchId | null;
 }

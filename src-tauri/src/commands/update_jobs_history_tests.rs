@@ -27,7 +27,6 @@ fn clearing_finished_jobs_keeps_paused_jobs_and_sealed_history_goes_only_with_cl
             )
             .unwrap();
         }
-        library.switch_over().unwrap();
         let state = AppState::new(Arc::new(super::super::shelf::Shelf::with_test_library(
             library.clone(),
         )));

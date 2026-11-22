@@ -9,13 +9,12 @@ export function formatUpdateSubtitle(subtitle: string): string {
   return subtitle.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})/g, (date) => formatDate(date, true));
 }
 
-export function UpdateWorkLinks({ source, sourceId, downloadId, workId, title, onOpenWork }: {
+export function UpdateWorkLinks({ source, sourceId, workId, title }: {
   source: string;
   sourceId: string;
-  downloadId?: number | null;
+  /** 棚に保存した作品の ID。あれば作品の画面を開ける。 */
   workId?: string | null;
   title: string;
-  onOpenWork?: (downloadId: number) => void;
 }) {
   const navigate = useAppNavigate();
   const url = sourceUrl(source, sourceId);
@@ -24,7 +23,7 @@ export function UpdateWorkLinks({ source, sourceId, downloadId, workId, title, o
     navigate(`/save/${source}?url=${encodeURIComponent(url)}`);
   };
   return <Group gap={2} wrap="nowrap" justify="flex-end" style={{ flex: "0 0 64px" }}>
-    {(workId || (downloadId && onOpenWork)) && <Tooltip label="保存した作品を開く"><ActionIcon variant="subtle" color="piep" aria-label={`${title}の保存した詳細を開く`} onClick={() => workId ? navigate(`/works/${workId}`) : downloadId && onOpenWork?.(downloadId)}><Icons.read size={IconSize.action} /></ActionIcon></Tooltip>}
+    {workId && <Tooltip label="保存した作品を開く"><ActionIcon variant="subtle" color="piep" aria-label={`${title}の保存した詳細を開く`} onClick={() => navigate(`/works/${workId}`)}><Icons.read size={IconSize.action} /></ActionIcon></Tooltip>}
     {url && <Tooltip label="取得元をアプリ内で開く"><ActionIcon variant="subtle" color="gray" aria-label={`${title}の取得元を開く`} onClick={openSource}><Icons.inAppBrowser size={IconSize.action} /></ActionIcon></Tooltip>}
   </Group>;
 }

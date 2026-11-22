@@ -48,14 +48,15 @@ it("shows a missing pixiv work as held with its source ID and no job error", asy
 });
 
 it("opens the saved work from the result row without shifting the row content", () => {
-  const onOpenWork = vi.fn();
+  window.location.hash = "#/updates";
+  const id = "019ad000-0000-7000-8000-000000000042";
   render(<MantineProvider><AppRouter><JobResultsPanel
     job={{ ...job, totals: 1, processed: 1, heldCount: 1 }}
-    items={[{ source: "fanbox", sourceId: "saved-1", itemType: "work", title: "保存済み作品", status: "held", error: "閲覧条件待ち", downloadId: 42 }]}
-    loading={false} error={null} onRetry={vi.fn()} onShowLogs={vi.fn()} onShowDeferred={vi.fn()} onOpenWork={onOpenWork}
+    items={[{ source: "fanbox", sourceId: "saved-1", itemType: "work", title: "保存済み作品", status: "held", error: "閲覧条件待ち", workId: id }]}
+    loading={false} error={null} onRetry={vi.fn()} onShowLogs={vi.fn()} onShowDeferred={vi.fn()}
   /></AppRouter></MantineProvider>);
   fireEvent.click(screen.getByRole("button", { name: "保存済み作品の保存した詳細を開く" }));
-  expect(onOpenWork).toHaveBeenCalledWith(42);
+  expect(window.location.hash).toContain(`/works/${id}`);
 });
 
 it("offers the deferred shelf only for an access restriction", () => {

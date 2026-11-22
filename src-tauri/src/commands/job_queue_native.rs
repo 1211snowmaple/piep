@@ -105,16 +105,12 @@ impl NativeQueue<'_> {
         }
         Ok(UpdateJobItem {
             id: row.get(0)?,
-            job_id: uuid_text(row, 1)?,
             item_type: row.get(2)?,
             source: row.get(3)?,
             source_id: row.get(4)?,
             target_type: row.get(5)?,
             title: row.get(6)?,
             payload_json: payload,
-            status: row.get(8)?,
-            error: row.get(9)?,
-            result_download_id: None,
         })
     }
     pub fn recover_update_jobs_on_startup(&self) -> Result<(), String> {
@@ -377,7 +373,6 @@ impl NativeQueue<'_> {
                         metadata,
                         work_id,
                         id,
-                        download_id: row.get(8)?,
                         key: format!("candidate:{}:{}:{}", source, source_id, id),
                         source,
                         source_id,
@@ -688,7 +683,6 @@ impl NativeQueue<'_> {
                             error: row.get(3)?,
                             item_type: None,
                             title: None,
-                            download_id: None,
                         })
                     },
                 )
@@ -781,10 +775,7 @@ impl NativeQueue<'_> {
             }
             tx.commit()
                 .map_err(|e| format!("Failed to commit update item claim: {e}"))?;
-            return Ok(Some(UpdateJobItem {
-                status: "running".to_string(),
-                ..item
-            }));
+            return Ok(Some(item));
         }
         tx.commit()
             .map_err(|e| format!("Failed to finish update item claim: {e}"))?;

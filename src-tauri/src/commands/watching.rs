@@ -1,6 +1,6 @@
-//! 監視の画面とジョブが使う口。切り替えた棚では旧 DB の監視表を読まず、書かない。
+//! 監視の画面とジョブが使う口。監視は棚に持つ。
 
-use crate::database::{UpdateTarget, WatchGroup, WatchId};
+use crate::database::{UpdateTarget, WatchGroup};
 use crate::library::{
     EntityKind, Library, LibraryId, ResourceReference, ResourceScope, WatchEdit, WatchResult,
 };
@@ -79,7 +79,7 @@ pub(super) fn targets(
             .map(|target| {
                 let icon_path = icon(library, &target)?;
                 Ok(UpdateTarget {
-                    id: WatchId::Shelf(target.id),
+                    id: Some(target.id),
                     watch_generation: Some(generation),
                     target_type: target.kind,
                     source: target.provider,
@@ -125,14 +125,13 @@ pub(super) fn groups(library: &Library) -> Result<Vec<WatchGroup>, String> {
             .into_iter()
             .map(|g| {
                 Ok(WatchGroup {
-                    id: WatchId::Shelf(g.id),
-                    legacy_id: g.legacy_id,
+                    id: g.id,
                     watch_generation: Some(generation),
                     name: g.name,
                     sort_order: g.position,
                     created_at: date(g.created_at)?,
                     updated_at: date(g.updated_at)?,
-                    target_ids: g.targets.into_iter().map(WatchId::Shelf).collect(),
+                    target_ids: g.targets,
                 })
             })
             .collect();
@@ -140,29 +139,15 @@ pub(super) fn groups(library: &Library) -> Result<Vec<WatchGroup>, String> {
     Err("監視グループが変更されています。読み直してください".into())
 }
 
-pub(super) fn target_id(library: &Library, key: WatchId) -> Result<LibraryId, String> {
+/// 棚にある監視対象か。
+pub(super) fn target_id(library: &Library, key: LibraryId) -> Result<LibraryId, String> {
     library
         .watch_targets()
         .map_err(|e| e.to_string())?
         .into_iter()
-        .find(|t| match key {
-            WatchId::Shelf(id) => t.id == id,
-            WatchId::Legacy(id) => t.legacy_id == Some(id),
-        })
-        .map(|t| t.id)
+        .any(|t| t.id == key)
+        .then_some(key)
         .ok_or("監視対象が見つかりません".into())
-}
-pub(super) fn group_id(library: &Library, key: WatchId) -> Result<LibraryId, String> {
-    library
-        .watch_groups()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|t| match key {
-            WatchId::Shelf(id) => t.id == id,
-            WatchId::Legacy(id) => t.legacy_id == Some(id),
-        })
-        .map(|t| t.id)
-        .ok_or("監視グループが見つかりません".into())
 }
 
 pub(super) fn edit(
@@ -185,7 +170,7 @@ pub(super) fn edit(
 
 pub(super) fn selected_targets(
     library: &Library,
-    ids: Option<&[WatchId]>,
+    ids: Option<&[LibraryId]>,
 ) -> Result<Vec<UpdateTarget>, String> {
     let selected = ids
         .map(|ids| {
@@ -199,7 +184,7 @@ pub(super) fn selected_targets(
         .filter(|t| {
             selected
                 .as_ref()
-                .is_none_or(|ids| matches!(t.id,WatchId::Shelf(id) if ids.contains(&id)))
+                .is_none_or(|ids| t.id.is_some_and(|id| ids.contains(&id)))
         })
         .collect())
 }
@@ -262,13 +247,7 @@ pub(super) fn record(
     else {
         return Ok(());
     };
-    let matches = match target.id {
-        WatchId::Shelf(id) => current.id == WatchId::Shelf(id),
-        WatchId::Legacy(id) => target_id(library, WatchId::Legacy(id))
-            .ok()
-            .is_some_and(|id| current.id == WatchId::Shelf(id)),
-    };
-    if !matches {
+    if target.id.is_none() || target.id != current.id {
         return Ok(());
     }
     let updated = updated
@@ -278,146 +257,10 @@ pub(super) fn record(
                 .map_err(|e| e.to_string())
         })
         .transpose()?;
-    if let WatchId::Shelf(id) = current.id {
+    if let Some(id) = current.id {
         library
             .record_watch_check(id, seen, updated, found, failed)
             .map_err(|e| e.to_string())?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::database::{Database, UpdateTargetInput};
-    use std::sync::atomic::AtomicBool;
-
-    #[test]
-    fn migrated_ids_and_groups_are_resolved_in_the_shelf_without_writing_the_old_database() {
-        let root = std::env::temp_dir().join(format!("piep-watch-adapter-{}", LibraryId::now_v7()));
-        std::fs::create_dir_all(root.join("old")).unwrap();
-        {
-            let old =
-                Database::open(&root.join("old/piep.db"), &root.join("old/downloads")).unwrap();
-            let before = old
-                .upsert_update_target(&UpdateTargetInput {
-                    target_type: "author".into(),
-                    source: "pixiv".into(),
-                    source_key: "77".into(),
-                    display_name: "作者".into(),
-                    enabled: true,
-                    metadata_json: None,
-                })
-                .unwrap();
-            let group = old.create_watch_group("毎日").unwrap();
-            old.set_watch_group_members(group, &[before.id.legacy().unwrap()], true)
-                .unwrap();
-            // 開発用 DB の初期化が作った preview の写しは、監視の移行試験から分けて残す。
-            std::fs::create_dir_all(root.join("fixture-backups")).unwrap();
-            for entry in std::fs::read_dir(root.join("old")).unwrap() {
-                let entry = entry.unwrap();
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("piep.db.preview-backup-")
-                {
-                    assert_eq!(entry.path().parent(), Some(root.join("old").as_path()));
-                    std::fs::rename(
-                        entry.path(),
-                        root.join("fixture-backups").join(entry.file_name()),
-                    )
-                    .unwrap();
-                }
-            }
-            let library = Library::create(&root.join("shelf")).unwrap();
-            let source = crate::library::LegacyImporter::open(&root.join("old")).unwrap();
-            let report = source
-                .import(&library, &AtomicBool::new(false), |_| {})
-                .unwrap();
-            assert!(report.unresolved.is_empty(), "{:?}", report.unresolved);
-            library.switch_over().unwrap();
-            let selected = selected_targets(&library, Some(&[before.id])).unwrap();
-            assert_eq!(selected.len(), 1);
-            let after = selected[0].clone();
-            assert!(matches!(after.id, WatchId::Shelf(_)));
-            let saved_groups = groups(&library).unwrap();
-            assert_eq!(saved_groups[0].legacy_id, Some(group));
-            assert_eq!(saved_groups[0].target_ids, [after.id]);
-            let request = LibraryId::now_v7();
-            let id = target_id(&library, after.id).unwrap();
-            let result = edit(
-                &library,
-                Some(request),
-                None,
-                WatchEdit::Enable {
-                    target: id,
-                    enabled: false,
-                },
-            )
-            .unwrap();
-            assert_eq!(
-                edit(
-                    &library,
-                    Some(request),
-                    None,
-                    WatchEdit::Enable {
-                        target: id,
-                        enabled: false
-                    }
-                )
-                .unwrap(),
-                result
-            );
-            assert!(
-                !find(&library, "author", "pixiv", "77")
-                    .unwrap()
-                    .unwrap()
-                    .enabled
-            );
-            assert!(
-                old.find_update_target("author", "pixiv", "77")
-                    .unwrap()
-                    .unwrap()
-                    .enabled
-            );
-            let captured = after;
-            let disabled = find(&library, "author", "pixiv", "77").unwrap().unwrap();
-            edit(
-                &library,
-                None,
-                disabled.watch_generation,
-                WatchEdit::RemoveTarget { target: id },
-            )
-            .unwrap();
-            let recreated = edit(
-                &library,
-                None,
-                None,
-                WatchEdit::Upsert {
-                    target_type: "author".into(),
-                    provider: "pixiv".into(),
-                    key: "77".into(),
-                    name: "作り直した作者".into(),
-                    enabled: true,
-                    options: serde_json::json!({}),
-                },
-            )
-            .unwrap();
-            assert_ne!(recreated.id, id);
-            record(&library, &captured, Some("late"), None, 1, false).unwrap();
-            assert!(find(&library, "author", "pixiv", "77")
-                .unwrap()
-                .unwrap()
-                .last_seen_source_id
-                .is_none());
-            assert_eq!(old.list_watch_groups().unwrap()[0].target_ids, [before.id]);
-            assert!(
-                selected_targets(&library, Some(&[WatchId::Shelf(LibraryId::now_v7())])).is_err()
-            );
-            assert!(selected_targets(&library, Some(&[])).unwrap().is_empty());
-            library.verify().unwrap();
-        }
-        assert_eq!(root.parent(), Some(std::env::temp_dir().as_path()));
-        std::fs::remove_dir_all(root).unwrap();
-    }
 }
