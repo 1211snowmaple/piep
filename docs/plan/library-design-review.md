@@ -2786,9 +2786,14 @@ web 詳細で確認した空欄・通常の空欄の変更を試験した。同�
 - 内蔵サーバー（5）: 消した。棚を配らない（`set_reader_shelf` を呼ぶのは単独サーバーだけ）ので、v1 が
   消えた今は携帯を登録できても `no_library` になるだけだった。設定画面は単独サーバーへの接続だけにし、
   命令 `server_embedded_start`・`server_embedded_stop`・`server_list_interfaces`・`server_revoke_device` を消した。
-  アプリデータの `server\state.db` と `server	ls\` は起動時に消し、設定の `embedded` は読むときに捨てる。
+  アプリデータの `server\state.db` と `server\tls\` は起動時に消し、設定の `embedded` は読むときに捨てる。
 
-残り: Maple への反映と `C:\ServerData\piep\library` の削除（4、了承が要る）。
+- Maple（4）: 2026-11-21 に 0.41.0 へ上げ、置き場と設定は起動時に `shelf` の名前へ移った。旧棚の
+  `library`（約 40GB）と空の `incoming` を消した。
+- 2026-11-22 にデスクトップのアプリデータに残っていた旧棚の `piep.db`（とその控え）と、8 月の旧形式の控え
+  `piep-backup-20260809233033` をごみ箱へ移した。
+
+残りは無い。
 
 **2026-11-22 旧棚の移行記録を落とす（スキーマ 28・29、`claude/remove-old-db`）。** 利用者の了承を得て、
 棚が旧棚と突き合わせるための記録を消した。
