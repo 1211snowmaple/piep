@@ -1,7 +1,7 @@
 # 新ライブラリ基盤の設計評価
 
 評価日: 2026-11-11。対象: `codex/library-data-v2`（デスクトップ・サーバー）と
-`piep-android` の `codex/android-library-v2-design`。設計文書 5 本と実装を読み、稼働棚
+`piep-android` の `codex/android-library-v2-design`。設計文書 5 本と実装を読み（Android 側の設計書は今は [こちら](android-library-v2-device.md)）、稼働棚
 （27,847 作品・約 30 GiB）の全件試走と読み取り専用の調査で確かめた。
 
 この文書は評価と決定を残す。仕様そのものは [データモデル](library-data-model.md)、
