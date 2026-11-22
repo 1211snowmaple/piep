@@ -40,7 +40,7 @@ import { openSingleDialog } from "@/services/dialogApi";
 import { cancelEpubExport, exportEpubBatch, listEpubTemplates } from "@/services/epubApi";
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
-import type { DownloadEntry, ShelfEntry } from "@/types/library";
+import type { ShelfEntry } from "@/types/library";
 import { shelfEntriesByIds } from "@/features/library/shelf";
 import type { EpubQueueId } from "@/app/WorkspaceContext";
 import type { ExportBatchResult, ExportProgress, TemplateInfo } from "@/types/epub";
@@ -80,9 +80,9 @@ export default function EpubPage() {
   // hundred books fired that many IPC round trips on every visit.
   const queueQuery = useQuery({
     queryKey: ["epub-queue-works", epubQueue],
-    queryFn: (): Promise<(ShelfEntry | DownloadEntry)[]> => runtime
+    queryFn: (): Promise<ShelfEntry[]> => runtime
       ? queuedWorks(epubQueue)
-      : Promise.resolve(epubQueue.map((id) => demoWorks.find((work) => work.id === id)).filter((work): work is DownloadEntry => Boolean(work))),
+      : Promise.resolve(epubQueue.map((id) => demoWorks.find((work) => work.id === id)).filter((work): work is ShelfEntry => Boolean(work))),
     enabled: epubQueue.length > 0,
   });
   const works = useMemo(() => queueQuery.data ?? [], [queueQuery.data]);

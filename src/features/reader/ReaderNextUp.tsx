@@ -4,7 +4,7 @@ import { Icons, IconSize } from "@/lib/icons";
 import { formatNumber } from "@/lib/format";
 import { summaryText } from "@/lib/content";
 import { readReadingPosition } from "@/features/library/readingShelf";
-import type { DownloadEntry, ShelfEntry } from "@/types/library";
+import type { ShelfEntry } from "@/types/library";
 
 /**
  * 黙読の速さの目安（字/分）。日本語の小説でよく言われる 400〜600字/分の
@@ -40,7 +40,7 @@ export function NeighborTile({ role, ordered, label, title, work, emphasized, on
   label: string;
   title: string;
   /** 詳しい情報（旧棚の作品か棚の作品）。まだ届いていなければ題だけで描く。 */
-  work?: DownloadEntry | ShelfEntry;
+  work?: ShelfEntry;
   /** 読む順のある並びの「次」。いちばん押されるので目立たせる。 */
   emphasized: boolean;
   onOpen: () => void;
@@ -51,7 +51,7 @@ export function NeighborTile({ role, ordered, label, title, work, emphasized, on
   return (
     <UnstyledButton className="reader-neighbor" data-role={role} data-emphasized={emphasized || undefined} onClick={onOpen} aria-label={`${label}：${title}`}>
       <Box className="reader-neighbor__cover">
-        <WorkCover work={work ?? { coverPath: null, source: "pixiv", sourceId: String(title), title, authorName: "" }} variant="compact" />
+        <WorkCover work={work ?? { source: "pixiv", sourceId: String(title), title, authorName: "" }} variant="compact" />
       </Box>
       <Box className="reader-neighbor__body">
         <Text size="xs" c={emphasized ? "piep" : "dimmed"} fw={700} className="reader-neighbor__label">

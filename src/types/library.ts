@@ -1,8 +1,12 @@
 /** Known providers, while still allowing plugins to add a named provider. */
 export type SourceKind = "pixiv" | "fanbox" | (string & {});
 
-export interface DownloadEntry {
-  id: number;
+/**
+ * 一覧のカードが読む作品の形。`id` は棚の作品の ID（UUID の文字列。プレビューの見本では
+ * "101" のような短い文字列）。表紙は `coverUrl` に URL で持つ。
+ */
+export interface ShelfEntry {
+  id: string;
   source: SourceKind;
   sourceId: string;
   title: string;
@@ -11,10 +15,7 @@ export interface DownloadEntry {
   contentType: string;
   tags: string[];
   excerpt: string | null;
-  coverPath: string | null;
-  jsonPath: string;
-  /** Immutable source file, which can differ from the active edited document. */
-  originalJsonPath?: string | null;
+  coverUrl: string | null;
   assetCount: number;
   fileSizeBytes: number;
   downloadedAt: string;
@@ -40,22 +41,6 @@ export interface DownloadEntry {
   /** Number of older saved revisions that also matched the query. */
   historicalMatchCount?: number;
 }
-
-/**
- * 棚の作品を、一覧のカードが読む形にしたもの。
- *
- * `id` は棚の作品の ID（UUID の文字列）で、旧棚の番号ではない。旧棚の番号で
- * 動く操作（お気に入り・更新監視・EPUB・削除・選択）には渡さない。表紙は
- * `coverUrl` に URL で持つ（旧棚のパスではない）。
- */
-export interface ShelfEntry extends Omit<DownloadEntry, "id"> {
-  id: string;
-  shelf: true;
-  coverUrl: string | null;
-}
-
-/** 一覧に並ぶ作品。旧棚か棚か。 */
-export type ListedWork = DownloadEntry | ShelfEntry;
 
 export interface ScoreReason {
   field: string;
@@ -133,7 +118,7 @@ export interface WorkBlockInput {
 }
 
 export interface ReaderDocument {
-  download: DownloadEntry;
+  download: ShelfEntry;
   assets: AssetEntry[];
   versions: DownloadVersion[];
   html: string;
@@ -143,7 +128,7 @@ export interface ReaderDocument {
 }
 
 export interface ReaderMetadata {
-  download: DownloadEntry;
+  download: ShelfEntry;
   versions: DownloadVersion[];
   assetCount: number;
   isEdited: boolean;
@@ -284,7 +269,7 @@ export interface SearchIndexOptimizationResult {
 }
 
 export interface EditorDocument {
-  download: DownloadEntry;
+  download: ShelfEntry;
   assets: AssetEntry[];
   activeRevision: WorkEditRevision | null;
   draftRevision: WorkEditRevision | null;
@@ -419,9 +404,10 @@ export interface EntityVersion {
   changeSummary: string | null;
 }
 
-export type WatchId = number | string;
-/** 旧棚の番号か、棚の作品 UUID。 */
-export type WorkId = number | string;
+/** 見張る作者・シリーズと、その組の ID（UUID の文字列）。 */
+export type WatchId = string;
+/** 棚の作品の ID（UUID の文字列）。 */
+export type WorkId = string;
 
 export interface UpdateTarget {
   id: WatchId;
@@ -482,8 +468,7 @@ export interface DashboardSummary {
   pendingIndexCount: number;
   topTags: FacetCount[];
   topAuthors: FacetCount[];
-  /** 棚の集計では棚の作品（`ShelfEntry`）が入る。 */
-  recentDownloads: ListedWork[];
+  recentDownloads: ShelfEntry[];
   sourceBreakdown: SourceBreakdown[];
   monthlyDownloads: DashboardTrendPoint[];
 }
@@ -592,8 +577,8 @@ export interface SearchParams {
   personKey?: string | null;
   seriesSource?: string | null;
   seriesKey?: string | null;
-  /** Restricts results to these works. An empty array means an empty shelf. */
-  idsInclude?: number[] | null;
+  /** 読みかけの作品だけ（棚が読書位置から選ぶ）。 */
+  readingOnly?: boolean | null;
   /** Jumps to a numbered page. Ignored for relevance ordering, which is walked
    *  with a score cursor and has no nth page. */
   offset?: number | null;
@@ -604,7 +589,7 @@ export interface SearchParams {
 }
 
 export interface SearchResult {
-  items: DownloadEntry[];
+  items: ShelfEntry[];
   nextCursor: string | null;
   totalEstimate: number | null;
   searchMeta: {

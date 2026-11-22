@@ -7,9 +7,8 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import { theme } from "@/theme";
-import { searchDemoWorks } from "@/mocks/demoData";
 import type { SearchParams } from "@/types/library";
-import LibraryPage, { parseSavedParams, resolveSortBy, rollbackWorkFlag, searchSuggestionAction, updateWorkFlag } from "./LibraryPage";
+import LibraryPage, { parseSavedParams, resolveSortBy, searchSuggestionAction } from "./LibraryPage";
 
 describe("LibraryPage search", () => {
   beforeAll(() => {
@@ -80,7 +79,7 @@ describe("LibraryPage search", () => {
     fireEvent.change(input, { target: { value: "別の言葉" } });
     await waitFor(() => expect(new URLSearchParams(window.location.hash.split("?")[1]).get("q")).toBe("別の言葉"));
     expect(window.location.hash).toContain("intent=exact");
-    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchParams).searchMode === "exact")).toBe(true);
+    expect(client.getQueryCache().findAll({ queryKey: ["shelf"] }).some((entry) => (entry.queryKey[1] as SearchParams).searchMode === "exact")).toBe(true);
   });
 
   it("stages detailed acquisition and revision conditions and exposes their removal before Apply", async () => {
@@ -102,7 +101,7 @@ describe("LibraryPage search", () => {
     await user.click(within(dialog).getByRole("button", { name: "適用" }));
     expect(window.location.hash).toContain("revision=pending_revision");
     expect(window.location.hash).toContain("favorite=0");
-    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchParams).favorite === false)).toBe(true);
+    expect(client.getQueryCache().findAll({ queryKey: ["shelf"] }).some((entry) => (entry.queryKey[1] as SearchParams).favorite === false)).toBe(true);
     expect(window.location.hash).not.toContain("acquisition=");
   });
 
@@ -120,7 +119,7 @@ describe("LibraryPage search", () => {
     await user.click(within(dialog).getByRole("button", { name: "適用" }));
     expect(window.location.hash).toContain("serieskey=220041");
     expect(window.location.hash).toContain("seriessource=pixiv");
-    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchParams).seriesKey === "220041")).toBe(true);
+    expect(client.getQueryCache().findAll({ queryKey: ["shelf"] }).some((entry) => (entry.queryKey[1] as SearchParams).seriesKey === "220041")).toBe(true);
   });
 
   /**
@@ -207,7 +206,7 @@ describe("LibraryPage search", () => {
       expect(query.get("order")).toBe("asc");
     });
     await waitFor(() => {
-      const query = client.getQueryCache().findAll({ queryKey: ["library"] })
+      const query = client.getQueryCache().findAll({ queryKey: ["shelf"] })
         .find((item) => {
           const params = item.queryKey[1] as SearchParams | undefined;
           return params?.sortBy === "asset_count" && params.sortOrder === "asc";
@@ -376,7 +375,7 @@ describe("LibraryPage search", () => {
     const view = render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     try {
       await waitFor(() => {
-        const library = client.getQueryCache().findAll({ queryKey: ["library"] });
+        const library = client.getQueryCache().findAll({ queryKey: ["shelf"] });
         expect(library.some((query) => (query.queryKey[1] as SearchParams)?.revisionFilter === "revised")).toBe(true);
       });
       expect(screen.queryByText("改稿のある作品を確認しています")).toBeNull();
@@ -404,7 +403,7 @@ describe("LibraryPage search", () => {
     expect(screen.getByText("検索対象: 過去版も")).toBeInTheDocument();
     expect(screen.getByLabelText("ライブラリを検索")).toHaveAttribute("placeholder", "現在版と過去版を検索");
     await waitFor(() => {
-      const query = client.getQueryCache().findAll({ queryKey: ["library"] })
+      const query = client.getQueryCache().findAll({ queryKey: ["shelf"] })
         .find((item) => (item.queryKey[1] as SearchParams | undefined)?.versionScope === "all");
       expect(query).toBeDefined();
     });
@@ -427,7 +426,7 @@ describe("LibraryPage search", () => {
     render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     await screen.findAllByText("雨上がりの図書室で");
-    const before = client.getQueryCache().findAll({ queryKey: ["library"] })[0];
+    const before = client.getQueryCache().findAll({ queryKey: ["shelf"] })[0];
     expect(before).toBeDefined();
     const updatedAt = before?.state.dataUpdatedAt;
 
@@ -437,7 +436,7 @@ describe("LibraryPage search", () => {
     // 棚を行で見たいことと、束の中身まで行にしたいことは別である。
     await waitFor(() => expect(window.localStorage.getItem("piep.library-view.library-works")).toBe(JSON.stringify("compact")));
     expect(window.localStorage.getItem("piep.library-view")).toBe(JSON.stringify("gallery"));
-    const libraryQueries = client.getQueryCache().findAll({ queryKey: ["library"] });
+    const libraryQueries = client.getQueryCache().findAll({ queryKey: ["shelf"] });
     expect(libraryQueries).toEqual([before]);
     expect(libraryQueries[0]?.state.dataUpdatedAt).toBe(updatedAt);
   });
@@ -460,7 +459,7 @@ describe("LibraryPage search", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
-    await waitFor(() => expect(client.getQueryData(["library-facets", false])).toBeDefined());
+    await waitFor(() => expect(client.getQueryData(["library-facets"])).toBeDefined());
     fireEvent.change(within(spotlight).getByRole("textbox", { name: "条件を検索" }), { target: { value: "青葉" } });
     // jsdom cannot position the non-portaled dropdown, so Mantine keeps its
     // options hidden even though the same store is open in a real window.
@@ -594,7 +593,7 @@ describe("LibraryPage search", () => {
     expect(screen.getByText("ローカル編集あり")).toBeInTheDocument();
     expect(screen.getByText("表紙あり")).toBeInTheDocument();
     await waitFor(() => {
-      const query = client.getQueryCache().findAll({ queryKey: ["library"] })
+      const query = client.getQueryCache().findAll({ queryKey: ["shelf"] })
         .find((item) => {
           const params = item.queryKey[1] as SearchParams | undefined;
           return params?.revisionFilter === "revised"
@@ -670,28 +669,6 @@ describe("search suggestion actions", () => {
 });
 
 describe("library optimistic flag rollback", () => {
-  it("reverts only the failed work and preserves a later successful mutation", () => {
-    const result = searchDemoWorks();
-    const first = { ...result.items[0], favorite: true, watchUpdates: true };
-    const second = { ...result.items[1], favorite: true, watchUpdates: true };
-    const initial = {
-      pages: [{ ...result, items: [first, second], totalEstimate: 2, searchMeta: { ...result.searchMeta, totalEstimate: 2 } }],
-      pageParams: [null],
-    };
-    const params: SearchParams = { favorite: true };
-
-    // The first operation removes its row from this filtered listing. A second
-    // work then succeeds before the first request reports failure.
-    const afterFirst = updateWorkFlag(initial, first.id, { favorite: false }, params);
-    const afterSecond = updateWorkFlag(afterFirst, second.id, { watchUpdates: false }, params);
-    const rolledBack = rollbackWorkFlag(afterSecond, initial, first.id, "favorite", params);
-
-    expect(rolledBack?.pages[0].items.map((item) => item.id)).toEqual([first.id, second.id]);
-    expect(rolledBack?.pages[0].items.find((item) => item.id === first.id)?.favorite).toBe(true);
-    expect(rolledBack?.pages[0].items.find((item) => item.id === second.id)?.watchUpdates).toBe(false);
-    expect(rolledBack?.pages[0].totalEstimate).toBe(2);
-  });
-
   it("normalizes a pasted deep page and explains how to continue without a deep OFFSET", async () => {
     window.localStorage.setItem("piep.paging-mode", JSON.stringify("pages"));
     window.location.hash = "#/library?page=999999";

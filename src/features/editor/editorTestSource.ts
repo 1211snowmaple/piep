@@ -26,7 +26,7 @@ function toDoc(document: EditorDocument): EditorDoc {
 export function editorTestSource(id: number, api: EditorTestApi): EditorSource {
   const save = (doc: EditorDoc, title: string | null, blocks: WorkBlockInput[]) => api.saveWorkDraft(id, doc.baseVersion, title, blocks);
   return {
-    key: id,
+    key: String(id),
     shelf: true,
     ready: Number.isFinite(id),
     workPath: `/works/${id}`,

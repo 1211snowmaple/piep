@@ -82,7 +82,7 @@ export function CollectionCoverModal({
 
   // 選んだ設定でどう見えるかを、その場で出す。保存してから確かめさせない。
   const coverMember = collection.members.find((member) => memberKey(member) === coverKey) ?? null;
-  const preview = { ...collection, coverMode: mode, coverImagePath: imagePath, coverPath: coverMember?.work?.coverPath ?? coverMember?.coverPath ?? null };
+  const preview = { ...collection, coverMode: mode, coverImagePath: imagePath, coverPath: coverMember?.coverPath ?? null };
   const members = collection.members.filter((member) => member.work);
 
   return (

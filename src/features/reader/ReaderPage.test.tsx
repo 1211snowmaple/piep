@@ -20,7 +20,7 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
 vi.mock("@/features/reader/readerSource", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/features/reader/readerSource")>();
   const { readerTestSource } = await import("@/features/reader/readerTestSource");
-  return { ...actual, previewReaderSource: (id: number) => readerTestSource(actual.previewReaderSource(id), dbApi) };
+  return { ...actual, previewReaderSource: (id: string) => readerTestSource(actual.previewReaderSource(id), dbApi) };
 });
 
 function deferred<T>() {
@@ -45,7 +45,7 @@ describe("ReaderPage position restoration", () => {
     window.localStorage.clear();
     window.sessionStorage.clear();
     window.location.hash = "#/reader/101";
-    const demo = getDemoReader(101);
+    const demo = getDemoReader("101");
     dbApi.getReaderMetadata.mockResolvedValue({
       download: demo.download,
       versions: demo.versions,

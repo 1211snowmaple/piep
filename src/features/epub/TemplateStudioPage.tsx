@@ -53,7 +53,7 @@ import {
   saveTemplateFile,
   saveTemplateSettings,
 } from "@/services/epubApi";
-import type { DownloadEntry, ShelfEntry } from "@/types/library";
+import type { ShelfEntry } from "@/types/library";
 import { searchShelf, shelfEntriesByIds } from "@/features/library/shelf";
 import type {
   DataField,
@@ -826,7 +826,7 @@ function SamplePicker({ sampleId, onChange, runtime }: { sampleId: SampleId | nu
   // 見本は棚から選ぶ。
   const recent = useQuery({
     queryKey: ["template-preview-works", query],
-    queryFn: (): Promise<{ items: Array<DownloadEntry | ShelfEntry> }> => {
+    queryFn: (): Promise<{ items: ShelfEntry[] }> => {
       if (!runtime) return Promise.resolve({ items: [] });
       return searchShelf({ text: query || null, limit: 20, sortBy: "downloaded_at", sortOrder: "desc" });
     },
@@ -835,7 +835,7 @@ function SamplePicker({ sampleId, onChange, runtime }: { sampleId: SampleId | nu
   });
   const current = useQuery({
     queryKey: ["template-preview-work", sampleId],
-    queryFn: (): Promise<Array<DownloadEntry | ShelfEntry>> => {
+    queryFn: (): Promise<ShelfEntry[]> => {
       if (!runtime || sampleId === null) return Promise.resolve([]);
       // 番号の見本は旧棚のころの残りなので引かない。
       return typeof sampleId === "string" ? shelfEntriesByIds([sampleId]) : Promise.resolve([]);

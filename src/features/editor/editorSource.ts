@@ -48,8 +48,8 @@ export interface EditorDoc {
 }
 
 export interface EditorSource {
-  /** 問い合わせの鍵。棚は UUID、プレビューの見本は番号。 */
-  key: number | string;
+  /** 問い合わせの鍵。棚は UUID、プレビューの見本は短い文字列。 */
+  key: string;
   shelf: boolean;
   ready: boolean;
   /** 作品の画面への道。 */
@@ -78,11 +78,11 @@ function fromDemo(document: EditorDocument): EditorDoc {
 }
 
 /** プレビューの見本の作品。保存しない（画面の上で編集を試せるだけ）。 */
-export function previewEditorSource(id: number): EditorSource {
+export function previewEditorSource(id: string): EditorSource {
   return {
     key: id,
     shelf: false,
-    ready: Number.isFinite(id),
+    ready: id !== "",
     workPath: `/works/${id}`,
     load: async () => fromDemo(getDemoEditor(id)),
     saveDraft: async () => undefined,

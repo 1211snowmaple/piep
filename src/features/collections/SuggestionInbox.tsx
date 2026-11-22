@@ -16,7 +16,7 @@ import { getProvider } from "@/lib/providers";
 import { demoSuggestions, getDemoReader } from "@/mocks/demoData";
 import { nameCollectionSuggestion } from "@/services/assistApi";
 import { acceptCollectionSuggestion, listCollectionSuggestions, rejectCollectionSuggestion, suggestionNameOverride } from "@/services/collectionApi";
-import { isTauriRuntime } from "@/services/dbApi";
+import { getAssetUrl, isTauriRuntime } from "@/services/dbApi";
 import { shelfContent, shelfFileUrl } from "@/services/shelfApi";
 import { invalidateShelf } from "@/features/library/shelf";
 import type { CollectionSuggestion, CollectionSuggestionMember, SavedSearchSuggestion, WorkKey } from "@/types/collections";
@@ -309,7 +309,7 @@ function SuggestionReview({ suggestion, draft, busy, accepting, runtime, deferre
             const evidence = [...new Set(member.evidence.filter((item) => !["series_subset", "edition_overlap", "order_conflict", "sequence_gap", "body_unconfirmed", "cross_source", "title_similarity", "content_link", "unregistered"].includes(item.kind)).map((item) => item.label).filter(Boolean))];
             return <li key={key} className="discovery-member" data-excluded={!included || undefined}>
               <div className="discovery-member__selection"><Checkbox checked={included} disabled={busy} aria-label={`${member.title}を含める`} onChange={() => onDraft((current) => ({ ...current, excluded: included ? [...current.excluded, key] : current.excluded.filter((value) => value !== key) }))} />{ordered && <span className="discovery-member__position" aria-label={`${index + 1}番目`}>{index + 1}</span>}</div>
-              <div className="discovery-member__cover"><WorkCover work={member.work ? { ...member, coverUrl: shelfFileUrl(member.coverPath) } : member} variant="compact" /></div>
+              <div className="discovery-member__cover"><WorkCover work={{ ...member, coverUrl: member.work ? shelfFileUrl(member.coverPath) : getAssetUrl(member.coverPath) }} variant="compact" /></div>
               <div className="discovery-member__body"><Text size="sm" fw={650} className="discovery-member__title">{member.title}</Text><div className="discovery-member__meta"><span>{getProvider(member.source).label}</span><span>{member.authorName}</span><span>{member.textLength > 0 ? `${formatNumber(member.textLength)}字` : "本文未取得"}</span></div>
                 {evidence.length > 0 && <ul className="discovery-member__evidence">{evidence.slice(0, 2).map((label) => <li key={label}>{label}</li>)}</ul>}
                 {evidence.length > 2 && <details className="discovery-member__more"><summary>ほかの根拠 {evidence.length - 2}件</summary><ul>{evidence.slice(2).map((label) => <li key={label}>{label}</li>)}</ul></details>}
@@ -343,7 +343,7 @@ function ReaderPreview({ member, runtime, onBack }: { member: CollectionSuggesti
         const shelfPage = await shelfContent(member.work, null, page);
         return { ...shelfPage, plainText: htmlText(shelfPage.html) };
       }
-      const demo = getDemoReader(member.downloadId!);
+      const demo = getDemoReader(String(member.downloadId));
       return Promise.resolve({ page: 0, pageCount: 1, plainText: demo.plainText, html: demo.html, totalPlainTextChars: demo.plainText.length, sourcePageStarts: [0] });
     },
     // 棚の候補は作品の ID で、プレビューの見本は番号で読む。

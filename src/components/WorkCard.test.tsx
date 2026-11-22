@@ -110,7 +110,7 @@ describe("WorkCard", () => {
     expect(screen.getAllByRole("button")).toEqual([card]);
 
     fireEvent.click(screen.getByText("青葉しおり"));
-    expect(onSelect).toHaveBeenCalledWith(demoWorks[0].id, true);
+    expect(onSelect).toHaveBeenCalledWith(demoWorks[0], true);
     expect(window.location.hash).toBe("#/library");
   });
 
@@ -123,7 +123,7 @@ describe("WorkCard", () => {
     const card = screen.getByRole("button", { name: /雨上がりの図書室でを選択解除/ });
     expect(card).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(card);
-    expect(onSelect).toHaveBeenCalledWith(demoWorks[0].id, false);
+    expect(onSelect).toHaveBeenCalledWith(demoWorks[0], false);
   });
 
   it("keeps only the compact selection toggle in the tab order", () => {
@@ -254,14 +254,14 @@ describe("WorkCard", () => {
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ work: shelfId, foundAt: "2026-09-01T00:00:00Z" }]);
     const { id: _legacy, ...rest } = demoWorks[0];
-    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: null, coverPath: null } });
+    renderCard({ work: { ...rest, id: shelfId, coverUrl: null } });
 
     fireEvent.click(await screen.findByRole("button", { name: /未保存の改稿を比較/ }));
     expect(window.location.hash).toBe(`#/works/${shelfId}?tab=history&compare=pending`);
   });
 
   it("uses the shared no-cover treatment and keeps the provider visible", () => {
-    renderCard({ work: { ...demoWorks[0], source: "fanbox", coverPath: null } });
+    renderCard({ work: { ...demoWorks[0], source: "fanbox", coverUrl: null } });
 
     expect(screen.getByLabelText("雨上がりの図書室で（表紙なし）")).toBeInTheDocument();
     expect(screen.getByLabelText("FANBOX")).toBeInTheDocument();
@@ -273,10 +273,10 @@ describe("WorkCard", () => {
     window.location.hash = "#/library";
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     const { id: _legacy, ...rest } = demoWorks[0];
-    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: "http://piep-library.localhost/abc", coverPath: null } });
+    renderCard({ work: { ...rest, id: shelfId, coverUrl: "http://piep-library.localhost/abc" } });
 
     expect(screen.getByAltText("雨上がりの図書室での表紙")).toHaveAttribute("src", "http://piep-library.localhost/abc");
-    // 改稿の印は棚の作品 ID で照らすので、旧棚の番号の改稿は出さない。EPUB のキューには棚の作品の ID で積む。
+    // 改稿の印は作品 ID で照らすので、別の作品の改稿は出さない。EPUB のキューには作品の ID で積む。
     const queue = screen.getByRole("button", { name: /雨上がりの図書室で：EPUBキューに追加/ });
     expect(queue).toBeEnabled();
     fireEvent.click(queue);
@@ -295,7 +295,7 @@ describe("WorkCard", () => {
     shelfApi.shelfSetUserState.mockResolvedValue({ favorite: true, watching: false, generation: 2 });
     const shelfId = "0195f1c2-0000-7000-8000-000000000001";
     const { id: _legacy, ...rest } = demoWorks[0];
-    renderCard({ work: { ...rest, id: shelfId, shelf: true, coverUrl: null, coverPath: null, favorite: false, watchUpdates: false } });
+    renderCard({ work: { ...rest, id: shelfId, coverUrl: null, favorite: false, watchUpdates: false } });
 
     fireEvent.click(await screen.findByRole("button", { name: /雨上がりの図書室で：お気に入りに追加/ }));
     expect(shelfApi.shelfSetUserState).toHaveBeenCalledWith(shelfId, { favorite: true });

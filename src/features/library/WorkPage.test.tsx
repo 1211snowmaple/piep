@@ -40,7 +40,7 @@ describe("WorkPage", () => {
   it("shows the sample work by its number in the browser preview", async () => {
     runtime.tauri = false;
     renderWork("#/works/101");
-    const title = getDemoReader(101).download.title;
+    const title = getDemoReader("101").download.title;
     const heading = await screen.findByRole("heading", { name: title });
     expect(heading).toHaveClass("work-hero__title");
     expect(heading).not.toHaveClass("line-clamp-2");

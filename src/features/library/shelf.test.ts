@@ -136,7 +136,7 @@ describe("shelfRequest", () => {
   });
 
   it("narrows the reading shelf by the shelf's reading positions", () => {
-    expect(shelfRequest({ idsInclude: [3, 1] }).query.filter.reading).toBe(true);
+    expect(shelfRequest({ readingOnly: true }).query.filter.reading).toBe(true);
     expect(shelfRequest({}).query.filter.reading).toBeNull();
   });
 });
@@ -150,7 +150,6 @@ describe("shelfEntry", () => {
     });
     expect(entry.id).toBe(card.id);
     expect(entry.coverUrl).toBe(`http://piep-library.localhost/${"ab".repeat(32)}`);
-    expect(entry.coverPath).toBeNull();
     expect(entry.source).toBe("pixiv");
     expect(entry.currentVersion).toBe(3);
     expect(entry.assetCount).toBe(2);
@@ -197,13 +196,13 @@ const row: ShelfEntityRow = {
 describe("searchShelfEntities", () => {
   it("narrows the authors by the same work filter as the works tab and keeps the watch state", async () => {
     tauri.invoke.mockResolvedValueOnce({ items: [row], total: 9 });
-    const page = await searchShelfEntities("person", "作", 60, 120, { favorite: true, tagsInclude: ["雨"], idsInclude: [3] }, "name", "asc", { watch: "paused", minWorkCount: 2, concluded: null });
+    const page = await searchShelfEntities("person", "作", 60, 120, { favorite: true, tagsInclude: ["雨"], readingOnly: true }, "name", "asc", { watch: "paused", minWorkCount: 2, concluded: null });
     const [command, args] = tauri.invoke.mock.calls[0];
     expect(command).toBe("shelf_entities");
     expect(args).toMatchObject({
       kind: "person",
       query: "作",
-      filter: shelfFilter({ favorite: true, tagsInclude: ["雨"], idsInclude: [3] }),
+      filter: shelfFilter({ favorite: true, tagsInclude: ["雨"], readingOnly: true }),
       series: null,
       scope: { watch: "paused", min_work_count: 2, concluded: null },
       sort: "name",

@@ -5,6 +5,8 @@ import { WorkCover } from "@/components/WorkCover";
 import { formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { ProviderMark } from "@/lib/providers";
+import { getAssetUrl, isTauriRuntime } from "@/services/dbApi";
+import { shelfFileUrl } from "@/services/shelfApi";
 import type { ViewMode } from "@/lib/viewMode";
 import type { WorkCollectionMember } from "@/types/collections";
 
@@ -325,7 +327,7 @@ function MissingMemberCard({ member }: { member: WorkCollectionMember }) {
             sourceId: member.sourceId,
             title: member.title,
             authorName: member.authorName,
-            coverPath: member.coverPath,
+            coverUrl: isTauriRuntime() ? shelfFileUrl(member.coverPath) : getAssetUrl(member.coverPath),
           }}
           variant="compact"
         />

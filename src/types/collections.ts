@@ -1,4 +1,4 @@
-import type { ListedWork, SourceKind } from "@/types/library";
+import type { ShelfEntry, SourceKind } from "@/types/library";
 
 export interface WorkKey {
   source: string;
@@ -85,9 +85,9 @@ export interface WorkCollectionMember {
   createdAt: string;
   updatedAt: string;
   /** 保存済みメンバーの作品そのもの。棚と同じ `WorkCard` に渡せる。 */
-  work: ListedWork | null;
+  work: ShelfEntry | null;
   /** 同じ作品の別版。続きではないので、行の中に畳む。 */
-  editions: ListedWork[];
+  editions: ShelfEntry[];
 }
 
 export interface WorkCollection extends WorkCollectionSummary {

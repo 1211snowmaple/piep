@@ -5,82 +5,83 @@ import type {
   WorkCollectionMember,
   WorkCollectionSummary,
 } from "@/types/collections";
-import type { DashboardSummary, DownloadEntry, EditorDocument, FilterFacets, ReaderDocument, SearchResult } from "@/types/library";
+import type { DashboardSummary, EditorDocument, FilterFacets, ReaderDocument, SearchResult, ShelfEntry } from "@/types/library";
 
 const now = new Date();
 const isoDaysAgo = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
 
-export const demoWorks: DownloadEntry[] = [
+/** プレビューの見本の作品。ID は棚の UUID の代わりの短い文字列（URL を短く保つ）。 */
+export const demoWorks: ShelfEntry[] = [
   {
-    id: 101, source: "pixiv", sourceId: "116041921", title: "雨上がりの図書室で", authorName: "青葉しおり", authorId: "8001234",
+    id: "101", source: "pixiv", sourceId: "116041921", title: "雨上がりの図書室で", authorName: "青葉しおり", authorId: "8001234",
     contentType: "novel", tags: ["創作", "青春", "短編"], excerpt: "雨音が止んだ午後、閉館前の図書室で二人はもう一度出会った。",
-    coverPath: null, jsonPath: "demo/pixiv-101.json", assetCount: 3, fileSizeBytes: 2_480_000, downloadedAt: isoDaysAgo(1), sourceCreatedAt: isoDaysAgo(21), sourceUpdatedAt: isoDaysAgo(2), currentVersion: 3, watchUpdates: true, textLength: 18420, favorite: true,
+    coverUrl: null, assetCount: 3, fileSizeBytes: 2_480_000, downloadedAt: isoDaysAgo(1), sourceCreatedAt: isoDaysAgo(21), sourceUpdatedAt: isoDaysAgo(2), currentVersion: 3, watchUpdates: true, textLength: 18420, favorite: true,
     personId: "8001234", personName: "青葉しおり", seriesId: "220041", seriesTitle: "季節の栞", matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
-    id: 102, source: "fanbox", sourceId: "10483920", title: "制作ノート #24 — 光の設計", authorName: "mizu atelier", authorId: "mizu_atelier",
+    id: "102", source: "fanbox", sourceId: "10483920", title: "制作ノート #24 — 光の設計", authorName: "mizu atelier", authorId: "mizu_atelier",
     contentType: "article", tags: ["制作記録", "背景", "メイキング"], excerpt: "今月制作した一枚の、ラフから仕上げまでをまとめました。",
-    coverPath: null, jsonPath: "demo/fanbox-102.json", assetCount: 12, fileSizeBytes: 18_720_000, downloadedAt: isoDaysAgo(2), sourceCreatedAt: isoDaysAgo(8), sourceUpdatedAt: isoDaysAgo(8), currentVersion: 1, watchUpdates: true, textLength: 6280, favorite: false,
+    coverUrl: null, assetCount: 12, fileSizeBytes: 18_720_000, downloadedAt: isoDaysAgo(2), sourceCreatedAt: isoDaysAgo(8), sourceUpdatedAt: isoDaysAgo(8), currentVersion: 1, watchUpdates: true, textLength: 6280, favorite: false,
     personId: "mizu_atelier", personName: "mizu atelier", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
-    id: 103, source: "pixiv", sourceId: "119238841", title: "星を編む人 第十二話", authorName: "遠野つむぎ", authorId: "4419281",
+    id: "103", source: "pixiv", sourceId: "119238841", title: "星を編む人 第十二話", authorName: "遠野つむぎ", authorId: "4419281",
     contentType: "novel", tags: ["ファンタジー", "連載", "宇宙"], excerpt: "夜空に残された糸をたどり、ミナは星図の外側へ踏み出す。",
-    coverPath: "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%20480%20720%27%3E%3Crect%20width%3D%27480%27%20height%3D%27720%27%20fill%3D%27%2523f5e9e4%27%2F%3E%3Ccircle%20cx%3D%27240%27%20cy%3D%27240%27%20r%3D%2796%27%20fill%3D%27%2523a8552e%27%2F%3E%3Crect%20x%3D%2780%27%20y%3D%27360%27%20width%3D%27320%27%20height%3D%27240%27%20rx%3D%2734%27%20fill%3D%27%2523a8552e%27%2F%3E%3Ctext%20x%3D%27240%27%20y%3D%27710%27%20font-size%3D%2751%27%20text-anchor%3D%27middle%27%20fill%3D%27%2523a8552e%27%3E2%3A3%3C%2Ftext%3E%3C%2Fsvg%3E", jsonPath: "demo/pixiv-103.json", assetCount: 1, fileSizeBytes: 1_120_000, downloadedAt: isoDaysAgo(4), sourceCreatedAt: isoDaysAgo(5), sourceUpdatedAt: isoDaysAgo(5), currentVersion: 1, watchUpdates: true, textLength: 32640, favorite: true,
+    coverUrl: "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%20480%20720%27%3E%3Crect%20width%3D%27480%27%20height%3D%27720%27%20fill%3D%27%2523f5e9e4%27%2F%3E%3Ccircle%20cx%3D%27240%27%20cy%3D%27240%27%20r%3D%2796%27%20fill%3D%27%2523a8552e%27%2F%3E%3Crect%20x%3D%2780%27%20y%3D%27360%27%20width%3D%27320%27%20height%3D%27240%27%20rx%3D%2734%27%20fill%3D%27%2523a8552e%27%2F%3E%3Ctext%20x%3D%27240%27%20y%3D%27710%27%20font-size%3D%2751%27%20text-anchor%3D%27middle%27%20fill%3D%27%2523a8552e%27%3E2%3A3%3C%2Ftext%3E%3C%2Fsvg%3E", assetCount: 1, fileSizeBytes: 1_120_000, downloadedAt: isoDaysAgo(4), sourceCreatedAt: isoDaysAgo(5), sourceUpdatedAt: isoDaysAgo(5), currentVersion: 1, watchUpdates: true, textLength: 32640, favorite: true,
     personId: "4419281", personName: "遠野つむぎ", seriesId: "778120", seriesTitle: "星を編む人", matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
-    id: 104, source: "fanbox", sourceId: "10229018", title: "春の配布素材まとめ", authorName: "こはるデザイン室", authorId: "koharu_design",
+    id: "104", source: "fanbox", sourceId: "10229018", title: "春の配布素材まとめ", authorName: "こはるデザイン室", authorId: "koharu_design",
     contentType: "image", tags: ["素材", "配布", "春"], excerpt: "壁紙と配信用素材をまとめてダウンロードできます。",
-    coverPath: null, jsonPath: "demo/fanbox-104.json", assetCount: 28, fileSizeBytes: 46_210_000, downloadedAt: isoDaysAgo(9), sourceCreatedAt: isoDaysAgo(14), sourceUpdatedAt: isoDaysAgo(10), currentVersion: 2, watchUpdates: false, textLength: 920, favorite: false,
+    coverUrl: null, assetCount: 28, fileSizeBytes: 46_210_000, downloadedAt: isoDaysAgo(9), sourceCreatedAt: isoDaysAgo(14), sourceUpdatedAt: isoDaysAgo(10), currentVersion: 2, watchUpdates: false, textLength: 920, favorite: false,
     personId: "koharu_design", personName: "こはるデザイン室", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
-    id: 105, source: "pixiv", sourceId: "118772304", title: "灯台守の休日", authorName: "七瀬あかり", authorId: "6620117",
+    id: "105", source: "pixiv", sourceId: "118772304", title: "灯台守の休日", authorName: "七瀬あかり", authorId: "6620117",
     contentType: "novel", tags: ["日常", "ほのぼの", "短編"], excerpt: "灯りを落とした朝、灯台守は初めて島の外を見に行く支度をした。",
-    coverPath: "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%20800%20450%27%3E%3Crect%20width%3D%27800%27%20height%3D%27450%27%20fill%3D%27%2523e9f2ea%27%2F%3E%3Ccircle%20cx%3D%27400%27%20cy%3D%27150%27%20r%3D%2790%27%20fill%3D%27%25233d6349%27%2F%3E%3Crect%20x%3D%27133%27%20y%3D%27225%27%20width%3D%27533%27%20height%3D%27150%27%20rx%3D%2732%27%20fill%3D%27%25233d6349%27%2F%3E%3Ctext%20x%3D%27400%27%20y%3D%27440%27%20font-size%3D%2732%27%20text-anchor%3D%27middle%27%20fill%3D%27%25233d6349%27%3E16%3A9%3C%2Ftext%3E%3C%2Fsvg%3E", jsonPath: "demo/pixiv-105.json", assetCount: 2, fileSizeBytes: 1_640_000, downloadedAt: isoDaysAgo(3), sourceCreatedAt: isoDaysAgo(11), sourceUpdatedAt: isoDaysAgo(11), currentVersion: 1, watchUpdates: true, textLength: 12980, favorite: false,
+    coverUrl: "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%20800%20450%27%3E%3Crect%20width%3D%27800%27%20height%3D%27450%27%20fill%3D%27%2523e9f2ea%27%2F%3E%3Ccircle%20cx%3D%27400%27%20cy%3D%27150%27%20r%3D%2790%27%20fill%3D%27%25233d6349%27%2F%3E%3Crect%20x%3D%27133%27%20y%3D%27225%27%20width%3D%27533%27%20height%3D%27150%27%20rx%3D%2732%27%20fill%3D%27%25233d6349%27%2F%3E%3Ctext%20x%3D%27400%27%20y%3D%27440%27%20font-size%3D%2732%27%20text-anchor%3D%27middle%27%20fill%3D%27%25233d6349%27%3E16%3A9%3C%2Ftext%3E%3C%2Fsvg%3E", assetCount: 2, fileSizeBytes: 1_640_000, downloadedAt: isoDaysAgo(3), sourceCreatedAt: isoDaysAgo(11), sourceUpdatedAt: isoDaysAgo(11), currentVersion: 1, watchUpdates: true, textLength: 12980, favorite: false,
     personId: "6620117", personName: "七瀬あかり", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
-    id: 106, source: "pixiv", sourceId: "119104552", title: "星を編む人 第十一話", authorName: "遠野つむぎ", authorId: "4419281",
+    id: "106", source: "pixiv", sourceId: "119104552", title: "星を編む人 第十一話", authorName: "遠野つむぎ", authorId: "4419281",
     contentType: "novel", tags: ["ファンタジー", "連載", "宇宙"], excerpt: "観測塔に残されたのは、誰も読めない一枚の星図だけだった。",
-    coverPath: "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%20600%20900%27%3E%3Crect%20width%3D%27600%27%20height%3D%27900%27%20fill%3D%27%2523eef0f6%27%2F%3E%3Ccircle%20cx%3D%27300%27%20cy%3D%27300%27%20r%3D%27120%27%20fill%3D%27%252340506e%27%2F%3E%3Crect%20x%3D%27100%27%20y%3D%27450%27%20width%3D%27400%27%20height%3D%27300%27%20rx%3D%2742%27%20fill%3D%27%252340506e%27%2F%3E%3Ctext%20x%3D%27300%27%20y%3D%27890%27%20font-size%3D%2764%27%20text-anchor%3D%27middle%27%20fill%3D%27%252340506e%27%3E2%3A3%3C%2Ftext%3E%3C%2Fsvg%3E", jsonPath: "demo/pixiv-106.json", assetCount: 1, fileSizeBytes: 1_080_000, downloadedAt: isoDaysAgo(5), sourceCreatedAt: isoDaysAgo(19), sourceUpdatedAt: isoDaysAgo(19), currentVersion: 2, watchUpdates: true, textLength: 30110, favorite: false,
+    coverUrl: "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%20600%20900%27%3E%3Crect%20width%3D%27600%27%20height%3D%27900%27%20fill%3D%27%2523eef0f6%27%2F%3E%3Ccircle%20cx%3D%27300%27%20cy%3D%27300%27%20r%3D%27120%27%20fill%3D%27%252340506e%27%2F%3E%3Crect%20x%3D%27100%27%20y%3D%27450%27%20width%3D%27400%27%20height%3D%27300%27%20rx%3D%2742%27%20fill%3D%27%252340506e%27%2F%3E%3Ctext%20x%3D%27300%27%20y%3D%27890%27%20font-size%3D%2764%27%20text-anchor%3D%27middle%27%20fill%3D%27%252340506e%27%3E2%3A3%3C%2Ftext%3E%3C%2Fsvg%3E", assetCount: 1, fileSizeBytes: 1_080_000, downloadedAt: isoDaysAgo(5), sourceCreatedAt: isoDaysAgo(19), sourceUpdatedAt: isoDaysAgo(19), currentVersion: 2, watchUpdates: true, textLength: 30110, favorite: false,
     personId: "4419281", personName: "遠野つむぎ", seriesId: "778120", seriesTitle: "星を編む人", matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
-    id: 107, source: "fanbox", sourceId: "10502377", title: "今月のラフ集", authorName: "mizu atelier", authorId: "mizu_atelier",
+    id: "107", source: "fanbox", sourceId: "10502377", title: "今月のラフ集", authorName: "mizu atelier", authorId: "mizu_atelier",
     contentType: "image", tags: ["ラフ", "制作記録", "限定"], excerpt: "採用されなかった構図もまとめて置いておきます。",
-    coverPath: null, jsonPath: "demo/fanbox-107.json", assetCount: 34, fileSizeBytes: 62_400_000, downloadedAt: isoDaysAgo(6), sourceCreatedAt: isoDaysAgo(6), sourceUpdatedAt: isoDaysAgo(6), currentVersion: 1, watchUpdates: true, textLength: 640, favorite: true,
+    coverUrl: null, assetCount: 34, fileSizeBytes: 62_400_000, downloadedAt: isoDaysAgo(6), sourceCreatedAt: isoDaysAgo(6), sourceUpdatedAt: isoDaysAgo(6), currentVersion: 1, watchUpdates: true, textLength: 640, favorite: true,
     personId: "mizu_atelier", personName: "mizu atelier", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
-    id: 108, source: "pixiv", sourceId: "117903466", title: "機械仕掛けの海 第三章", authorName: "白鳥ケイ", authorId: "5528830",
+    id: "108", source: "pixiv", sourceId: "117903466", title: "機械仕掛けの海 第三章", authorName: "白鳥ケイ", authorId: "5528830",
     contentType: "novel", tags: ["SF", "連載", "長編"], excerpt: "潜水都市の照明が落ちる三分間だけ、彼女は本当のことを話した。",
-    coverPath: null, jsonPath: "demo/pixiv-108.json", assetCount: 1, fileSizeBytes: 2_020_000, downloadedAt: isoDaysAgo(7), sourceCreatedAt: isoDaysAgo(24), sourceUpdatedAt: isoDaysAgo(12), currentVersion: 4, watchUpdates: true, textLength: 41250, favorite: true,
+    coverUrl: null, assetCount: 1, fileSizeBytes: 2_020_000, downloadedAt: isoDaysAgo(7), sourceCreatedAt: isoDaysAgo(24), sourceUpdatedAt: isoDaysAgo(12), currentVersion: 4, watchUpdates: true, textLength: 41250, favorite: true,
     personId: "5528830", personName: "白鳥ケイ", seriesId: "641902", seriesTitle: "機械仕掛けの海", matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
-    id: 109, source: "fanbox", sourceId: "10318744", title: "配信環境をつくり直した話", authorName: "こはるデザイン室", authorId: "koharu_design",
+    id: "109", source: "fanbox", sourceId: "10318744", title: "配信環境をつくり直した話", authorName: "こはるデザイン室", authorId: "koharu_design",
     contentType: "article", tags: ["制作記録", "配信", "機材"], excerpt: "机の上をやり直したら、配信の準備が十分で終わるようになりました。",
-    coverPath: null, jsonPath: "demo/fanbox-109.json", assetCount: 9, fileSizeBytes: 12_880_000, downloadedAt: isoDaysAgo(12), sourceCreatedAt: isoDaysAgo(16), sourceUpdatedAt: isoDaysAgo(16), currentVersion: 1, watchUpdates: false, textLength: 5410, favorite: false,
+    coverUrl: null, assetCount: 9, fileSizeBytes: 12_880_000, downloadedAt: isoDaysAgo(12), sourceCreatedAt: isoDaysAgo(16), sourceUpdatedAt: isoDaysAgo(16), currentVersion: 1, watchUpdates: false, textLength: 5410, favorite: false,
     personId: "koharu_design", personName: "こはるデザイン室", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
-    id: 110, source: "pixiv", sourceId: "115880210", title: "夏、置き去りの自転車", authorName: "青葉しおり", authorId: "8001234",
+    id: "110", source: "pixiv", sourceId: "115880210", title: "夏、置き去りの自転車", authorName: "青葉しおり", authorId: "8001234",
     contentType: "novel", tags: ["創作", "青春", "短編"], excerpt: "河原に一台だけ残された自転車を、その夏の終わりまで誰も動かさなかった。",
-    coverPath: null, jsonPath: "demo/pixiv-110.json", assetCount: 4, fileSizeBytes: 2_960_000, downloadedAt: isoDaysAgo(15), sourceCreatedAt: isoDaysAgo(38), sourceUpdatedAt: isoDaysAgo(31), currentVersion: 2, watchUpdates: true, textLength: 21740, favorite: true,
+    coverUrl: null, assetCount: 4, fileSizeBytes: 2_960_000, downloadedAt: isoDaysAgo(15), sourceCreatedAt: isoDaysAgo(38), sourceUpdatedAt: isoDaysAgo(31), currentVersion: 2, watchUpdates: true, textLength: 21740, favorite: true,
     personId: "8001234", personName: "青葉しおり", seriesId: "220041", seriesTitle: "季節の栞", matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
-    id: 111, source: "pixiv", sourceId: "114620935", title: "猫と喫茶店の午後", authorName: "三日月ゆの", authorId: "7714002",
+    id: "111", source: "pixiv", sourceId: "114620935", title: "猫と喫茶店の午後", authorName: "三日月ゆの", authorId: "7714002",
     contentType: "novel", tags: ["日常", "ほのぼの", "猫"], excerpt: "看板猫が席を選ぶので、この店では座る場所を客が決められない。",
-    coverPath: null, jsonPath: "demo/pixiv-111.json", assetCount: 2, fileSizeBytes: 1_380_000, downloadedAt: isoDaysAgo(18), sourceCreatedAt: isoDaysAgo(45), sourceUpdatedAt: isoDaysAgo(45), currentVersion: 1, watchUpdates: false, textLength: 9860, favorite: false,
+    coverUrl: null, assetCount: 2, fileSizeBytes: 1_380_000, downloadedAt: isoDaysAgo(18), sourceCreatedAt: isoDaysAgo(45), sourceUpdatedAt: isoDaysAgo(45), currentVersion: 1, watchUpdates: false, textLength: 9860, favorite: false,
     personId: "7714002", personName: "三日月ゆの", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
-    id: 112, source: "fanbox", sourceId: "10088451", title: "壁紙セット 2026 夏", authorName: "こはるデザイン室", authorId: "koharu_design",
+    id: "112", source: "fanbox", sourceId: "10088451", title: "壁紙セット 2026 夏", authorName: "こはるデザイン室", authorId: "koharu_design",
     contentType: "image", tags: ["素材", "配布", "夏"], excerpt: "デスクトップとスマートフォン向けに、同じ絵柄を並べて書き出しました。",
-    coverPath: null, jsonPath: "demo/fanbox-112.json", assetCount: 16, fileSizeBytes: 28_940_000, downloadedAt: isoDaysAgo(23), sourceCreatedAt: isoDaysAgo(27), sourceUpdatedAt: isoDaysAgo(27), currentVersion: 1, watchUpdates: false, textLength: 780, favorite: false,
+    coverUrl: null, assetCount: 16, fileSizeBytes: 28_940_000, downloadedAt: isoDaysAgo(23), sourceCreatedAt: isoDaysAgo(27), sourceUpdatedAt: isoDaysAgo(27), currentVersion: 1, watchUpdates: false, textLength: 780, favorite: false,
     personId: "koharu_design", personName: "こはるデザイン室", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
   },
 ];
@@ -162,7 +163,7 @@ export function searchDemoWorks(text = "", source?: string | null): SearchResult
   };
 }
 
-export function getDemoWork(id: number): DownloadEntry {
+export function getDemoWork(id: string): ShelfEntry {
   const work = demoWorks.find((item) => item.id === id);
   if (!work) throw new Error("作品が見つかりません");
   return work;
@@ -198,12 +199,12 @@ const demoHtml = `
   </a>
 `;
 
-export function getDemoReader(id: number): ReaderDocument {
+export function getDemoReader(id: string): ReaderDocument {
   const download = getDemoWork(id);
   return {
     download,
-    assets: id === 108 ? [{ id:10801,downloadId:108,assetType:"illustration",filename:"preview-sample.svg",localPath:`data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1800"><rect width="1200" height="1800" fill="#d8efff"/><circle cx="600" cy="800" r="350" fill="#279cff"/><path d="M0 1300 600 900 1200 1300V1800H0Z" fill="#729f12"/></svg>')}`,originalUrl:null,mimeType:"image/svg+xml",fileSizeBytes:250 }] : [],
-    versions: [{ id: 1, downloadId: download.id, version: download.currentVersion, contentHash: null, textLength: download.textLength, jsonPath: download.jsonPath, originalJsonPath: null, assetCount: download.assetCount, fileSizeBytes: download.fileSizeBytes, createdAt: download.downloadedAt, changeSummary: "初回保存" }],
+    assets: id === "108" ? [{ id:10801,downloadId:108,assetType:"illustration",filename:"preview-sample.svg",localPath:`data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1800"><rect width="1200" height="1800" fill="#d8efff"/><circle cx="600" cy="800" r="350" fill="#279cff"/><path d="M0 1300 600 900 1200 1300V1800H0Z" fill="#729f12"/></svg>')}`,originalUrl:null,mimeType:"image/svg+xml",fileSizeBytes:250 }] : [],
+    versions: [{ id: 1, downloadId: Number(download.id), version: download.currentVersion, contentHash: null, textLength: download.textLength, jsonPath: `demo/${download.id}.json`, originalJsonPath: null, assetCount: download.assetCount, fileSizeBytes: download.fileSizeBytes, createdAt: download.downloadedAt, changeSummary: "初回保存" }],
     html: demoHtml,
     plainText: demoHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),
     isEdited: false,
@@ -211,7 +212,7 @@ export function getDemoReader(id: number): ReaderDocument {
   };
 }
 
-export function getDemoEditor(id: number): EditorDocument {
+export function getDemoEditor(id: string): EditorDocument {
   const reader = getDemoReader(id);
   return {
     download: reader.download,
@@ -236,15 +237,15 @@ export function getDemoEditor(id: number): EditorDocument {
  * 実データで起きた見え方 — 表紙のあるもの、無いもの、名前の長いもの — を
  * ひととおり並べてある。
  */
-function demoMember(work: DownloadEntry, position: number): WorkCollectionMember {
+function demoMember(work: ShelfEntry, position: number): WorkCollectionMember {
   return {
     collectionId: "demo-collection",
     source: work.source,
     sourceId: work.sourceId,
-    downloadId: work.id,
+    downloadId: Number(work.id),
     title: work.title,
     authorName: work.authorName,
-    coverPath: work.coverPath,
+    coverPath: work.coverUrl,
     textLength: work.textLength,
     position,
     memberRole: "main",
@@ -262,7 +263,7 @@ function demoMember(work: DownloadEntry, position: number): WorkCollectionMember
 function demoCollection(
   id: string,
   name: string,
-  members: DownloadEntry[],
+  members: ShelfEntry[],
   overrides: Partial<WorkCollectionSummary> = {},
 ): WorkCollection {
   return {
@@ -270,8 +271,8 @@ function demoCollection(
     name,
     description: null,
     collectionKind: "ordered",
-    coverDownloadId: members[0]?.id ?? null,
-    coverPath: members[0]?.coverPath ?? null,
+    coverDownloadId: members[0] ? Number(members[0].id) : null,
+    coverPath: members[0]?.coverUrl ?? null,
     coverMode: "mosaic",
     coverImagePath: null,
     coverTiles: members.slice(0, 4).map((work) => ({
@@ -279,7 +280,7 @@ function demoCollection(
       sourceId: work.sourceId,
       title: work.title,
       authorName: work.authorName,
-      coverPath: work.coverPath,
+      coverPath: work.coverUrl,
     })),
     nameSource: "manual",
     revision: 1,
@@ -322,14 +323,14 @@ export const demoCollections: WorkCollection[] = [
  * 意図的に極端なものを混ぜてある。2作だけの束（「＋N」が出ない）、題名が
  * 長い束（行送りと省略）、12作の束（畳んだ一覧）、表紙の無い束。
  */
-function demoSuggestionMember(work: DownloadEntry, position: number): CollectionSuggestionMember {
+function demoSuggestionMember(work: ShelfEntry, position: number): CollectionSuggestionMember {
   return {
     source: work.source,
     sourceId: work.sourceId,
-    downloadId: work.id,
+    downloadId: Number(work.id),
     title: work.title,
     authorName: work.authorName,
-    coverPath: work.coverPath,
+    coverPath: work.coverUrl,
     textLength: work.textLength,
     proposedPosition: position,
     score: 1,
@@ -341,7 +342,7 @@ function demoSuggestionMember(work: DownloadEntry, position: number): Collection
 function demoSuggestion(
   id: string,
   proposedName: string,
-  members: DownloadEntry[],
+  members: ShelfEntry[],
   overrides: Partial<CollectionSuggestion> = {},
 ): CollectionSuggestion {
   return {

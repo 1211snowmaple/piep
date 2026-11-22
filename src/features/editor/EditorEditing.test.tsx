@@ -38,7 +38,7 @@ function block(order: number, blockType: WorkBlock["blockType"], text: string | 
 }
 
 function documentWith(blocks: WorkBlock[], extra: Partial<EditorDocument> = {}): EditorDocument {
-  return { ...getDemoEditor(101), blocks, ...extra };
+  return { ...getDemoEditor("101"), blocks, ...extra };
 }
 
 function renderEditor() {
@@ -199,7 +199,7 @@ describe("書きかけの捨て方と、土台の版", () => {
    * 編集版は読書画面と EPUB を覆うので、新しい本文が黙って隠れていた。
    */
   it("土台の版が古いときは、そう告げる", async () => {
-    const demo = getDemoEditor(101);
+    const demo = getDemoEditor("101");
     dbApi.getEditorDocument.mockResolvedValue({
       ...demo,
       download: { ...demo.download, currentVersion: 3 },

@@ -50,6 +50,7 @@ import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler
 import { TargetsPanel, type GroupAction, type TargetAction } from "./WatchTargetsPanel";
 import type { UpdateTarget, WatchGroup, WatchId } from "@/types/library";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
+import { SHELF_WORK_ID } from "@/services/shelfApi";
 
 export { TargetHealthBadge } from "./WatchTargetsPanel";
 
@@ -92,10 +93,9 @@ export function isSettledCandidateStatus(status: string): boolean {
 const SHELF_SCOPE_LIMIT = 500;
 const CANDIDATE_DISPLAY_PAGE_SIZE = 60;
 
-export function parseWorkId(value: string | null): number | null {
-  if (!value || !/^\d+$/.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+/** `?work=` の作品。棚の作品の ID（UUID）だけを受け取る。 */
+export function parseWorkId(value: string | null): string | null {
+  return value && SHELF_WORK_ID.test(value) ? value.toLowerCase() : null;
 }
 
 export default function UpdatesPage() {
@@ -154,13 +154,13 @@ export default function UpdatesPage() {
   // 一覧に出すのは「自分で選んだ作者・シリーズ」だけ。作品の監視は
   // 作品カードのトグルが持っていて、ここに混ぜると名前が並んで分かりにくい。
   const targets = useQuery({ queryKey: ["update-targets"], queryFn: async () => runtime ? (await listUpdateTargets<UpdateTarget>(null, false)).filter((target) => target.targetType === "author" || target.targetType === "series") : ([
-    { id: 1, targetType: "author", source: "pixiv", sourceKey: "8001234", displayName: "青葉しおり", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12002", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), watchGroups: ["毎日見る"] },
-    { id: 2, targetType: "series", source: "pixiv", sourceKey: "778120", displayName: "星を編む人", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12001", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), watchGroups: ["毎日見る"] },
-    { id: 3, targetType: "author", source: "fanbox", sourceKey: "mizu-atelier", displayName: "mizu atelier", enabled: false, lastCheckedAt: new Date(Date.now() - 86_400_000).toISOString(), lastSeenSourceId: null, lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+    { id: "demo-target-1", targetType: "author", source: "pixiv", sourceKey: "8001234", displayName: "青葉しおり", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12002", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), watchGroups: ["毎日見る"] },
+    { id: "demo-target-2", targetType: "series", source: "pixiv", sourceKey: "778120", displayName: "星を編む人", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12001", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), watchGroups: ["毎日見る"] },
+    { id: "demo-target-3", targetType: "author", source: "fanbox", sourceKey: "mizu-atelier", displayName: "mizu atelier", enabled: false, lastCheckedAt: new Date(Date.now() - 86_400_000).toISOString(), lastSeenSourceId: null, lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
   ] as UpdateTarget[]) });
   // 利用者が作った監視グループ。確認する範囲にも、自動確認の範囲にも出る。
   const groups = useQuery({ queryKey: ["watch-groups"], queryFn: async (): Promise<WatchGroup[]> => runtime ? listWatchGroups() : [
-    { id: 1, name: "毎日見る", sortOrder: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), targetIds: [1, 2] },
+    { id: "demo-group-1", name: "毎日見る", sortOrder: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), targetIds: ["demo-target-1", "demo-target-2"] },
   ] });
   const groupList = groups.data ?? [];
   /** グループの中で、止めていない対象。確認に送るのはこれだけ。 */
@@ -345,7 +345,8 @@ export default function UpdatesPage() {
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["update-targets"] }),
   });
   const groupMutation = useMutation({
-    mutationFn: async (input: GroupAction): Promise<WatchId | null> => {
+    // 作ったグループの ID か、入れた・外した件数。
+    mutationFn: async (input: GroupAction): Promise<WatchId | number | null> => {
       if (!runtime) return null;
       if (input.action === "create") {
         const id = await createWatchGroup(input.name);

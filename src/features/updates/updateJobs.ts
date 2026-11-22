@@ -117,8 +117,7 @@ function mergeProgressDelta(
  * これを忘れると、確認が終わっても画面が前の答えを出しつづける。
  *
  * 「自動保存」を選んだジョブは、確認するだけでなく**作品そのものを増やす**。
- * 増えた分が古くするのは、消したときに古くなるものと同じ場所である。
- * 一覧の定義は `deletedWorkCleanup.ts` にあるので、そちらに合わせる。
+ * 増えた分が古くするのは、作品の一覧・束・数を出している画面である。
  */
 export function invalidateAfterUpdateJob(client: QueryClient): void {
   client.invalidateQueries({ queryKey: ["work-acquisition"] });

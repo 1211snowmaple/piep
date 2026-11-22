@@ -34,7 +34,7 @@ import { openSingleDialog } from "@/services/dialogApi";
 import { exportCollectionEpub } from "@/services/epubApi";
 import { readExportSettings, toCompressOptions } from "@/features/epub/exportSettings";
 import type { CollectionAdditionCandidate, WorkCollection, WorkCollectionInput, WorkCollectionMember, WorkKey } from "@/types/collections";
-import type { ListedWork } from "@/types/library";
+import type { ShelfEntry } from "@/types/library";
 import { CollectionAddWorksModal } from "./CollectionAddWorksModal";
 import { CollectionAdditionsModal } from "./CollectionAdditionsModal";
 import { CollectionCoverModal } from "./CollectionCoverModal";
@@ -142,7 +142,7 @@ export default function CollectionPage() {
 type MemberAction =
   | { type: "remove"; keys: WorkKey[] }
   | { type: "reorder"; keys: WorkKey[] }
-  | { type: "add"; works: ListedWork[] }
+  | { type: "add"; works: ShelfEntry[] }
   | { type: "sort"; mode: "published" | "episode" };
 
 /** 棚の編集の一回を、作品の鍵で組む。 */

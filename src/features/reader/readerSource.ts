@@ -11,8 +11,8 @@ import type { ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearc
 
 /** 読む画面の頭に出す作品の情報。 */
 export interface ReaderHead {
-  /** 作品の画面の ID（棚は UUID、プレビューの見本は番号）。読書位置・しおりもこれで引く。 */
-  id: number | string;
+  /** 作品の画面の ID（棚は UUID、プレビューの見本は短い文字列）。読書位置・しおりもこれで引く。 */
+  id: string;
   title: string;
   authorName: string;
   source: string;
@@ -36,7 +36,6 @@ export interface ReaderHead {
 /** 作品の頭。見本なら見本の読む画面の情報も持つ（前後の作品）。 */
 export interface ReaderHeadData {
   head: ReaderHead;
-  legacy: ReaderMetadata | null;
 }
 
 /**
@@ -50,8 +49,8 @@ export interface ReaderHeadQuery {
 }
 
 export interface ReaderSource {
-  /** 問い合わせの鍵。棚は UUID、見本は番号。読書位置・しおりは頭の `id` で引く。 */
-  key: number | string;
+  /** 問い合わせの鍵。棚は UUID、見本は短い文字列。読書位置・しおりは頭の `id` で引く。 */
+  key: string;
   /** 棚の作品（見本でない）。 */
   shelf: boolean;
   head: ReaderHeadQuery;
@@ -93,7 +92,7 @@ function demoHead(doc: ReaderMetadata): ReaderHead {
 }
 
 /** ブラウザのプレビューの見本の作品。 */
-export function previewReaderSource(id: number): ReaderSource {
+export function previewReaderSource(id: string): ReaderSource {
   const demo = () => getDemoReader(id);
   return {
     key: id,
@@ -101,7 +100,7 @@ export function previewReaderSource(id: number): ReaderSource {
     head: {
       queryKey: ["reader-metadata", id],
       queryFn: (): Promise<ReaderMetadata> => Promise.resolve((() => { const sample = demo(); return { download: sample.download, versions: sample.versions, assetCount: sample.assets.length, isEdited: sample.isEdited, activeEditRevision: sample.activeEditRevision, draftEditRevision: null }; })()),
-      select: (data) => ({ head: demoHead(data as ReaderMetadata), legacy: data as ReaderMetadata }),
+      select: (data) => ({ head: demoHead(data as ReaderMetadata) }),
     },
     page: () => Promise.resolve((() => { const sample = demo(); return { page: 0, pageCount: 1, html: sample.html, plainText: sample.plainText, totalPlainTextChars: sample.plainText.length, sourcePageStarts: [0] }; })()),
     outline: () => Promise.resolve([]),
@@ -153,7 +152,7 @@ export function shelfReaderSource(id: string): ReaderSource {
     head: {
       queryKey: ["shelf-work", id],
       queryFn: load,
-      select: (data) => ({ head: shelfHead(data as ShelfWork), legacy: null }),
+      select: (data) => ({ head: shelfHead(data as ShelfWork) }),
     },
     page: async (version, page) => {
       const content = await shelfContent(id, await snapshotOf(version), page);

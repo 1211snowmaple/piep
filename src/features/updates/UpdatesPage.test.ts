@@ -28,12 +28,11 @@ describe("update candidate selection", () => {
 });
 
 describe("work-scoped update URLs", () => {
-  it("only accepts positive safe integer work IDs", () => {
-    expect(parseWorkId("42")).toBe(42);
+  it("only accepts shelf work IDs", () => {
+    expect(parseWorkId("0190A1B2-C3D4-7E5F-8A9B-0C1D2E3F4A5B")).toBe("0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b");
+    expect(parseWorkId("42")).toBeNull();
     expect(parseWorkId("abc")).toBeNull();
-    expect(parseWorkId("1e3")).toBeNull();
-    expect(parseWorkId("0")).toBeNull();
-    expect(parseWorkId("99999999999999999999")).toBeNull();
+    expect(parseWorkId(null)).toBeNull();
   });
 });
 

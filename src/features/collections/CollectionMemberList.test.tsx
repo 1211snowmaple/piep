@@ -15,10 +15,10 @@ function member(overrides: Partial<WorkCollectionMember> = {}): WorkCollectionMe
     collectionId: "collection-1",
     source: work.source,
     sourceId: work.sourceId,
-    downloadId: work.id,
+    downloadId: null,
     title: work.title,
     authorName: work.authorName,
-    coverPath: work.coverPath,
+    coverPath: work.coverUrl,
     textLength: work.textLength,
     position: 0,
     memberRole: "main",
@@ -37,7 +37,7 @@ function member(overrides: Partial<WorkCollectionMember> = {}): WorkCollectionMe
 function renderList(props: Partial<React.ComponentProps<typeof CollectionMemberList>> = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const merged: React.ComponentProps<typeof CollectionMemberList> = {
-    members: [member(), member({ sourceId: "202", downloadId: 102, title: "つづき", position: 1, work: { ...demoWorks[1], id: 102 } })],
+    members: [member(), member({ sourceId: "202", downloadId: 102, title: "つづき", position: 1, work: { ...demoWorks[1], id: "102" } })],
     ordered: true,
     view: "compact",
     busy: false,
@@ -164,7 +164,7 @@ describe("CollectionMemberList", () => {
 
   it("folds editions instead of listing them as separate members", () => {
     renderList({
-      members: [member({ editions: [{ ...demoWorks[1], id: 900, title: "【改稿版】星の航路" }] })],
+      members: [member({ editions: [{ ...demoWorks[1], id: "900", title: "【改稿版】星の航路" }] })],
     });
     // 畳んだ状態では、別版の題名は開くまで数に入らない。
     const toggle = screen.getByRole("button", { name: /別版 1件/ });
@@ -203,7 +203,7 @@ describe("CollectionMemberList", () => {
       downloadId: 1000 + index,
       title: `${index + 1}番目`,
       position: index,
-      work: { ...demoWorks[0], id: 1000 + index, title: `${index + 1}番目` },
+      work: { ...demoWorks[0], id: String(1000 + index), title: `${index + 1}番目` },
     }));
 
     it("そのページのぶんだけ描く", () => {

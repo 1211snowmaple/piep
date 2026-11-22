@@ -41,9 +41,9 @@ export function invalidateWorkSetViews(queryClient: QueryClient): void {
  * 一覧はひとつだけ置く。
  *
  * `workId` を渡さなければ、すべての作品の詳細を古いものにする。携帯がサーバー越しに
- * 変えたときは、どの作品かを画面の番号で知らせないため。
+ * 変えたときは、どの作品かを知らせないため。
  */
-export function invalidateWorkFlagViews(queryClient: QueryClient, workId?: number): Promise<unknown> {
+export function invalidateWorkFlagViews(queryClient: QueryClient, workId?: string): Promise<unknown> {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: ["library"] }),
     queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] }),

@@ -11,9 +11,6 @@ import { SHELF_WORK_ID } from "@/services/shelfApi";
 const POSITION_PREFIX = "piep.reader-position.";
 const POSITION_CHANGE_EVENT = "piep:reading-position-change";
 
-/** Guards against a storage full of stale entries producing an enormous query. */
-const MAX_SHELF_IDS = 2_000;
-
 function storage(): Storage | null {
   try {
     return typeof window === "undefined" ? null : window.localStorage;
@@ -53,15 +50,15 @@ export interface ReadingPosition {
 }
 
 /**
- * 読書位置を憶える作品。棚の作品は UUID、ブラウザーのプレビューの見本は番号。
+ * 読書位置を憶える作品。棚の作品は UUID、ブラウザーのプレビューの見本は "101" のような数字の文字列。
  */
-export type ReadingWorkKey = number | string;
+export type ReadingWorkKey = string;
+
+const PREVIEW_WORK_ID = /^[1-9][0-9]*$/;
 
 function validKey(workId: ReadingWorkKey): boolean {
   // 棚の鍵は小文字にそろえたものだけ。大文字と小文字で同じ作品の位置が二つに割れない。
-  return typeof workId === "number"
-    ? Number.isSafeInteger(workId) && workId > 0
-    : SHELF_WORK_ID.test(workId) && workId === workId.toLowerCase();
+  return (SHELF_WORK_ID.test(workId) && workId === workId.toLowerCase()) || PREVIEW_WORK_ID.test(workId);
 }
 
 function keyFor(workId: ReadingWorkKey, version: number | null): string {
@@ -150,34 +147,6 @@ export function subscribeReadingPositions(listener: () => void): () => void {
   if (typeof window === "undefined") return () => undefined;
   window.addEventListener(POSITION_CHANGE_EVENT, listener);
   return () => window.removeEventListener(POSITION_CHANGE_EVENT, listener);
-}
-
-/**
- * Work ids with a recorded reading position, most recently written first is not
- * knowable from storage, so these come back in ascending id order for a stable
- * list. Entries whose work has since been deleted are filtered out by the
- * backend, not here - only it knows what still exists.
- */
-export function readingWorkIds(): number[] {
-  const store = storage();
-  if (!store) return [];
-  const ids = new Set<number>();
-  for (let index = 0; index < store.length; index += 1) {
-    const key = store.key(index);
-    if (!key || !key.startsWith(POSITION_PREFIX)) continue;
-    // piep.reader-position.{id}.{version}。数字だけの鍵が旧棚の作品。棚の UUID を
-    // `parseInt` すると頭の数字だけが読まれ、別の作品の番号になる。
-    const segment = key.slice(POSITION_PREFIX.length).split(".")[0] ?? "";
-    if (!/^\d+$/.test(segment)) continue;
-    const id = Number(segment);
-    if (!Number.isSafeInteger(id) || id <= 0) continue;
-    // A position of 0 is the top of the work, which is not "part-read".
-    const position = parsePosition(store.getItem(key));
-    if (!isPartRead(position)) continue;
-    ids.add(id);
-    if (ids.size >= MAX_SHELF_IDS) break;
-  }
-  return [...ids].sort((a, b) => a - b);
 }
 
 /**

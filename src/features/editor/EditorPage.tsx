@@ -164,7 +164,7 @@ export default function EditorPage() {
   const runtime = isTauriRuntime();
   // 棚の作品（UUID）は棚で開いて書く。プレビューは番号で見本を開く。
   const source = useMemo(
-    () => (runtime ? shelfEditorSource(workId ?? "") : previewEditorSource(Number(workId))),
+    () => (runtime ? shelfEditorSource(workId ?? "") : previewEditorSource(workId ?? "")),
     [runtime, workId],
   );
   const id = source.key;

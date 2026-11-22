@@ -28,7 +28,7 @@ import {
   type ShelfTextSearch,
 } from "@/services/shelfApi";
 import type { CollectionCoverMode, CollectionNameSource, WorkCollection, WorkCollectionSummary } from "@/types/collections";
-import type { EntityFacet, EntityFacetScope, EntitySortBy, EntityVersion, LibrarySortBy, ListedWork, PersonEntry, SearchParams, SearchResult, SeriesEntry, ShelfEntry, SourceKind } from "@/types/library";
+import type { EntityFacet, EntityFacetScope, EntitySortBy, EntityVersion, LibrarySortBy, PersonEntry, SearchParams, SearchResult, SeriesEntry, ShelfEntry, SourceKind } from "@/types/library";
 
 /**
  * ライブラリの一覧を棚から出す。
@@ -36,10 +36,6 @@ import type { EntityFacet, EntityFacetScope, EntitySortBy, EntityVersion, Librar
  * 一覧の条件（検索語・絞り込み・並び順）は棚の問い合わせに直して渡し、結果はカードが
  * 読む形（`ShelfEntry`）にする。作品は棚の ID のまま。
  */
-
-export function isShelfEntry(work: ListedWork): work is ShelfEntry {
-  return typeof work.id === "string";
-}
 
 const SETTLED: ReadonlySet<ShelfState["state"]> = new Set(["ready", "failed"]);
 
@@ -153,7 +149,7 @@ export function shelfFilter(params: SearchParams, scope: ShelfEntityScope = {}):
     favorite: params.favorite ?? null,
     watching: params.watchFilter ? params.watchFilter === "watched" : null,
     // 読みかけの棚。棚の読書位置で絞る。
-    reading: params.idsInclude ? true : null,
+    reading: params.readingOnly ? true : null,
     edited: params.editFilter ? params.editFilter === "edited" : null,
     has_cover: params.coverFilter ? params.coverFilter === "has_cover" : null,
     in_series: params.seriesFilter ? params.seriesFilter === "in_series" : null,
@@ -231,7 +227,6 @@ function isoOrNull(ms: number | null): string | null {
 export function shelfEntry(card: ShelfCard, match?: ShelfMatch, decoration?: ShelfDecoration): ShelfEntry {
   return {
     id: card.id,
-    shelf: true,
     coverUrl: shelfFileUrl(card.coverFile),
     source: card.provider,
     sourceId: card.external_key,
@@ -242,8 +237,6 @@ export function shelfEntry(card: ShelfCard, match?: ShelfMatch, decoration?: She
     contentType: card.content_type,
     tags: card.tags,
     excerpt: card.excerpt,
-    coverPath: null,
-    jsonPath: "",
     assetCount: card.media_count,
     fileSizeBytes: card.logical_size,
     downloadedAt: new Date(card.saved_at).toISOString(),
@@ -264,7 +257,7 @@ export function shelfEntry(card: ShelfCard, match?: ShelfMatch, decoration?: She
   };
 }
 
-export type ShelfSearchResult = Omit<SearchResult, "items"> & { items: ShelfEntry[] };
+export type ShelfSearchResult = SearchResult;
 
 /**
  * 一覧の一ページを棚から引く。一致した箇所と理由は、語の検索で一致があったときだけ

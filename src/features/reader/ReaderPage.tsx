@@ -46,7 +46,7 @@ import { openExternalUrl } from "@/services/openerApi";
 import { previewReaderSource, shelfReaderSource, SHELF_WORK_ID, type ReaderSource } from "@/features/reader/readerSource";
 import { RecapPanel } from "@/features/assist/RecapPanel";
 import { NeighborPlaceholder, NeighborTile, formatReadingTime } from "@/features/reader/ReaderNextUp";
-import type { DownloadEntry, ShelfEntry } from "@/types/library";
+import type { ShelfEntry } from "@/types/library";
 import { shelfNeighbors, type ShelfCard, type ShelfNeighbors } from "@/services/shelfApi";
 import { shelfEntry } from "@/features/library/shelf";
 
@@ -111,7 +111,7 @@ function shelfReadingContexts(rows: ShelfNeighbors[], currentId: string, authorN
 function ReadingContextCard({ context, neighbors, onOpen }: {
   context: ReadingContextRow;
   /** 隣の作品の詳しい情報。届くまでは題だけで描く。 */
-  neighbors: ReadonlyMap<ReaderWorkKey, DownloadEntry | ShelfEntry>;
+  neighbors: ReadonlyMap<ReaderWorkKey, ShelfEntry>;
   onOpen: (path: string) => void;
 }) {
   const href = (id: ReaderWorkKey) => `/reader/${id}${context.collectionId ? `?collection=${encodeURIComponent(context.collectionId)}` : ""}`;
@@ -265,9 +265,9 @@ const EDITED_VERSION = "edit";
 
 export default function ReaderPage() {
   const { workId } = useRouteParams("/reader/:workId");
-  // 棚の作品は UUID で来る。番号で来るのはプレビューの見本だけ。
+  // 棚の作品は UUID で来る。それ以外はプレビューの見本。
   const shelfId = SHELF_WORK_ID.test(workId ?? "") ? workId!.toLowerCase() : null;
-  const source = useMemo(() => shelfId ? shelfReaderSource(shelfId) : previewReaderSource(Number(workId)), [shelfId, workId]);
+  const source = useMemo(() => shelfId ? shelfReaderSource(shelfId) : previewReaderSource(workId ?? ""), [shelfId, workId]);
   return <Reader source={source} />;
 }
 
@@ -387,7 +387,7 @@ function Reader({ source }: { source: ReaderSource }) {
     [id, metadataQuery.data?.head.authorName, shelfNeighborsQuery.data],
   );
   const readingContexts = shelfContexts?.contexts ?? [];
-  const neighbors: ReadonlyMap<ReaderWorkKey, DownloadEntry | ShelfEntry> = shelfContexts?.neighbors ?? new Map();
+  const neighbors: ReadonlyMap<ReaderWorkKey, ShelfEntry> = shelfContexts?.neighbors ?? new Map();
   // Only while reading: an address you cannot follow is noise here, whereas the
   // detail screen deliberately shows the work as its author wrote it.
   const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === sourcePage - 1;

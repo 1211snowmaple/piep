@@ -6,6 +6,7 @@ import { WorkCover } from "@/components/WorkCover";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { suggestCollectionAdditions } from "@/services/collectionApi";
+import { getAssetUrl } from "@/services/dbApi";
 import { shelfFileUrl } from "@/services/shelfApi";
 import type { CollectionAdditionCandidate, WorkCollection } from "@/types/collections";
 
@@ -185,7 +186,7 @@ function AdditionRow({ candidate, dropped, onToggle }: {
           {dropped ? <Icons.cancel size={IconSize.inline} /> : <Icons.confirm size={IconSize.inline} />}
         </span>
         <span className="suggestion-member__cover">
-          <WorkCover work={candidate.work ? { ...candidate, coverUrl: shelfFileUrl(candidate.coverPath) } : candidate} variant="compact" />
+          <WorkCover work={{ ...candidate, coverUrl: candidate.work ? shelfFileUrl(candidate.coverPath) : getAssetUrl(candidate.coverPath) }} variant="compact" />
         </span>
         <span className="suggestion-member__body">
           {/* 題名は折らずに最後まで出す。1行で切っていたが、この束へ足す候補は
