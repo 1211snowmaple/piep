@@ -227,7 +227,7 @@ pub(crate) fn collection_additions(
         .map(|scored| CollectionAdditionCandidate {
             source: scored.work.source,
             source_id: scored.work.source_id,
-            download_id: scored.work.id,
+            corpus_key: scored.work.id,
             work: None,
             title: scored.work.title,
             author_name: scored.work.author_name,

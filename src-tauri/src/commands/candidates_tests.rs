@@ -38,7 +38,6 @@ fn new_shelf_candidates_drive_display_blocking_and_user_choices_without_old_cand
     let rows = ledger.list_deferred_update_candidate_summaries(-1).unwrap();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].work_id.is_some());
-    assert_eq!(rows[0].download_id, None);
     assert!(rows[0].metadata.saved_at.is_some());
     assert!(!rows[0].payload_json.contains("本文を画面へ運ばない"));
     ledger

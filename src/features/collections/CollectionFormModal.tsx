@@ -43,7 +43,7 @@ export function CollectionFormModal({ opened, onClose, onSave }: {
           <Button variant="default" onClick={onClose}>キャンセル</Button>
           <Button
             disabled={!name.trim()}
-            onClick={() => onSave({ name: name.trim(), description: description.trim() || null, collectionKind: kind, coverDownloadId: null })}
+            onClick={() => onSave({ name: name.trim(), description: description.trim() || null, collectionKind: kind })}
           >
             保存
           </Button>

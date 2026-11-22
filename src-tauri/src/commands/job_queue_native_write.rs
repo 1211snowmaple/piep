@@ -277,7 +277,6 @@ impl NativeQueue<'_> {
                     error: r.get(3)?,
                     item_type: r.get(4)?,
                     title: r.get(5)?,
-                    download_id: None,
                     metadata,
                 })
             })

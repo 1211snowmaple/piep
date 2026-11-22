@@ -232,7 +232,9 @@ pub struct CollectionSuggestionEvidence {
 pub struct CollectionSuggestionMember {
     pub source: String,
     pub source_id: String,
-    pub download_id: Option<i64>,
+    /// 提案の計算の作業用の表での作品の番号。画面へは出さず、棚の作品（`work`）へ置き換える。
+    #[serde(skip)]
+    pub corpus_key: Option<i64>,
     /// 棚の作品 ID（UUID）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<String>,
@@ -297,7 +299,9 @@ pub struct CollectionSweepResult {
 pub struct CollectionAdditionCandidate {
     pub source: String,
     pub source_id: String,
-    pub download_id: i64,
+    /// 提案の計算の作業用の表での作品の番号。画面へは出さず、棚の作品（`work`）へ置き換える。
+    #[serde(skip)]
+    pub corpus_key: i64,
     /// 棚の作品 ID（UUID）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<String>,
@@ -607,8 +611,6 @@ pub struct UpdateJobCandidate {
     #[serde(default, skip_serializing_if = "UpdateWorkMetadata::is_empty")]
     pub metadata: UpdateWorkMetadata,
     pub id: i64,
-    #[serde(default)]
-    pub download_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_id: Option<crate::library::LibraryId>,
     pub key: String,
@@ -690,9 +692,6 @@ pub struct UpdateJobItemState {
     pub item_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Local library ID, when this job item is already saved.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub download_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_id: Option<crate::library::LibraryId>,
 }
@@ -737,8 +736,6 @@ pub struct UpdateCandidateRow {
     pub status: String,
     pub first_seen_at: String,
     pub updated_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub download_id: Option<i64>,
 }
 
 /// Display metadata comes from the saved row or the already recorded provider

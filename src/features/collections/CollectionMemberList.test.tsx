@@ -15,7 +15,6 @@ function member(overrides: Partial<WorkCollectionMember> = {}): WorkCollectionMe
     collectionId: "collection-1",
     source: work.source,
     sourceId: work.sourceId,
-    downloadId: null,
     title: work.title,
     authorName: work.authorName,
     coverPath: work.coverUrl,
@@ -37,7 +36,7 @@ function member(overrides: Partial<WorkCollectionMember> = {}): WorkCollectionMe
 function renderList(props: Partial<React.ComponentProps<typeof CollectionMemberList>> = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const merged: React.ComponentProps<typeof CollectionMemberList> = {
-    members: [member(), member({ sourceId: "202", downloadId: 102, title: "つづき", position: 1, work: { ...demoWorks[1], id: "102" } })],
+    members: [member(), member({ sourceId: "202", title: "つづき", position: 1, work: { ...demoWorks[1], id: "102" } })],
     ordered: true,
     view: "compact",
     busy: false,
@@ -155,7 +154,7 @@ describe("CollectionMemberList", () => {
 
   it("shows an unsaved member without pretending it is a work card", () => {
     renderList({
-      members: [member({ downloadId: null, work: null, missing: true, title: "手元に無い話" })],
+      members: [member({ work: null, missing: true, title: "手元に無い話" })],
     });
     expect(screen.getByText("手元に無い話")).toBeInTheDocument();
     expect(screen.getByText("未保存")).toBeInTheDocument();
@@ -176,8 +175,7 @@ describe("CollectionMemberList", () => {
   it("progressively reveals a very large collection instead of mounting every card", () => {
     const members = Array.from({ length: 121 }, (_, index) => member({
       sourceId: `missing-${index + 1}`,
-      downloadId: null,
-      title: `member-${index + 1}`,
+        title: `member-${index + 1}`,
       position: index,
       work: null,
       missing: true,
@@ -200,7 +198,6 @@ describe("CollectionMemberList", () => {
   describe("ページ番号で見ているとき", () => {
     const paged = (count: number) => Array.from({ length: count }, (_, index) => member({
       sourceId: `paged-${index + 1}`,
-      downloadId: 1000 + index,
       title: `${index + 1}番目`,
       position: index,
       work: { ...demoWorks[0], id: String(1000 + index), title: `${index + 1}番目` },

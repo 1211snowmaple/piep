@@ -186,7 +186,7 @@ describe("collections on the shelf", () => {
       suggest.suggestCollectionAdditions.mockResolvedValue({
         collectionId: "0195f1c2-0000-7000-8000-0000000000d1", collectionName: "雨の束", semanticUsed: false, eligibleCount: 1, note: null,
         candidates: [{
-          source: "pixiv", sourceId: "9", downloadId: 0, work: "0195f1c2-0000-7000-8000-000000000009",
+          source: "pixiv", sourceId: "9", work: "0195f1c2-0000-7000-8000-000000000009",
           title: "次の話", authorName: "作者一", coverPath: COVER, textLength: 900, publishedAt: "2026-01-05T00:00:00Z",
           confidence: 0.9, reason: "同じシリーズの作品です", evidence: [],
         }],

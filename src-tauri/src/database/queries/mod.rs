@@ -1834,7 +1834,7 @@ fn suggestion_evidence_summary(
 ) -> String {
     let others = members
         .iter()
-        .filter(|member| member.download_id.is_none_or(|id| !seed_ids.contains(&id)))
+        .filter(|member| member.corpus_key.is_none_or(|id| !seed_ids.contains(&id)))
         .collect::<Vec<_>>();
     let count = |kind: &str| {
         others

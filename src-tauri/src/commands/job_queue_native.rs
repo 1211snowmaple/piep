@@ -373,7 +373,6 @@ impl NativeQueue<'_> {
                         metadata,
                         work_id,
                         id,
-                        download_id: row.get(8)?,
                         key: format!("candidate:{}:{}:{}", source, source_id, id),
                         source,
                         source_id,
@@ -684,7 +683,6 @@ impl NativeQueue<'_> {
                             error: row.get(3)?,
                             item_type: None,
                             title: None,
-                            download_id: None,
                         })
                     },
                 )

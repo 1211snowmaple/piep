@@ -703,7 +703,7 @@ fn prepare_swept_suggestions(
                 .map(|(position, work)| CollectionSuggestionMember {
                     source: work.source.clone(),
                     source_id: work.source_id.clone(),
-                    download_id: Some(work.id),
+                    corpus_key: Some(work.id),
                     work: None,
                     title: work.title.clone(),
                     author_name: work.author_name.clone(),

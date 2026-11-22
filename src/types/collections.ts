@@ -47,7 +47,6 @@ export interface WorkCollectionSummary {
   name: string;
   description: string | null;
   collectionKind: CollectionKind;
-  coverDownloadId: number | null;
   coverPath: string | null;
   coverMode: CollectionCoverMode;
   coverImagePath: string | null;
@@ -71,7 +70,6 @@ export interface WorkCollectionMember {
   collectionId: string;
   source: SourceKind;
   sourceId: string;
-  downloadId: number | null;
   title: string;
   authorName: string;
   coverPath: string | null;
@@ -99,7 +97,6 @@ export interface WorkCollectionInput {
   name: string;
   description?: string | null;
   collectionKind: CollectionKind;
-  coverDownloadId?: number | null;
   coverMode?: CollectionCoverMode | null;
   coverImagePath?: string | null;
   nameSource?: CollectionNameSource | null;
@@ -140,7 +137,6 @@ export interface CollectionSuggestionEvidence {
 }
 
 export interface CollectionSuggestionMember extends WorkKey {
-  downloadId: number | null;
   /** 棚の作品（UUID）。 */
   work?: string | null;
   title: string;
@@ -204,8 +200,6 @@ export interface CollectionSweepResult {
 export interface CollectionAdditionCandidate {
   source: string;
   sourceId: string;
-  /** 使わない番号（いつも 0）。作品は `work` で指す。 */
-  downloadId: number;
   /** 棚の作品（UUID）。 */
   work?: string | null;
   title: string;

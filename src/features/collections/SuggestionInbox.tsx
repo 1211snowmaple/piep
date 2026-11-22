@@ -309,11 +309,11 @@ function SuggestionReview({ suggestion, draft, busy, accepting, runtime, deferre
             const evidence = [...new Set(member.evidence.filter((item) => !["series_subset", "edition_overlap", "order_conflict", "sequence_gap", "body_unconfirmed", "cross_source", "title_similarity", "content_link", "unregistered"].includes(item.kind)).map((item) => item.label).filter(Boolean))];
             return <li key={key} className="discovery-member" data-excluded={!included || undefined}>
               <div className="discovery-member__selection"><Checkbox checked={included} disabled={busy} aria-label={`${member.title}を含める`} onChange={() => onDraft((current) => ({ ...current, excluded: included ? [...current.excluded, key] : current.excluded.filter((value) => value !== key) }))} />{ordered && <span className="discovery-member__position" aria-label={`${index + 1}番目`}>{index + 1}</span>}</div>
-              <div className="discovery-member__cover"><WorkCover work={{ ...member, coverUrl: member.work ? shelfFileUrl(member.coverPath) : getAssetUrl(member.coverPath) }} variant="compact" /></div>
+              <div className="discovery-member__cover"><WorkCover work={{ ...member, coverUrl: runtime ? shelfFileUrl(member.coverPath) : getAssetUrl(member.coverPath) }} variant="compact" /></div>
               <div className="discovery-member__body"><Text size="sm" fw={650} className="discovery-member__title">{member.title}</Text><div className="discovery-member__meta"><span>{getProvider(member.source).label}</span><span>{member.authorName}</span><span>{member.textLength > 0 ? `${formatNumber(member.textLength)}字` : "本文未取得"}</span></div>
                 {evidence.length > 0 && <ul className="discovery-member__evidence">{evidence.slice(0, 2).map((label) => <li key={label}>{label}</li>)}</ul>}
                 {evidence.length > 2 && <details className="discovery-member__more"><summary>ほかの根拠 {evidence.length - 2}件</summary><ul>{evidence.slice(2).map((label) => <li key={label}>{label}</li>)}</ul></details>}
-                <Button variant="subtle" color="gray" size="compact-xs" className="discovery-member__preview" leftSection={<Icons.read size={IconSize.inline} />} disabled={busy || (runtime ? !member.work : member.downloadId === null)} onClick={() => setPreview(member)}>本文を確認</Button>
+                <Button variant="subtle" color="gray" size="compact-xs" className="discovery-member__preview" leftSection={<Icons.read size={IconSize.inline} />} disabled={busy || !member.work} onClick={() => setPreview(member)}>本文を確認</Button>
               </div>
               {ordered && <div className="discovery-member__order"><Tooltip label="一つ前へ"><ActionIcon variant="subtle" color="gray" aria-label={`${member.title}を一つ前へ`} disabled={busy || index === 0} onClick={() => move(index, -1)}><Icons.up size={IconSize.menu} /></ActionIcon></Tooltip><Tooltip label="一つ後へ"><ActionIcon variant="subtle" color="gray" aria-label={`${member.title}を一つ後へ`} disabled={busy || index === members.length - 1} onClick={() => move(index, 1)}><Icons.down size={IconSize.menu} /></ActionIcon></Tooltip></div>}
             </li>;
@@ -336,18 +336,17 @@ function ReaderPreview({ member, runtime, onBack }: { member: CollectionSuggesti
   const [knownPageCount, setKnownPageCount] = useState(1);
   const contentRef = useRef<HTMLDivElement>(null);
   const content = useQuery({
-    queryKey: ["collection-preview", member.work ?? member.downloadId, page],
+    queryKey: ["collection-preview", member.work, page],
     queryFn: async () => {
       // 棚の候補は作品の UUID で読む。読む画面と同じ HTML を平文にして見せる。
       if (runtime && member.work) {
         const shelfPage = await shelfContent(member.work, null, page);
         return { ...shelfPage, plainText: htmlText(shelfPage.html) };
       }
-      const demo = getDemoReader(String(member.downloadId));
+      const demo = getDemoReader(member.work ?? "");
       return Promise.resolve({ page: 0, pageCount: 1, plainText: demo.plainText, html: demo.html, totalPlainTextChars: demo.plainText.length, sourcePageStarts: [0] });
     },
-    // 棚の候補は作品の ID で、プレビューの見本は番号で読む。
-    enabled: runtime ? Boolean(member.work) : member.downloadId !== null,
+    enabled: Boolean(member.work),
     staleTime: 60_000,
   });
   useEffect(() => { if (content.data) setKnownPageCount(content.data.pageCount); }, [content.data]);

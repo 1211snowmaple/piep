@@ -10,9 +10,9 @@ import { getAssetUrl } from "@/services/dbApi";
 import { shelfFileUrl } from "@/services/shelfApi";
 import type { CollectionAdditionCandidate, WorkCollection } from "@/types/collections";
 
-/** 候補の作品を指す鍵（作品の UUID）。 */
+/** 候補の作品を指す鍵（作品の UUID、無ければ取得元と取得元の ID）。 */
 function candidateKey(candidate: CollectionAdditionCandidate): string {
-  return candidate.work ?? String(candidate.downloadId);
+  return candidate.work ?? `${candidate.source}:${candidate.sourceId}`;
 }
 
 /**

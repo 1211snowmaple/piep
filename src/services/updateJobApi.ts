@@ -90,7 +90,6 @@ export interface UpdateWorkMetadata { authorName?: string | null; publishedAt?: 
 export interface UpdateJobCandidate {
   metadata?: UpdateWorkMetadata;
   id: number;
-  downloadId?: number | null;
   workId?: string | null;
   key: string;
   source: "pixiv" | "fanbox";
@@ -170,7 +169,6 @@ export interface DeferredUpdateCandidate {
   title: string;
   status: "held" | "dismissed";
   payloadJson: string;
-  downloadId?: number | null;
 }
 
 export function listDeferredUpdateCandidatesCommand(): Promise<DeferredUpdateCandidate[]> {
@@ -222,8 +220,6 @@ export interface UpdateJobItemState {
   /** Included in explicit item lists; omitted from small progress events. */
   itemType?: string | null;
   title?: string | null;
-  /** Local saved work ID when this job item resolves to the library. */
-  downloadId?: number | null;
   workId?: string | null;
 }
 

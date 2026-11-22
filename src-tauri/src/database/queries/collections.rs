@@ -530,7 +530,7 @@ pub(crate) fn seed_suggestion_plan(
         .map(|(position, value)| CollectionSuggestionMember {
             source: value.work.source,
             source_id: value.work.source_id,
-            download_id: Some(value.work.id),
+            corpus_key: Some(value.work.id),
             work: None,
             title: value.work.title,
             author_name: value.work.author_name,

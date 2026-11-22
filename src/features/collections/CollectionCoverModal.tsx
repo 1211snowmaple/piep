@@ -54,10 +54,13 @@ export function CollectionCoverModal({
   useEffect(() => {
     if (!opened) return;
     setMode(collection.coverMode);
-    const current = collection.members.find((member) => member.downloadId !== null && member.downloadId === collection.coverDownloadId);
+    // 「1作を選ぶ」の表紙は、その作品の表紙の画像そのもの。同じ画像の回を選んだことにする。
+    const current = collection.coverMode === "single" && collection.coverPath
+      ? collection.members.find((member) => member.coverPath === collection.coverPath)
+      : undefined;
     setCoverKey(current ? memberKey(current) : null);
     setImagePath(collection.coverImagePath);
-  }, [collection.coverDownloadId, collection.coverImagePath, collection.coverMode, collection.members, opened]);
+  }, [collection.coverImagePath, collection.coverMode, collection.coverPath, collection.members, opened]);
 
   const pickImage = async () => {
     try {
@@ -151,7 +154,6 @@ export function CollectionCoverModal({
                 name: collection.name,
                 description: collection.description,
                 collectionKind: collection.collectionKind,
-                coverDownloadId: coverMember?.downloadId ?? null,
                 coverMode: mode,
                 coverImagePath: imagePath,
               }, coverMember ? { source: coverMember.source, sourceId: coverMember.sourceId } : null)

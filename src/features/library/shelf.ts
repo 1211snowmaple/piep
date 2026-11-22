@@ -471,7 +471,6 @@ export function shelfCollectionSummary(item: ShelfCollectionSummary): WorkCollec
     name: item.name,
     description: item.description,
     collectionKind: item.ordered ? "ordered" : "unordered",
-    coverDownloadId: null,
     coverPath: item.cover,
     coverMode: item.cover_mode as CollectionCoverMode,
     coverImagePath: item.cover_image,
@@ -499,7 +498,7 @@ export async function shelfCollections(): Promise<WorkCollectionSummary[]> {
 
 /**
  * コレクションの画面を棚から引く。回の作品は一覧と同じ `ShelfEntry`（作品の画面・読む画面は
- * 棚の ID で開く）。`downloadId` は使わない（空）。
+ * 棚の ID で開く）。
  */
 export async function shelfCollection(id: string): Promise<WorkCollection> {
   return shelfCollectionView(await fetchShelfCollection(id));
@@ -522,7 +521,6 @@ function shelfCollectionView(item: ShelfCollection): WorkCollection {
       collectionId: summary.id,
       source: member.provider as SourceKind,
       sourceId: member.external_key,
-      downloadId: null,
       title: member.title,
       authorName: member.author_name,
       coverPath: member.cover,

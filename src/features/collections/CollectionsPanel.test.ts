@@ -11,7 +11,6 @@ function collection(
     name: id,
     description: null,
     collectionKind: "unordered",
-    coverDownloadId: null,
     coverPath: null,
     coverMode: "mosaic",
     coverImagePath: null,

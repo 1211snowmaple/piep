@@ -3802,7 +3802,7 @@ mod tests {
             metadata: Default::default(),
             source: "fanbox".into(), source_id: "11".into(), kind: "new".into(), title: "作品".into(),
             payload_json: serde_json::json!({"originSourceKey":"creator", "originalData":{"creatorId":"creator"}}).to_string(),
-            target_type: Some("author".into()), status: "pending".into(), first_seen_at: "now".into(), updated_at: "now".into(), download_id: None,
+            target_type: Some("author".into()), status: "pending".into(), first_seen_at: "now".into(), updated_at: "now".into(),
         };
         let works = HashSet::from([("fanbox".into(), "11".into())]);
         assert!(!super::candidate_matches_scope(

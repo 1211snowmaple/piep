@@ -5,7 +5,7 @@
 //! `collection_suggestion_members`・`collection_pair_feedback`）へ書き、画面の形で返す。
 //!
 //! 画面へ返す形は `database::CollectionSuggestion`。候補の ID は UUID、作品は
-//! `work`（作品 UUID）で指し、`download_id` は持たない。
+//! `work`（作品 UUID）で指す。作業用の表の番号（`corpus_key`）は画面へ出さない。
 
 use crate::database::queries::{
     accepted_suggestion_name_source, collection_additions, name_proposals_in, naming_works_in,
@@ -64,10 +64,9 @@ fn shelf_members(
         .into_iter()
         .map(|mut member| {
             let work = member
-                .download_id
+                .corpus_key
                 .and_then(|id| corpus.work(id))
                 .ok_or_else(|| "候補の作品が棚にありません".to_string())?;
-            member.download_id = None;
             member.work = Some(work.to_string());
             Ok((work, member))
         })
@@ -419,7 +418,7 @@ impl Library {
                     Ok(CollectionSuggestionMember {
                         source: source.unwrap_or_default(),
                         source_id: source_id.unwrap_or_default(),
-                        download_id: None,
+                        corpus_key: None,
                         work: Some(work.to_string()),
                         title,
                         author_name: author,
@@ -837,10 +836,9 @@ impl Library {
         let mut result = collection_additions(&corpus, &collection.to_string())?;
         for candidate in &mut result.candidates {
             let work = corpus
-                .work(candidate.download_id)
+                .work(candidate.corpus_key)
                 .ok_or_else(|| "候補の作品が棚にありません".to_string())?;
             candidate.work = Some(work.to_string());
-            candidate.download_id = 0;
         }
         Ok(result)
     }

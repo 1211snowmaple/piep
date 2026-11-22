@@ -29,7 +29,7 @@ import { reportJobAction } from "@/features/jobs/operationJobs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { BrowserListShortcuts } from "./BrowserListShortcuts";
-import { useAppNavigate, useAppSearchParams } from "@/app/router";
+import { useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
@@ -99,7 +99,6 @@ export function parseWorkId(value: string | null): string | null {
 }
 
 export default function UpdatesPage() {
-  const navigate = useAppNavigate();
   const runtime = isTauriRuntime();
   const [searchParams, setSearchParams] = useAppSearchParams();
   const workId = parseWorkId(searchParams.get("work"));
@@ -581,7 +580,6 @@ export default function UpdatesPage() {
               onSave={() => saveCandidatesMutation.mutate(selectedSavableIds)}
               onLoadMore={() => runtime && updateJobs.loadMoreCandidates()}
               onDismiss={(candidate) => dismissMutation.mutate(candidate)}
-              onOpenWork={(id) => navigate(`/works/${id}`)}
             />
           ) : (
             <EmptyState icon={Icons.versionHistory} title="更新ジョブはまだありません" description="上の対象と方法を選び、「確認を開始」を押してください。" />
@@ -600,13 +598,12 @@ export default function UpdatesPage() {
               onRetry={() => void (resultIsTerminal ? jobItems.refetch() : heldItems.refetch())}
               onShowLogs={() => selectTab("logs")}
               onShowDeferred={() => selectTab("deferred")}
-              onOpenWork={(id) => navigate(`/works/${id}`)}
             />
           ) : <EmptyState icon={Icons.confirm} title="結果はまだありません" description="確認を開始すると、処理結果をここで確認できます。" />}
         </Tabs.Panel>
 
         <Tabs.Panel value="deferred" pt="lg">
-          <DeferredCandidatesPanel runtime={runtime} onOpenWork={(id) => navigate(`/works/${id}`)} onRechecked={(jobId) => { void updateJobs.selectJob(jobId); selectTab("candidates"); }} />
+          <DeferredCandidatesPanel runtime={runtime} onRechecked={(jobId) => { void updateJobs.selectJob(jobId); selectTab("candidates"); }} />
         </Tabs.Panel>
 
         <Tabs.Panel value="logs" pt="lg">
@@ -674,7 +671,7 @@ export default function UpdatesPage() {
 }
 
 /** A selected job's outcome, including holds that exist only in its history. */
-export function JobResultsPanel({ job, subject, items, loading, error, onRetry, onShowLogs, onShowDeferred, onOpenWork }: {
+export function JobResultsPanel({ job, subject, items, loading, error, onRetry, onShowLogs, onShowDeferred }: {
   job: UpdateJobSnapshot;
   subject?: string;
   items: UpdateJobItemState[] | null;
@@ -683,7 +680,6 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
   onRetry: () => void;
   onShowLogs: () => void;
   onShowDeferred: () => void;
-  onOpenWork?: (downloadId: number) => void;
 }) {
   const [visibleHeldCount, setVisibleHeldCount] = useState(50);
   const terminal = isUpdateJobTerminal(job.status);
@@ -723,7 +719,7 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
               <UpdateWorkMetadata metadata={item.metadata} />
             </Stack>
             <UpdateStatusBadge title={item.title || item.sourceId || "作品"} {...acquisitionStatusMeta(heldAcquisitionKind(reason))} detail={item.error || "確認を保留しました。保存済みの内容は保持されています。"} />
-            {item.source && item.sourceId && <UpdateWorkLinks source={item.source} sourceId={item.sourceId} downloadId={item.downloadId} workId={item.workId} title={item.title || item.sourceId} onOpenWork={onOpenWork} />}
+            {item.source && item.sourceId && <UpdateWorkLinks source={item.source} sourceId={item.sourceId} workId={item.workId} title={item.title || item.sourceId} />}
           </Group>
         </Paper>;
       })}
@@ -833,7 +829,7 @@ function JobStageProgress({ label, processed, total, animated }: { label: string
   </Box>;
 }
 
-export function CandidatesPanel({ candidates, selectedIds, selectableIds, running, saving, allowQueuedSelection, hasMore, jobActive, onToggle, onSelectMany, onClearSelection, onSave, onLoadMore, onDismiss, onOpenWork }: {
+export function CandidatesPanel({ candidates, selectedIds, selectableIds, running, saving, allowQueuedSelection, hasMore, jobActive, onToggle, onSelectMany, onClearSelection, onSave, onLoadMore, onDismiss }: {
   candidates: UpdateJobSnapshot["candidates"];
   selectedIds: Set<number>;
   selectableIds: number[];
@@ -848,7 +844,6 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
   onSave: () => void;
   onLoadMore: () => void;
   onDismiss: (candidate: UpdateJobSnapshot["candidates"][number]) => void;
-  onOpenWork?: (downloadId: number) => void;
 }) {
   const [kind, setKind] = useState<string>("all");
   // 済んだものは畳む。数は残す - 「無かったこと」にはしない。
@@ -939,7 +934,7 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
                 <UpdateWorkMetadata metadata={candidate.metadata} fallback={[candidate.targetLabel, candidate.subtitle].filter(Boolean).join(" · ")} />
               </Stack>
               <UpdateStatusBadge title={candidate.title} {...candidateStatusMeta(candidate)} detail={candidate.error} />
-              <UpdateWorkLinks source={candidate.source} sourceId={candidate.sourceId} downloadId={candidate.downloadId} workId={candidate.workId} title={candidate.title} onOpenWork={onOpenWork} />
+              <UpdateWorkLinks source={candidate.source} sourceId={candidate.sourceId} workId={candidate.workId} title={candidate.title} />
               {isSavableCandidate(candidate) && (
                 <Tooltip label="候補から外す（保留・非表示の一覧から戻せます）">
                   <ActionIcon variant="subtle" color="gray" aria-label={`${candidate.title}を候補から外す`} onClick={() => onDismiss(candidate)}>
