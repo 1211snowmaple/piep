@@ -98,59 +98,64 @@ npm run build && CI=1 npx playwright test
 緑を1回見ただけで「直った」と判断しない。断続的な失敗を疑うときは、同じ条件で
 複数回確認してから結論を出す。
 
-## バージョンとタグ
+## リリース
 
-機能の節目ごとに minor を上げる。patch は不具合修正だけのリリースに使う。
+デスクトップ版・単独サーバー・Android 版は、**一つのタグ `vX.Y.Z`** に一緒に載る。
 
-- タグは `vX.Y.Z` の注釈付きタグ（`git tag -a`）
-- **タグを押すとリリースのビルドが走る。** 過去の節目へ後からタグを足さない
-- タグを打つ前に、その commit の CI が緑であることを確認する
-- リリースワークフローは下書きを作る。署名済みアセットと `latest.json` を確認し、
-  同じ commit の main CI が緑であることをもう一度確認してから公開する
-- バージョンを上げるときは5ファイルすべてを揃える:
-  `package.json` / `package-lock.json` / `src-tauri/Cargo.toml` /
-  `src-tauri/tauri.conf.json` / `src/lib/version.ts`（`cargo check` で
-  `Cargo.lock` も追随させる）
+### 版
 
-1.0.0 は、スキーマと画面が数リリース跨いで安定してから。
+機能の節目ごとに minor を上げる。patch は不具合修正だけのリリースに使う。1.0.0 は、スキーマと
+画面が数リリース跨いで安定してから。
 
-## アプリ内更新の署名鍵
+- デスクトップ版は毎回5か所を揃える：`package.json` / `package-lock.json` / `src-tauri/Cargo.toml` /
+  `src-tauri/tauri.conf.json` / `src/lib/version.ts`（`cargo check` で `Cargo.lock` も追随させる）
+- 携帯は、**携帯に関わる物（`android/`・`shared/`・`crates/`。説明の `.md` は除く）が前に APK を出した版
+  から変わったときだけ**、同じ版にする：`android/package.json` / `android/package-lock.json` /
+  `android/src-tauri/Cargo.toml` / `android/src-tauri/Cargo.lock` / `android/src-tauri/tauri.conf.json`。
+  変わっていない回に上げると、中身が同じでも携帯に更新の通知が出る。判断は Release が
+  `tools/android-release-plan.ps1` で確かめ、上げ忘れていれば止まる
+- 版を上げるコミットには、`npx playwright test readme-shots` で撮り直した `docs/screenshots/*` も入れる
+  （版の表示が焼き込まれる）
 
-インストール済みの piep は、起動時に GitHub の最新リリースへ置かれた
-`latest.json` を見て新しい版を知る。Tauri の updater は**署名された配布物しか
-受け付けない**ので、鍵が無ければこの経路は動かない。
+### 手順
 
-鍵は生成済みで、公開鍵は `src-tauri/tauri.conf.json` の
-`plugins.updater.pubkey` に入っている。
+1. 版を上げる PR を出し、CI の緑と利用者の了承を見てから `main` へマージする
+2. マージできたこと（PR の状態・`main` の先頭・そのコミットの版）を確かめてから、**マージコミット**に
+   注釈付きタグを打って push する（`git tag -a vX.Y.Z <コミット> -m "piep vX.Y.Z"`）。前の段が失敗したまま
+   次へ進まない
+3. Release ワークフローが走る。組み立ては品質の確認を待たずに始まり、同じコミットの `main` の Quality と
+   Docs の `contract` が緑になってから下書きを作る。Docs は `cancel-in-progress` なので、直後に別の PR が
+   入ると取り消されてリリースが止まる。そのときは `contract` のジョブだけ再実行する
+4. 下書きを確かめる。載る物は8つ：`piep_X.Y.Z_x64-setup.exe` とその `.sig`、`latest-v2.json`、
+   `piep-server-X.Y.Z-windows-x64.zip` とその `.sig`、`latest-server.json`、
+   `piep-android-vA.B.C-arm64.apk`、`latest-android.json`。単独サーバーの zip の中身の一覧は前の版と
+   比べる（増えると前の版の自己更新が受け取らない）
+5. リリースノートを書く（下の「リリースノート」）。本文は `gh release edit vX.Y.Z --notes-file <ファイル>` で
+   入れ、そのあと `gh release view vX.Y.Z --json tagName,isDraft` でタグ名が `vX.Y.Z` のままか確かめる
+6. 利用者の了承を得てから公開する（`gh release edit vX.Y.Z --draft=false`）。公開後、
+   `releases/latest` が新しい版を指し、インストーラーの URL が 200 を返すことを確かめる
 
-- 秘密鍵: リポジトリ外で厳重に管理する。所在や保護方法は公開資料に記載しない
-- 公開鍵: `tauri.conf.json` の `plugins.updater.pubkey`
+公開済みの版は作り直さない。アプリ内更新は版の番号で比べるので、同じ番号で中身を替えても届かない。
+足したい物は patch で出す。過去の節目へ後からタグを足さない。
 
-秘密鍵は Actions の秘密 `TAURI_SIGNING_PRIVATE_KEY` として登録済み。入れ直す
-ときは:
+## 署名鍵
 
-```bash
-gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/piep-updater.key
-```
+配布物の署名鍵は二つある。どちらも GitHub の `release` Environment の Secrets にあり、`v*` のタグからしか
+読めない。秘密鍵の所在や保護方法は公開資料に記載しない。
 
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` は登録しない。未登録の秘密は空文字として
-展開され、パスワード無しの鍵はそれで通る。あとからパスワード付きの鍵にするなら、
-そのときに登録する。
+| Secret | 用途 |
+|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | デスクトップ版のアプリ内更新と単独サーバーの自己更新の署名。公開鍵は `src-tauri/tauri.conf.json` の `plugins.updater.pubkey` |
+| `ANDROID_KEYSTORE_BASE64` / `ANDROID_KEYSTORE_PASSWORD` / `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` | Android の APK の署名（[android/RELEASING.md](android/RELEASING.md)） |
 
-`release.yml` はこの秘密を読み、`latest.json` をリリースの資材として上げる。
-リリースは下書きで作られるので、**公開するまでアプリからは見えない**。更新を
-配るときは下書きを publish するところまでを1回のリリースとする。
-
-鍵を作り直すとき（パスワードを付けたくなった、漏らした）:
-
-```bash
-npx tauri signer generate -f -w ~/.tauri/piep-updater.key
-```
-
-`npm run tauri signer generate` ではなく `npx` を使う。`npm run` は `-w` を
-自分の `--workspace` として食べてしまう。作り直したら公開鍵の差し替えと秘密の
-登録し直しが要る。**すでに配ったインストールは、新しい鍵で署名した更新を
-受け取れない。**
+- 登録と入れ替えは利用者がする。`gh secret set <名前> --env release --repo 1211snowmaple/piep` は値を
+  端末で尋ねるので、パスワードを引数や履歴に残さずに済む
+- Secrets は書き込み専用で、あとから取り出せない。鍵とパスワードの控えはリポジトリとも GitHub とも
+  別の場所に置く
+- **鍵を作り直すと、すでに配ったインストールは新しい鍵で署名した更新を受け取れない。** パスワードを
+  付け替えるだけなら鍵の対は変わらないので、作り直さない
+- 作り直すときは `npx tauri signer generate -f -w <ファイル>`。`npm run tauri signer generate` は `-w` を
+  npm の `--workspace` として食べてしまう。公開鍵の差し替えと Secrets の登録し直しが要る
 
 ## リリースノート
 

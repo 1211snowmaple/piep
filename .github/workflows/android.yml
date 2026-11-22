@@ -1,7 +1,7 @@
 name: "Android"
 
-# 携帯アプリの画面側だけを確かめる。APK の組み立ては NDK と署名が要るので、
-# 手元の android/tools/release.ps1 で行う。
+# 携帯アプリの画面側を確かめ、鍵なしで APK まで組めることを確かめる。
+# 署名した配布物は Release ワークフローが同じ手順（android-apk.yml）で組む。
 on:
   workflow_dispatch:
   pull_request:
@@ -9,12 +9,16 @@ on:
       - "android/**"
       - "shared/**"
       - ".github/workflows/android.yml"
+      - ".github/workflows/android-apk.yml"
+      - "crates/**"
   push:
     branches: [main]
     paths:
       - "android/**"
       - "shared/**"
       - ".github/workflows/android.yml"
+      - ".github/workflows/android-apk.yml"
+      - "crates/**"
 
 jobs:
   frontend:
@@ -34,3 +38,8 @@ jobs:
       # 型検査と本番用の組み立て。
       - run: npm run build
       - run: npm test
+
+  apk:
+    uses: ./.github/workflows/android-apk.yml
+    with:
+      sign: false
