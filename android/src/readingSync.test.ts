@@ -13,10 +13,10 @@ beforeEach(() => {
 
 /** 同期は棚と受け渡すので、棚に届いている接続にしてから読み込む。 */
 async function loadSync() {
-  const native = await import("./nativeReading");
-  native.adoptNativeLibrary({
+  const shelf = await import("./shelf");
+  shelf.adoptShelf({
     url: "https://server", reachable: true,
-    nativeLibrary: {
+    shelf: {
       scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
       readerBundle: true,
     },

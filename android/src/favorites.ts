@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { pcErrorMessage, type PcWork } from "./pcApi";
-import { nativeShelf, setShelfFavorite } from "./nativeReading";
+import { connectedShelf, setShelfFavorite } from "./shelf";
 import { useAppNavigation } from "./appHistory";
 import { favoriteReadRevision, nextFavoriteRevision } from "./favoriteFreshness";
 
@@ -85,7 +85,7 @@ export function useFavorite(work: PcWork): { favorite: boolean; busy: boolean; o
   }, [queryClient]);
 
   // 棚に届いているときだけ押せる。
-  const shelf = navigation.canBrowseServer ? nativeShelf() : null;
+  const shelf = navigation.canBrowseServer ? connectedShelf() : null;
   const writable = shelf !== null && work.shelf !== undefined;
   const generation = (refreshed ? undefined : entry?.generation) ?? remoteGeneration ?? "0";
 

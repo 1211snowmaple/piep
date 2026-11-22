@@ -1,8 +1,7 @@
 //! 端末内の読書位置と「続きを読む」。
 //!
-//! 以前は WebView の localStorage に置いていた。localStorage は書き込みが遅れ、
-//! ホームへ戻ってすぐアプリを止めると最後の位置が消えた。ここでは呼び出しが
-//! 返った時点で SQLite に確定している。
+//! 呼び出しが返った時点で SQLite に確定している。WebView の localStorage は書き込みが遅れ、
+//! ホームへ戻ってすぐアプリを止めると最後の位置が消えるので使わない。
 //!
 //! 作品は取得元と取得元の ID で見分ける。サーバーの作品番号は接続先ごとに振られるので、
 //! 棚から開くための接続先と番号は、最後に読んだときのものとして別に持つ。
@@ -33,7 +32,6 @@ pub struct LocalReading {
     shelved: bool,
     read_at: i64,
     server_url: Option<String>,
-    work_id: Option<i64>,
     /// 棚に出すための作品情報。
     work: Option<serde_json::Value>,
 }
@@ -99,7 +97,6 @@ fn row_to_reading(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalReading> {
         shelved: row.get("shelved")?,
         read_at: row.get("read_at")?,
         server_url: row.get("server_url")?,
-        work_id: row.get("work_id")?,
         work: json(row.get("work")?),
     })
 }
@@ -122,13 +119,12 @@ fn put(tx: &rusqlite::Transaction<'_>, reading: &LocalReading) -> Result<(), Cli
     let text = |value: &Option<serde_json::Value>| value.as_ref().map(serde_json::Value::to_string);
     tx.execute(
         "INSERT INTO readings(key, source, source_id, version, content_hash, edit_hash, page, position,
-             progress, finished, shelved, read_at, server_url, work_id, work)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+             progress, finished, shelved, read_at, server_url, work)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(key) DO UPDATE SET version=excluded.version, content_hash=excluded.content_hash,
              edit_hash=excluded.edit_hash, page=excluded.page, position=excluded.position,
              progress=excluded.progress, finished=excluded.finished, shelved=excluded.shelved,
-             read_at=excluded.read_at, server_url=excluded.server_url, work_id=excluded.work_id,
-             work=excluded.work",
+             read_at=excluded.read_at, server_url=excluded.server_url, work=excluded.work",
         rusqlite::params![
             key(&reading.source, &reading.source_id),
             reading.source,
@@ -143,7 +139,6 @@ fn put(tx: &rusqlite::Transaction<'_>, reading: &LocalReading) -> Result<(), Cli
             reading.shelved,
             reading.read_at,
             reading.server_url,
-            reading.work_id,
             text(&reading.work),
         ],
     )
@@ -234,7 +229,6 @@ mod tests {
             shelved: true,
             read_at,
             server_url: Some("https://pc.example/".into()),
-            work_id: Some(7),
             work: Some(serde_json::json!({ "id": 7, "title": "作品" })),
         }
     }

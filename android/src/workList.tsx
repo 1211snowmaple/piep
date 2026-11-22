@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient, useQueries } from "@tanstack/react-query";
 import { WorkCard, WorkCardSkeleton, type SavedState } from "./WorkCard";
 import { VirtualWorkList } from "./VirtualWorkList";
-import { nativeShelfKey } from "./nativeReading";
+import { connectedShelfKey } from "./shelf";
 import { getPcMetadata, sameSavedVersion, sameWork, listOfflineWorks, pcErrorMessage, searchPcWorks, type PcSearchPage, type PcWork, type PcWorkScope, type PcWorkSearch } from "./pcApi";
 
 export const statusQueryKey = ["pc-status"] as const;
@@ -51,7 +51,7 @@ export function useWorkList({ search, scope, pagingMode, page, enabled }: { sear
   const numbered = pagingMode === "pages" && !(search.text.trim() && search.sort === "standard");
   const scopeKey = scope ? { kind: scope.kind, source: scope.source, key: scope.key } : null;
   // 棚から引く接続では、棚と接続ごとに別の一覧として覚える（作品の指し方が違う）。
-  const shelf = nativeShelfKey();
+  const shelf = connectedShelfKey();
   const infinite = useInfiniteQuery({
     queryKey: ["works", search, scopeKey, shelf],
     queryFn: ({ pageParam }) => searchPcWorks(search, pageParam, scopeKey),

@@ -21,7 +21,7 @@ const shelfItem = {
 function status(reachable = true) {
   return {
     url: "https://server", reachable,
-    nativeLibrary: {
+    shelf: {
       scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
       readerBundle: true,
     },
@@ -34,23 +34,23 @@ beforeEach(() => {
 });
 
 it("一覧・作品の画面・表紙を棚から引く", async () => {
-  const native = await import("./nativeReading");
+  const shelf = await import("./shelf");
   const pc = await import("./pcApi");
   const images = await import("./images");
-  native.adoptNativeLibrary(status());
+  shelf.adoptShelf(status());
   api.invoke.mockImplementation(async (command: string) => {
-    if (command === "pc_native_search") return { items: [shelfItem], nextCursor: "next", totalEstimate: 1, indexComplete: true };
-    if (command === "pc_native_work") return { work: shelfItem, people: [], series: [], versions: [], editBaseVersion: 1 };
+    if (command === "pc_search") return { items: [shelfItem], nextCursor: "next", totalEstimate: 1, indexComplete: true };
+    if (command === "pc_work") return { work: shelfItem, people: [], series: [], versions: [], editBaseVersion: 1 };
     if (command === "offline_save_shelf_work" || command === "offline_list_works") {
       const saved = { work: shelfItem, shelfLibrary: library, savedAtMs: 1, savedVersion: 2, savedContentHash: null, savedEditHash: `edit:${edit}`, pageCount: 3 };
       return command === "offline_list_works" ? [saved] : saved;
     }
-    if (command === "pc_native_work_collections") return [];
+    if (command === "pc_work_collections") return [];
     throw new Error(command);
   });
 
   const page = await pc.searchPcWorks({ ...pc.defaultPcSearch, text: "題", sort: "dateDesc" });
-  expect(api.invoke.mock.calls[0][0]).toBe("pc_native_search");
+  expect(api.invoke.mock.calls[0][0]).toBe("pc_search");
   expect(api.invoke.mock.calls[0][1]).toMatchObject({ library: { libraryId: library }, cursor: null, scope: null });
   const [item] = page.items;
   expect(item.id).toBe(work);
@@ -59,7 +59,7 @@ it("一覧・作品の画面・表紙を棚から引く", async () => {
   expect(images.workCoverUrl(item, true)?.startsWith(`http://pcimg.localhost/shelf/${library}/${work}/${snapshot}/large?connection=`)).toBe(true);
 
   const metadata = await pc.getPcMetadata(item.id);
-  expect(api.invoke.mock.calls[1]).toEqual(["pc_native_work", { library: expect.objectContaining({ libraryId: library }), work }]);
+  expect(api.invoke.mock.calls[1]).toEqual(["pc_work", { library: expect.objectContaining({ libraryId: library }), work }]);
   expect(metadata.isEdited).toBe(true);
   // 編集の UUID で読書位置と保存版を分ける（端末に保存した版の印と同じ形）。
   expect(metadata.activeEditHash).toBe(`edit:${edit}`);
@@ -78,15 +78,15 @@ it("一覧・作品の画面・表紙を棚から引く", async () => {
 
   await expect(pc.getPcWorkCollections(item.id)).resolves.toEqual([]);
   expect(api.invoke).toHaveBeenCalledTimes(5);
-  expect(native.nativeShelf()).toMatchObject({ libraryId: library });
+  expect(shelf.connectedShelf()).toMatchObject({ libraryId: library });
 });
 
 it("棚に届かない接続では、一覧を引かずに知らせる", async () => {
-  const native = await import("./nativeReading");
+  const shelf = await import("./shelf");
   const pc = await import("./pcApi");
-  native.adoptNativeLibrary(status(false));
+  shelf.adoptShelf(status(false));
   await expect(pc.searchPcWorks({ ...pc.defaultPcSearch, sort: "dateDesc" })).rejects.toMatchObject({ code: "library_changed" });
   await expect(pc.saveOfflineWork(work)).rejects.toMatchObject({ code: "library_changed" });
   expect(api.invoke).not.toHaveBeenCalled();
-  expect(native.nativeShelfKey()).toBeNull();
+  expect(shelf.connectedShelfKey()).toBeNull();
 });

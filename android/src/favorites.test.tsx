@@ -8,7 +8,7 @@ import { markFavoriteRead, nextFavoriteRevision } from "./favoriteFreshness";
 
 const api = vi.hoisted(() => ({ setShelfFavorite: vi.fn(), shelf: { libraryId: "shelf" } as object | null }));
 vi.mock("./pcApi", () => ({ pcErrorMessage: () => "前のサーバーのエラー" }));
-vi.mock("./nativeReading", () => ({ nativeShelf: () => api.shelf, setShelfFavorite: api.setShelfFavorite }));
+vi.mock("./shelf", () => ({ connectedShelf: () => api.shelf, setShelfFavorite: api.setShelfFavorite }));
 vi.mock("./appHistory", () => ({ useAppNavigation: () => ({ canBrowseServer: true }) }));
 
 const work = {

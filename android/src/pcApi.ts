@@ -4,7 +4,7 @@ import type {
 } from "@shared/mobileApi";
 import { invoke } from "@tauri-apps/api/core";
 import { markFavoriteRead, nextFavoriteRevision } from "./favoriteFreshness";
-import { listShelfCollections, listShelfEntities, listShelfEntitySeries, lookupShelfWork, nativeShelf, NO_SHELF, searchShelf, shelfCollectionDetail, shelfEntityDetail, shelfMetadata, shelfSuggestions, shelfWork, shelfWorkCollections } from "./nativeReading";
+import { listShelfCollections, listShelfEntities, listShelfEntitySeries, lookupShelfWork, connectedShelf, NO_SHELF, searchShelf, shelfCollectionDetail, shelfEntityDetail, shelfMetadata, shelfSuggestions, shelfWork, shelfWorkCollections } from "./shelf";
 
 export interface PcConnectionStatus {
   paired: boolean;
@@ -14,7 +14,7 @@ export interface PcConnectionStatus {
   issue: "offline" | "certificate_changed" | "certificate_untrusted" | "secret_lost" | "protocol_mismatch" | "revoked" | "not_ready" | "remote_error" | "no_library" | null;
   capabilities: string[];
   /** 接続先が配信している棚。届かないとき・棚がまだ無いときは無い。 */
-  nativeLibrary?: {
+  shelf?: {
     scope: {
       libraryId: string;
       subjectId: string;
@@ -199,7 +199,7 @@ export const searchPcWorks = (criteria: PcWorkSearch, cursor: string | null = nu
   const revision = nextFavoriteRevision();
   // 画面表示用の名前などを Rust コマンドへ渡さない。入力は三つの識別子だけ。
   const entity = scope ? { kind: scope.kind, source: scope.source, key: scope.key } : null;
-  const library = nativeShelf();
+  const library = connectedShelf();
   if (!library) return noShelf();
   return searchShelf(library, criteria, cursor, entity, offset, limit).then((page) => {
     for (const work of page.items) markFavoriteRead(work, revision);
@@ -207,28 +207,28 @@ export const searchPcWorks = (criteria: PcWorkSearch, cursor: string | null = nu
   });
 };
 export const listPcEntities = (kind: "people" | "series", text = "", offset = 0, sort?: { sort: string; order: string }) => {
-  const library = nativeShelf();
+  const library = connectedShelf();
   return library ? listShelfEntities(library, kind, text, offset, sort) : noShelf();
 };
 export const getPcEntityDetail = (kind: "people" | "series", source: string, key: string) => {
-  const library = nativeShelf();
+  const library = connectedShelf();
   return library ? shelfEntityDetail(library, kind, source, key) : noShelf();
 };
 export const listPcEntitySeries = (source: string, key: string, text: string, cursor: string | null, sort?: { sort: string; order: string }) => {
-  const library = nativeShelf();
+  const library = connectedShelf();
   return library ? listShelfEntitySeries(library, source, key, text, cursor, sort) : noShelf();
 };
 export const listPcCollections = () => {
-  const library = nativeShelf();
+  const library = connectedShelf();
   return library ? listShelfCollections(library) : noShelf();
 };
 export const getPcWorkCollections = (workId: string) => {
-  const library = nativeShelf();
+  const library = connectedShelf();
   return library ? shelfWorkCollections(library, workId) : Promise.resolve<PcCollection[]>([]);
 };
 export const getPcCollection = (collectionId: string) => {
   const revision = nextFavoriteRevision();
-  const library = nativeShelf();
+  const library = connectedShelf();
   if (!library) return noShelf();
   return shelfCollectionDetail(library, collectionId).then((collection) => {
     for (const member of collection.members) if (member.work) markFavoriteRead(member.work, revision);
@@ -253,12 +253,12 @@ export interface SearchSuggestion {
 }
 /** 検索欄の候補（題の候補の `sourceKey` は棚の作品の ID）。 */
 export const searchPcSuggestions = (text: string): Promise<SearchSuggestion[]> => {
-  const shelf = nativeShelf();
+  const shelf = connectedShelf();
   return shelf ? shelfSuggestions(shelf, text) : Promise.resolve([]);
 };
 /** 取得元と ID から棚の作品を引く（本文の中のリンク・題の候補）。棚に無いときは失敗になる。 */
 export const lookupPcWork = (source: string, key: string): Promise<PcWork | null> => {
-  const shelf = nativeShelf();
+  const shelf = connectedShelf();
   return shelf ? lookupShelfWork(shelf, source, key) : Promise.resolve(null);
 };
 /** Rust が返す保存版の一覧の行。作品は棚の一覧と同じ形で残っている。 */
@@ -270,7 +270,7 @@ const offlineWork = (stored: StoredOfflineWork): OfflineWork => ({ ...stored, wo
 export const listOfflineWorks = () => invoke<StoredOfflineWork[]>("offline_list_works").then((works) => works.map(offlineWork));
 /** 端末に保存する。今つながっている棚から、読む画面と同じ組み立てで保存する。 */
 export const saveOfflineWork = (workId: string) => {
-  const library = nativeShelf();
+  const library = connectedShelf();
   if (!library) return noShelf();
   return invoke<StoredOfflineWork>("offline_save_shelf_work", { library, work: workId }).then(offlineWork);
 };

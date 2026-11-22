@@ -4,7 +4,7 @@
 //! 組み立て（`piep-reader-render`）でページにする。ページの切れ目が同じなので、「何ページ目の
 //! どこ」で憶えた読書位置はデスクトップと携帯で同じ場所を指す。画像は一式に載っている
 //! ファイルだけを部分実体で受け取り、中身のハッシュを確かめてから出す。
-use super::native_library::{self, NativeLibraryScope};
+use super::shelf::{self, ShelfScope};
 use super::{ClientError, PcClientState};
 use piep_library_protocol::{BundleFile, Id, ReaderBundle, ResourceReference, ResourceScope};
 use piep_mobile_api::MobilePage;
@@ -21,9 +21,9 @@ use tauri::State;
 const KEEP_DOCUMENTS: usize = 4;
 
 /// 組み上げた一冊。画像の番号は `images` の位置。
-pub(crate) struct NativeDocument {
+pub(crate) struct ShelfDocument {
     key: String,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     entity: Id,
     view: ResourceScope,
     pages: Vec<String>,
@@ -32,7 +32,7 @@ pub(crate) struct NativeDocument {
     images: Vec<BundleFile>,
 }
 
-impl NativeDocument {
+impl ShelfDocument {
     pub(crate) fn pages(&self) -> &[String] {
         &self.pages
     }
@@ -63,17 +63,17 @@ impl NativeDocument {
 }
 
 #[derive(Default)]
-pub struct NativeReaderState {
-    documents: Mutex<VecDeque<Arc<NativeDocument>>>,
+pub struct ShelfReaderState {
+    documents: Mutex<VecDeque<Arc<ShelfDocument>>>,
 }
 
-impl NativeReaderState {
-    fn find(&self, key: &str) -> Option<Arc<NativeDocument>> {
+impl ShelfReaderState {
+    fn find(&self, key: &str) -> Option<Arc<ShelfDocument>> {
         let documents = self.documents.lock().unwrap_or_else(|e| e.into_inner());
         documents.iter().find(|d| d.key == key).cloned()
     }
 
-    fn keep(&self, document: Arc<NativeDocument>) {
+    fn keep(&self, document: Arc<ShelfDocument>) {
         let mut documents = self.documents.lock().unwrap_or_else(|e| e.into_inner());
         documents.retain(|d| d.key != document.key);
         documents.push_front(document);
@@ -83,7 +83,7 @@ impl NativeReaderState {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NativeOpened {
+pub struct OpenedShelfWork {
     /// ページと画像を引くときの鍵。
     key: String,
     entity_id: Id,
@@ -106,10 +106,7 @@ fn view_key(entity: Id, view: &ResourceScope) -> String {
 
 /// 一式を組む。本文の画像の置き場（ファイルの識別子）を、一式に載った資産の番号に置き換える。
 /// 一式に無い置き場を指す本文は組まない（知らないファイルを取りに行かない）。
-pub(crate) fn build(
-    scope: NativeLibraryScope,
-    bundle: ReaderBundle,
-) -> Result<NativeDocument, ClientError> {
+pub(crate) fn build(scope: ShelfScope, bundle: ReaderBundle) -> Result<ShelfDocument, ClientError> {
     let document = ReaderView::from_value(bundle.document).map_err(|_| ClientError::protocol())?;
     let reading = document.reading.clone().ok_or_else(ClientError::protocol)?;
     let (pages, source_page_starts) =
@@ -150,7 +147,7 @@ pub(crate) fn build(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| ClientError::protocol())?;
-    Ok(NativeDocument {
+    Ok(ShelfDocument {
         key: view_key(bundle.entity_id, &bundle.scope),
         scope,
         entity: bundle.entity_id,
@@ -164,14 +161,14 @@ pub(crate) fn build(
 
 /// 取得元と作品の鍵から、この利用者が今読む版を開く。
 #[tauri::command]
-pub async fn pc_native_open(
+pub async fn pc_open(
     state: State<'_, PcClientState>,
-    reader: State<'_, NativeReaderState>,
-    scope: NativeLibraryScope,
+    reader: State<'_, ShelfReaderState>,
+    scope: ShelfScope,
     provider: String,
     key: String,
-) -> Result<NativeOpened, ClientError> {
-    let found = native_library::lookup(&state, scope, &provider, &key).await?;
+) -> Result<OpenedShelfWork, ClientError> {
+    let found = shelf::lookup(&state, scope, &provider, &key).await?;
     let view = match found.edit_id {
         Some(edit) => ResourceScope::Edit(edit),
         None => ResourceScope::Snapshot(found.snapshot_id),
@@ -181,13 +178,13 @@ pub async fn pc_native_open(
 
 /// 作品の保存した版の一つ（版ごとの写し）を開く。作品の画面の版の一覧の `snapshotId`。
 #[tauri::command]
-pub async fn pc_native_open_snapshot(
+pub async fn pc_open_snapshot(
     state: State<'_, PcClientState>,
-    reader: State<'_, NativeReaderState>,
-    scope: NativeLibraryScope,
+    reader: State<'_, ShelfReaderState>,
+    scope: ShelfScope,
     work: Id,
     snapshot: Id,
-) -> Result<NativeOpened, ClientError> {
+) -> Result<OpenedShelfWork, ClientError> {
     open_view(
         &state,
         &reader,
@@ -200,22 +197,22 @@ pub async fn pc_native_open_snapshot(
 
 async fn open_view(
     state: &PcClientState,
-    reader: &NativeReaderState,
-    scope: NativeLibraryScope,
+    reader: &ShelfReaderState,
+    scope: ShelfScope,
     entity: Id,
     view: ResourceScope,
-) -> Result<NativeOpened, ClientError> {
+) -> Result<OpenedShelfWork, ClientError> {
     let document_key = view_key(entity, &view);
     let document = match reader.find(&document_key) {
         Some(document) if document.scope.same_as(&scope) => document,
         _ => {
-            let bundle = native_library::bundle(state, scope, entity, view.clone()).await?;
+            let bundle = shelf::bundle(state, scope, entity, view.clone()).await?;
             let document = Arc::new(build(scope, bundle)?);
             reader.keep(Arc::clone(&document));
             document
         }
     };
-    Ok(NativeOpened {
+    Ok(OpenedShelfWork {
         key: document.key.clone(),
         entity_id: document.entity,
         view: document.view.clone(),
@@ -229,8 +226,8 @@ async fn open_view(
 
 /// 開いた文書のページ（0 から）。
 #[tauri::command]
-pub fn pc_native_page(
-    reader: State<'_, NativeReaderState>,
+pub fn pc_page(
+    reader: State<'_, ShelfReaderState>,
     key: String,
     page: usize,
 ) -> Result<MobilePage, ClientError> {
@@ -252,7 +249,7 @@ pub fn pc_native_page(
 
 /// 画像を取りに行く先。開いた文書の一式に載っているものだけ。
 pub(crate) struct ImageTarget {
-    pub scope: NativeLibraryScope,
+    pub scope: ShelfScope,
     pub entity: Id,
     pub view: ResourceScope,
     pub resource: ResourceReference,
@@ -266,7 +263,7 @@ impl ImageTarget {
 }
 
 pub(crate) fn image_target(
-    reader: &NativeReaderState,
+    reader: &ShelfReaderState,
     key: &str,
     asset: usize,
 ) -> Option<ImageTarget> {
@@ -280,7 +277,7 @@ pub(crate) async fn fetch_image(
 ) -> Result<Vec<u8>, ClientError> {
     let mut bytes = Vec::with_capacity(target.file.length as usize);
     for (ordinal, chunk) in target.file.chunks.iter().enumerate() {
-        let encoded = native_library::chunk(
+        let encoded = shelf::chunk(
             state,
             target.scope,
             target.entity,
@@ -310,8 +307,8 @@ mod tests {
         Id::new(uuid::Uuid::from_u128(n)).unwrap()
     }
 
-    fn scope() -> NativeLibraryScope {
-        NativeLibraryScope::for_tests(id(1), id(2), id(3), 7)
+    fn scope() -> ShelfScope {
+        ShelfScope::for_tests(id(1), id(2), id(3), 7)
     }
 
     fn file(bytes: &[u8]) -> ContentFile {

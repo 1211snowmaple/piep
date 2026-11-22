@@ -23,9 +23,9 @@ pub mod cover_protocol;
 pub(crate) mod device_db;
 mod image_validation;
 pub(crate) mod local_reading;
-pub(crate) mod native_library;
-pub(crate) mod native_reader;
 pub(crate) mod offline;
+pub(crate) mod shelf;
+pub(crate) mod shelf_reader;
 pub(crate) mod shelf_reading;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -376,7 +376,7 @@ pub struct ConnectionStatus {
     issue: Option<&'static str>,
     capabilities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    native_library: Option<native_library::NativeLibraryStatus>,
+    shelf: Option<shelf::ShelfStatus>,
 }
 
 impl ConnectionStatus {
@@ -388,7 +388,7 @@ impl ConnectionStatus {
             device_name: None,
             issue: None,
             capabilities: Vec::new(),
-            native_library: None,
+            shelf: None,
         }
     }
     fn from_saved(saved: &SavedConnection, reachable: bool, issue: Option<&'static str>) -> Self {
@@ -399,7 +399,7 @@ impl ConnectionStatus {
             device_name: Some(saved.device_name.clone()),
             issue,
             capabilities: saved.capabilities.clone(),
-            native_library: None,
+            shelf: None,
         }
     }
 }
@@ -754,12 +754,12 @@ pub async fn pc_connection_status(
                     .bearer_auth(&saved.token)
                     .timeout(PROBE_TIMEOUT)
                     .send();
-                let (authorized, native_library) =
-                    tokio::join!(about, native_library::discover(&client, &saved, generation),);
+                let (authorized, shelf) =
+                    tokio::join!(about, shelf::discover(&client, &saved, generation),);
                 let issue = match authorized {
                     // 登録は生きているが、棚を読めない（サーバーに棚がまだ無いか、この端末に許可が無い）。
                     Ok(response) if response.status().is_success() => {
-                        native_library.is_none().then_some("no_library")
+                        shelf.is_none().then_some("no_library")
                     }
                     Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
                         Some("revoked")
@@ -774,7 +774,7 @@ pub async fn pc_connection_status(
                 };
                 state.with_connection(generation, || {
                     Ok(ConnectionStatus {
-                        native_library,
+                        shelf,
                         ..ConnectionStatus::from_saved(&saved, issue.is_none(), issue)
                     })
                 })
@@ -1555,7 +1555,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_new_filters_preserve_legacy_wire_shape() {
+    fn empty_filters_are_left_out_of_the_request() {
         let criteria = search_criteria(serde_json::json!({
             "tagMode": "and", "minAssets": "", "maxAssets": "",
             "revision": "", "edit": "", "cover": "",

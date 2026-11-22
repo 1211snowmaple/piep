@@ -128,7 +128,7 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
   }
 
   return <>
-    <SearchField value={input} label={`${target}を検索`} placeholder={tab === "works" ? "作品・作者・本文を検索" : `${target}を検索`} onChange={setInput} onSubmit={submitSearch} onSuggestion={tab === "works" && status?.nativeLibrary ? (item) => {
+    <SearchField value={input} label={`${target}を検索`} placeholder={tab === "works" ? "作品・作者・本文を検索" : `${target}を検索`} onChange={setInput} onSubmit={submitSearch} onSuggestion={tab === "works" && status?.shelf ? (item) => {
       if (item.kind === "tag") navigation.openTag(item.value);
       else if ((item.kind === "author" || item.kind === "series") && item.source && item.sourceKey) navigation.openEntity(item.kind === "author" ? "person" : "series", item.source, item.sourceKey, item.label);
       else if (item.kind === "author") changeCriteria({ ...criteria, text: "", author: item.label });

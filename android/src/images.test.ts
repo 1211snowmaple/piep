@@ -10,10 +10,10 @@ const library = "0190a000-0000-7000-8000-000000000001";
 const id = "0190a000-0000-7000-8000-000000000002";
 
 async function load() {
-  const native = await import("./nativeReading");
-  native.adoptNativeLibrary({
+  const shelf = await import("./shelf");
+  shelf.adoptShelf({
     url: "https://server", reachable: true,
-    nativeLibrary: {
+    shelf: {
       scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
       readerBundle: true,
     },

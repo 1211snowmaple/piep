@@ -32,7 +32,6 @@ export interface LocalReading {
   readAt: number;
   /** 最後に読んだときの接続先。作品の番号はサーバーごとに振られるので、別のサーバーの棚に混ぜない。 */
   serverUrl: string | null;
-  workId: number | null;
   work: PcWork | null;
 }
 
@@ -91,7 +90,6 @@ function editable(work: WorkIdentity, editHash: string | null): LocalReading {
     shelved: row?.shelved ?? false,
     readAt: 0,
     serverUrl: row?.serverUrl ?? null,
-    workId: row?.workId ?? null,
     work: row?.work ?? null,
   };
 }
@@ -207,7 +205,7 @@ export function rememberReading(work: PcWork, editHash: string | null, progress:
   // 頭へ戻した作品は棚から降ろす。読み進めればまた並ぶ。
   const shelved = finished || partRead(progress);
   const joined = shelved !== row.shelved || finished !== row.finished;
-  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, serverUrl: currentServer ?? row.serverUrl, workId: null, work }, shelved || row.shelved, joined);
+  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, serverUrl: currentServer ?? row.serverUrl, work }, shelved || row.shelved, joined);
 }
 
 /** 接続先が変わったら呼ぶ。「続きを読む」は接続先ごとに分ける。 */

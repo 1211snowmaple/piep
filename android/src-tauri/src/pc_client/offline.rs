@@ -2,8 +2,8 @@
 
 use super::device_db::DeviceDb;
 use super::image_validation::validate_saved_image;
-use super::native_library::{self, NativeLibraryScope};
-use super::native_reader;
+use super::shelf::{self, ShelfScope};
+use super::shelf_reader;
 use super::*;
 use piep_library_protocol::{Id, ResourceScope, WorkReadingView};
 use piep_reader_render::pages::reader_outline;
@@ -733,13 +733,13 @@ fn publish_snapshot(
 pub async fn offline_save_shelf_work(
     pc: State<'_, PcClientState>,
     state: State<'_, OfflineState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     work: Id,
 ) -> Result<OfflineWork, ClientError> {
     let _save_guard = state.save_lock.lock().await;
     let key = OfflineKey(work.get());
     state.work_dir(&key)?;
-    let detail = native_library::work_detail(&pc, library, work).await?;
+    let detail = shelf::work_detail(&pc, library, work).await?;
     if let Ok((existing, _)) = read_manifest(&state, &key)
         && (existing.summary.work.source != detail.work.source
             || existing.summary.work.source_id != detail.work.source_id)
@@ -768,14 +768,14 @@ async fn save_shelf_into(
     pc: &PcClientState,
     client: &reqwest::Client,
     saved: &SavedConnection,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     detail: &piep_mobile_api::MobileShelfWorkDetail,
     staging: &Path,
 ) -> Result<Manifest, ClientError> {
     fs::create_dir(staging.join("pages")).map_err(|_| storage())?;
     fs::create_dir(staging.join("assets")).map_err(|_| storage())?;
     let work = &detail.work;
-    let found = native_library::lookup(pc, library, &work.source, &work.source_id).await?;
+    let found = shelf::lookup(pc, library, &work.source, &work.source_id).await?;
     // 作品の画面を出した後に改稿・編集されていれば、画面と違う版を保存しない。
     if found.entity_id.get().to_string() != work.id || !same_view(&found, work) {
         return Err(ClientError::remote());
@@ -784,8 +784,8 @@ async fn save_shelf_into(
         Some(edit) => ResourceScope::Edit(edit),
         None => ResourceScope::Snapshot(found.snapshot_id),
     };
-    let bundle = native_library::bundle(pc, library, found.entity_id, view).await?;
-    let document = native_reader::build(library, bundle)?;
+    let bundle = shelf::bundle(pc, library, found.entity_id, view).await?;
+    let document = shelf_reader::build(library, bundle)?;
     let page_count = document.pages().len();
     if page_count == 0 || page_count > MAX_PAGES || document.image_count() > MAX_ASSETS {
         return Err(ClientError::remote());
@@ -823,7 +823,7 @@ async fn save_shelf_into(
         if target.file.length > MAX_ASSET_BYTES as u64 {
             return Err(ClientError::remote());
         }
-        let bytes = native_reader::fetch_image(pc, &target).await?;
+        let bytes = shelf_reader::fetch_image(pc, &target).await?;
         let mime_type =
             super::cover_protocol::sniffed_mime(&bytes).ok_or_else(ClientError::protocol)?;
         validate_saved_image(&bytes, mime_type)?;
@@ -912,7 +912,7 @@ async fn save_shelf_into(
     // 作品の入ったコレクション（読む画面の欄と、保存した作品の一覧の絞り込みに使う）。
     let work_id = Id::new(uuid::Uuid::parse_str(&work.id).map_err(|_| ClientError::protocol())?)
         .map_err(|_| ClientError::protocol())?;
-    let collections = native_library::work_collections(pc, library, work_id).await?;
+    let collections = shelf::work_collections(pc, library, work_id).await?;
     let collection_positions = collections
         .iter()
         .filter_map(|collection| {
@@ -935,7 +935,7 @@ async fn save_shelf_into(
         .map(|record| record.collection_id.clone())
         .collect();
     // 受け取っている間に版が変わっていれば、混ざった版を保存しない。
-    let latest = native_library::lookup(pc, library, &work.source, &work.source_id).await?;
+    let latest = shelf::lookup(pc, library, &work.source, &work.source_id).await?;
     if latest.entity_id != found.entity_id || !same_view(&latest, work) {
         return Err(ClientError::remote());
     }
@@ -1320,7 +1320,7 @@ pub(super) mod tests {
             },
         )
         .unwrap();
-        // 置き場の名前として正しくないもの（旧 API の番号の置き場を含む）は見ない。
+        // 置き場の名前として正しくないもの（番号だけの置き場を含む）は見ない。
         for name in [
             key(4).dir_name(),
             format!("shelf-{}", Uuid::nil()),
