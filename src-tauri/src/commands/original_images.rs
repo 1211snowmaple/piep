@@ -15,9 +15,10 @@ use crate::downloader::pixiv_originals::{
 };
 use crate::AppState;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
@@ -144,6 +145,51 @@ pub async fn shelf_original_image_status(
 /// 同じ縮小版の URL を作品ごとに確かめ直さない。通信の失敗は覚えない（次の作品で確かめ直す）。
 type KnownLookups = Mutex<HashMap<String, OriginalLookup>>;
 
+/// 公開元で見つからなかった縮小版の URL と、確かめた時刻（UNIX 秒）の控え。アプリのデータ
+/// フォルダーに置く。無くなっても確かめ直すだけなので、棚には入れない。
+const MISSES_FILE: &str = "original-image-misses.json";
+/// 公開元で見つからなかった画像を、確かめ直すまでの間。消えた画像はまず戻らないが、
+/// 一時的な不調で 404 が返ることもあるので、ずっと覚えはしない。
+const MISS_RECHECK: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// 控えを読む。古くなった記録は捨てる。読めなければ空（すべて確かめ直す）。
+fn load_misses(path: &Path, now: u64) -> HashMap<String, u64> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut misses: HashMap<String, u64> = serde_json::from_str(&text).unwrap_or_else(|error| {
+        log::warn!("公開元に無かった画像の控えを読めません（確かめ直します）: {error}");
+        HashMap::new()
+    });
+    misses.retain(|_, checked| now.saturating_sub(*checked) < MISS_RECHECK.as_secs());
+    misses
+}
+
+/// 一回の実行で確かめた結果を控えに反映する。見つかった URL は消し、無かった URL は
+/// 確かめた時刻で残す（前から控えにあったものは、その時刻のまま）。
+fn merge_misses(
+    misses: &mut HashMap<String, u64>,
+    known: &HashMap<String, OriginalLookup>,
+    now: u64,
+) {
+    for (url, lookup) in known {
+        match lookup {
+            OriginalLookup::Unavailable => {
+                misses.entry(url.clone()).or_insert(now);
+            }
+            OriginalLookup::Found(_) => {
+                misses.remove(url);
+            }
+        }
+    }
+}
+
 async fn remembered<F, Fut>(
     known: &KnownLookups,
     url: String,
@@ -177,6 +223,7 @@ async fn upgrade_shelf_work(
     library: &Arc<crate::library::Library>,
     client: &reqwest::Client,
     known: &KnownLookups,
+    asked: &AtomicUsize,
     work: crate::library::LibraryId,
 ) -> Result<(Lookups, String), String> {
     let (card, raw) = {
@@ -235,6 +282,7 @@ async fn upgrade_shelf_work(
             async move {
                 count(
                     remembered(known, url, |url| async move {
+                        asked.fetch_add(1, Ordering::Relaxed);
                         find_original(client, &url).await
                     })
                     .await,
@@ -248,6 +296,7 @@ async fn upgrade_shelf_work(
             async move {
                 count(
                     remembered(known, url, |url| async move {
+                        asked.fetch_add(1, Ordering::Relaxed);
                         find_fanbox_original_cover(client, &url).await
                     })
                     .await,
@@ -301,7 +350,25 @@ pub async fn shelf_upgrade_images_to_original(
 
     let state = app.state::<Arc<AppState>>().inner().clone();
     let client = cdn_client()?;
-    let known = KnownLookups::default();
+    // 前の実行で公開元に無かった画像は、しばらく確かめ直さない。
+    let misses_path = app
+        .path()
+        .app_data_dir()
+        .map(|dir| dir.join(MISSES_FILE))
+        .map_err(|error| log::warn!("公開元に無かった画像の控えの置き場が分かりません: {error}"))
+        .ok();
+    let started = unix_now();
+    let mut misses = misses_path
+        .as_deref()
+        .map(|path| load_misses(path, started))
+        .unwrap_or_default();
+    let known: KnownLookups = Mutex::new(
+        misses
+            .keys()
+            .map(|url| (url.clone(), OriginalLookup::Unavailable))
+            .collect(),
+    );
+    let asked = AtomicUsize::new(0);
     let works = shelf_reduced_works(Arc::clone(&shelf)).await?;
     let total: usize = works
         .iter()
@@ -356,8 +423,10 @@ pub async fn shelf_upgrade_images_to_original(
             ),
         );
         let images = reduced.covers + reduced.illustrations;
+        let asked_before = asked.load(Ordering::Relaxed);
         let (lookups, title) =
-            match upgrade_shelf_work(&shelf, &library, &client, &known, reduced.work).await {
+            match upgrade_shelf_work(&shelf, &library, &client, &known, &asked, reduced.work).await
+            {
                 Ok(result) => result,
                 Err(error) => (
                     Lookups {
@@ -403,7 +472,25 @@ pub async fn shelf_upgrade_images_to_original(
         if stopped_reason.is_some() {
             break;
         }
-        tokio::time::sleep(PACE).await;
+        // 画像サーバーに一度も問い合わせず、何も保存しなかった作品（無かった画像だけが残る）は
+        // 間を空けない。
+        if asked.load(Ordering::Relaxed) != asked_before || lookups.found > 0 {
+            tokio::time::sleep(PACE).await;
+        }
+    }
+    if let Some(path) = &misses_path {
+        let known = known
+            .into_inner()
+            .unwrap_or_else(|error| error.into_inner());
+        merge_misses(&mut misses, &known, unix_now());
+        match serde_json::to_vec(&misses) {
+            Ok(bytes) => {
+                if let Err(error) = crate::server::update::write_atomic(path, &bytes) {
+                    log::warn!("公開元に無かった画像の控えを残せません: {error}");
+                }
+            }
+            Err(error) => log::warn!("公開元に無かった画像の控えを作れません: {error}"),
+        }
     }
     // 表紙の問い合わせは画面が取り直しの完了で捨てる（棚の作品は ID で引く）。
 
@@ -471,5 +558,41 @@ mod tests {
         assert!(remembered(&known, "b".into(), failing).await.is_err());
         assert!(remembered(&known, "b".into(), failing).await.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// 公開元に無かった画像は控えに残り、30日たつまで確かめ直さない。見つかれば控えから消える。
+    #[test]
+    fn missing_originals_are_remembered_for_a_while_and_forgotten_when_found() {
+        let dir = std::env::temp_dir().join(format!(
+            "piep-original-misses-{}",
+            crate::library::LibraryId::now_v7()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(MISSES_FILE);
+        let day = 24 * 60 * 60;
+        let now = 1_000 * day;
+        // 控えが無い・壊れているときは、すべて確かめ直す。
+        assert!(load_misses(&path, now).is_empty());
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(load_misses(&path, now).is_empty());
+
+        let mut misses = HashMap::from([
+            ("old".to_string(), now - 31 * day),
+            ("recent".to_string(), now - 2 * day),
+            ("revived".to_string(), now - 2 * day),
+        ]);
+        let known = HashMap::from([
+            ("recent".to_string(), OriginalLookup::Unavailable),
+            ("new".to_string(), OriginalLookup::Unavailable),
+            ("revived".to_string(), OriginalLookup::Found("x".into())),
+        ]);
+        merge_misses(&mut misses, &known, now);
+        crate::server::update::write_atomic(&path, &serde_json::to_vec(&misses).unwrap()).unwrap();
+        let loaded = load_misses(&path, now);
+        assert_eq!(loaded.get("recent"), Some(&(now - 2 * day)));
+        assert_eq!(loaded.get("new"), Some(&now));
+        assert!(!loaded.contains_key("revived"));
+        assert!(!loaded.contains_key("old"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
