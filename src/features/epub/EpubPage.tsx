@@ -52,10 +52,10 @@ import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 type EpubValues = EpubExportSettings;
 /**
  * キューの作品を棚の ID でまとめて引く（並びはキューの順）。一件ずつ引くと、数百冊のキューで
- * 開くたびにその数だけ往復していた。番号の項目は旧棚のころの残りなので引かない。
+ * 開くたびにその数だけ往復していた。前に積んだ番号の項目は引かない。
  */
 async function queuedWorks(queue: EpubQueueId[]): Promise<ShelfEntry[]> {
-  const shelf = queue.filter((id): id is string => typeof id === "string");
+  const shelf = queue.filter((id) => typeof id === "string");
   if (!shelf.length) return [];
   // 書き出す順は積んだ順。
   const order = new Map(shelf.map((id, index) => [id, index]));

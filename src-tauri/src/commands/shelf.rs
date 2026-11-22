@@ -56,7 +56,7 @@ pub struct Shelf {
     /// 最近ページに分けた本文。ページをめくるたびに本文全体を組み直さない。
     documents: Mutex<VecDeque<CachedDocument>>,
     /// 最近集計した作者・シリーズの一覧（条件・棚の世代・行）。ページをめくる・並べ替える・
-    /// 件数を聞くたびに全作品を集め直さない（旧棚の一覧も同じく覚えている）。
+    /// 件数を聞くたびに全作品を集め直さない。
     entity_rows: Mutex<VecDeque<CachedEntityRows>>,
     /// 検索欄の候補の、正規化で足す名前の束（棚の世代ごと）。
     suggestions: crate::library_suggest::SuggestionPool,
@@ -709,7 +709,7 @@ fn scope_of(card: &WorkCard, snapshot: Option<LibraryId>) -> ResourceScope {
     }
 }
 
-/// 本文の一ページ。旧棚の読む画面の一ページ（`ReaderContentPage`）と同じ形。
+/// 本文の一ページ。読む画面の一ページ（`ReaderContentPage`）の形。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContentPageView {
@@ -770,7 +770,7 @@ pub async fn shelf_outline(
     .map_err(|e| e.to_string())?
 }
 
-/// 本文内検索（読む画面）。旧棚と同じ畳み方で、ページごとの一致を返す。
+/// 本文内検索（読む画面）。カタカナとひらがなを畳み、ページごとの一致を返す。
 #[tauri::command]
 pub async fn shelf_search_content(
     state: State<'_, Arc<Shelf>>,
@@ -860,8 +860,8 @@ pub async fn shelf_media(
 }
 
 /// 作品の添付の PDF の1ページを絵にする（「原本を見る」）。`file` はファイルの識別子、
-/// `page` は 0 から。作品の版に PDF として載っていないファイルは断る。旧棚の
-/// `render_pdf_attachment_page` と同じく控えは持たず、要求のたびに描く。
+/// `page` は 0 から。作品の版に PDF として載っていないファイルは断る。
+/// 控えは持たず、要求のたびに描く。
 #[tauri::command]
 pub async fn shelf_render_pdf_page(
     state: State<'_, Arc<Shelf>>,
@@ -967,7 +967,7 @@ pub async fn shelf_entity(
     .map_err(|e| e.to_string())?
 }
 
-/// 検索欄の候補（旧棚の `search_suggest` と同じ形）。題の候補の `sourceKey` は棚の作品の ID。
+/// 検索欄の候補（`search_suggest` の形）。題の候補の `sourceKey` は棚の作品の ID。
 #[tauri::command]
 pub async fn shelf_search_suggest(
     state: State<'_, Arc<Shelf>>,
@@ -1569,7 +1569,7 @@ pub async fn shelf_job_history(
     .map_err(|e| e.to_string())?
 }
 
-/// 完了履歴の項目を当時の順に読む。現在版や旧棚の作品行から結果を補わない。
+/// 完了履歴の項目を当時の順に読む。現在版の作品から結果を補わない。
 #[tauri::command]
 pub async fn shelf_job_history_items(
     state: State<'_, Arc<Shelf>>,

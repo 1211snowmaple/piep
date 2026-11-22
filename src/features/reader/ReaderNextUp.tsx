@@ -39,7 +39,7 @@ export function NeighborTile({ role, ordered, label, title, work, emphasized, on
   ordered: boolean;
   label: string;
   title: string;
-  /** 詳しい情報（旧棚の作品か棚の作品）。まだ届いていなければ題だけで描く。 */
+  /** 詳しい情報。まだ届いていなければ題だけで描く。 */
   work?: ShelfEntry;
   /** 読む順のある並びの「次」。いちばん押されるので目立たせる。 */
   emphasized: boolean;

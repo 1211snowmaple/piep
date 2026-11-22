@@ -99,7 +99,7 @@ describe("棚の一覧の操作", () => {
     vi.clearAllMocks();
   });
 
-  it("選んだ棚の作品をまとめてお気に入りにし、旧棚には頼まない", async () => {
+  it("選んだ棚の作品をまとめてお気に入りにする", async () => {
     view();
     fireEvent.click(await screen.findByRole("button", { name: "複数選択" }));
     fireEvent.click(await screen.findByRole("button", { name: /棚の作品1を選択/ }));

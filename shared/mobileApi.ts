@@ -162,7 +162,7 @@ export interface MobileRevision {
   activeEditHash: string | null;
 }
 
-/** 棚の作品の一件（棚の UUID で指し、旧棚の番号を持たない）。項目は `MobileWork` に揃える。 */
+/** 棚の作品の一件（棚の UUID で指す）。項目は `MobileWork` に揃える。 */
 export interface MobileShelfWork {
   /** 作品の UUID。 */
   id: string;

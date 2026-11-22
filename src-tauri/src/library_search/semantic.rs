@@ -1,5 +1,5 @@
-//! 意味検索。旧棚の意味検索の索引（`crate::database::semantic_index`、作品ごとに説明と本文の
-//! ベクトルを一つずつ持つ）をそのまま使い、`<棚>/derived/search/semantic-v2/` に置く。
+//! 意味検索。意味検索の索引（`crate::database::semantic_index`、作品ごとに説明と本文の
+//! ベクトルを一つずつ持つ）を使い、`<棚>/derived/search/semantic-v2/` に置く。
 //!
 //! 埋め込みは遅い（本文まるごとで 1 秒に 1.5 作品ほど、全棚で 5 時間）。そこで作り直すときは、
 //! 同じ索引の前のベクトルのうち文字列が変わっていない部分を写す（タグを付け替えただけなら、
@@ -55,7 +55,7 @@ pub struct SemanticEvidence {
 }
 
 impl Library {
-    /// 意味検索の索引の置き場（旧棚の関数に渡す `storage_dir`）。索引そのものはこの親の
+    /// 意味検索の索引の置き場（`semantic_index` の関数に渡す `storage_dir`）。索引そのものはこの親の
     /// `search/semantic-v2/` にできるので、`derived/search/semantic-v2/` になる。
     pub(crate) fn semantic_storage(&self) -> PathBuf {
         self.search_storage().join("semantic")
@@ -98,8 +98,8 @@ impl Library {
             report.removed = orphans.len();
         }
 
-        // 状態の違う作品と、写せる前のベクトル。同じ索引に前の行があればそれを、なければ
-        // 旧棚の行を候補にする。
+        // 状態の違う作品と、写せる前のベクトル。同じ索引に前の行があれば
+        // それを写す候補にする。
         let stale = self.stale_semantic_works()?;
         if stale.is_empty() {
             return Ok(report);
@@ -423,8 +423,8 @@ struct Built {
     stamp: (Vec<u8>, Option<Vec<u8>>, Option<String>),
 }
 
-/// 旧棚の意味検索の文書の形。説明の断片の文字列（題・作者・タグ・シリーズ・説明）は
-/// ここで決まり、旧棚と同じなら旧棚のベクトルを写せる。
+/// 意味検索の文書の形。説明の断片の文字列（題・作者・タグ・シリーズ・説明）は
+/// ここで決まり、前と同じなら前のベクトルを写せる。
 fn semantic_document(key: i64, doc: SearchDocument) -> SemanticIndexDocument {
     SemanticIndexDocument {
         download_id: key,

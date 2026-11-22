@@ -22,7 +22,7 @@ pub struct ProfileSave<'a> {
 
 impl Library {
     /// 保存済み作品の現在版に載る作者・シリーズのうち、プロフィールを直接取得していない対象。
-    /// 作品の原本や旧棚の番号は読まず、同じ対象を一度だけ返す。
+    /// 作品の原本は読まず、同じ対象を一度だけ返す。
     pub fn missing_profiles_for_works(
         &self,
         works: &[LibraryId],

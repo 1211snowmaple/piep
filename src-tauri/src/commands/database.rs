@@ -210,7 +210,7 @@ pub async fn search_set_semantic_enabled(
 }
 
 /// 棚の索引を追いつかせる（全文、続けて意味検索を入れていれば意味の索引）。
-/// 進み具合は旧棚の作り直しと同じ知らせで流し、走っている作り直しがあればそれに合流する。
+/// 進み具合は索引の作り直しの知らせで流し、走っている作り直しがあればそれに合流する。
 fn spawn_shelf_index_job(
     app: tauri::AppHandle,
     library: Arc<crate::library::Library>,

@@ -1,7 +1,6 @@
 //! 棚の作者・シリーズを、作者・シリーズの画面が出す形にする（評価文書 6.21）。
 //!
-//! 数え方・並べ方は、旧棚の問い合わせ（`get_person`・`get_series`・`list_entity_tags`・
-//! `list_entity_series_paged`）と全員・全シリーズで突き合わせて合わせたもの。
+//! 数え方・並べ方は、切り替えの前に全員・全シリーズで突き合わせて合わせたもの。
 
 use crate::library::{
     EntityKind, Fingerprint, Library, LibraryId, ResourceReference, ResourceScope, Result,
@@ -52,7 +51,7 @@ pub struct TagCount {
     pub count: u64,
 }
 
-/// 作者のシリーズの一件（旧棚の `EntityFacet` の形）。
+/// 作者のシリーズの一件（画面の `EntityFacet` の形）。
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct SeriesFacet {
     pub id: LibraryId,
@@ -78,7 +77,7 @@ pub struct SeriesFacet {
     pub total_revisions: u64,
 }
 
-/// 作者のシリーズを並べる鍵。旧棚の `list_entity_series_paged` と同じ語彙。
+/// 作者のシリーズを並べる鍵。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeriesSort {
@@ -133,7 +132,7 @@ pub(crate) fn text(value: Option<&serde_json::Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// 旧棚の `LIKE … COLLATE NOCASE`（ASCII だけ大文字と小文字を区別しない）と同じ一致。
+/// SQLite の `LIKE … COLLATE NOCASE`（ASCII だけ大文字と小文字を区別しない）と同じ一致。
 pub(crate) fn contains_nocase(haystack: &str, needle: &str) -> bool {
     haystack
         .to_ascii_lowercase()
@@ -273,8 +272,8 @@ impl Library {
     }
 
     /// 画面の「保存データ」の欄に出す、版を作った取得元の応答（最も新しく受け取ったもの）。
-    /// 旧棚の行を写した記録（`legacy-current-row`）は取得元の応答ではないので除く。旧棚の
-    /// 画面は最新の版の JSON を出しており、その JSON は取り込みの記録の側にある。
+    /// 移行で作品の行を写した記録（`legacy-current-row`）は取得元の応答ではないので除く。
+    /// 最新の版の JSON は取り込みの記録の側にある。
     pub fn entity_profile(&self, entity: LibraryId, snapshot: LibraryId) -> Result<Option<String>> {
         let observation: Option<Vec<u8>> = self
             .reader()?

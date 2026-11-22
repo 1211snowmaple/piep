@@ -119,7 +119,7 @@ pub(super) fn mobile_collection(
         .into(),
         member_count: count(summary.member_count),
         available_count: count(summary.available_count),
-        // 旧棚の作品番号は無い。単独の表紙は `cover/single` から引く。
+        // 作品番号は無い。単独の表紙は `cover/single` から引く。
         cover_work_id: None,
         cover_mode: summary.cover_mode,
         cover_revision: summary.revision,

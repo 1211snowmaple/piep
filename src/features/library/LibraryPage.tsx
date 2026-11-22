@@ -1971,7 +1971,7 @@ export function searchSuggestionAction(item: SearchSuggestion): SearchSuggestion
   if (item.kind === "series" && source && sourceKey) {
     return { kind: "navigate", target: `/series/${encodeURIComponent(source)}/${encodeURIComponent(sourceKey)}` };
   }
-  // 題の候補の `sourceKey` は作品の ID（旧棚は番号、棚は UUID）。
+  // 題の候補の `sourceKey` は棚の作品の ID（UUID）。
   if (item.kind === "title" && sourceKey && (/^\d+$/.test(sourceKey) || SHELF_WORK_ID.test(sourceKey))) {
     return { kind: "navigate", target: `/works/${sourceKey.toLowerCase()}` };
   }

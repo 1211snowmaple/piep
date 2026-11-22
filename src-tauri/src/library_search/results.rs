@@ -1,5 +1,5 @@
 //! 本文の検索の一覧に付けるもの：作者やシリーズそのものを指す問い合わせの解釈と、
-//! 一致した箇所の抜粋・理由。どちらも旧棚の判定と抜粋の関数をそのまま使う。
+//! 一致した箇所の抜粋・理由。どちらも `crate::database` の判定と抜粋の関数を使う。
 
 use super::index::Space;
 use super::query::parse_query;
@@ -96,8 +96,7 @@ impl TextSearch {
 
 /// 過去の改稿だけで一致した作品の関連度に掛ける重み。過去の改稿の索引は文書が少なく、
 /// 語の珍しさの重みがいまの版の索引と揃わないので、関連度は目安でしかない。いまの版で同じ
-/// くらいに一致した作品を先に出すために、半分にする（旧棚も、過去の版の一致は控えめな点に
-/// していた）。
+/// くらいに一致した作品を先に出すために、半分にする。
 const HISTORY_WEIGHT: f32 = 0.5;
 
 /// 本文の検索の一ページ。
@@ -132,7 +131,7 @@ struct PastMatch {
     count: u32,
 }
 
-/// 一致した箇所。旧棚の検索結果の `match_fields`・`score_reasons`・`match_highlights` と同じ
+/// 一致した箇所。検索結果の `match_fields`・`score_reasons`・`match_highlights` と同じ
 /// （抜粋の `text` だけは、項目の全文でなく一致の前後の窓）。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchDecoration {
@@ -140,7 +139,7 @@ pub struct SearchDecoration {
     pub match_fields: Vec<String>,
     pub score_reasons: Vec<ScoreReason>,
     pub highlights: Vec<SearchHighlight>,
-    /// 一致した項目の重みから出した点。旧棚は表示する関連度にこれを足していた（並びには使わない）。
+    /// 一致した項目の重みから出した点（並びには使わない）。
     pub field_score: f64,
 }
 
@@ -258,7 +257,7 @@ impl Library {
     /// 続きのページは語の一致と同じ。作者・シリーズの解釈はしない。
     ///
     /// 除く語（`-語`）は、語の一致でその語を含む作品を除く。意味の問い合わせには除く語を
-    /// 入れない（旧棚は問い合わせをそのまま埋め込んでいて、除きたい語に近い作品が上がっていた）。
+    /// 入れない（埋め込むと、除きたい語に近い作品が上がる）。
     fn search_by_meaning(&self, text: &str, query: &WorkListQuery) -> Result<SearchPage> {
         let parsed = parse_search_query(text);
         let meaning = if parsed.exclude.is_empty() {
@@ -484,8 +483,8 @@ impl Library {
             let mut highlights: Vec<SearchHighlight> = make_match_highlights(&document, &parsed)
                 .into_iter()
                 .map(|mut highlight| {
-                    // 旧棚は項目の全文（本文なら作品まるごと）を `text` に入れていた。
-                    // 一覧の一件ごとに本文を運ぶことになるので、一致の前後の窓だけにする。
+                    // 項目の全文（本文なら作品まるごと）を入れると、一覧の一件ごとに本文を
+                    // 運ぶことになるので、一致の前後の窓だけにする。
                     highlight.text = highlight
                         .segments
                         .iter()

@@ -176,7 +176,7 @@ impl SweepBundle {
     }
 }
 
-/// 走査で見つけ、保存する前の候補。保存の仕方（旧棚・棚）だけが違う。
+/// 走査で見つけ、保存する前の候補。
 pub(crate) struct PreparedSweep {
     pub track: &'static str,
     pub strength: f64,

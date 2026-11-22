@@ -1,11 +1,11 @@
 //! 棚の作品を、作品の画面と読む画面が出す形にする（本文の HTML・画像・版）。
 //!
-//! 本文の HTML は旧棚の変換（`database::parser`）をそのまま使う。旧棚の変換は本文の中の
+//! 本文の HTML は取得元の応答の変換（`database::parser`）で組む。変換は本文の中の
 //! 画像の指定を保存名で探すので、棚の「指定 → 画像」の対応（reader bindings）から、
-//! 旧棚の保存名の形をした仮の添付の一覧を作って渡す。置き場には保存名ではなく
+//! 保存名の形をした仮の添付の一覧を作って渡す。置き場には保存名ではなく
 //! ファイルの識別子（中身の SHA-256）を入れ、画面が `piep-library` の URI にする。
-//! 指定と画像の結び付けは棚の対応が決め、旧棚の名前の推測には頼らない
-//! （仮の名前は、旧棚の変換がその指定に対して探す名前そのもの）。
+//! 指定と画像の結び付けは棚の対応が決め、変換の名前の推測には頼らない
+//! （仮の名前は、変換がその指定に対して探す名前そのもの）。
 
 use crate::database::models::AssetEntry;
 use crate::library::{
@@ -33,7 +33,7 @@ pub struct RenderedDocument {
     pub text_chars: usize,
 }
 
-/// 保存した版の一つ。同じ改稿の補完は最後のものだけを数える（旧棚の版と同じ数え方）。
+/// 保存した版の一つ。同じ改稿の補完は最後のものだけを数える。
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct VersionView {
     pub snapshot: LibraryId,
@@ -193,7 +193,7 @@ impl Library {
     /// 編集の基準の版の番号（取得元の改稿の順、`VersionView::version` と同じ数え方）。
     ///
     /// 読む画面は、これが今の版より古いと「編集版（v… 基準）」と出す。編集のあとに取り込んだ
-    /// 改稿は、編集版を読んでいるあいだ見えないからである（旧棚の `staleEditBase` と同じ）。
+    /// 改稿は、編集版を読んでいるあいだ見えないからである。
     pub fn edit_base_version(&self, work: LibraryId, edit: LibraryId) -> Result<i64> {
         let base: Vec<u8> = self.reader()?.query_row(
             "SELECT base_snapshot_id FROM edit_revisions WHERE id=?1 AND work_id=?2 AND sealed=1",
@@ -211,7 +211,7 @@ impl Library {
     /// ファイルだけを返し、載っていなければ `None`。
     ///
     /// 画面から受け取った識別子をそのまま開くと、作品と関係のないファイルを読ませる口になる
-    /// （旧棚の `render_pdf_attachment_page` が作品のアセットに限るのと同じ）。
+    /// 。
     pub fn work_pdf_attachment(
         &self,
         work: LibraryId,
@@ -271,7 +271,7 @@ impl Library {
     ///
     /// FANBOX の保存版は、添付の PDF・テキストの本文を添付の位置へ差し込む。
     /// 検索の文書と同じ関数を通すので、読める本文と検索に入る本文が食い違わない。携帯は添付を
-    /// 読み解けないので、差し込んだ文書を渡す。字数は旧棚の読む画面と同じく、HTML ではなく
+    /// 読み解けないので、差し込んだ文書を渡す。字数は HTML ではなく
     /// 本文の平文（検索に使う本文、添付から取り込んだ本文を含む）で数える。
     ///
     /// 取得元の応答に本文が無い作品（公開範囲の外の投稿など）は、空の本文にする。
@@ -382,7 +382,7 @@ pub fn render_html(document: &ReaderDocument) -> Result<String> {
     Ok(piep_reader_render::document::render_html(&view(document)?))
 }
 
-/// 旧棚の変換が探す名前の仮の添付。
+/// 変換が探す名前の仮の添付。
 pub(crate) fn bound_assets(document: &ReaderDocument) -> Result<Vec<AssetEntry>> {
     Ok(piep_reader_render::document::bound_assets(&view(document)?).0)
 }

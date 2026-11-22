@@ -3,7 +3,7 @@ import { Box, Card, Group, Stack, Text, ThemeIcon } from "@mantine/core";
 import { ActionRow } from "@/components/ActionRow";
 import type { LucideIcon } from "@/lib/icons";
 
-/** 診断の画面の数の札と、手入れの札（旧棚と棚の診断で同じ見た目にする）。 */
+/** 診断の画面の数の札と、手入れの札。 */
 export function MetricCard({ label, value, detail, icon: Icon, color = "piep" }: { label: string; value: string; detail: string; icon: LucideIcon; color?: string }) {
   return <Card p="lg"><Group wrap="nowrap" align="flex-start" gap="sm"><ThemeIcon size={38} variant="light" color={color} style={{ flex: "0 0 auto" }}><Icon size={18} /></ThemeIcon><Box miw={0} style={{ flex: "1 1 auto" }}><Text size="xs" c="dimmed" className="line-clamp-1">{label}</Text><Text fz="xl" fw={760} className="metric-card__value">{value}</Text><Text size="xs" c="dimmed" mt={4}>{detail}</Text></Box></Group></Card>;
 }

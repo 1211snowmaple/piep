@@ -1405,7 +1405,7 @@ async fn people_series_and_collections_come_from_the_shelf_in_the_v1_shapes() {
         .await;
     assert!(none.is_empty());
 
-    // 棚に無いもの・知らない条件は、旧棚へ回さず断る。
+    // 棚に無いもの・知らない条件は断る。
     for (rest, status) in [
         (
             "/people/detail?provider=pixiv&key=nobody".to_string(),

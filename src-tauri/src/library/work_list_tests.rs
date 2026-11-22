@@ -548,7 +548,7 @@ fn cover(bytes: &[u8]) -> CapturedMedia {
 /// - d: タグ R、作者 p1（新名）、シリーズ s1、保留（未完）の候補
 /// - e: 有効な編集、判断待ちの改稿の候補
 /// - f: 外した新着の候補
-/// - g: 旧棚の「修復」の版で欠けた題を埋めた（版は 2 だが作者の改稿ではない）
+/// - g: 移行で入った「修復」の版で欠けた題を埋めた（版は 2 だが作者の改稿ではない）
 fn filter_shelf(library: &Library) -> BTreeMap<&'static str, LibraryId> {
     let base = |provider: &str, key: &str, body: &str, acquired: i64| {
         let mut c = capture(&Work {
@@ -627,7 +627,7 @@ fn filter_shelf(library: &Library) -> BTreeMap<&'static str, LibraryId> {
     let mut g = base("pixiv", "g", "123456", 10_000);
     g.metadata.insert("title".into(), json!(""));
     ids.insert("g", library.capture(g).unwrap().entity_id);
-    // 旧棚から移した「修復」の版は、改稿の絞り込みに数えない。
+    // 移行で入った「修復」の版は、改稿の絞り込みに数えない。
     let repaired = library
         .capture(base("pixiv", "g", "123456", 11_000))
         .unwrap();
@@ -1114,7 +1114,7 @@ fn every_filter_selects_the_works_with_that_property_and_pages_through_them() {
     for (name, filter, expected) in cases {
         assert_eq!(keys(filter), expected, "{name}");
     }
-    // 修復で分けた版も版の番号には数える（旧棚の版の表示と同じ）。
+    // 修復で分けた版も版の番号には数える。
     assert_eq!(library.work_card(ids["g"]).unwrap().version_number, 2);
     library.verify().unwrap();
 }

@@ -1,7 +1,7 @@
-//! 棚の検索欄の候補（旧棚の `search_suggest`）。
+//! 棚の検索欄の候補。
 //!
 //! 作者・シリーズ・題・タグの前方一致を集め、足りなければよく使う名前の束から正規化と
-//! 作者の読みで足す（組み立ては [`crate::search_suggest`]、旧棚と共通）。候補を押した先は
+//! 作者の読みで足す（組み立ては [`crate::search_suggest`]）。候補を押した先は
 //! 返す：作者・シリーズは取得元と ID、題は取得元の ID と棚の作品の ID。
 
 use crate::database::models::SearchSuggestion;
@@ -127,7 +127,7 @@ fn collect(
 }
 
 impl Library {
-    /// 検索欄の候補（旧棚の `search_suggest` と同じ並びと形）。語が空なら何も出さない。
+    /// 検索欄の候補（`search_suggest` の並びと形）。語が空なら何も出さない。
     /// `limit` は 1〜[`SUGGESTION_LIMIT_MAX`] に収める。
     pub fn search_suggestions(
         &self,

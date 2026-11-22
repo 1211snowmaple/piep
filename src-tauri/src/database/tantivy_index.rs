@@ -81,7 +81,7 @@ pub struct TantivyIndexDocument {
     pub tags: String,
     /// タグを一つずつ。空でなければ、読みの欄をタグごとの値にする（棚）。つないだ
     /// `tags` の読みは隣のタグとの境目をまたぐ 2〜3 文字にも当たる。空なら
-    /// `tags` から作る（旧棚の索引は作り直さない）。
+    /// `tags` から作る。
     pub tag_list: Vec<String>,
     pub series_title: String,
     pub excerpt: String,

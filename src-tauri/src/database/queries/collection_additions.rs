@@ -96,7 +96,7 @@ impl AdditionWork {
     }
 }
 
-/// 束にあとから入れるとよさそうな作品を探す（出どころは旧棚か棚の作業用の表）。
+/// 束にあとから入れるとよさそうな作品を探す（出どころは棚から組んだ作業用の表）。
 pub(crate) fn collection_additions(
     src: &dyn SuggestionSource,
     collection_id: &str,

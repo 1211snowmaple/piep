@@ -227,7 +227,7 @@ impl From<&MobileMetadata> for MobileRevision {
     }
 }
 
-/// 棚の作品の一件（棚の UUID で指し、旧棚の番号を持たない）。項目は `MobileWork` に揃える。
+/// 棚の作品の一件（棚の UUID で指す）。項目は `MobileWork` に揃える。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MobileShelfWork {

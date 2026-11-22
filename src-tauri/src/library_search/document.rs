@@ -1,8 +1,7 @@
-//! 本文の検索の文書。旧棚の全文索引と同じ材料を、棚の保存状態から作る。
+//! 本文の検索の文書。全文索引の材料を、棚の保存状態から作る。
 //!
-//! 索引は派生物で、関連度の重みと字句解析は旧棚の実装をそのまま使う
-//! （`crate::database::tantivy_index`）。ここは「何を索引に入れるか」だけを決める。
-//! 切り替えの前に、全作品の文書を旧棚の文書と突き合わせて確かめてある。
+//! 索引は派生物で、関連度の重みと字句解析は `crate::database::tantivy_index` が持つ。
+//! ここは「何を索引に入れるか」だけを決める。
 
 use crate::database::models::AssetEntry;
 use crate::library::{Error, Fingerprint, Library, LibraryId, Result, SourceBody};
@@ -26,14 +25,14 @@ pub struct SearchDocument {
     pub excerpt: String,
     /// 有効な編集があればその本文、なければ保存版の本文（FANBOX は添付から取り出した本文を含む）。
     pub body: String,
-    /// 保存版にある画像・添付の種類（旧棚の資産の種類の名前: cover・illustration・file）。
+    /// 保存版にある画像・添付の種類（cover・illustration・file）。
     pub asset_kinds: Vec<&'static str>,
     pub text_length: i64,
     pub saved_at: i64,
     pub published_at: Option<i64>,
 }
 
-/// 取得元の作品の URL。旧棚の索引と同じ形。
+/// 取得元の作品の URL。
 pub fn source_url(provider: &str, external_key: &str, author_key: &str) -> String {
     match provider {
         "pixiv" => format!("https://www.pixiv.net/novel/show.php?id={external_key}"),
@@ -100,9 +99,8 @@ impl Library {
         else {
             return Ok(None);
         };
-        // 保存版の説明をそのまま使う。旧棚の作品の行の説明は、取得の経路によって前後の
-        // 空白が落ちていることがある（版の原本には残っている）。前後の空白は語にならない
-        // ので、索引で引ける語は変わらない。
+        // 保存版の説明をそのまま使う。前後の空白は語にならないので、索引で引ける語は
+        // 変わらない。
         let head = Head {
             provider,
             external_key,
@@ -274,7 +272,7 @@ impl Library {
     /// 添付の位置へ差し込む。
     ///
     /// 検索の文書と読む画面の本文の両方がここを通す。別々に差し込むと「読めるのに検索に
-    /// 出ない」作品ができる（旧棚の `content_from_json` と同じ理由）。
+    /// 出ない」作品ができる（`content_from_json` と同じ理由）。
     pub(crate) fn insert_attachment_bodies(
         &self,
         conn: &Connection,
@@ -326,7 +324,7 @@ impl Library {
         Ok(())
     }
 
-    /// 本文として取り込める添付（PDF・テキスト）を一時のフォルダーへ書き出す。旧棚の
+    /// 本文として取り込める添付（PDF・テキスト）を一時のフォルダーへ書き出す。
     /// 取り出しはファイルの場所を受け取るので、実体を一時的に戻して渡す。
     fn attachment_text_files(&self, conn: &Connection, snapshot: LibraryId) -> Result<TextFiles> {
         let rows: Vec<(Vec<u8>, String, Option<String>)> = conn
@@ -358,7 +356,7 @@ impl Library {
                     .map_err(|_| Error::Integrity("添付のハッシュが不正です".into()))?,
             );
             let content = Self::file_from_conn(conn, fingerprint)?;
-            // 旧棚は添付を「名前が一致する」か「場所に取得元のファイル ID を含む」で探す。
+            // 変換は添付を「名前が一致する」か「場所に取得元のファイル ID を含む」で探す。
             // 保存名は `名前_ID.拡張子` なので、保存名のまま置かないと見つからない。
             // フォルダーを分けて名前の衝突を避け、危ない文字は保存時と同じ規則で均す。
             let place = dir.join(index.to_string());

@@ -66,14 +66,12 @@ interface ReadingContextRow {
   currentId: ReaderWorkKey;
 }
 
-/** 旧棚の作品は番号、棚の作品は UUID。 */
 /** 前後の作品は棚の作品だけ（UUID）。 */
 type ReaderWorkKey = string;
 interface NeighborRef { id: ReaderWorkKey; title: string }
 
 /**
- * 棚の前後の作品を、旧棚と同じ札の行にする。旧棚と同じ名乗り方・同じ数え方で、
- * 隣の作品の詳しい情報（表紙・作者・字数）は、引いた並びにもう入っている。
+ * 棚の前後の作品を、札の行にする。 * 隣の作品の詳しい情報（表紙・作者・字数）は、引いた並びにもう入っている。
  */
 function shelfReadingContexts(rows: ShelfNeighbors[], currentId: string, authorName: string) {
   const neighbors = new Map<ReaderWorkKey, ShelfEntry>();
@@ -340,7 +338,6 @@ function Reader({ source }: { source: ReaderSource }) {
   const shelfReadingPending = Boolean(shelfReading) && shelfReadingQuery.isPending;
   const remoteReading = shelfReadingQuery.data ?? null;
   const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(readingId ?? id, version);
-  // 前後の作品・保存フォルダーは旧棚の作品だけ。
   const contentQuery = useQuery({
     queryKey: ["reader-content-page", id, version, sourcePage - 1],
     queryFn: () => source.page(version, sourcePage - 1),

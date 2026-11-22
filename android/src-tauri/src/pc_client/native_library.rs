@@ -724,7 +724,7 @@ pub async fn pc_native_collection(
     library: NativeLibraryScope,
     collection: String,
 ) -> Result<MobileShelfCollectionDetail, ClientError> {
-    // 棚の UUID か、旧棚から移したコレクションの旧棚の ID（端末に保存した作品が持っている）。
+    // 棚のコレクションの UUID。サーバーが読み解くので、ここでは道に入れてよい文字かだけを見る。
     if collection.is_empty()
         || collection.len() > 128
         || !collection

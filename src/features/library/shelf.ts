@@ -105,7 +105,7 @@ const MEDIA = {
   has_images_and_files: "images_and_files",
 } as const;
 
-/** 旧棚の日付の絞り込みは UTC の日で両端を含む。棚はミリ秒で、終わりを含まない。 */
+/** 画面の日付の絞り込みは UTC の日で両端を含む。棚はミリ秒で、終わりを含まない。 */
 function utcDay(value: string | null | undefined, offsetDays = 0): number | null {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
   const [year, month, day] = value.split("-").map(Number);
@@ -120,7 +120,7 @@ function nonEmpty(values: string[] | null | undefined): string[] {
   return (values ?? []).filter((value) => value.trim() !== "");
 }
 
-/** 旧棚の続きの位置（文字列）と棚の続きの位置を行き来する。 */
+/** 画面の続きの位置（文字列）と棚の続きの位置を行き来する。 */
 export function encodeShelfCursor(cursor: ShelfCursor | null): string | null {
   return cursor ? JSON.stringify(cursor) : null;
 }
@@ -261,7 +261,7 @@ export type ShelfSearchResult = SearchResult;
 
 /**
  * 一覧の一ページを棚から引く。一致した箇所と理由は、語の検索で一致があったときだけ
- * 続けて引く（旧棚の一覧と同じく、カードに一致の理由を出す）。
+ * 続けて引く（カードに一致の理由を出す）。
  */
 /** 棚の一覧が一度に返す件数の上限。 */
 const SHELF_PAGE_LIMIT = 500;
@@ -292,7 +292,7 @@ export async function searchShelf(params: SearchParams, scope: ShelfEntityScope 
   const decorationByWork = new Map(decorations.map((decoration) => [decoration.work, decoration]));
   const items = view.cards.map((card) => shelfEntry(card, matchByWork.get(card.id), decorationByWork.get(card.id)));
   const total = view.page.total;
-  // 文言は旧棚の一覧（`search_explanations`）と同じにする。
+  // 文言は `search_explanations` と同じにする。
   const intent = view.intent;
   const explanations = intent
     ? [`${intent.kind === "series" ? "シリーズ" : "作者"}「${intent.label}」への完全一致として解釈し、関係する作品だけに限定しました`]
@@ -315,8 +315,8 @@ export async function searchShelf(params: SearchParams, scope: ShelfEntityScope 
 }
 
 /**
- * 作者・シリーズの頭を、画面が読む旧棚の形にする。画像はファイルの識別子のまま入れ、画面が
- * `shelfFileUrl` で URL にする（旧棚のパスとは読み方が違う）。
+ * 作者・シリーズの頭を、画面が読む形にする。画像はファイルの識別子のまま入れ、画面が
+ * `shelfFileUrl` で URL にする。
  */
 function entityCommon(head: ShelfEntityHead) {
   const first = head.versions[0];
@@ -397,7 +397,7 @@ export function shelfSeriesFacet(item: ShelfSeriesFacet): EntityFacet {
  * ライブラリの「作者・クリエイター」「シリーズ」タブの一ページを棚から引く。
  *
  * 作品の絞り込みは作品の一覧と同じ関数で直す（二つのタブで同じ条件が別の意味にならない）。
- * シリーズの指名は取得元がなくても使える（検索語の `series:キー` と同じ）。行は旧棚の `EntityFacet` の形にし、監視の
+ * シリーズの指名は取得元がなくても使える（検索語の `series:キー` と同じ）。行は `EntityFacet` の形にし、監視の
  * 登録（移した時点の写し）を `watch` に添える。
  */
 export async function searchShelfEntities(

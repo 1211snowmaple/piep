@@ -24,7 +24,7 @@ impl Deref for Corpus<'_> {
 }
 
 pub(crate) trait SuggestionSource {
-    /// 旧棚の形の表（downloads・download_series・tags・download_tags・work_links・
+    /// 提案の計算が読む表（downloads・download_series・tags・download_tags・work_links・
     /// collection_pair_feedback・work_collections・work_collection_members）。
     fn corpus(&self) -> Result<Corpus<'_>, String>;
     /// 作品ごとの本文ベクトル。意味索引が読めないときは Err。

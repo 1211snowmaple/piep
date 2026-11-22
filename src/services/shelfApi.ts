@@ -7,10 +7,10 @@ import type { RevisionMetadata } from "@/services/workInspectionApi";
  * 棚（読み取り専用の写し）の命令。`src-tauri/src/commands/shelf.rs` と対になる。
  *
  * 作品は棚の ID（UUID の文字列）で指し、画像はファイルの識別子（中身の SHA-256 の
- * 16 進）で指す。旧棚の番号やパスへの読み替えはしない。
+ * 16 進）で指す。
  */
 
-/** 棚の作品の ID（UUID）。旧棚の作品は番号なので、画面の ID の形で見分ける。 */
+/** 棚の作品の ID（UUID）。プレビューの見本は番号なので、ID の形で見分ける。 */
 export const SHELF_WORK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** 作者のシリーズの一覧の一ページの件数。 */
@@ -223,7 +223,7 @@ export function shelfSearch(search: ShelfTextSearch, query: ShelfListQuery, pers
   return invoke<ShelfSearchView>("shelf_search", { search, query, person });
 }
 
-/** 検索欄の候補（旧棚の `search_suggest` と同じ形）。題の候補の `sourceKey` は棚の作品の ID。 */
+/** 検索欄の候補（`search_suggest` の形）。題の候補の `sourceKey` は棚の作品の ID。 */
 export function shelfSearchSuggest(text: string, limit = 8): Promise<SearchSuggestResult> {
   const trimmed = text.trim();
   if (!trimmed) return Promise.resolve({ items: [] });
@@ -255,7 +255,7 @@ export type ShelfWork = ShelfCard & {
   editBaseVersion: number | null;
 };
 
-/** 編集版が今の版より古い版の上に載っているとき、その基準の版。旧棚の `staleEditBase` と同じ。 */
+/** 編集版が今の版より古い版の上に載っているとき、その基準の版。 */
 export function staleEditBaseOf(work: Pick<ShelfWork, "edit_id" | "editBaseVersion" | "version_number">): number | null {
   return work.edit_id !== null && work.editBaseVersion !== null && work.editBaseVersion < work.version_number
     ? work.editBaseVersion
@@ -332,7 +332,7 @@ export function shelfMedia(work: string, snapshot: string | null): Promise<Shelf
 
 /**
  * 作品の添付の PDF の1ページを絵にする（「原本を見る」）。`file` はファイルの識別子、
- * `page` は 0 から。旧棚の `renderPdfAttachmentPage` の棚の版。
+ * `page` は 0 から。
  */
 export function shelfRenderPdfPage(work: string, file: string, page: number, width: number): Promise<PdfPageImage> {
   return invoke<PdfPageImage>("shelf_render_pdf_page", { work, file, page, width });
@@ -364,7 +364,7 @@ export function shelfFileUrl(fingerprint: string | null | undefined): string | n
 
 /**
  * 本文の `data-local-path`（`識別子` か `識別子/印`）を URL にする。棚の識別子でないもの
- * （旧棚のパスなど）は読まない。
+ * （保存フォルダーのパスなど）は読まない。
  */
 export function shelfBodyUrl(localPath: string | null | undefined): string | null {
   const fingerprint = localPath?.split("/", 1)[0] ?? "";
@@ -570,7 +570,7 @@ export function shelfWorkCollections(work: string): Promise<ShelfCollectionSumma
   return invoke<ShelfCollectionSummary[]>("shelf_work_collections", { work });
 }
 
-/** コレクションの一回（旧棚の `WorkCollectionMember`）。 */
+/** コレクションの一回（`WorkCollectionMember`）。 */
 export interface ShelfCollectionMember {
   provider: string;
   external_key: string;

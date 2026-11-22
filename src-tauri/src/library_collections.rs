@@ -1,8 +1,7 @@
 //! 棚のコレクションの一覧と中身（評価文書 6.23）。
 //!
-//! ライブラリの「コレクション」タブは旧棚の `list_work_collections`、コレクションの画面は
-//! `get_work_collection` を、そのまま棚で読む。並び・数え方・別版の畳み方は旧棚に合わせ、
-//! `piep-library compare-collections` で突き合わせる。
+//! ライブラリの「コレクション」タブと、コレクションの画面が読む。並び・数え方・別版の畳み方は、
+//! 切り替えの前に全コレクションを突き合わせて合わせたもの。
 
 use crate::database::collection_rules::edition_match_key;
 use crate::database::search::normalize_search_text;
@@ -13,10 +12,10 @@ use rusqlite::params;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-/// 別版を探すときに見る作品の上限（旧棚の `EDITION_SCAN_LIMIT`）。
+/// 別版を探すときに見る作品の上限。
 const EDITION_SCAN_LIMIT: usize = 3_000;
 
-/// コレクションの一回（旧棚の `WorkCollectionMember`）。
+/// コレクションの一回（画面の `WorkCollectionMember`）。
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct CollectionMember {
     pub provider: String,
@@ -55,7 +54,7 @@ pub struct CollectionDetail {
 }
 
 impl Library {
-    /// コレクションの一覧（旧棚の `list_work_collections`）。更新の新しい順。
+    /// コレクションの一覧。更新の新しい順。
     pub fn list_collections(&self) -> Result<Vec<CollectionSummary>> {
         let conn = self.reader()?;
         collection_summaries(&conn, "1", &[])
@@ -71,7 +70,7 @@ impl Library {
         )
     }
 
-    /// コレクションとその回（旧棚の `get_work_collection`）。回は並べた順、同じ位置は入れた順。
+    /// コレクションとその回。回は並べた順、同じ位置は入れた順。
     pub fn collection_detail(&self, collection: LibraryId) -> Result<CollectionDetail> {
         let conn = self.reader()?;
         let summary = collection_summaries(&conn, "c.id=?1", &[collection.as_bytes().to_vec()])?
@@ -189,7 +188,7 @@ impl Library {
         Ok(CollectionDetail { summary, members })
     }
 
-    /// 回ごとの別版（旧棚の `load_member_editions`）。作者の名前で棚を絞り、正規化した名前と
+    /// 回ごとの別版。作者の名前で棚を絞り、正規化した名前と
     /// 題の鍵（版の呼び名を除く）が回と同じ、コレクションに入っていない作品を集める。
     fn member_editions(
         &self,

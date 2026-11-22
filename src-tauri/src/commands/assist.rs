@@ -347,7 +347,7 @@ pub async fn shelf_assist_propose_splits(
 
 // ---- あらすじ ---------------------------------------------------------------
 
-/// 進み具合のイベント。旧棚と同じ名前で、作品は棚の ID（文字列）で送る。
+/// 進み具合のイベント。作品は棚の ID（文字列）で送る。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShelfProgressEvent {

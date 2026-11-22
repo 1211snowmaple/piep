@@ -233,7 +233,7 @@ pub struct CollectionSuggestionMember {
     pub source: String,
     pub source_id: String,
     pub download_id: Option<i64>,
-    /// 棚の作品 ID（UUID）。旧棚の候補では None。
+    /// 棚の作品 ID（UUID）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<String>,
     pub title: String,
@@ -298,7 +298,7 @@ pub struct CollectionAdditionCandidate {
     pub source: String,
     pub source_id: String,
     pub download_id: i64,
-    /// 棚の作品 ID（UUID）。旧棚の候補では None。
+    /// 棚の作品 ID（UUID）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<String>,
     pub title: String,

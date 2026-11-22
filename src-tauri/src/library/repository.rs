@@ -103,8 +103,8 @@ pub struct Capture {
     pub attachments: Vec<CapturedAttachment>,
 }
 
-/// 同じ要求 ID が前と違う内容で送られたときの、完全性の失敗の文言。移行の追いつきは、これを
-/// 見て旧棚で中身が変わった版を別の要求で送り直す。
+/// 同じ要求 ID が前と違う内容で送られたときの、完全性の失敗の文言。送り手は、これを見て
+/// 中身が変わった版を別の要求で送り直す。
 pub(crate) const REQUEST_REUSED: &str = "同じ要求 ID が異なる内容で再送されました";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -157,7 +157,7 @@ struct StoredBody {
     rule: i64,
 }
 
-/// 新形式の棚だけを開く。未知の DB を初期化したり、旧棚を自動移行したりしない。
+/// 棚だけを開く。未知の DB を初期化したり、ほかの形の DB を移したりしない。
 pub struct Library {
     root: PathBuf,
     pub id: LibraryId,
@@ -733,7 +733,7 @@ impl Library {
                 .map(|body| (&body.file, body.format, body.semantic)),
             &media,
             &attachments,
-            // 旧棚の取り込みが分類を入れていた欄。要求の指紋を変えないよう null のまま残す。
+            // 移行の取り込みが分類を入れていた欄。要求の指紋を変えないよう null のまま残す。
             Option::<&str>::None,
         ))?;
         let request_bytes = if let Some(context) = &context {

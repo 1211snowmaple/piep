@@ -1,7 +1,7 @@
 //! 棚が使う、作品の形の解釈と提案の計算。
 //!
-//! 旧棚（`piep.db`）の読み書きはもう無い。ここに残るのは、保存した応答の解釈（本文・資産・
-//! 改稿の情報）と、コレクションの提案の計算（棚から組んだメモリ上の表を読む）。
+//! 保存した応答の解釈（本文・資産・改稿の情報）と、コレクションの提案の計算（棚から組んだ
+//! メモリ上の表を読む）。
 
 use regex::Regex;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -2413,7 +2413,7 @@ mod title_order_tests;
 #[path = "editor_roundtrip_tests.rs"]
 mod editor_roundtrip_tests;
 
-/// 絞り込みの選択肢を、問いに近い順に並べて `limit` 件に切る（旧棚と棚で共通）。
+/// 絞り込みの選択肢を、問いに近い順に並べて `limit` 件に切る。
 ///
 /// `normalized_query` は `normalize_search_text` を通したもの。一致・前方一致・部分一致のあとに、
 /// 文字の重なりと編集距離で読みの揺れを拾い、使われている数を少し足す。

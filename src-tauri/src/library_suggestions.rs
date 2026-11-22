@@ -1,10 +1,10 @@
 //! コレクションの提案を、棚で作る・読む・採る・断る（評価文書 4.1 の 4）。
 //!
-//! 提案の計算は旧棚と同じものを使う（`library_suggestion_corpus` が棚から作業用の表を組む）。
+//! 提案の計算は `database::queries` のものを使う（`library_suggestion_corpus` が棚から作業用の表を組む）。
 //! ここは計算の結果を棚の表（`collection_suggestions`・`collection_suggestion_seeds`・
 //! `collection_suggestion_members`・`collection_pair_feedback`）へ書き、画面の形で返す。
 //!
-//! 画面へ返す形は旧棚と同じ（`database::CollectionSuggestion`）。候補の ID は UUID、作品は
+//! 画面へ返す形は `database::CollectionSuggestion`。候補の ID は UUID、作品は
 //! `work`（作品 UUID）で指し、`download_id` は持たない。
 
 use crate::database::queries::{
@@ -846,11 +846,11 @@ impl Library {
     }
 }
 
-/// 根拠から関係の状態を決め直す（旧棚の移行と同じ規則）。
+/// 根拠から関係の状態を決め直す。
 const LINK_STATUS: &str = "UPDATE work_links SET status=CASE WHEN EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='accepted') AND NOT EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='rejected') THEN 'accepted' WHEN EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='rejected') AND NOT EXISTS(SELECT 1 FROM link_evidence WHERE link_id=?1 AND decision='accepted') THEN 'rejected' ELSE 'observed' END WHERE id=?1";
 
 impl Library {
-    /// 作品の今の版の本文・説明から本文リンクを取り直す（旧棚の `refresh_work_links` と同じ規則）。
+    /// 作品の今の版の本文・説明から本文リンクを取り直す。
     ///
     /// 取り直すのは本文から拾った未判断の根拠（`content_link` の `observed`）だけ。利用者が採った・
     /// 断った根拠と、ほかの種類の根拠は残す。根拠の無くなった関係は消す。返すのは拾ったリンクの数。

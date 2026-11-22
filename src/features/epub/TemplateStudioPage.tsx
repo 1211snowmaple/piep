@@ -55,6 +55,7 @@ import {
 } from "@/services/epubApi";
 import type { ShelfEntry } from "@/types/library";
 import { searchShelf, shelfEntriesByIds } from "@/features/library/shelf";
+import { SHELF_WORK_ID } from "@/services/shelfApi";
 import type {
   DataField,
   InfoField,
@@ -113,7 +114,6 @@ export default function TemplateStudioPage() {
 
   // The work the preview renders. Kept in the address so a reload comes back to
   // the same comparison rather than to an arbitrary book.
-  // 旧棚の作品は番号、棚の作品は ID（文字列）。
   const sampleId = parseSample(params.get("sample"));
   const setSample = (id: SampleId | null) => {
     const next = new URLSearchParams(params);
@@ -297,17 +297,12 @@ function NewTemplateModal({ opened, onClose, templates, pending, onCreate }: {
 // 編集の中身
 // ============================================================
 
-/** 見本の作品。旧棚は番号、棚は作品の ID。 */
-type SampleId = number | string;
+/** 見本の作品（棚の作品の ID）。 */
+type SampleId = string;
 
 function parseSample(value: string | null): SampleId | null {
   const text = value?.trim() ?? "";
-  if (!text) return null;
-  if (/^\d+$/.test(text)) {
-    const id = Number.parseInt(text, 10);
-    return Number.isSafeInteger(id) ? id : null;
-  }
-  return text;
+  return SHELF_WORK_ID.test(text) ? text : null;
 }
 
 function TemplateWorkspace({ template, runtime, sampleId, onSampleChange, onChanged }: {
@@ -837,8 +832,7 @@ function SamplePicker({ sampleId, onChange, runtime }: { sampleId: SampleId | nu
     queryKey: ["template-preview-work", sampleId],
     queryFn: (): Promise<ShelfEntry[]> => {
       if (!runtime || sampleId === null) return Promise.resolve([]);
-      // 番号の見本は旧棚のころの残りなので引かない。
-      return typeof sampleId === "string" ? shelfEntriesByIds([sampleId]) : Promise.resolve([]);
+      return shelfEntriesByIds([sampleId]);
     },
     enabled: Boolean(runtime && sampleId !== null),
   });

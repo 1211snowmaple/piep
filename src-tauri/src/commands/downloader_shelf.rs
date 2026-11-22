@@ -1,4 +1,4 @@
-//! 棚への保存。取り寄せた応答を、旧棚の保存と同じ形のまま棚へ入れる。
+//! 棚への保存。取り寄せた応答を、取得元の形のまま棚へ入れる。
 //!
 //! 版を増やすかどうかは棚が決める（応答から作った項目・本文・画像と添付を今の版と比べる）。
 //! ここで決めるのは、画像と添付を落とし直さなくてよいか（応答の中身が今の版の原本と同じで、
@@ -45,7 +45,7 @@ pub(super) async fn blocking<T: Send + 'static>(
         .map_err(|e| e.to_string())?
 }
 
-/// 取得元の画像・添付の種類（旧棚の保存と同じ名前）。
+/// 取得元の画像・添付の種類（保存フォルダーと同じ名前）。
 fn target_role(sub_folder: &str) -> &'static str {
     match sub_folder {
         "illustrations" => "illustration",
@@ -261,7 +261,7 @@ fn staged_from(dir: &Path, data: &Value, source: &str) -> Result<Vec<StagedAsset
 }
 
 /// 保存フォルダーの一つの版（応答の JSON と `data_assets/`）を、取り寄せずに棚へ保存する。
-/// 旧棚の保存フォルダーの再取り込みに使う。画像・添付はフォルダーにあるものだけを使う。
+/// 保存フォルダーの再取り込みに使う。画像・添付はフォルダーにあるものだけを使う。
 pub(crate) async fn save_folder_to_shelf(
     library: Arc<Library>,
     data: Value,
@@ -447,7 +447,7 @@ async fn save_to_shelf_as(
         }
     }
 
-    // 原寸は、実際に保存すると決まったここで探す（旧棚の保存と同じ）。
+    // 原寸は、実際に保存すると決まったここで探す。
     if source == "pixiv" && !reader_only && !upgrade_images {
         match crate::downloader::pixiv_originals::cdn_client() {
             Ok(client) => {

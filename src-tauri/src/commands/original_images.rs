@@ -329,7 +329,7 @@ pub async fn shelf_upgrade_pixiv_images_to_original(
         }
         tokio::time::sleep(PACE).await;
     }
-    // 表紙の問い合わせは画面が取り直しの完了で捨てる（棚の作品は ID で引くので、旧棚の通知は使わない）。
+    // 表紙の問い合わせは画面が取り直しの完了で捨てる（棚の作品は ID で引く）。
 
     let canceled = CANCEL.load(Ordering::Acquire);
     let remaining = shelf_reduced_works(shelf)

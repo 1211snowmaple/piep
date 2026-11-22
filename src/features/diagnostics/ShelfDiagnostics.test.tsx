@@ -84,7 +84,7 @@ describe("棚の診断", () => {
     vi.clearAllMocks();
   });
 
-  it("棚の台帳と索引を数え、旧棚の保存フォルダーの照合は出さない", async () => {
+  it("棚の台帳と索引を数え、保存フォルダーの照合は出さない", async () => {
     view();
     expect(await screen.findByText("3件")).toBeTruthy();
     expect(screen.getByText("3セグメント")).toBeTruthy();

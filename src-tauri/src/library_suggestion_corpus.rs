@@ -1,7 +1,7 @@
 //! コレクションの提案の材料を、棚から作業用の表へ写す。
 //!
-//! 提案の計算（`database::queries` の走査・種からの提案・追加の候補・名前の案）は、旧棚の形の表を
-//! SQL で引く。ここでは棚の今の姿から同じ形の表をメモリ上に組み、その計算をそのまま走らせる。
+//! 提案の計算（`database::queries` の走査・種からの提案・追加の候補・名前の案）は、作品の番号で
+//! 結んだ表を SQL で引く。ここでは棚の今の姿から同じ形の表をメモリ上に組み、その計算をそのまま走らせる。
 //! 作品の番号は作業用の表の中だけのもので、棚の作品 ID との対応をここで持つ。
 //!
 //! 写すもの：
@@ -101,7 +101,7 @@ fn time(ms: i64) -> String {
         .unwrap_or_default()
 }
 
-/// 公開日時。旧棚は取得元の日本時間（`+09:00`）のまま持っていた。走査は日付の部分で前後や
+/// 公開日時。取得元の日本時間（`+09:00`）で書く。走査は日付の部分で前後や
 /// 同じ日の投稿を見るので、UTC で書くと日本時間の 0〜9 時の投稿が前の日になる。
 fn published_time(ms: i64) -> String {
     let japan = chrono::FixedOffset::east_opt(9 * 3600).expect("日本時間");
@@ -289,7 +289,7 @@ impl<'a> ShelfSuggestions<'a> {
                      right_source_id,decision,rule_version) VALUES(?1,?2,?3,?4,?5,?6)",
             )?;
             while let Some(r) = rows.next()? {
-                // 旧棚の組は取得元の鍵の小さいほうを左に置く。
+                // 組は取得元の鍵の小さいほうを左に置く。
                 let mut left = (r.get::<_, String>(0)?, r.get::<_, String>(1)?);
                 let mut right = (r.get::<_, String>(2)?, r.get::<_, String>(3)?);
                 if left > right {

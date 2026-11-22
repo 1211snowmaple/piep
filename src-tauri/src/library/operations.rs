@@ -457,7 +457,7 @@ impl Library {
                 generation,
             });
         }
-        // 一覧にだけある作品（旧棚から移した以前の編集版）には、まだ編集文書の行が無い。
+        // 一覧にだけある作品（移行で入った以前の編集版）には、まだ編集文書の行が無い。
         tx.execute("INSERT INTO edit_documents(work_id,user_id,generation) VALUES(?1,?2,0) ON CONFLICT(work_id,user_id) DO NOTHING",params![key.0, key.1])?;
         tx.execute(
             "UPDATE edit_documents SET active_id=?3,draft_id=?4,generation=generation+1 WHERE work_id=?1 AND user_id=?2",

@@ -1,6 +1,5 @@
-//! 本文の検索の索引。`<棚>/derived/` に置く派生物で、旧棚の全文索引の実装
-//! （`crate::database::tantivy_index`）をそのまま使う。重み・字句解析・問い合わせの解釈が
-//! 旧棚と同じなので、同じ文書からは同じ順位が出る。
+//! 本文の検索の索引。`<棚>/derived/` に置く派生物で、全文索引の実装
+//! （`crate::database::tantivy_index`）を使う。重み・字句解析・問い合わせの解釈はそちらが決める。
 //!
 //! 索引は二つある。いまの版の索引（`derived/search-index/`、文書は作品ごと）と、過去の版の
 //! 索引（`derived/history/search-index/`、文書は改稿ごと）。作り方は同じで、文書の単位と
@@ -130,7 +129,7 @@ fn library_id(bytes: &[u8]) -> Result<LibraryId> {
 }
 
 impl Library {
-    /// 索引の置き場（旧棚の関数に渡す `storage_dir`）。
+    /// 索引の置き場（`tantivy_index` の関数に渡す `storage_dir`）。
     pub(crate) fn search_storage(&self) -> PathBuf {
         self.root().join("derived")
     }
@@ -336,7 +335,7 @@ impl Library {
 
     /// 索引の形式と世代を確かめ、合わなければ空から作り直す準備をする。作り直すなら `true`。
     fn prepare_space(&self, space: Space, storage: &Path) -> Result<bool> {
-        // 旧棚と同じ形式に、棚だけの作り方（タグごとの読み）の版を足す。
+        // 索引の形式に、棚の作り方（タグごとの読み）の版を足す。
         let format = format!("{}+tag-readings-1", tantivy_index::index_format_version());
         let marker_path = storage.join("search-index").join(MARKER);
         let state = space.state_table();
@@ -537,7 +536,7 @@ impl Library {
     }
 
     /// 問い合わせに一致する作品を、関連度の高い順に返す（同点は作品の鍵の順）。
-    /// 問い合わせの書き方は旧棚と同じ（語の AND、`-` で除外、同義語の展開）。
+    /// 問い合わせの書き方は語の AND、`-` で除外、同義語の展開。
     pub fn search_text(&self, query: &str) -> Result<Vec<SearchHit>> {
         let found = self.matching_documents(query)?;
         let conn = self.reader()?;
@@ -572,7 +571,7 @@ impl Library {
 #[path = "index_tests.rs"]
 mod tests;
 
-/// 旧棚の索引に入れる形。
+/// 全文索引に入れる形。
 fn index_document(key: i64, doc: &SearchDocument) -> TantivyIndexDocument {
     let date = |at: i64| {
         chrono::DateTime::from_timestamp_millis(at)

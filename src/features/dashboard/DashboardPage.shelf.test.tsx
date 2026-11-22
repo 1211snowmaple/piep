@@ -81,7 +81,7 @@ describe("棚のホーム", () => {
     vi.clearAllMocks();
   });
 
-  it("数も最近の保存も棚から出し、旧棚には聞かない", async () => {
+  it("数も最近の保存も棚から出す", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(
       <MantineProvider>

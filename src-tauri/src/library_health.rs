@@ -1,7 +1,7 @@
 //! 棚の数と手入れ（ホーム・横の欄・設定・診断の画面）。
 //!
-//! 旧棚の同じ画面と同じ形で返す。数え方は棚の今の版（`work_current_projection`）に揃え、
-//! 旧棚にしかない数（保存フォルダーの照合・未登録のファイル）は持たない。棚のファイルは
+//! 数え方は棚の今の版（`work_current_projection`）に揃え、保存フォルダーの照合・未登録の
+//! ファイルのような数は持たない。棚のファイルは
 //! 中身の指紋で台帳と結ばれているので、照合は `verify` が、未参照の片付けは `reclaim` が担う。
 
 use crate::database::models::{
@@ -16,7 +16,7 @@ use crate::library::{
 use serde::Serialize;
 use std::path::Path;
 
-/// 診断の画面の数。旧棚の診断のうち、棚にも意味のあるものだけを持つ。
+/// 診断の画面の数。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShelfDiagnostics {
@@ -53,7 +53,7 @@ fn count(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
 
-/// 月の区切りは日本時間（旧棚の保存日時の文字列の先頭 7 文字と同じ月）。
+/// 月の区切りは日本時間。
 const MONTH_SQL: &str = "strftime('%Y-%m',p.saved_at/1000,'unixepoch','+9 hours')";
 
 impl Library {
@@ -368,7 +368,7 @@ impl Library {
     }
 
     /// 棚の作品の今の版に載る作者・シリーズのうち、プロフィールをまだ一度も取得していないもの
-    /// （旧棚の「作者・シリーズ情報の修復」の対象と同じ。作者が先、名前の順）。
+    /// （作者が先、名前の順）。
     pub fn incomplete_profiles(&self) -> Result<Vec<IncompleteEntityProfile>> {
         let conn = self.reader()?;
         let mut statement = conn.prepare(
