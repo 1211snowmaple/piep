@@ -1,0 +1,9 @@
+# 試験は `cargo nextest run` で、テストごとに別のプロセスで走らせる。
+# 理由は .github/workflows/quality.yml の Quality の手順に書いた。
+
+[profile.ci]
+# 一つ落ちても最後まで流し、落ちた物を全部並べる。
+fail-fast = false
+# 長い試験に気づけるように印を付けるが、止めはしない。
+slow-timeout = { period = "60s" }
+failure-output = "immediate-final"
