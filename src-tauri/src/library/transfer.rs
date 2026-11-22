@@ -61,7 +61,7 @@ impl Library {
                 files.push(BundleFile {
                     scope: wire_scope(manifest.scope)?,
                     resource: wire_reference(&info.reference)?,
-                    file: WireFile::from_native(&file),
+                    file: WireFile::from_content_file(&file),
                 });
             }
         }

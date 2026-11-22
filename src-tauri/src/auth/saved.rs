@@ -6,16 +6,10 @@
 //!
 //! 取得元ごとに一つの資格情報へ、鍵と、その鍵と対でだけ意味を持つ UA と、
 //! 画面に出す名前をまとめて置く。別々に置くと、片方だけ書けた状態が生まれる。
-//!
-//! 前の版は鍵を設定のファイル（`settings.json`）に平文で置いていた。起動時に
-//! 一度だけここへ移し、ファイルからは消す（[`move_from_settings`]）。
-use std::path::Path;
-
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 
 use crate::credential_manager;
-use crate::database::models::UpdateCredentials;
+use crate::models::UpdateCredentials;
 
 /// FANBOX の UA が分からないときに送るもの。
 pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0";
@@ -206,83 +200,6 @@ impl Vault {
     }
 }
 
-/// 前の版が `settings.json` に置いた鍵の名前。移したあと、すべて消す。
-const SETTINGS_KEYS: [&str; 7] = [
-    "pixiv_refresh_token",
-    "pixiv_user",
-    "pixiv_cookie",
-    "pixiv_user_agent",
-    "fanbox_session_id",
-    "fanbox_user",
-    "fanbox_user_agent",
-];
-
-fn text(settings: &Map<String, Value>, key: &str) -> Option<String> {
-    settings
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-fn user_name(settings: &Map<String, Value>, key: &str) -> String {
-    settings
-        .get(key)
-        .and_then(|user| user.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
-/// `settings.json` に残っている鍵を資格情報マネージャーへ移し、ファイルから消す。
-///
-/// 画面が設定のファイルを開く前（`setup` の中、窓を作る前）に呼ぶ。開いたあとだと、
-/// 画面の側が古い中身を書き戻す。
-///
-/// 移しきれなかったときはファイルに手を付けず、次の起動でやり直す。
-pub fn move_from_settings(vault: &Vault, settings_path: &Path) -> Result<bool, String> {
-    let bytes = match std::fs::read(settings_path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("設定のファイルを読めません: {error}")),
-    };
-    let Ok(Value::Object(mut settings)) = serde_json::from_slice::<Value>(&bytes) else {
-        return Ok(false);
-    };
-    if !SETTINGS_KEYS.iter().any(|key| settings.contains_key(*key)) {
-        return Ok(false);
-    }
-    if let Some(refresh_token) = text(&settings, "pixiv_refresh_token") {
-        vault.set_pixiv(&PixivAccount {
-            refresh_token,
-            web_session: WebSession::pair(
-                text(&settings, "pixiv_cookie")
-                    .map(|cookie| crate::auth::essential_cookies(&cookie)),
-                text(&settings, "pixiv_user_agent"),
-            ),
-            user_name: user_name(&settings, "pixiv_user"),
-        })?;
-    }
-    if let Some(session_id) = text(&settings, "fanbox_session_id") {
-        vault.set_fanbox(&FanboxAccount {
-            session_id,
-            user_agent: text(&settings, "fanbox_user_agent")
-                .unwrap_or_else(|| DEFAULT_USER_AGENT.to_string()),
-            user_name: user_name(&settings, "fanbox_user"),
-        })?;
-    }
-    for key in SETTINGS_KEYS {
-        settings.remove(key);
-    }
-    let bytes =
-        serde_json::to_vec_pretty(&Value::Object(settings)).map_err(|error| error.to_string())?;
-    let temporary = settings_path.with_extension("json.tmp");
-    std::fs::write(&temporary, bytes)
-        .and_then(|()| std::fs::rename(&temporary, settings_path))
-        .map_err(|error| format!("設定のファイルから鍵を消せません: {error}"))?;
-    Ok(true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,33 +212,30 @@ mod tests {
         }
     }
 
-    fn temp_settings(content: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("piep-saved-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("settings.json");
-        std::fs::write(&path, content).unwrap();
-        path
-    }
-
     #[test]
-    fn keys_move_out_of_the_settings_file_once() {
+    fn saved_accounts_come_back_as_credentials_and_status() {
         let vault = Cleanup(Vault::for_test());
-        let path = temp_settings(
-            r#"{
-              "theme": "dark",
-              "pixiv_refresh_token": "pixiv-token",
-              "pixiv_user": {"id": "1", "name": "ぴくし", "profile_image_urls": {}},
-              "pixiv_cookie": "_ga=x; PHPSESSID=1_abc; cf_clearance=pass",
-              "pixiv_user_agent": "UA/1",
-              "fanbox_session_id": "fanbox-session",
-              "fanbox_user": {"userId": "2", "name": "ふぁん"},
-              "fanbox_user_agent": "UA/2"
-            }"#,
-        );
-        assert!(move_from_settings(&vault.0, &path).unwrap());
-
-        let left: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(left, serde_json::json!({ "theme": "dark" }));
+        vault
+            .0
+            .set_pixiv(&PixivAccount {
+                refresh_token: "pixiv-token".into(),
+                web_session: WebSession::pair(
+                    Some(crate::auth::essential_cookies(
+                        "_ga=x; PHPSESSID=1_abc; cf_clearance=pass",
+                    )),
+                    Some("UA/1".into()),
+                ),
+                user_name: "ぴくし".into(),
+            })
+            .unwrap();
+        vault
+            .0
+            .set_fanbox(&FanboxAccount {
+                session_id: "fanbox-session".into(),
+                user_agent: "UA/2".into(),
+                user_name: "ふぁん".into(),
+            })
+            .unwrap();
 
         let credentials = vault.0.update_credentials();
         assert_eq!(
@@ -347,31 +261,25 @@ mod tests {
                 }),
             }
         );
-
-        // 二度目は何も起きない。
-        assert!(!move_from_settings(&vault.0, &path).unwrap());
     }
 
     #[test]
     fn a_cookie_without_its_user_agent_is_not_kept() {
+        assert!(WebSession::pair(Some("PHPSESSID=1".into()), None).is_none());
         let vault = Cleanup(Vault::for_test());
-        let path = temp_settings(r#"{"pixiv_refresh_token": "t", "pixiv_cookie": "PHPSESSID=1"}"#);
-        assert!(move_from_settings(&vault.0, &path).unwrap());
+        vault
+            .0
+            .set_pixiv(&PixivAccount {
+                refresh_token: "t".into(),
+                web_session: WebSession::pair(Some("PHPSESSID=1".into()), None),
+                user_name: String::new(),
+            })
+            .unwrap();
         let credentials = vault.0.update_credentials();
         assert_eq!(credentials.pixiv_refresh_token.as_deref(), Some("t"));
         assert_eq!(credentials.pixiv_cookie, None);
         assert_eq!(credentials.pixiv_user_agent, None);
         assert!(!vault.0.status().unwrap().pixiv.unwrap().web_session);
-    }
-
-    #[test]
-    fn settings_without_keys_are_left_untouched() {
-        let vault = Cleanup(Vault::for_test());
-        let content = "{\n  \"theme\": \"light\"\n}";
-        let path = temp_settings(content);
-        assert!(!move_from_settings(&vault.0, &path).unwrap());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
-        assert!(!move_from_settings(&vault.0, &path.with_file_name("missing.json")).unwrap());
     }
 
     #[test]

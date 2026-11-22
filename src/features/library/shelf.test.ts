@@ -215,7 +215,7 @@ describe("searchShelfEntities", () => {
     expect(facet).toMatchObject({ shelf: true, source: "pixiv", sourceKey: "77", displayName: "作者一", count: 4, watch: "paused", sampleTitle: "見本" });
     // アイコンのない作者はヘッダーを顔にする。
     expect(facet.coverPath).toBe("ef".repeat(32));
-    expect(facet.latestDownloadedAt).toBe("2026-01-02T00:00:00.000Z");
+    expect(facet.latestSavedAt).toBe("2026-01-02T00:00:00.000Z");
   });
 
   it("names a series by its provider, or by its key alone like the search syntax", async () => {

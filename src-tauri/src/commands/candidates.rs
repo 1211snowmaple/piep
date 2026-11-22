@@ -1,9 +1,9 @@
 //! 更新確認で見つけた候補の判断と原入力。棚の `discoveries` に持つ。
 
-use crate::database::{
+use crate::library::{Discovery, DiscoveryInput, Library, LibraryId};
+use crate::models::{
     UpdateCandidateInput, UpdateCandidateRow, UpdateJobItemInput, UpdateWorkMetadata,
 };
-use crate::library::{Discovery, DiscoveryInput, Library, LibraryId};
 use crate::AppState;
 use std::sync::Arc;
 

@@ -106,7 +106,7 @@ it("marks failed EPUB batches as failed and retries only unfinished works", asyn
   expect(screen.getByLabelText("書き出し待ち")).toHaveTextContent(/^w-108$/);
 
   await act(async () => retryOperation(failedJob!.id));
-  await waitFor(() => expect(api.exportEpubBatch).toHaveBeenCalledWith(expect.objectContaining({ downloadIds: ["w-108"] })));
+  await waitFor(() => expect(api.exportEpubBatch).toHaveBeenCalledWith(expect.objectContaining({ workIds: ["w-108"] })));
   await waitFor(() => expect(screen.getByLabelText("書き出し待ち")).toHaveTextContent(/^$/));
   expect(getOperationJobs().find((job) => job.id === failedJob!.id)).toMatchObject({ status: "failed", canRetry: false });
   expect(getOperationJobs().find((job) => job.kind === "epub" && job.label === "1冊をEPUBへ書き出し")).toMatchObject({ status: "completed" });
@@ -153,7 +153,7 @@ it.each(["success", "failed", "invalid", "canceled"])("keeps later additions and
   render(<MantineProvider><ModalsProvider><QueryClientProvider client={client}><AppRouter><WorkspaceProvider><QueueProbe /><EpubPage /></WorkspaceProvider></AppRouter></QueryClientProvider></ModalsProvider></MantineProvider>);
   fireEvent.click(await screen.findByRole("button", { name: "2冊を書き出す" }));
   await waitFor(() => expect(api.exportEpubBatch).toHaveBeenCalledOnce());
-  expect(api.exportEpubBatch).toHaveBeenCalledWith(expect.objectContaining({ downloadIds: ["w-101", "w-108"] }));
+  expect(api.exportEpubBatch).toHaveBeenCalledWith(expect.objectContaining({ workIds: ["w-101", "w-108"] }));
 
   fireEvent.click(screen.getByRole("button", { name: "次の作品を追加" }));
   await screen.findByRole("button", { name: "3冊を書き出す" });
@@ -178,7 +178,7 @@ it("exports works of the shelf by their id, in queue order, and keeps a failed o
   render(<MantineProvider><ModalsProvider><QueryClientProvider client={client}><AppRouter><WorkspaceProvider><EpubPage /><QueueProbe /></WorkspaceProvider></AppRouter></QueryClientProvider></ModalsProvider></MantineProvider>);
 
   fireEvent.click(await screen.findByRole("button", { name: "3冊を書き出す" }));
-  await waitFor(() => expect(api.exportEpubBatch).toHaveBeenCalledWith(expect.objectContaining({ downloadIds: ["w-101", "w-1", "w-108"] })));
+  await waitFor(() => expect(api.exportEpubBatch).toHaveBeenCalledWith(expect.objectContaining({ workIds: ["w-101", "w-1", "w-108"] })));
   expect(shelf.byIds).toHaveBeenCalledWith(["w-101", "w-1", "w-108"]);
   // 書けなかった棚の作品だけがキューに残る。
   await waitFor(() => expect(screen.getByLabelText("書き出し待ち")).toHaveTextContent(/^w-1$/));

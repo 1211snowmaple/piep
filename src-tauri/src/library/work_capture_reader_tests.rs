@@ -8,7 +8,8 @@ use std::fs;
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("piep-native-reader-{}", LibraryId::now_v7()));
+        let root =
+            std::env::temp_dir().join(format!("piep-capture-reader-{}", LibraryId::now_v7()));
         fs::create_dir_all(&root).unwrap();
         Self(root)
     }
@@ -108,7 +109,7 @@ fn only_gate_masked_fields_are_unknown_and_confirmed_empty_fields_are_real_chang
 }
 
 #[test]
-fn replaying_an_old_native_request_keeps_its_original_interpretation_and_bytes() {
+fn replaying_a_stored_request_keeps_its_original_interpretation_and_bytes() {
     let temp = Temp::new();
     let library = Library::create(&temp.0.join("shelf")).unwrap();
     let request = LibraryId::now_v7();
@@ -169,7 +170,7 @@ fn replaying_an_old_native_request_keeps_its_original_interpretation_and_bytes()
 }
 
 #[test]
-fn a_native_pixiv_save_publishes_exact_bindings_and_keeps_missing_images_explicit() {
+fn a_pixiv_save_publishes_exact_bindings_and_keeps_missing_images_explicit() {
     let temp = Temp::new();
     let library = Library::create(&temp.0.join("shelf")).unwrap();
     let data = json!({"detail":{"title":"題","user":{"id":"77","name":"作者"}},"text":"一[uploadedimage:123]二[pixivimage:9-2]三[uploadedimage:404]"});

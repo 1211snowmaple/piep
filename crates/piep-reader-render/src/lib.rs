@@ -18,7 +18,7 @@ pub const NOTICE_BLOCK_TYPE: &str = "piep_attachment_notice";
 #[serde(rename_all = "camelCase")]
 pub struct AssetEntry {
     pub id: i64,
-    pub download_id: i64,
+    pub work_id: i64,
     pub asset_type: String,
     pub filename: String,
     pub local_path: String,

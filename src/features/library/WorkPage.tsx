@@ -587,14 +587,14 @@ function PreviewWorkPage() {
         </Tabs.List>
         <Tabs.Panel value="overview" pt="lg">
           {/* モデルの手伝い。設定していなければ何も出ない。 */}
-          <Box mb="lg"><WorkAssist downloadId={String(work.id)} /></Box>
+          <Box mb="lg"><WorkAssist workId={String(work.id)} /></Box>
           {/* Two columns from the medium breakpoint - the previous large one
               left this stacked at ordinary window sizes - and both stretch so
               the section reads as a single block rather than three cards of
               unrelated heights. */}
           <Grid gap="lg" align="stretch">
             <Grid.Col span={{ base: 12, md: 8 }}>
-              <Card p="lg" h="100%"><Title order={3} mb="md">作品情報</Title>{/* 取得元のことと手元のことを分ける。混ぜて並べると、どの日付が誰の行いを指しているのかが読み取れない。 */}<Text size="xs" c="dimmed" fw={700} mb="sm">取得元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.authorName} icon={<Icons.person size={IconSize.action} />} /><Info label="公開日" value={formatDate(work.sourceCreatedAt, true)} icon={<Icons.publishedDate size={IconSize.action} />} />{sourceRevised && <Info label="最終更新" value={formatDate(work.sourceUpdatedAt, true)} icon={<Icons.updates size={IconSize.action} />} />}</SimpleGrid><Divider my="lg" /><Text size="xs" c="dimmed" fw={700} mb="sm">手元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label={doc.isEdited ? "取得元の文字数" : "文字数"} value={`${formatNumber(work.textLength)}字`} icon={<Icons.read size={IconSize.action} />} /><Info label={doc.isEdited ? "取得元の容量" : "ローカル容量"} value={formatBytes(work.fileSizeBytes)} icon={<Icons.openFolder size={IconSize.action} />} /><Info label="バージョン" value={`v${work.currentVersion}`} icon={<Icons.versionHistory size={IconSize.action} />} /><Info label="保存日" value={formatDate(work.downloadedAt, true)} icon={<Icons.epubAdd size={IconSize.action} />} /></SimpleGrid></Card>
+              <Card p="lg" h="100%"><Title order={3} mb="md">作品情報</Title>{/* 取得元のことと手元のことを分ける。混ぜて並べると、どの日付が誰の行いを指しているのかが読み取れない。 */}<Text size="xs" c="dimmed" fw={700} mb="sm">取得元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.authorName} icon={<Icons.person size={IconSize.action} />} /><Info label="公開日" value={formatDate(work.sourceCreatedAt, true)} icon={<Icons.publishedDate size={IconSize.action} />} />{sourceRevised && <Info label="最終更新" value={formatDate(work.sourceUpdatedAt, true)} icon={<Icons.updates size={IconSize.action} />} />}</SimpleGrid><Divider my="lg" /><Text size="xs" c="dimmed" fw={700} mb="sm">手元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label={doc.isEdited ? "取得元の文字数" : "文字数"} value={`${formatNumber(work.textLength)}字`} icon={<Icons.read size={IconSize.action} />} /><Info label={doc.isEdited ? "取得元の容量" : "ローカル容量"} value={formatBytes(work.fileSizeBytes)} icon={<Icons.openFolder size={IconSize.action} />} /><Info label="バージョン" value={`v${work.currentVersion}`} icon={<Icons.versionHistory size={IconSize.action} />} /><Info label="保存日" value={formatDate(work.savedAt, true)} icon={<Icons.epubAdd size={IconSize.action} />} /></SimpleGrid></Card>
             </Grid.Col>
             <Grid.Col span={{ base: 12, md: 4 }}>
               {/* 両端に寄せると、外側の辺は「作品情報」と揃うかわりに真ん中が

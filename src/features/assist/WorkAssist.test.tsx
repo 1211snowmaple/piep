@@ -42,10 +42,10 @@ import { WorkAssist } from "@/features/assist/WorkAssist";
 const proposal = { tag: "園芸", reason: "花壇の手入れが描かれています" };
 const relatedCandidate = { tag: "料理", reason: "他作品のタグ併用から見つかった候補", matchingWorkCount: 12, cooccurringWorkCount: 4 };
 
-function view(downloadId: string, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
+function view(workId: string, client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   return {
     client,
-    element: <MantineProvider><QueryClientProvider client={client}><WorkAssist downloadId={downloadId} /></QueryClientProvider></MantineProvider>,
+    element: <MantineProvider><QueryClientProvider client={client}><WorkAssist workId={workId} /></QueryClientProvider></MantineProvider>,
   };
 }
 
@@ -54,7 +54,7 @@ async function openTagModal(user: ReturnType<typeof userEvent.setup>) {
   expect(await screen.findByRole("dialog", { name: "タグの補完" })).toBeInTheDocument();
 }
 
-describe("WorkAssist downloadId switch", () => {
+describe("WorkAssist workId switch", () => {
   beforeEach(() => {
     mocks.useAssist.mockImplementation((feature: string) => ({
       engine: feature === "work_tagging" ? { model: "test-model" } : null,

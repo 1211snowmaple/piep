@@ -406,7 +406,7 @@ fn host_rejected_page(host: &str) -> Response {
     let page = HOST_REJECTED_PAGE
         .replace("{favicon}", favicon)
         .replace("{icon}", icon)
-        .replace("{host}", &crate::database::parser::escape_html(host));
+        .replace("{host}", &piep_reader_render::parser::escape_html(host));
     (
         StatusCode::FORBIDDEN,
         [
@@ -1318,7 +1318,7 @@ async fn storage(
             "contentBytes": content,
             "databaseBytes": database,
             "indexBytes": index,
-            "freeBytes": crate::database::queries::available_space_bytes(&paths.root),
+            "freeBytes": crate::analysis::available_space_bytes(&paths.root),
         })
     })
     .await

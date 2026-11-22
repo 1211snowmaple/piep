@@ -30,7 +30,7 @@ use serde::Deserialize;
 use std::collections::VecDeque;
 use std::sync::{atomic::Ordering, Arc};
 
-/// 表紙の縮小前の上限（旧 API と同じ）。
+/// 表紙の縮小前の上限。
 const MAX_COVER_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_COVER_PIXELS: u64 = 64_000_000;
 /// 縮めた表紙を覚えておく数。一覧を行き来しても縮め直さない。
@@ -118,11 +118,11 @@ pub(super) fn shelf_work(card: &WorkCard, keys: CardKeys, state: &UserState) -> 
         series_title: card.series_title.clone(),
         series_id: keys.series,
         source_created_at: card.published_at.map(iso),
-        downloaded_at: iso(card.saved_at),
+        saved_at: iso(card.saved_at),
     }
 }
 
-/// 旧 API の日付（その日の UTC の 0 時から）をミリ秒にする。`days` 日あとにずらす。
+/// 携帯の送る日付（その日の UTC の 0 時から）をミリ秒にする。`days` 日あとにずらす。
 fn utc_day(value: Option<&str>, days: i64) -> Option<i64> {
     let date = NaiveDate::parse_from_str(value?, "%Y-%m-%d").ok()?;
     Some(date.and_hms_opt(0, 0, 0)?.and_utc().timestamp_millis() + days * 86_400_000)
@@ -156,13 +156,13 @@ fn decode_cursor(value: &str, epoch: Id, subject: Id) -> Result<WorkCursor, ApiE
 /// 作者の指名（取得元と ID）。棚の作者の ID は要求ごとに棚で引く。
 type PersonKey = (String, String);
 
-/// 旧 API の検索の条件を、棚の問い合わせにする。値の検査は旧 API と同じものを通す。
+/// 携帯の検索の条件を、棚の問い合わせにする。
 pub(super) fn shelf_request(
     request: MobileSearchRequest,
     epoch: Id,
     subject: Id,
 ) -> Result<(TextSearch, WorkListQuery, Option<PersonKey>), ApiError> {
-    request.clone().into_db_params().map_err(|_| invalid())?;
+    request.validate().map_err(|_| invalid())?;
     let mut text = request.text.as_deref().unwrap_or("").trim().to_owned();
     if let Some(key) = &request.series_key {
         let term = match &request.series_source {
@@ -526,7 +526,7 @@ pub(super) fn image_response(bytes: Arc<Vec<u8>>, mime: &'static str) -> Respons
     response
 }
 
-/// 候補の既定の数と上限、語の長さの上限（旧 API の `search/suggest` と同じ）。
+/// 候補の既定の数と上限、語の長さの上限。
 const SUGGESTIONS: i64 = 8;
 const MAX_SUGGESTIONS: i64 = 12;
 const MAX_SUGGEST_CHARS: usize = 200;
@@ -538,7 +538,7 @@ pub(super) struct SuggestQuery {
     limit: Option<i64>,
 }
 
-/// 検索欄の候補（旧 API の `search/suggest`）。題の候補の `sourceKey` は棚の作品の ID。
+/// 検索欄の候補。題の候補の `sourceKey` は棚の作品の ID。
 pub(super) async fn suggest(
     State(ctx): State<Arc<Context>>,
     Extension(principal): Extension<Principal>,

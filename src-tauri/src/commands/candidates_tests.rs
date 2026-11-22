@@ -23,7 +23,7 @@ fn save(library: &Library, key: &str) {
 }
 
 #[test]
-fn new_shelf_candidates_drive_display_blocking_and_user_choices_without_old_candidate_rows() {
+fn candidates_drive_display_blocking_and_user_choices() {
     let (_temp, state, library) = fixture();
     save(&library, "11");
     let ledger = state.candidates();
@@ -79,7 +79,7 @@ fn new_shelf_candidates_drive_display_blocking_and_user_choices_without_old_cand
 }
 
 #[test]
-fn unavailable_holds_and_execution_rows_use_the_native_shelf_without_changing_the_old_queue() {
+fn unavailable_holds_and_execution_rows_live_on_the_shelf() {
     let (_temp, state, library) = fixture();
     save(&library, "11");
     let job = LibraryId::now_v7().to_string();
@@ -87,7 +87,7 @@ fn unavailable_holds_and_execution_rows_use_the_native_shelf_without_changing_th
         .jobs()
         .create_update_job(
             &job,
-            &crate::database::StartUpdateJobRequest {
+            &crate::models::StartUpdateJobRequest {
                 scope: "all".into(),
                 mode: "check_only".into(),
                 work_ids: None,
@@ -173,8 +173,8 @@ fn stale_recheck_cannot_reverse_a_choice_made_during_the_request() {
 
 #[test]
 #[ignore]
-fn native_fixture() {
-    let root = std::env::temp_dir().join(format!("piep-candidate-native-{}", LibraryId::now_v7()));
+fn candidates_fixture() {
+    let root = std::env::temp_dir().join(format!("piep-candidate-fixture-{}", LibraryId::now_v7()));
     let library = Library::create(&root).unwrap();
     save(&library, "11");
     for (key, kind) in [("11", "incomplete"), ("22", "restricted")] {
@@ -194,5 +194,5 @@ fn native_fixture() {
             )
             .unwrap();
     }
-    println!("CANDIDATE_NATIVE_FIXTURE={}", root.display());
+    println!("CANDIDATE_FIXTURE={}", root.display());
 }

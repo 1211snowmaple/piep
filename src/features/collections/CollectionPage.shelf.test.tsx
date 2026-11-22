@@ -27,7 +27,6 @@ vi.mock("@/services/shelfApi", async (importOriginal) => ({
 const suggest = vi.hoisted(() => ({
   listCollectionSuggestions: vi.fn(),
   suggestCollectionAdditions: vi.fn(),
-  generateShelfCollectionSuggestion: vi.fn(),
   generateCollectionSuggestion: vi.fn(),
 }));
 vi.mock("@/services/collectionApi", async (importOriginal) => ({
@@ -203,10 +202,9 @@ describe("collections on the shelf", () => {
 
     it("seeds a suggestion from the work the work page sent by its shelf UUID", async () => {
       const seed = "0195f1c2-0000-7000-8000-000000000001";
-      suggest.generateShelfCollectionSuggestion.mockResolvedValue({});
+      suggest.generateCollectionSuggestion.mockResolvedValue({});
       renderWith(<CollectionsPanel />, `#/library?tab=collections&suggest=${seed}`);
-      await waitFor(() => expect(suggest.generateShelfCollectionSuggestion).toHaveBeenCalledWith([seed]));
-      expect(suggest.generateCollectionSuggestion).not.toHaveBeenCalled();
+      await waitFor(() => expect(suggest.generateCollectionSuggestion).toHaveBeenCalledWith([seed]));
       await waitFor(() => expect(window.location.hash).not.toContain("suggest="));
     });
 

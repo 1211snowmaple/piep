@@ -1208,7 +1208,7 @@ type NeighborRow = (
 );
 
 #[test]
-fn neighbors_follow_each_collection_series_and_author_in_the_old_reader_order() {
+fn neighbors_follow_each_collection_series_and_author_in_reading_order() {
     let temp = Temp::new();
     let library = Library::create(&temp.0).unwrap();
     let make = |key: &str, author: &str, created: &str, series: Option<Option<i64>>| {

@@ -1,5 +1,5 @@
 //! サーバーの HTTP 層。登録と接続確認（`/api/hello`・`pair`・`about`）と管理の API
-//! （`/api/admin/...`）。棚を読む口（`/api/identity`・`/api/libraries/...`）は `v2`。
+//! （`/api/admin/...`）。棚を読む口（`/api/identity`・`/api/libraries/...`）は `reader`。
 //!
 //! URL が知られていても読めないことを前提にする。無認証で答えるのは `hello` と
 //! `pair` だけで、応答にパスや内部の誤り文を出さない。
@@ -359,7 +359,7 @@ fn finish(router: Router, ctx: &Ctx) -> Router {
         // 頼まれたときだけ圧縮するので、古い端末の受け取り方は変わらない。
         .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))
         .layer(middleware::from_fn(no_store));
-    // v2 の資産は形式とキャッシュの条件を自分で決める。配信時に圧縮し直さない。
+    // 棚の資産は形式とキャッシュの条件を自分で決める。配信時に圧縮し直さない。
     let routes = match ctx.reader_shelf.get() {
         Some(shelf) => routes.merge(super::reader::router(Arc::clone(shelf))),
         None => routes,

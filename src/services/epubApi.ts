@@ -75,8 +75,8 @@ export function saveTemplateSettings(templateName: string, settings: TemplateSet
   return invoke<TemplateSettings>("save_template_settings", { templateName, settings });
 }
 
-/** `downloadId` は棚の作品の ID。 */
-export function previewEpubTemplate(templateName: string, downloadId: string | null): Promise<TemplatePreview> {
-  return invoke<TemplatePreview>("preview_epub_template", { templateName, downloadId });
+/** `workId` は棚の作品の ID。 */
+export function previewEpubTemplate(templateName: string, workId: string | null): Promise<TemplatePreview> {
+  return invoke<TemplatePreview>("preview_epub_template", { templateName, workId });
 }
 

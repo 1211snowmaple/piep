@@ -406,7 +406,7 @@ fn convert_pixiv_text_to_pages(text: &str) -> Vec<EpubPage> {
     // `"[newpage]"` の完全一致だったので、`[[newpage]]` や `[NewPage]` と
     // 書かれた作品は、読むときはページが分かれるのに本にすると 1 ページに
     // 融合していた。同じ作品が、読むときと本にするときで別の構造になる。
-    let raw_pages: Vec<&str> = crate::database::parser::split_pixiv_pages(text);
+    let raw_pages: Vec<&str> = piep_reader_render::parser::split_pixiv_pages(text);
     let multi_page = raw_pages.len() > 1;
     let page_count = raw_pages.len();
     let mut chapter_seq = 0usize;
@@ -479,7 +479,7 @@ fn pixiv_text_to_html(text: &str, chapter_seq: &mut usize, page_count: usize) ->
 
         // 編集画面で足した区切り線。pixiv 本来の記法には無い印なので、
         // 取り込んだ本文がこれに当たることはない。
-        if trimmed.trim() == crate::database::parser::EDITOR_SEPARATOR_NOTATION {
+        if trimmed.trim() == piep_reader_render::parser::EDITOR_SEPARATOR_NOTATION {
             html.push_str("<hr />\n");
             continue;
         }
@@ -722,7 +722,7 @@ fn convert_fanbox_body_to_pages(data: &Value) -> (Vec<EpubPage>, u64, Vec<EpubAt
                     }
                 }
                 // piep が差し込んだ印。添付から取り込んだ本文の前に置く。
-                crate::database::attachment::NOTICE_BLOCK_TYPE => {
+                crate::attachment::NOTICE_BLOCK_TYPE => {
                     pending_blank = false;
                     // 取り込めなかったことは画面で伝える話であって、本にする
                     // ものではない。読む人の手元へ渡る本に piep の事情を残さない。
@@ -926,7 +926,7 @@ fn fanbox_embed(body: &Value, embed_id: &str) -> Option<(String, String)> {
     // URL も投稿情報も持たず、HTML だけを返す埋め込みがある。その HTML には
     // 元のページの宛先が書いてあるので、読書画面と同じやり方で拾う。
     let html = read_str(embed.get("html"))?;
-    let url = crate::database::parser::first_public_url_in_html(&html)?;
+    let url = piep_reader_render::parser::first_public_url_in_html(&html)?;
     let label = read_str(embed.get("host")).unwrap_or_else(|| url.clone());
     Some((label, url))
 }
@@ -939,10 +939,10 @@ fn fanbox_service_embed(body: &Value, embed_id: &str) -> Option<(String, Option<
     let embed = body.get("embedMap").and_then(|value| value.get(embed_id))?;
     let provider = read_str(embed.get("serviceProvider")).unwrap_or_default();
     let content_id = read_str(embed.get("contentId")).unwrap_or_default();
-    let label = crate::database::parser::embed_service_label(&provider);
+    let label = piep_reader_render::parser::embed_service_label(&provider);
     Some((
         label,
-        crate::database::parser::embed_service_url(&provider, &content_id),
+        piep_reader_render::parser::embed_service_url(&provider, &content_id),
     ))
 }
 
@@ -1473,7 +1473,7 @@ mod tests {
                     "blocks": [
                         {"type": "p", "text": "お納めください。"},
                         {"type": "file", "fileId": "f1"},
-                        {"type": crate::database::attachment::NOTICE_BLOCK_TYPE,
+                        {"type": crate::attachment::NOTICE_BLOCK_TYPE,
                          "fileName": "本文.pdf", "method": "tagged",
                          "pageCount": 2, "charCount": 12},
                         {"type": "p", "text": "取り込んだ段落。"},

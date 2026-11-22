@@ -21,7 +21,7 @@ export interface MobileWork {
   seriesTitle: string | null;
   seriesId: string | null;
   sourceCreatedAt: string | null;
-  downloadedAt: string;
+  savedAt: string;
 }
 
 export interface MobileSearchPage {
@@ -193,7 +193,7 @@ export interface MobileShelfWork {
   /** 公開日（ISO 8601）。 */
   sourceCreatedAt: string | null;
   /** 保存日（ISO 8601）。 */
-  downloadedAt: string;
+  savedAt: string;
 }
 
 /** 棚の作品のお気に入りを付け外しする。`request_id` は端末が作る UUID で、送り直しても */
@@ -278,7 +278,7 @@ export interface MobileShelfWorkDetail {
   editBaseVersion: number | null;
 }
 
-/** 棚の検索欄の候補（旧 API の `search/suggest` の一件と同じ形）。作者・シリーズは */
+/** 棚の検索欄の候補の一件。作者・シリーズは */
 /** `source`・`source_key` が取得元と ID、題は `value` が取得元の ID で `source_key` が棚の */
 /** 作品の ID、タグは `value` がタグ。 */
 export interface MobileSearchSuggestion {

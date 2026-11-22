@@ -4,13 +4,13 @@
 //! `search-settings.json` に置く。無いうちは使わない。
 
 use super::shelf::Shelf;
-use crate::database::models::{
-    DashboardSummary, FacetCount, FilterFacets, LibraryMaintenanceResult, LibraryShelfCounts,
-    SearchIndexOptimizationResult, SearchIndexStatus,
-};
 use crate::library::{Library, LibraryId, ReclaimReport};
 use crate::library_facets::FacetKind;
 use crate::library_health::ShelfDiagnostics;
+use crate::models::{
+    DashboardSummary, FacetCount, FilterFacets, LibraryMaintenanceResult, LibraryShelfCounts,
+    SearchIndexOptimizationResult, SearchIndexStatus,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

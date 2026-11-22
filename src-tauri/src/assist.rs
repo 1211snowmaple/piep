@@ -27,7 +27,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::database::collection_rules;
+use crate::analysis::collection_rules;
 
 mod grounded;
 mod harness;
@@ -909,7 +909,7 @@ pub async fn runtime_profile(engine: &AssistEngine) -> Result<AssistRuntimeProfi
         .map(|value| value.get())
         .unwrap_or(1);
     let available_memory_bytes = if local_server {
-        crate::database::resource_budget::available_memory_bytes()
+        crate::resource_budget::available_memory_bytes()
     } else {
         None
     };
@@ -4018,7 +4018,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_author_reports_all_works_or_the_explicit_recent_subset() {
+    async fn author_reports_all_works_or_the_explicit_recent_subset() {
         let mut engine = engine_with_profile(FEATURE_AUTHOR_STYLE, "");
         let works = (0..35)
             .map(|index| WorkFacts {
@@ -4080,7 +4080,7 @@ mod tests {
     }
 
     #[test]
-    fn native_author_fingerprint_ignores_model_but_tracks_counting_policy() {
+    fn author_fingerprint_ignores_model_but_tracks_counting_policy() {
         let first = engine_with_profile(FEATURE_AUTHOR_STYLE, "モデル向けの指示");
         let mut changed = engine_with_profile(FEATURE_AUTHOR_STYLE, "別の指示");
         changed.model = "別モデル".into();

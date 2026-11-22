@@ -119,27 +119,9 @@ impl ServerStore {
              CREATE TABLE IF NOT EXISTS meta (
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
-             );
-             -- 旧 API の送信と、旧 API の読書位置・お気に入りの記録は使わない。
-             DROP TABLE IF EXISTS files;
-             DROP TABLE IF EXISTS session_files;
-             DROP TABLE IF EXISTS reading;
-             DROP TABLE IF EXISTS favorite_changes;",
+             );",
         )
         .map_err(db_error)?;
-        // 0.33.0 が記録したメールアドレスを残さない。
-        let has_last_user = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('devices') WHERE name = 'last_user'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(db_error)?
-            > 0;
-        if has_last_user {
-            conn.execute_batch("ALTER TABLE devices DROP COLUMN last_user;")
-                .map_err(db_error)?;
-        }
         conn.execute_batch(super::admin_store::ADMIN_TABLES)
             .map_err(db_error)?;
         Ok(Self {
@@ -456,24 +438,21 @@ mod tests {
             "発行だけでは今の管理者を失効させない"
         );
 
-        // 修正前の版が複数発行したまま更新された状態も扱う。
-        let legacy = random_token(32);
+        // 管理者の登録が複数残っていても、使った一つ以外は断る。
+        let stray = random_token(32);
         store
             .connection()
             .unwrap()
             .execute(
                 "INSERT INTO pairings(secret_hash, role, expires_at) VALUES (?1, 'admin', ?2)",
-                params![hash_secret(&legacy).as_slice(), now_ms() + 60_000],
+                params![hash_secret(&stray).as_slice(), now_ms() + 60_000],
             )
             .unwrap();
         let replacement = store.consume_pairing(&latest, "次の管理者").unwrap();
         assert!(store.authorize(&current.token).is_none());
         assert!(store.authorize(&replacement.token).is_some());
         assert_eq!(
-            store
-                .consume_pairing(&legacy, "古い版の案内")
-                .err()
-                .unwrap(),
+            store.consume_pairing(&stray, "残った案内").err().unwrap(),
             PairError::Rejected
         );
         assert_eq!(

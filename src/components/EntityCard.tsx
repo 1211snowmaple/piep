@@ -125,7 +125,7 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
             <Badge variant="light" color="gray" style={{ flex: "none" }}>{formatNumber(entity.count)}作品</Badge>
             {kind === "series" && entity.isConcluded === true && <Badge variant="light" color="gray" style={{ flex: "none" }}>完結</Badge>}
             {kind === "series" && entity.isConcluded === false && <Badge variant="light" color="piep" style={{ flex: "none" }}>連載中</Badge>}
-            <Text size="xs" c="dimmed" className="line-clamp-1">最終保存 {formatDate(entity.latestDownloadedAt)}</Text>
+            <Text size="xs" c="dimmed" className="line-clamp-1">最終保存 {formatDate(entity.latestSavedAt)}</Text>
           </Group>
         </Stack>
         {/* 状態は絵柄そのもので描く - 消えていれば灰、点いていればその色。

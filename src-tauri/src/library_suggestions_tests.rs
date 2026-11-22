@@ -1,5 +1,5 @@
 use super::*;
-use crate::database::queries::SuggestionSource;
+use crate::analysis::SuggestionSource;
 use crate::library::WorkSave;
 
 struct Temp(std::path::PathBuf);
@@ -123,7 +123,7 @@ fn a_seed_suggestion_follows_the_body_links_and_accepting_it_makes_a_collection(
     }
     assert!(suggestion.members.iter().all(|member| {
         let json = serde_json::to_value(member).unwrap();
-        json.get("corpusKey").is_none() && json.get("downloadId").is_none()
+        json.get("corpusKey").is_none() && json.get("workId").is_none()
     }));
     assert_eq!(suggestion.state, "pending");
 
@@ -284,7 +284,7 @@ fn additions_and_names_are_proposed_from_the_collection_on_the_shelf() {
             .unwrap();
         assert!(!works[..2].contains(&work), "入っている作品は候補にしない");
         let json = serde_json::to_value(candidate).unwrap();
-        assert!(json.get("corpusKey").is_none() && json.get("downloadId").is_none());
+        assert!(json.get("corpusKey").is_none() && json.get("workId").is_none());
     }
     assert!(
         additions
@@ -309,19 +309,19 @@ fn additions_and_names_are_proposed_from_the_collection_on_the_shelf() {
 }
 
 #[test]
-fn the_working_tables_see_the_shelf_text_and_have_no_old_shelf_to_backfill() {
+fn the_working_tables_see_the_shelf_text() {
     let (_temp, library) = shelf();
     let [first, ..] = chain(&library);
     let corpus = ShelfSuggestions::load(&library).unwrap();
     let id = corpus.id_of(first).unwrap();
     assert_eq!(corpus.work(id), Some(first));
     assert!(corpus.plain_text(id).unwrap().contains("本文です"));
-    let downloads: i64 = corpus
+    let works: i64 = corpus
         .corpus()
         .unwrap()
-        .query_row("SELECT count(*) FROM downloads", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM works", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(downloads, 3);
+    assert_eq!(works, 3);
     let links: i64 = corpus
         .corpus()
         .unwrap()

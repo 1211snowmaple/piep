@@ -111,7 +111,7 @@ const demoNav = `<?xml version="1.0" encoding="utf-8"?>
 export const demoPreview: TemplatePreview = {
   sampleTitle: "見本の作品 ― 雨と硝子",
   sampleSource: "sample",
-  sampleDownloadId: null,
+  sampleWorkId: null,
   css: "body { line-height: 1.8; padding: 16px; font-family: serif; } h1.title { font-size: 1.5em; } .tag { color: #0073bb; } .badge { background: rgba(0,0,0,.06); border-radius: 20px; padding: 2px 10px; font-size: .8em; } .series, .date { color: #767676; font-size: .85em; }",
   cover: null,
   info: demoInfoPage,

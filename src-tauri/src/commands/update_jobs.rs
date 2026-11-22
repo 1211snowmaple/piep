@@ -12,11 +12,11 @@
 //! ログは1ジョブ `MAX_UPDATE_JOB_LOGS` 行で頭打ちにし、超えた分は古い方から
 //! 落とす。長いジョブのログでライブラリを太らせない。
 
-use crate::database::{
+use crate::fanbox_api::models::FanboxPost;
+use crate::models::{
     StartUpdateJobRequest, UpdateCandidateInput, UpdateCredentials, UpdateJobItem,
     UpdateJobItemInput, UpdateJobItemState, UpdateJobSnapshot, UpdateJobSummary,
 };
-use crate::fanbox_api::models::FanboxPost;
 use crate::pixiv_api::error::PixivError;
 use crate::AppState;
 use serde_json::Value;
@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
-#[path = "update_jobs_shelf.rs"]
+#[path = "update_jobs_items.rs"]
 pub(super) mod shelf;
 
 #[cfg(test)]
@@ -375,19 +375,17 @@ fn fanbox_user_agent(credentials: &UpdateCredentials) -> String {
 /// だけではアイコンは新しくならない。シリーズはプロフィール画像を持たないため、
 /// ここでは作者だけを対象にする。
 fn profile_refresh_params_for_target(
-    target: &crate::database::UpdateTarget,
+    target: &crate::models::UpdateTarget,
     credentials: &UpdateCredentials,
-) -> Option<crate::commands::database::RefreshEntityProfileParams> {
-    (target.target_type == "author").then(|| {
-        crate::commands::database::RefreshEntityProfileParams {
-            entity_type: "person".to_string(),
-            source: target.source.clone(),
-            source_key: target.source_key.clone(),
-            force: Some(false),
-            refresh_token: pixiv_token(credentials),
-            cookie: fanbox_cookie(credentials),
-            user_agent: Some(fanbox_user_agent(credentials)),
-        }
+) -> Option<crate::commands::library::RefreshEntityProfileParams> {
+    (target.target_type == "author").then(|| crate::commands::library::RefreshEntityProfileParams {
+        entity_type: "person".to_string(),
+        source: target.source.clone(),
+        source_key: target.source_key.clone(),
+        force: Some(false),
+        refresh_token: pixiv_token(credentials),
+        cookie: fanbox_cookie(credentials),
+        user_agent: Some(fanbox_user_agent(credentials)),
     })
 }
 
@@ -608,7 +606,7 @@ fn item_from_payload(
 /// 判断し、分からなければ従来どおりシリーズも走査する（取りこぼさない側に倒す）。
 fn series_covered_by_watched_author(
     library: &crate::library::Library,
-    target: &crate::database::UpdateTarget,
+    target: &crate::models::UpdateTarget,
     watched_authors: &HashSet<(String, String)>,
 ) -> Result<bool, String> {
     if watched_authors.is_empty() {
@@ -621,7 +619,7 @@ fn series_covered_by_watched_author(
 }
 
 fn candidate_matches_scope(
-    candidate: &crate::database::UpdateCandidateRow,
+    candidate: &crate::models::UpdateCandidateRow,
     works: &HashSet<(String, String)>,
     targets: &HashSet<(String, String, String)>,
 ) -> bool {
@@ -729,7 +727,7 @@ fn build_initial_items(
             &adhoc.source,
             &adhoc.source_key,
         )?;
-        let target = registered.unwrap_or_else(|| crate::database::UpdateTarget {
+        let target = registered.unwrap_or_else(|| crate::models::UpdateTarget {
             id: None,
             watch_generation: None,
             target_type: adhoc.target_type.clone(),
@@ -1463,7 +1461,7 @@ pub async fn dismiss_update_candidate(
 #[tauri::command]
 pub async fn list_deferred_update_candidates(
     app: tauri::AppHandle,
-) -> Result<Vec<crate::database::UpdateCandidateRow>, String> {
+) -> Result<Vec<crate::models::UpdateCandidateRow>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     tokio::task::spawn_blocking(move || {
         state
@@ -1885,7 +1883,7 @@ pub async fn list_pending_revisions(
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingRevisionPreview {
-    pub metadata: crate::database::queries::RevisionMetadata,
+    pub metadata: crate::analysis::RevisionMetadata,
     /// 作品の画面と同じ ID（`list_pending_revisions` の `work`）。
     pub work: String,
     pub base_version: i64,
@@ -1950,7 +1948,7 @@ pub async fn preview_pending_revision(
     }
     let text_length = text.chars().count() as i64;
     Ok(PendingRevisionPreview {
-        metadata: crate::database::queries::revision_metadata(&value, &source, None),
+        metadata: crate::analysis::revision_metadata(&value, &source, None),
         work,
         base_version,
         text,
@@ -2461,13 +2459,11 @@ async fn run_update_job(
                         item.target_type.as_deref(),
                     ) {
                         let result = super::watching::active(&app).and_then(|library| {
-                            serde_json::from_str::<crate::database::UpdateTarget>(
-                                &item.payload_json,
-                            )
-                            .map_err(|e| e.to_string())
-                            .and_then(|target| {
-                                super::watching::record(&library, &target, None, None, 0, true)
-                            })
+                            serde_json::from_str::<crate::models::UpdateTarget>(&item.payload_json)
+                                .map_err(|e| e.to_string())
+                                .and_then(|target| {
+                                    super::watching::record(&library, &target, None, None, 0, true)
+                                })
                         });
                         if let Err(error) = result {
                             log::warn!(
@@ -2627,7 +2623,7 @@ async fn refresh_profiles_for_saved_works(
         if current_status != "running" {
             break;
         }
-        let params = crate::commands::database::RefreshEntityProfileParams {
+        let params = crate::commands::library::RefreshEntityProfileParams {
             entity_type: entity_type.to_string(),
             source: source.clone(),
             source_key: source_key.clone(),
@@ -2637,7 +2633,7 @@ async fn refresh_profiles_for_saved_works(
             user_agent: Some(fanbox_user_agent(credentials)),
         };
         if let Err(error) =
-            crate::commands::database::refresh_entity_profile_with(app.clone(), params).await
+            crate::commands::library::refresh_entity_profile_with(app.clone(), params).await
         {
             log::warn!("{entity_type}:{source}:{source_key} の情報を取れません: {error}");
             let _ = state.jobs().append_update_job_log(
@@ -3023,7 +3019,7 @@ async fn process_work_item(
 fn record_candidate(
     state: &Arc<AppState>,
     job_id: &str,
-    target: &crate::database::UpdateTarget,
+    target: &crate::models::UpdateTarget,
     source_item: &Value,
     kind: CandidateKind,
     auto_save: bool,
@@ -3131,7 +3127,7 @@ fn record_candidate(
 async fn scan_pixiv_revisions(
     state: &Arc<AppState>,
     job_id: &str,
-    target: &crate::database::UpdateTarget,
+    target: &crate::models::UpdateTarget,
     auto_save: bool,
     web_index: &mut WebUpdateIndex,
 ) -> Result<i64, String> {
@@ -3151,7 +3147,7 @@ async fn process_target_item(
     web_index: &mut WebUpdateIndex,
     fanbox_index: &mut FanboxUpdateIndex,
 ) -> Result<ItemOutcome, String> {
-    let target: crate::database::UpdateTarget =
+    let target: crate::models::UpdateTarget =
         serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
     let auto_save = state.jobs().update_job_mode_value(job_id)? == "auto_save";
     let new_works_only = state.jobs().update_job_new_works_only(job_id)?;
@@ -3346,7 +3342,7 @@ async fn process_target_item(
         .flatten();
     if let Some(params) = profile_params {
         if let Err(error) =
-            crate::commands::database::refresh_entity_profile_with(app.clone(), params).await
+            crate::commands::library::refresh_entity_profile_with(app.clone(), params).await
         {
             log::warn!(
                 "監視作者 {}:{} のプロフィールを更新できません: {error}",
@@ -3436,7 +3432,7 @@ async fn save_candidate(
         // A gate that still hides the details must not settle as complete:
         // clearing the candidate here would lose the work from the audit,
         // because an unchanged body creates no new version to inspect.
-        let masked = crate::database::queries::masked_pixiv_metadata(&value);
+        let masked = crate::analysis::masked_pixiv_metadata(&value);
         if !missing.is_empty() || !masked.is_empty() {
             let mut losses = Vec::new();
             if !missing.is_empty() {
@@ -3448,7 +3444,7 @@ async fn save_candidate(
             if !masked.is_empty() {
                 losses.push(format!(
                     "作品情報（{}）が取得元で伏せられています",
-                    crate::database::queries::masked_metadata_label(&masked)
+                    crate::analysis::masked_metadata_label(&masked)
                 ));
             }
             return Ok(ItemOutcome::PartialSaved(
@@ -3526,8 +3522,8 @@ mod tests {
         FailureKind, FanboxUpdateIndex, SaveJobWork, MAX_ERROR_BACKOFF_MS,
         MAX_RATE_LIMIT_BACKOFF_MS,
     };
-    use crate::database::{AdhocUpdateTarget, StartUpdateJobRequest};
     use crate::fanbox_api::error::FanboxError;
+    use crate::models::{AdhocUpdateTarget, StartUpdateJobRequest};
     use std::collections::HashSet;
 
     #[test]
@@ -3569,7 +3565,7 @@ mod tests {
     #[test]
     fn only_a_new_or_changed_hold_is_reported_again() {
         let (_temp, state, _library) = super::shelf::tests::fixture();
-        let item = crate::database::UpdateJobItem {
+        let item = crate::models::UpdateJobItem {
             id: 1,
             item_type: "work".into(),
             source: Some("pixiv".into()),
@@ -3584,7 +3580,7 @@ mod tests {
         assert!(!super::is_known_hold(&state, &item, &gone).unwrap());
         state
             .candidates()
-            .upsert_update_candidate(&crate::database::UpdateCandidateInput {
+            .upsert_update_candidate(&crate::models::UpdateCandidateInput {
                 source: "pixiv".into(),
                 source_id: "42".into(),
                 kind: "revision".into(),
@@ -3630,7 +3626,7 @@ mod tests {
             false,
         );
         for (source_id, kind) in [("old", "revision"), ("new", "new")] {
-            state.candidates().upsert_update_candidate(&crate::database::UpdateCandidateInput {
+            state.candidates().upsert_update_candidate(&crate::models::UpdateCandidateInput {
                 source: "pixiv".into(), source_id: source_id.into(),
                 kind: kind.into(), title: source_id.into(),
                 payload_json: serde_json::json!({
@@ -3682,7 +3678,7 @@ mod tests {
     #[test]
     fn a_target_check_recovers_pending_candidates_beyond_the_global_first_page() {
         let (_temp, state, library) = super::shelf::tests::fixture();
-        let candidate = |source_id: String, author: &str| crate::database::UpdateCandidateInput {
+        let candidate = |source_id: String, author: &str| crate::models::UpdateCandidateInput {
             source: "pixiv".into(),
             source_id,
             kind: "new".into(),
@@ -3733,8 +3729,8 @@ mod tests {
         target_type: &str,
         source: &str,
         source_key: &str,
-    ) -> crate::database::UpdateTarget {
-        crate::database::UpdateTarget {
+    ) -> crate::models::UpdateTarget {
+        crate::models::UpdateTarget {
             id: None,
             watch_generation: None,
             target_type: target_type.into(),
@@ -3778,7 +3774,7 @@ mod tests {
 
     #[test]
     fn durable_candidates_obey_exact_current_watch_scope() {
-        let mut candidate = crate::database::UpdateCandidateRow {
+        let mut candidate = crate::models::UpdateCandidateRow {
             work_id: None,
             metadata: Default::default(),
             source: "fanbox".into(), source_id: "11".into(), kind: "new".into(), title: "作品".into(),

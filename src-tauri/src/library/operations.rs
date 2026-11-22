@@ -211,26 +211,6 @@ impl Library {
         )
     }
 
-    pub fn set_watching(
-        &self,
-        request: LibraryId,
-        work: LibraryId,
-        user: LibraryId,
-        expected: i64,
-        watching: bool,
-    ) -> Result<UserState> {
-        self.set_user_state(
-            request,
-            work,
-            user,
-            expected,
-            UserStateChange {
-                favorite: None,
-                watching: Some(watching),
-            },
-        )
-    }
-
     /// お気に入りと更新の監視を一度に変える。世代が `expected` と違えば競合として断る。
     pub fn set_user_state(
         &self,

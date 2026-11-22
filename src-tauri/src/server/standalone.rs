@@ -1,7 +1,7 @@
 //! 単独サーバー（`piep-server`）の本体。設定、置き場、待ち受け、コマンド。
 
-#[path = "standalone_native.rs"]
-mod native;
+#[path = "standalone_generations.rs"]
+mod generations;
 #[path = "standalone_shipment.rs"]
 pub mod shipment;
 
@@ -73,7 +73,7 @@ impl ReaderShelfConfig {
     /// 配る世代の棚の置き場。
     fn root(&self, paths: &ServerPaths) -> Result<PathBuf, String> {
         match self.generation {
-            Some(generation) => native::generation_path(paths, generation),
+            Some(generation) => generations::generation_path(paths, generation),
             None => Ok(paths.shelf()),
         }
     }
@@ -1208,16 +1208,17 @@ pub async fn main_from_args(args: Vec<String>) -> i32 {
             "stage-library" => {
                 let paths = ServerPaths::new(required_data(&parsed)?)?;
                 let shelf = parsed.shelf.ok_or_else(|| USAGE.to_string())?;
-                let generation = tokio::task::spawn_blocking(move || native::stage(&paths, &shelf))
-                    .await
-                    .map_err(|error| error.to_string())??;
+                let generation =
+                    tokio::task::spawn_blocking(move || generations::stage(&paths, &shelf))
+                        .await
+                        .map_err(|error| error.to_string())??;
                 println!("{}", generation.get());
                 Ok(0)
             }
             "activate-library" => {
                 let paths = ServerPaths::new(required_data(&parsed)?)?;
                 let generation = parsed.generation.ok_or_else(|| USAGE.to_string())?;
-                tokio::task::spawn_blocking(move || native::activate(&paths, generation))
+                tokio::task::spawn_blocking(move || generations::activate(&paths, generation))
                     .await
                     .map_err(|error| error.to_string())??;
                 println!(
@@ -1425,7 +1426,7 @@ mod tests {
         assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
         let bundle = ReaderBundle::parse(&response.bytes().await.unwrap()).unwrap();
         assert_eq!(bundle.files.len(), 1);
-        let file = bundle.files[0].file.to_native();
+        let file = bundle.files[0].file.to_content_file();
         let response = resource(format!("{view}/resources/body/files/{}/chunks/0", file.id))
             .send()
             .await

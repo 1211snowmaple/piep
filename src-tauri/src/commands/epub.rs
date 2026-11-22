@@ -138,8 +138,8 @@ fn emit_progress(app: &tauri::AppHandle, progress: &ExportProgress) {
 fn apply_edited_source(
     source: &str,
     data: &mut serde_json::Value,
-    edit: crate::database::models::EditedSourceForm,
-) -> Vec<crate::database::models::AssetEntry> {
+    edit: crate::models::EditedSourceForm,
+) -> Vec<crate::models::AssetEntry> {
     // 空の本文も反映済みの編集。文字数で有無を判定すると、本文を消した編集や
     // 挿絵だけの編集を無視し、取り込んだ本文が書き出しに戻ってしまう。
     let added_images = edit.added_images;
@@ -175,7 +175,7 @@ fn apply_edited_source(
 ///
 /// 書き出しが拾う挿絵は版の置き場（`data_assets/illustrations/`）にあるものだけ
 /// なので、足した絵は本文から指されていても本に入らず、空の枠だけが残っていた。
-fn add_edited_images(manifest: &mut EpubManifest, added: &[crate::database::models::AssetEntry]) {
+fn add_edited_images(manifest: &mut EpubManifest, added: &[crate::models::AssetEntry]) {
     for asset in added {
         let path = Path::new(&asset.local_path);
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -231,7 +231,7 @@ pub fn load_shelf_manifest(
     }
     // 添付の中の本文を先に入れる。**編集より先でなければならない。** 編集はブロックを丸ごと
     // 差し替えるので、あとから入れると編集済みの本文へ二重に差し込むことになる。
-    crate::database::attachment::apply_attachment_text(&mut data, &provider, &attachments);
+    crate::attachment::apply_attachment_text(&mut data, &provider, &attachments);
     let added_images = edit
         .map(|edit| apply_edited_source(&provider, &mut data, edit))
         .unwrap_or_default();
@@ -568,7 +568,7 @@ fn batch_output_filename(
     title: &str,
     source: &str,
     manifest: &EpubManifest,
-    download_id: EpubWork,
+    work_id: EpubWork,
 ) -> String {
     let provider_id = manifest
         .provider
@@ -577,7 +577,7 @@ fn batch_output_filename(
         .or(manifest.provider.post_id.as_deref())
         .filter(|id| !id.trim().is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| download_id.to_string());
+        .unwrap_or_else(|| work_id.to_string());
 
     let clean_stem = |value: &str| {
         sanitize_epub_filename(value)
@@ -821,11 +821,11 @@ fn sync_output_parent(_destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn deduplicate_download_ids(download_ids: Vec<EpubWork>) -> Vec<EpubWork> {
-    let mut seen = HashSet::with_capacity(download_ids.len());
-    download_ids
+fn deduplicate_work_ids(work_ids: Vec<EpubWork>) -> Vec<EpubWork> {
+    let mut seen = HashSet::with_capacity(work_ids.len());
+    work_ids
         .into_iter()
-        .filter(|download_id| seen.insert(*download_id))
+        .filter(|work_id| seen.insert(*work_id))
         .collect()
 }
 
@@ -1035,7 +1035,7 @@ enum BatchItemStatus {
 
 struct BatchItemResult {
     index: u32,
-    download_id: EpubWork,
+    work_id: EpubWork,
     status: BatchItemStatus,
     issues: Vec<EpubValidationIssue>,
 }
@@ -1072,12 +1072,12 @@ fn aggregate_batch_results(mut completed: Vec<BatchItemResult>) -> ExportBatchRe
                 // a successful output with a warning. No file was published.
                 result.failed_count += 1;
                 result.invalid_count += 1;
-                result.invalid_ids.push(item.download_id);
+                result.invalid_ids.push(item.work_id);
             }
             BatchItemStatus::Failed(error) => {
-                log::debug!("EPUB ID {} failed: {}", item.download_id, error);
+                log::debug!("EPUB ID {} failed: {}", item.work_id, error);
                 result.failed_count += 1;
-                result.failed_ids.push(item.download_id);
+                result.failed_ids.push(item.work_id);
             }
         }
     }
@@ -1090,7 +1090,7 @@ fn export_batch_item(
     _state: Arc<AppState>,
     shelf: Arc<crate::commands::shelf::Shelf>,
     templates_dir: PathBuf,
-    download_id: EpubWork,
+    work_id: EpubWork,
     index: u32,
     total: u32,
     template_name: String,
@@ -1098,7 +1098,7 @@ fn export_batch_item(
     compress: ImageCompressOptions,
     writing_mode: Option<String>,
 ) -> BatchItemResult {
-    let title = work_title(&shelf, download_id);
+    let title = work_title(&shelf, work_id);
     emit_progress(
         &app,
         &ExportProgress {
@@ -1117,12 +1117,12 @@ fn export_batch_item(
             source,
             title: loaded_title,
             _staging,
-        } = load_work_manifest(&shelf, download_id)?;
+        } = load_work_manifest(&shelf, work_id)?;
         let manager = TemplateManager::new(templates_dir);
         let resolved = resolve_template(&manager, &template_name, &source);
         let contents = manager.load_template_contents(&resolved)?;
         let settings = manager.read_settings(&resolved);
-        let filename = batch_output_filename(&loaded_title, &source, &manifest, download_id);
+        let filename = batch_output_filename(&loaded_title, &source, &manifest, work_id);
         let destination = output_base.join(filename);
         let builder = EpubBuilder::new(manifest, contents, settings, compress)
             .with_writing_mode(writing_mode.as_deref());
@@ -1165,7 +1165,7 @@ fn export_batch_item(
             BatchItemStatus::Invalid
         }
         Err(error) => {
-            log::error!("EPUB export error (ID {}): {}", download_id, error);
+            log::error!("EPUB export error (ID {}): {}", work_id, error);
             emit_progress(
                 &app,
                 &ExportProgress {
@@ -1182,7 +1182,7 @@ fn export_batch_item(
 
     BatchItemResult {
         index,
-        download_id,
+        work_id,
         status,
         issues,
     }
@@ -1203,7 +1203,7 @@ fn export_batch_item(
 pub async fn export_epub_batch(
     app: tauri::AppHandle,
     operation_id: String,
-    download_ids: Vec<EpubWork>,
+    work_ids: Vec<EpubWork>,
     template_name: String,
     output_dir: String,
     compress_options: Option<ImageCompressOptions>,
@@ -1222,8 +1222,8 @@ pub async fn export_epub_batch(
     let output_base = PathBuf::from(&output_dir);
     std::fs::create_dir_all(&output_base).map_err(|e| e.to_string())?;
 
-    let download_ids = deduplicate_download_ids(download_ids);
-    let total = download_ids.len() as u32;
+    let work_ids = deduplicate_work_ids(work_ids);
+    let total = work_ids.len() as u32;
 
     emit_progress(
         &app,
@@ -1237,7 +1237,7 @@ pub async fn export_epub_batch(
     );
 
     let mut tasks = tokio::task::JoinSet::new();
-    let mut pending = download_ids.into_iter().enumerate();
+    let mut pending = work_ids.into_iter().enumerate();
     let mut completed = Vec::with_capacity(total as usize);
     let mut worker_error = None;
     loop {
@@ -1246,7 +1246,7 @@ pub async fn export_epub_batch(
             if epub_export_canceled(&EPUB_EXPORT_STATE, &operation_id) {
                 break;
             }
-            let Some((index, download_id)) = pending.next() else {
+            let Some((index, work_id)) = pending.next() else {
                 break;
             };
             let app = app.clone();
@@ -1263,7 +1263,7 @@ pub async fn export_epub_batch(
                     state,
                     shelf,
                     templates_dir,
-                    download_id,
+                    work_id,
                     (index + 1) as u32,
                     total,
                     template_name,
@@ -1294,7 +1294,7 @@ pub async fn export_epub_batch(
     let mut result = aggregate_batch_results(completed);
     // 一度も試していない作品はキューに残す。止めた結果として棚から
     // 消えてしまっては、中止が「取り下げ」になってしまう。
-    result.skipped_ids = pending.map(|(_, download_id)| download_id).collect();
+    result.skipped_ids = pending.map(|(_, work_id)| work_id).collect();
     // 最後の一冊の完了と中止IPCが競ったとき、未着手がなければ全件完了。
     let canceled =
         epub_export_canceled(&EPUB_EXPORT_STATE, &operation_id) && !result.skipped_ids.is_empty();
@@ -1488,7 +1488,7 @@ pub struct TemplatePreview {
     /// プレビューに使った作品。
     pub sample_title: String,
     pub sample_source: String,
-    pub sample_download_id: Option<EpubWork>,
+    pub sample_work_id: Option<EpubWork>,
     pub css: String,
     pub cover: Option<String>,
     pub info: Option<String>,
@@ -1516,7 +1516,7 @@ pub struct DataField {
 
 /// テンプレートの仕上がりを、書き出さずに見せる。
 ///
-/// `downloadId` を渡すとその作品で、省くと**同梱の見本**で組む。テンプレートを
+/// `workId` を渡すとその作品で、省くと**同梱の見本**で組む。テンプレートを
 /// 直しながら確かめる用途なので、ライブラリが空でも使える。
 ///
 /// 読んでいる間、ライブラリの姿を固定する（書き換えの途中を写さない）。
@@ -1524,7 +1524,7 @@ pub struct DataField {
 pub async fn preview_epub_template(
     app: tauri::AppHandle,
     template_name: String,
-    download_id: Option<EpubWork>,
+    work_id: Option<EpubWork>,
 ) -> Result<TemplatePreview, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let shelf = app
@@ -1536,7 +1536,7 @@ pub async fn preview_epub_template(
 
     // 棚の作品の画像は、見本を組み終えるまで一時の置き場に置いておく。
     let mut _staging = None;
-    let (manifest, source, title, resolved_id) = match download_id {
+    let (manifest, source, title, resolved_id) = match work_id {
         Some(id) => {
             let loaded = tokio::task::spawn_blocking(move || load_work_manifest(&shelf, id))
                 .await
@@ -1629,7 +1629,7 @@ pub async fn preview_epub_template(
     Ok(TemplatePreview {
         sample_title: title,
         sample_source: source,
-        sample_download_id: resolved_id,
+        sample_work_id: resolved_id,
         css,
         cover,
         info,
@@ -2072,7 +2072,7 @@ mod tests {
     #[test]
     fn duplicate_batch_ids_are_removed_without_reordering() {
         assert_eq!(
-            deduplicate_download_ids([7, 3, 7, 9, 3, 11].map(EpubWork::from_u128).to_vec()),
+            deduplicate_work_ids([7, 3, 7, 9, 3, 11].map(EpubWork::from_u128).to_vec()),
             [7, 3, 9, 11].map(EpubWork::from_u128).to_vec()
         );
     }
@@ -2203,7 +2203,7 @@ mod tests {
 
         let result = aggregate_batch_results(vec![BatchItemResult {
             index: 1,
-            download_id: EpubWork::from_u128(42),
+            work_id: EpubWork::from_u128(42),
             status: BatchItemStatus::Invalid,
             issues: vec![EpubValidationIssue::error("TEST", "content.opf", "invalid")],
         }]);

@@ -3,8 +3,10 @@ use super::*;
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
-        crate::database::tantivy_index::release_runtime(&self.0.join("derived"));
-        crate::database::tantivy_index::release_runtime(&self.0.join("derived").join("history"));
+        crate::search_engine::tantivy_index::release_runtime(&self.0.join("derived"));
+        crate::search_engine::tantivy_index::release_runtime(
+            &self.0.join("derived").join("history"),
+        );
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -57,7 +59,7 @@ fn an_existing_library_opens_indexes_and_serves_files_by_their_fingerprint() {
     assert_eq!(found.body(), &png);
     assert_eq!(found.headers()["Content-Type"], "image/png");
     assert_eq!(respond(&state, &"0".repeat(64)).status(), 404);
-    // 開いている棚は、ほかから開けない（移行器も止まる）。
+    // 開いている棚は、ほかから開けない。
     assert!(Library::open(&dir.0).is_err());
 }
 

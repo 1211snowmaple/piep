@@ -16,7 +16,7 @@ pub struct Grant {
 /// 認証済み端末を棚と利用者へ明示的に結ぶ。利用者 ID を端末 ID から作らない。
 pub trait Authority: Send + Sync {
     fn grant(&self, bearer: &str, library: Id) -> Option<Grant>;
-    /// 端末に許した利用者（旧 API で届いた変更を、同じ利用者へ当てるため）。
+    /// 端末に許した利用者。
     fn subject_of(&self, _device: &str, _library: Id) -> Option<Id> {
         None
     }
@@ -27,7 +27,7 @@ pub trait Authority: Send + Sync {
 }
 
 /// 既存の bearer 検証を使うアダプター。grants は管理側が明示して投入する。
-/// 旧登録へ自動で新ライブラリの権限を追加しない。鍵はここへ保持しない。
+/// 登録しただけの端末に棚を読む許可を付けない。鍵はここへ保持しない。
 pub struct DeviceAuthority {
     store: Arc<ServerStore>,
     grants: RwLock<HashMap<(String, uuid::Uuid), Id>>,

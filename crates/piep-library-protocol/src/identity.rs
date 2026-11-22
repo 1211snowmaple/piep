@@ -61,7 +61,7 @@ impl LibraryIdentity {
             || self.max_manifest_bytes.get() > MAX_MANIFEST_BYTES as u64
         {
             return Err(Error::Integrity(
-                "新ライブラリの対応形式または上限が一致しません".into(),
+                "棚の対応形式または上限が一致しません".into(),
             ));
         }
         Ok(())

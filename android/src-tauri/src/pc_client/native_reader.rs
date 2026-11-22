@@ -57,7 +57,7 @@ impl NativeDocument {
             entity: self.entity,
             view: file.scope.clone(),
             resource: file.resource.clone(),
-            file: file.file.to_native(),
+            file: file.file.to_content_file(),
         })
     }
 }
@@ -354,7 +354,7 @@ mod tests {
             resource: ResourceReference::Media {
                 slot: "inline".into(),
             },
-            file: File::from_native(&picture),
+            file: File::from_content_file(&picture),
         };
         let document = build(scope(), bundle(vec![listed])).unwrap();
         assert_eq!(document.pages.len(), 2);

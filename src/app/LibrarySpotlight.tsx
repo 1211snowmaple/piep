@@ -46,7 +46,7 @@ export function LibrarySpotlight({ actions }: { actions: SpotlightActionData[] }
           <ProviderMark provider={work.source} compact />
           <div className="global-search__work-body">
             <Highlight highlight={query.trim()} className="global-search__work-title" title={work.title}>{work.title}</Highlight>
-            <div className="global-search__work-meta"><span className="global-search__work-author" title={work.personName || work.authorName}>{work.personName || work.authorName}</span><span className="global-search__work-date"><Icons.publishedDate size={IconSize.inline} /><span>{formatDateNumeric(work.sourceUpdatedAt || work.sourceCreatedAt || work.downloadedAt)}</span></span><span className="global-search__work-length"><Icons.textLength size={IconSize.inline} /><span>{formatNumber(work.textLength)}字</span></span><span className="global-search__work-version">{work.currentVersion > 1 ? `${work.currentVersion}版` : ""}</span></div>
+            <div className="global-search__work-meta"><span className="global-search__work-author" title={work.personName || work.authorName}>{work.personName || work.authorName}</span><span className="global-search__work-date"><Icons.publishedDate size={IconSize.inline} /><span>{formatDateNumeric(work.sourceUpdatedAt || work.sourceCreatedAt || work.savedAt)}</span></span><span className="global-search__work-length"><Icons.textLength size={IconSize.inline} /><span>{formatNumber(work.textLength)}字</span></span><span className="global-search__work-version">{work.currentVersion > 1 ? `${work.currentVersion}版` : ""}</span></div>
           </div>
         </Spotlight.Action>)}
         {results.isFetching && <Spotlight.Empty>作品を検索中…</Spotlight.Empty>}

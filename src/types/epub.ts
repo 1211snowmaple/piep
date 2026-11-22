@@ -68,7 +68,7 @@ export interface EpubValidationReport {
 export interface TemplatePreview {
   sampleTitle: string;
   sampleSource: string;
-  sampleDownloadId: number | string | null;
+  sampleWorkId: number | string | null;
   css: string;
   cover: string | null;
   info: string | null;

@@ -7,8 +7,7 @@
 //! 画像（表紙・本文の画像）は `piep-library` の URI で、ファイルの識別子（中身の SHA-256）
 //! から返す。画面は `convertFileSrc(識別子, "piep-library")` で URL にする。
 
-use crate::database::models::{ReaderOutlineEntry, ReaderSearchHit};
-use crate::database::queries::{reader_outline, search_reader_pages};
+use crate::analysis::{reader_outline, search_reader_pages};
 use crate::library::{
     Fingerprint, Library, LibraryId, NeighborKind, ResourceScope, WorkCard, WorkFilter,
     WorkListQuery,
@@ -17,6 +16,7 @@ use crate::library_entity::{EntityHead, SeriesFacetPage, SeriesSort, TagCount};
 use crate::library_entity_list::{CollectionSummary, EntityListPage, EntityRow, EntityScope};
 use crate::library_search::{parse_query, SearchDecoration, SearchMatch, SearchPage, TextSearch};
 use crate::library_view::{MediaView, RenderedDocument, VersionView};
+use crate::models::{ReaderOutlineEntry, ReaderSearchHit};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -222,7 +222,7 @@ pub fn open_for_startup(state: Arc<Shelf>, app_data: &Path) -> Result<(), String
     super::library_health::set_settings_dir(app_data);
     let path = library_dir(app_data);
     // 予約した復元は、棚を開く前に入れ替える。
-    super::backup_shelf::apply_pending_restore(&path);
+    super::backup::apply_pending_restore(&path);
     state.open(&path)?;
     let spawned = std::thread::Builder::new()
         .name("piep-library-index".into())
@@ -281,8 +281,7 @@ fn sniff(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// 棚の状態（ない・開いている・索引の同期中・使える・失敗）。使えるときは移行の
-/// 未解決の記録も返す。
+/// 棚の状態（ない・開いている・索引の同期中・使える・失敗）。
 #[tauri::command]
 pub fn shelf_status(state: State<'_, Arc<Shelf>>) -> ShelfState {
     state.status()
@@ -973,14 +972,14 @@ pub async fn shelf_search_suggest(
     state: State<'_, Arc<Shelf>>,
     text: String,
     limit: Option<i64>,
-) -> Result<crate::database::models::SearchSuggestResult, String> {
+) -> Result<crate::models::SearchSuggestResult, String> {
     let state = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         let items = state
             .library()?
             .search_suggestions(&text, limit.unwrap_or(12), &state.suggestions)
             .map_err(|e| e.to_string())?;
-        Ok(crate::database::models::SearchSuggestResult { items })
+        Ok(crate::models::SearchSuggestResult { items })
     })
     .await
     .map_err(|e| e.to_string())?

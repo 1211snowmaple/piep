@@ -8,13 +8,13 @@
 //! 自動保存は数秒ごとに下書きを送るので、中身が今の下書きと同じなら書かない（段の ID は作品と
 //! 順番から決めるので、同じ中身は同じ文書になる）。
 
-use crate::database::models::{WorkBlock, WorkBlockInput};
-use crate::database::queries::{html_to_editor_blocks, normalize_block_inputs};
+use crate::analysis::{html_to_editor_blocks, normalize_block_inputs};
 use crate::library::{
     EditBlock, EditContent, EditMedia, EditPointerChange, EditRequest, EditState, Error,
     Fingerprint, Library, LibraryId, ResourceScope, Result,
 };
 use crate::library_view::{bound_assets, render_html};
+use crate::models::{WorkBlock, WorkBlockInput};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;

@@ -33,14 +33,14 @@ type WorkAssistAction = "synopsis" | "tags" | "related-tags";
 /**
  * One contextual launcher owns every optional model action on a work page.
  *
- * `downloadId` は棚の作品の ID。
+ * `workId` は棚の作品の ID。
  */
-export function WorkAssist({ downloadId }: { downloadId: AssistWork }) {
+export function WorkAssist({ workId }: { workId: AssistWork }) {
   // 作品を切り替えたら選択状態と未完了要求の受け口を分離する。
-  return <WorkAssistForWork key={downloadId} downloadId={downloadId} />;
+  return <WorkAssistForWork key={workId} workId={workId} />;
 }
 
-function WorkAssistForWork({ downloadId }: { downloadId: AssistWork }) {
+function WorkAssistForWork({ workId }: { workId: AssistWork }) {
   const runtime = isTauriRuntime();
   const synopsis = useAssist("work_synopsis");
   const tagging = useAssist("work_tagging");
@@ -49,9 +49,9 @@ function WorkAssistForWork({ downloadId }: { downloadId: AssistWork }) {
   const [proposals, setProposals] = useState<TagProposal[] | null>(null);
   const [picked, setPicked] = useState<ReadonlySet<string>>(new Set());
   const [relatedPicked, setRelatedPicked] = useState<ReadonlySet<string>>(new Set());
-  const noteKey = ["assist-note", "work", String(downloadId), "synopsis"] as const;
+  const noteKey = ["assist-note", "work", String(workId), "synopsis"] as const;
   const noteEngine = synopsis.settings ? toEngine(synopsis.settings, "work_synopsis") : null;
-  const tagsKey = ["assist-tags", downloadId] as const;
+  const tagsKey = ["assist-tags", workId] as const;
   // タグが変わると一覧・絞り込み・読む画面の情報も変わる。出ている画面の問い合わせを
   // まとめて読み直させる（どこに出ているかを一つずつ追わない）。
   const refreshAfterTags = () => invalidateShelf(queryClient, tagsKey);
@@ -66,26 +66,26 @@ function WorkAssistForWork({ downloadId }: { downloadId: AssistWork }) {
     notifications.show({ color: "red", title: "タグの更新を確認してください", message: errorMessage(error) });
   };
 
-  const note = useQuery({ queryKey: [...noteKey, noteEngine], queryFn: () => loadNote("work", String(downloadId), "synopsis", noteEngine) });
-  const tags = useQuery({ queryKey: tagsKey, queryFn: () => workTags(downloadId) });
+  const note = useQuery({ queryKey: [...noteKey, noteEngine], queryFn: () => loadNote("work", String(workId), "synopsis", noteEngine) });
+  const tags = useQuery({ queryKey: tagsKey, queryFn: () => workTags(workId) });
   const assisted = (tags.data ?? []).filter((tag) => tag.source === "llm");
   const manuallyAdded = (tags.data ?? []).filter((tag) => tag.source === "manual");
   const existingTagNames = new Set((tags.data ?? []).map((tag) => tag.name));
 
   const summarize = useMutation({
     mutationFn: () => synopsis.engine
-      ? summarizeWork(synopsis.engine, downloadId)
+      ? summarizeWork(synopsis.engine, workId)
       : Promise.reject(new Error("あらすじ機能が設定されていません")),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: noteKey }),
     onError: (error) => notifications.show({ color: "red", title: "あらすじを作れません", message: errorMessage(error) }),
   });
   const discard = useMutation({
-    mutationFn: () => deleteNote("work", String(downloadId), "synopsis"),
+    mutationFn: () => deleteNote("work", String(workId), "synopsis"),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: noteKey }),
   });
   const propose = useMutation({
     mutationFn: () => tagging.engine
-      ? suggestTags(tagging.engine, downloadId)
+      ? suggestTags(tagging.engine, workId)
       : Promise.reject(new Error("タグ補完が設定されていません")),
     onSuccess: (found) => {
       setProposals(found);
@@ -95,7 +95,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: AssistWork }) {
     onError: (error) => notifications.show({ color: "red", title: "タグを提案できません", message: errorMessage(error) }),
   });
   const accept = useMutation({
-    mutationFn: () => acceptTags(downloadId, [...picked]),
+    mutationFn: () => acceptTags(workId, [...picked]),
     onSuccess: (next) => {
       setProposals(null);
       setPicked(new Set());
@@ -106,7 +106,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: AssistWork }) {
     onError: reportTagUpdateError,
   });
   const remove = useMutation({
-    mutationFn: (tag: string) => removeAssistedTag(downloadId, tag),
+    mutationFn: (tag: string) => removeAssistedTag(workId, tag),
     onSuccess: (next) => {
       queryClient.setQueryData(tagsKey, next);
       void refreshAfterTags();
@@ -114,7 +114,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: AssistWork }) {
     onError: reportTagUpdateError,
   });
   const related = useMutation({
-    mutationFn: () => relatedTagCandidates(downloadId),
+    mutationFn: () => relatedTagCandidates(workId),
     onMutate: () => setRelatedPicked(new Set()),
     onSuccess: (found) => {
       if (found.length === 0) notifications.show({ message: "一緒に付いているタグからは、候補が見つかりませんでした" });
@@ -125,7 +125,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: AssistWork }) {
   const visibleRelatedTags = new Set(newRelatedCandidates?.map((candidate) => candidate.tag) ?? []);
   const validRelatedPicked = [...relatedPicked].filter((tag) => visibleRelatedTags.has(tag));
   const acceptRelated = useMutation({
-    mutationFn: () => acceptRelatedTags(downloadId, validRelatedPicked),
+    mutationFn: () => acceptRelatedTags(workId, validRelatedPicked),
     onSuccess: (next) => {
       related.reset();
       setRelatedPicked(new Set());
@@ -136,7 +136,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: AssistWork }) {
     onError: reportTagUpdateError,
   });
   const removeManual = useMutation({
-    mutationFn: (tag: string) => removeManualTag(downloadId, tag),
+    mutationFn: (tag: string) => removeManualTag(workId, tag),
     onSuccess: (next) => {
       queryClient.setQueryData(tagsKey, next);
       void refreshAfterTags();
@@ -174,7 +174,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: AssistWork }) {
     },
   ];
   const headerHosted = usePageAssist(
-    `work-assist-${downloadId}`,
+    `work-assist-${workId}`,
     "この作品で使えるAIの手伝い",
     launcherItems,
     runtime,
@@ -226,7 +226,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: AssistWork }) {
           <Stack>
             <Text size="sm" c="dimmed">本文を読んで、結末までのあらすじを400字以内で書きます。文ごとに原文の根拠を付け、別の確認で原文と照らします。文脈の小さいモデルでは、本文の文を選ぶ抜粋になります。</Text>
             {note.data && <AssistNoteBody text={note.data.text} sourceTail={note.data.sourceTail} claims={note.data.claims} modelId={note.data.modelId} createdAt={note.data.createdAt} promptVersion={note.data.promptVersion} promptStale={note.data.promptStale} inputStale={note.data.inputStale} configStale={note.data.configStale} />}
-            <AssistProgressLine feature="work_synopsis" downloadId={downloadId} active={summarize.isPending} />
+            <AssistProgressLine feature="work_synopsis" workId={workId} active={summarize.isPending} />
             <ActionRow><Button loading={summarize.isPending} disabled={!synopsisReady} onClick={() => summarize.mutate()}>{note.data ? "作り直す" : "あらすじを作る"}</Button></ActionRow>
           </Stack>
         ) : active === "tags" ? (

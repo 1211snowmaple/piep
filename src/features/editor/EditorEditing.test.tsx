@@ -187,7 +187,7 @@ describe("書きかけの捨て方と、土台の版", () => {
 
     dbApi.getEditorDocument.mockResolvedValue({
       ...base,
-      draftRevision: { id: 9, downloadId: 101, baseVersion: 1, status: "draft", title: null, contentHash: null, createdAt: "", updatedAt: "" },
+      draftRevision: { id: 9, workId: 101, baseVersion: 1, status: "draft", title: null, contentHash: null, createdAt: "", updatedAt: "" },
     });
     // 別の画面として開き直す。
     render(<MantineProvider><Notifications /><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><ModalsProvider><AppRouter><EditorPage /></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
@@ -203,7 +203,7 @@ describe("書きかけの捨て方と、土台の版", () => {
     dbApi.getEditorDocument.mockResolvedValue({
       ...demo,
       download: { ...demo.download, currentVersion: 3 },
-      activeRevision: { id: 5, downloadId: 101, baseVersion: 1, status: "active", title: null, contentHash: null, createdAt: "", updatedAt: "" },
+      activeRevision: { id: 5, workId: 101, baseVersion: 1, status: "active", title: null, contentHash: null, createdAt: "", updatedAt: "" },
     });
     renderEditor();
 

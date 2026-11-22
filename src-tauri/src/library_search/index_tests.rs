@@ -8,8 +8,10 @@ use std::path::PathBuf;
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
-        crate::database::tantivy_index::release_runtime(&self.0.join("derived"));
-        crate::database::tantivy_index::release_runtime(&self.0.join("derived").join("history"));
+        crate::search_engine::tantivy_index::release_runtime(&self.0.join("derived"));
+        crate::search_engine::tantivy_index::release_runtime(
+            &self.0.join("derived").join("history"),
+        );
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -141,15 +143,15 @@ fn the_index_follows_saves_tags_and_removals_and_rebuilds_when_lost() {
 
     // 索引の場所が消えたら、空から作り直す。
     let storage = library.search_storage();
-    crate::database::tantivy_index::release_runtime(&storage.join("history"));
-    crate::database::tantivy_index::release_runtime(&storage);
+    crate::search_engine::tantivy_index::release_runtime(&storage.join("history"));
+    crate::search_engine::tantivy_index::release_runtime(&storage);
     std::fs::remove_dir_all(&storage).unwrap();
     let rebuilt = library.sync_search_index(&mut quiet).unwrap();
     assert!(rebuilt.reset);
     assert_eq!(rebuilt.indexed, 3);
     assert_eq!(found(&library, "檸檬"), vec![orange]);
     assert_eq!(found(&library, "果物"), vec![grape]);
-    crate::database::tantivy_index::release_runtime(&temp.0.join("derived"));
+    crate::search_engine::tantivy_index::release_runtime(&temp.0.join("derived"));
 }
 
 #[test]
@@ -275,7 +277,7 @@ fn search_results_page_by_relevance_and_combine_with_filters_and_sorts() {
             ..Default::default()
         })
         .is_err());
-    crate::database::tantivy_index::release_runtime(&temp.0.join("derived"));
+    crate::search_engine::tantivy_index::release_runtime(&temp.0.join("derived"));
 }
 
 /// 保存のたびの少しずつの同期で、セグメントが保存の数だけたまらない。
@@ -308,9 +310,9 @@ fn small_syncs_let_merges_finish_instead_of_piling_up_segments() {
         assert_eq!(report.indexed, 1);
     }
     // 少しずつの同期は使い回す書き手で書いている。
-    assert!(crate::database::tantivy_index::ordinary_writer_is_cached(&storage).unwrap());
-    crate::database::tantivy_index::settle_ordinary_writer(&storage).unwrap();
-    let segments = crate::database::tantivy_index::searchable_segment_count(&storage).unwrap();
+    assert!(crate::search_engine::tantivy_index::ordinary_writer_is_cached(&storage).unwrap());
+    crate::search_engine::tantivy_index::settle_ordinary_writer(&storage).unwrap();
+    let segments = crate::search_engine::tantivy_index::searchable_segment_count(&storage).unwrap();
     assert!(
         segments < SAVES / 2,
         "{SAVES} 回の保存で {segments} 個のセグメントが残った（統合が終わっていない）"

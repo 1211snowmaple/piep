@@ -88,7 +88,7 @@ impl Context {
     pub fn prepare_search(self: &Arc<Self>) {
         let ctx = Arc::clone(self);
         let spawned = std::thread::Builder::new()
-            .name("piep-v2-search-index".into())
+            .name("piep-reader-search-index".into())
             .spawn(
                 move || match ctx.library.sync_search_index(&mut |_, _| {}) {
                     Ok(_) => ctx.search_ready.store(true, Ordering::Release),
@@ -664,11 +664,7 @@ async fn chunk(
     })
     .await
     .map_err(|_| internal())??;
-    Ok(representation(
-        bytes,
-        "application/vnd.piep.object-v1",
-        true,
-    ))
+    Ok(representation(bytes, "application/vnd.piep.object", true))
 }
 
 #[cfg(test)]

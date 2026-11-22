@@ -65,7 +65,7 @@ fn shelf() -> (Temp, Library, LibraryId, LibraryId) {
 }
 
 #[test]
-fn the_saved_response_and_images_are_laid_out_like_the_old_shelf() {
+fn the_saved_response_and_images_are_laid_out_for_the_book() {
     let (_temp, library, work, _) = shelf();
     let source = library.epub_source(work).unwrap();
     assert_eq!(source.provider, "pixiv");
@@ -230,7 +230,7 @@ fn added_path(manifest: &crate::epub::intermediate::EpubManifest) -> String {
 }
 
 #[test]
-fn the_queue_sends_shelf_ids_and_refuses_old_numbers() {
+fn the_queue_sends_work_ids_and_refuses_numbers() {
     use crate::epub::intermediate::EpubWork;
     let id = LibraryId::now_v7();
     let works: Vec<EpubWork> = serde_json::from_value(json!([id.to_string()])).unwrap();

@@ -29,7 +29,7 @@ use std::sync::Arc;
 /// 一ページの既定と上限。
 const PAGE: i64 = 200;
 const MAX_PAGE: i64 = 500;
-/// 読書画面のページ番号の上限（旧 API と同じ）。
+/// 読書画面のページ番号の上限。
 const MAX_PAGE_NUMBER: u64 = 1_000_000;
 
 pub(super) fn reading_item(

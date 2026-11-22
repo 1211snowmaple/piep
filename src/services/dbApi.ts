@@ -51,7 +51,7 @@ export interface FanboxRepairScan {
 }
 
 export function getEntityProfileRepairStatus(): Promise<EntityProfileRepairStatus> {
-  return invoke<EntityProfileRepairStatus>("db_get_entity_profile_repair_status");
+  return invoke<EntityProfileRepairStatus>("get_entity_profile_repair_status");
 }
 
 export function repairIncompleteEntityProfiles(): Promise<EntityProfileRepairResult> {
@@ -104,7 +104,7 @@ export interface ReimportOutcome {
 }
 
 export async function getSearchIndexStatus(): Promise<SearchIndexStatus> {
-  return invoke<SearchIndexStatus>("db_get_search_index_status");
+  return invoke<SearchIndexStatus>("get_search_index_status");
 }
 
 export async function refreshEntityProfile<T>(params: Record<string, unknown>): Promise<T> {
@@ -113,53 +113,53 @@ export async function refreshEntityProfile<T>(params: Record<string, unknown>): 
 
 export async function upsertUpdateTarget(target: Record<string, unknown>): Promise<void> {
   const before = await getUpdateTarget(String(target.targetType), String(target.source), String(target.sourceKey));
-  await invoke("db_upsert_update_target", { target, requestId: crypto.randomUUID(), expectedGeneration: before?.watchGeneration ?? null });
+  await invoke("upsert_update_target", { target, requestId: crypto.randomUUID(), expectedGeneration: before?.watchGeneration ?? null });
 }
 
 export async function setUpdateTargetEnabled(targetType: string, source: string, sourceKey: string, enabled: boolean): Promise<void> {
   const before = await getUpdateTarget(targetType, source, sourceKey);
-  return invoke<void>("db_set_update_target_enabled", { targetType, source, sourceKey, enabled, targetId: before?.id ?? null, requestId: crypto.randomUUID(), expectedGeneration: before?.watchGeneration ?? null });
+  return invoke<void>("set_update_target_enabled", { targetType, source, sourceKey, enabled, targetId: before?.id ?? null, requestId: crypto.randomUUID(), expectedGeneration: before?.watchGeneration ?? null });
 }
 
 export async function deleteUpdateTarget(targetType: string, source: string, sourceKey: string): Promise<void> {
   const before = await getUpdateTarget(targetType, source, sourceKey);
-  return invoke<void>("db_delete_update_target", { targetType, source, sourceKey, targetId: before?.id ?? null, requestId: crypto.randomUUID(), expectedGeneration: before?.watchGeneration ?? null });
+  return invoke<void>("delete_update_target", { targetType, source, sourceKey, targetId: before?.id ?? null, requestId: crypto.randomUUID(), expectedGeneration: before?.watchGeneration ?? null });
 }
 
 export async function listUpdateTargets<T>(targetType: string | null = null, enabledOnly = false): Promise<T[]> {
-  return invoke<T[]>("db_list_update_targets", { targetType, enabledOnly });
+  return invoke<T[]>("list_update_targets", { targetType, enabledOnly });
 }
 
 export async function listWatchGroups(): Promise<WatchGroup[]> {
-  return invoke<WatchGroup[]>("db_list_watch_groups");
+  return invoke<WatchGroup[]>("list_watch_groups");
 }
 
 /** 新しい監視グループを作り、その ID を返す。同じ名前があれば失敗する。 */
 export async function createWatchGroup(name: string): Promise<WatchId> {
   const groups = await listWatchGroups();
-  return invoke<WatchId>("db_create_watch_group", { name, requestId: crypto.randomUUID(), expectedGeneration: groups[0]?.watchGeneration ?? null });
+  return invoke<WatchId>("create_watch_group", { name, requestId: crypto.randomUUID(), expectedGeneration: groups[0]?.watchGeneration ?? null });
 }
 
 export async function renameWatchGroup(groupId: WatchId, name: string): Promise<void> {
   const group = (await listWatchGroups()).find((item) => item.id === groupId);
-  return invoke<void>("db_rename_watch_group", { groupId: group?.id ?? groupId, name, requestId: crypto.randomUUID(), expectedGeneration: group?.watchGeneration ?? null });
+  return invoke<void>("rename_watch_group", { groupId: group?.id ?? groupId, name, requestId: crypto.randomUUID(), expectedGeneration: group?.watchGeneration ?? null });
 }
 
 /** グループだけを消す。中の監視対象は残る。 */
 export async function deleteWatchGroup(groupId: WatchId): Promise<void> {
   const group = (await listWatchGroups()).find((item) => item.id === groupId);
-  return invoke<void>("db_delete_watch_group", { groupId: group?.id ?? groupId, requestId: crypto.randomUUID(), expectedGeneration: group?.watchGeneration ?? null });
+  return invoke<void>("delete_watch_group", { groupId: group?.id ?? groupId, requestId: crypto.randomUUID(), expectedGeneration: group?.watchGeneration ?? null });
 }
 
 /** 監視対象をグループに入れる（add）か外す。変わった件数を返す。 */
 export async function setWatchGroupMembers(groupId: WatchId, targetIds: WatchId[], add: boolean): Promise<number> {
   const group = (await listWatchGroups()).find((item) => item.id === groupId);
-  return invoke<number>("db_set_watch_group_members", { groupId: group?.id ?? groupId, targetIds, add, requestId: crypto.randomUUID(), expectedGeneration: group?.watchGeneration ?? null });
+  return invoke<number>("set_watch_group_members", { groupId: group?.id ?? groupId, targetIds, add, requestId: crypto.randomUUID(), expectedGeneration: group?.watchGeneration ?? null });
 }
 
 /** Fetch one target without transferring every watched entity over IPC. */
 export async function getUpdateTarget<T = UpdateTarget>(targetType: string, source: string, sourceKey: string): Promise<T | null> {
-  return invoke<T | null>("db_get_update_target", { targetType, source, sourceKey });
+  return invoke<T | null>("get_update_target", { targetType, source, sourceKey });
 }
 
 export interface PdfPageImage {

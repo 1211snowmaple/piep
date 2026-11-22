@@ -82,7 +82,7 @@ fn bounded_chunks<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Vec<Ch
 }
 
 impl File {
-    pub fn from_native(file: &ContentFile) -> Self {
+    pub fn from_content_file(file: &ContentFile) -> Self {
         Self {
             id: Hash::new(file.id),
             length: Decimal::new(file.length),
@@ -96,7 +96,7 @@ impl File {
                 .collect(),
         }
     }
-    pub fn to_native(&self) -> ContentFile {
+    pub fn to_content_file(&self) -> ContentFile {
         ContentFile {
             id: self.id.get(),
             length: self.length.get(),
@@ -125,7 +125,7 @@ impl TransferManifest {
         let result = Self {
             format: FORMAT.into(),
             target,
-            file: File::from_native(file),
+            file: File::from_content_file(file),
         };
         result.validate()?;
         Ok(result)
@@ -154,7 +154,7 @@ impl TransferManifest {
             }
             _ => (),
         }
-        self.file.to_native().validate_layout()
+        self.file.to_content_file().validate_layout()
     }
     /// 同じ struct のエンコードは一定。受信時の ID は元の JSON バイト列で計算する。
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -182,7 +182,7 @@ impl ValidatedTransfer {
         let manifest: TransferManifest =
             serde_json::from_slice(bytes).map_err(|e| Error::Integrity(e.to_string()))?;
         manifest.validate()?;
-        let file = manifest.file.to_native();
+        let file = manifest.file.to_content_file();
         Ok(Self {
             bytes: bytes.to_vec(),
             id: Fingerprint::of(bytes),

@@ -4,7 +4,7 @@
 //! どれも一つのトランザクションで世代を上げ、outbox に記録する。`request` は画面が一回の操作ごとに
 //! 作る ID で、送り直しても二度書かない。
 
-use crate::database::collection_rules::episode_order;
+use crate::analysis::collection_rules::episode_order;
 use crate::library::{
     CollectionMember, CollectionSave, Error, Fingerprint, Library, LibraryId, Result,
 };

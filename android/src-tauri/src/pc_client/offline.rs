@@ -1175,7 +1175,7 @@ pub(super) mod tests {
             "excerpt": null, "textLength": 1, "assetCount": 0, "hasCover": false,
             "currentVersion": 1, "edited": false, "editId": null, "favorite": false,
             "favoriteGeneration": "0", "seriesTitle": null, "seriesId": null,
-            "sourceCreatedAt": null, "downloadedAt": "2026-11-19T00:00:00Z"
+            "sourceCreatedAt": null, "savedAt": "2026-11-19T00:00:00Z"
         })
     }
 
@@ -1544,7 +1544,7 @@ pub(super) mod tests {
                     "assetCount": 1, "hasCover": false, "currentVersion": 2, "edited": false,
                     "editId": null, "favorite": false, "favoriteGeneration": "0",
                     "seriesTitle": null, "seriesId": null, "sourceCreatedAt": null,
-                    "downloadedAt": "2026-11-19T00:00:00Z"
+                    "savedAt": "2026-11-19T00:00:00Z"
                 }, "shelfLibrary": Uuid::now_v7().to_string(), "savedAtMs": 1, "savedVersion": 2,
                     "savedContentHash": null, "savedEditHash": null,
                     "pageCount": 1},

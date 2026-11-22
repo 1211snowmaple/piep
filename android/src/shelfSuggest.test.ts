@@ -15,7 +15,7 @@ const older = "0190a000-0000-7000-8000-000000000006";
 const shelfItem = {
   id: work, snapshotId: snapshot, source: "pixiv", sourceId: "42", title: "題", authorName: "作者", authorId: "7",
   contentType: "novel", tags: [], excerpt: null, textLength: 10, assetCount: 2, hasCover: true, currentVersion: 2,
-  edited: false, editId: null, favorite: false, favoriteGeneration: "1", seriesTitle: null, seriesId: null, sourceCreatedAt: null, downloadedAt: "2026-11-18T00:00:00.000Z",
+  edited: false, editId: null, favorite: false, favoriteGeneration: "1", seriesTitle: null, seriesId: null, sourceCreatedAt: null, savedAt: "2026-11-18T00:00:00.000Z",
 };
 
 const opened = { key: "k", entityId: work, view: { kind: "snapshot", id: older }, edited: false, pageCount: 1, sourcePageStarts: [0], totalPlainTextChars: 5, outline: [] };

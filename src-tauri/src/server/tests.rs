@@ -1,5 +1,5 @@
 //! サーバーモードを通しで確かめる。本物の HTTP で話し、本物のファイルと DB を動かす。
-//! 棚を読む口（`/api/libraries/...`）の試験は `v2/tests.rs`、棚の送信は `standalone_shipment_tests.rs`。
+//! 棚を読む口（`/api/libraries/...`）の試験は `reader/tests.rs`、棚の送信は `standalone_shipment_tests.rs`。
 
 use super::http::{
     admin_router, combined_router, reader_router, AdminAsset, AdminWeb, ConnectionInfo,
@@ -333,23 +333,6 @@ async fn the_public_side_refuses_what_it_should() {
             .unwrap();
         assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED, "{path}");
     }
-    // 版の付いた旧い口は無い。
-    for path in [
-        "/api/v1/hello",
-        "/api/v1/works/1",
-        "/api/v1/admin/status",
-        "/api/v2/hello",
-        "/api/v2/admin/status",
-    ] {
-        let gone = client
-            .get(format!("{url}{path}"))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(gone.status(), StatusCode::NOT_FOUND, "{path}");
-    }
-
     // 更新を頼めるのは管理者だけ。手で置いたサーバーは自分では更新できない。
     let update_url = format!("{url}/api/admin/update");
     assert_eq!(
@@ -467,36 +450,6 @@ async fn the_public_side_refuses_what_it_should() {
         .unwrap()
         .consume_pairing(&secret, "x")
         .is_ok());
-}
-
-#[test]
-fn opening_the_store_removes_the_recorded_login_name() {
-    let root = TestRoot::created("last_user");
-    let path = root.0.join("state.db");
-    {
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE devices (
-                 id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL,
-                 token_hash BLOB NOT NULL, created_at TEXT NOT NULL,
-                 last_seen_at TEXT, last_user TEXT
-             );
-             INSERT INTO devices VALUES ('a', 'PC', 'admin', x'00', '2026-11-04T00:00:00Z', NULL, 'someone@example.test');",
-        )
-        .unwrap();
-    }
-    let store = ServerStore::open(&path).unwrap();
-    assert_eq!(store.list_devices().unwrap()[0].name, "PC");
-    drop(store);
-    let columns: i64 = rusqlite::Connection::open(&path)
-        .unwrap()
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('devices') WHERE name = 'last_user'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(columns, 0);
 }
 
 // ---- 管理画面 ----

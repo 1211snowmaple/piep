@@ -8,8 +8,10 @@ use std::path::PathBuf;
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
-        crate::database::tantivy_index::release_runtime(&self.0.join("derived"));
-        crate::database::tantivy_index::release_runtime(&self.0.join("derived").join("history"));
+        crate::search_engine::tantivy_index::release_runtime(&self.0.join("derived"));
+        crate::search_engine::tantivy_index::release_runtime(
+            &self.0.join("derived").join("history"),
+        );
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }

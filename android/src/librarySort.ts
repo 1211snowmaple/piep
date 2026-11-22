@@ -56,7 +56,7 @@ function time(value: string | null | undefined): number {
 }
 
 function offlineCompare(sort: FixedSort): (left: OfflineWork, right: OfflineWork) => number {
-  const saved = (item: OfflineWork) => time(item.work.downloadedAt) || item.savedAtMs;
+  const saved = (item: OfflineWork) => time(item.work.savedAt) || item.savedAtMs;
   const published = (item: OfflineWork) => time(item.work.sourceCreatedAt);
   const text = (a: string, b: string) => a.localeCompare(b, "ja");
   switch (sort) {

@@ -254,11 +254,11 @@ fn watch_receipts_are_catalog_owned_and_cannot_be_reused_for_other_operations() 
         .is_err());
 }
 
-/// 手動のネイティブ確認用。空の棚を作り、場所だけ表示する。利用者の棚へは触らない。
+/// 開発版で手で確かめる用。空の棚を作り、場所だけ表示する。利用者の棚へは触らない。
 #[test]
 #[ignore]
-fn native_fixture() {
-    let root = std::env::temp_dir().join(format!("piep-watch-native-{}", LibraryId::now_v7()));
+fn watching_fixture() {
+    let root = std::env::temp_dir().join(format!("piep-watch-fixture-{}", LibraryId::now_v7()));
     Library::create(&root).unwrap();
-    println!("WATCH_NATIVE_FIXTURE={}", root.display());
+    println!("WATCH_FIXTURE={}", root.display());
 }

@@ -7,20 +7,20 @@
 //! の組ごとに錠を持つ。同じ作品への保存が重なるのは珍しいことではなく、
 //! 一覧からの一括保存と更新監視が並んだときに普通に起きる。
 
-use crate::database::NewAsset;
 use crate::downloader::fanbox::get_post_detail;
 use crate::downloader::pixiv::{get_novel_detail, PixivNovelContent};
 use crate::fanbox_api::models::FanboxPost;
+use crate::models::NewAsset;
 use crate::pixiv_api;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use tauri::Manager;
 
-#[path = "downloader_shelf.rs"]
+#[path = "downloader_save.rs"]
 pub(super) mod shelf;
 pub use shelf::ShelfSaved;
-#[path = "downloader_shelf_profiles.rs"]
+#[path = "downloader_profiles.rs"]
 mod shelf_profiles;
 
 type WorkSaveMutex = tokio::sync::Mutex<()>;

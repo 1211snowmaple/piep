@@ -26,7 +26,7 @@ vi.mock("@/features/editor/editorSource", async (importOriginal) => {
   };
 });
 
-const revision: WorkEditRevision = { id: 8, downloadId: 101, baseVersion: 3, status: "draft", title: null, contentHash: null, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" };
+const revision: WorkEditRevision = { id: 8, workId: 101, baseVersion: 3, status: "draft", title: null, contentHash: null, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" };
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

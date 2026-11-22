@@ -144,17 +144,6 @@ impl Library {
         Ok(rows)
     }
 
-    pub fn job_history_entry(&self, job: LibraryId) -> Result<JobHistory> {
-        let conn = self.reader()?;
-        conn.query_row(
-            &format!("SELECT {SUMMARY} FROM job_history WHERE id=?1 AND sealed=1"),
-            [job.as_bytes().as_slice()],
-            summary,
-        )
-        .optional()?
-        .ok_or(Error::ResourceUnavailable)
-    }
-
     /// 封をした履歴の原本を保ち、一覧での表示だけを変更する。同じ要求の再送は一度だけ。
     /// `job=None, hidden=true` は、現在ある完了履歴を一度に一覧から外す。
     pub fn set_job_history_hidden(

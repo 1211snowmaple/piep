@@ -4,10 +4,10 @@
 //! 作者は今の版の作者名でまとめる（一覧の作者の条件は作者名で当てる）。作者・シリーズの
 //! 束ねは一覧の束ねのタブが別に引くので、ここでは持たない。
 
-use crate::database::models::{FacetCount, FilterFacets};
-use crate::database::queries::rank_facets;
-use crate::database::search::normalize_search_text;
+use crate::analysis::rank_facets;
 use crate::library::{Error, Library, LibraryId, Result};
+use crate::models::{FacetCount, FilterFacets};
+use crate::search_engine::text::normalize_search_text;
 use rusqlite::{params_from_iter, types::Value, OptionalExtension};
 
 /// 引き出しに並べる数。多い順に 500 まで（それより先は名前で探す）。

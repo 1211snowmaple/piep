@@ -4,9 +4,9 @@
 //! 使う名前の束（棚の世代ごとに覚える）から、正規化した部分一致と作者の読みで足す。前方
 //! 一致の候補は必ず先に並べ、足した候補がそれを押し出さない。
 
-use crate::database::models::SearchSuggestion;
-use crate::database::search::normalize_search_text;
-use crate::database::search_normalization::index_text;
+use crate::models::SearchSuggestion;
+use crate::search_engine::normalization::index_text;
+use crate::search_engine::text::normalize_search_text;
 use std::ops::Deref;
 
 /// 正規化で足す候補の束に、種類ごとに入れる数（よく使う順）。
