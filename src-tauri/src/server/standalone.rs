@@ -851,12 +851,10 @@ fn lock_server(paths: &ServerPaths) -> Result<File, String> {
 }
 
 async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
-    // 0.40 までの名前（`library-v2` と `[library_v2]`）を棚の名前へ移し、
     // 送られた棚を組み終えていれば、設定を読む前に配る棚をそれへ切り替える。
     {
         let paths = paths.clone();
         tokio::task::spawn_blocking(move || {
-            native::rename_old_layout(&paths)?;
             shipment::apply_pending(&paths);
             Ok::<(), String>(())
         })

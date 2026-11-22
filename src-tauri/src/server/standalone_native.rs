@@ -107,61 +107,6 @@ pub(super) fn activate_locked(
     write_config(paths, written.as_bytes())
 }
 
-/// 0.40 までの置き場の名前と、そのとき棚の名前に変える。
-const OLD_NAMES: [(&str, &str); 5] = [
-    ("library-v2", "shelf"),
-    ("library-v2-generations", "shelf-generations"),
-    ("library-v2-incoming", "shelf-incoming"),
-    ("library-v2-database-parts", "shelf-database-parts"),
-    ("library-v2-pending.json", "shelf-pending.json"),
-];
-const OLD_TABLE: &str = "library_v2";
-
-/// 0.40 までの置き場の名前と設定の `[library_v2]` を、棚の名前へ一度だけ移す。
-/// 途中で止まっても、次の起動で残りを移す。両方の名前があれば、どちらも動かさずに止める。
-pub(super) fn rename_old_layout(paths: &ServerPaths) -> Result<(), String> {
-    for (old, new) in OLD_NAMES {
-        let (from, to) = (paths.root.join(old), paths.root.join(new));
-        if fs::symlink_metadata(&from).is_err() {
-            continue;
-        }
-        if fs::symlink_metadata(&to).is_ok() {
-            return Err(format!(
-                "{old} と {new} が両方あります。どちらを使うか決めて、片方を置き場の外へ移してください"
-            ));
-        }
-        fs::rename(&from, &to).map_err(|error| format!("{old} を {new} へ移せません: {error}"))?;
-        sync_directory(&paths.root).map_err(|error| error.to_string())?;
-    }
-    for path in [paths.config(), paths.config_previous()] {
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Some(renamed) = renamed_table(&text)? else {
-            continue;
-        };
-        super::update::write_atomic(&path, renamed.as_bytes())?;
-    }
-    Ok(())
-}
-
-/// 設定の `[library_v2]` を `[shelf]` へ移した文。移すものが無ければ `None`。
-fn renamed_table(text: &str) -> Result<Option<String>, String> {
-    let mut document: DocumentMut = text.parse().map_err(|error: toml_edit::TomlError| {
-        format!("{CONFIG_FILE} を読み取れません: {error}")
-    })?;
-    let Some(item) = document.remove(OLD_TABLE) else {
-        return Ok(None);
-    };
-    if document.contains_key("shelf") {
-        return Err(format!(
-            "{CONFIG_FILE} に [library_v2] と [shelf] が両方あります。[library_v2] を消してください"
-        ));
-    }
-    document.insert("shelf", item);
-    Ok(Some(document.to_string()))
-}
-
 pub(super) fn write_config(paths: &ServerPaths, content: &[u8]) -> Result<(), String> {
     let temporary = paths
         .root
@@ -213,50 +158,6 @@ mod tests {
                 None,
             )
             .unwrap();
-    }
-
-    #[test]
-    fn the_old_v2_names_move_to_the_shelf_names_once() {
-        let (_temp, paths, source) = fixture();
-        let generation = stage(&paths, &source).unwrap();
-        activate(&paths, generation).unwrap();
-        let library = load_config(&paths).unwrap().shelf.unwrap().library_id;
-        // 0.40 までの名前に戻す。
-        fs::rename(
-            paths.root.join("shelf-generations"),
-            paths.root.join("library-v2-generations"),
-        )
-        .unwrap();
-        fs::write(paths.root.join("library-v2-pending.json"), b"{}").unwrap();
-        let old = fs::read_to_string(paths.config())
-            .unwrap()
-            .replace("[shelf", "[library_v2");
-        fs::write(paths.config(), &old).unwrap();
-        fs::write(paths.config_previous(), &old).unwrap();
-        assert!(load_config(&paths).is_err());
-
-        rename_old_layout(&paths).unwrap();
-        rename_old_layout(&paths).unwrap();
-        let config = load_config(&paths).unwrap().shelf.unwrap();
-        assert_eq!(config.library_id, library);
-        assert_eq!(config.generation, Some(generation));
-        assert!(fs::read_to_string(paths.config())
-            .unwrap()
-            .contains("# 設定を保つ"));
-        assert!(!fs::read_to_string(paths.config_previous())
-            .unwrap()
-            .contains("library_v2"));
-        assert!(generation_path(&paths, generation).unwrap().is_dir());
-        assert!(paths.root.join("shelf-pending.json").is_file());
-        for (old, _) in OLD_NAMES {
-            assert!(!paths.root.join(old).exists(), "{old}");
-        }
-
-        // 両方の名前があれば、どちらも動かさない。
-        fs::create_dir(paths.root.join("library-v2-generations")).unwrap();
-        assert!(rename_old_layout(&paths).is_err());
-        assert!(paths.root.join("shelf-generations").is_dir());
-        assert!(paths.root.join("library-v2-generations").is_dir());
     }
 
     #[test]
