@@ -195,7 +195,21 @@ async fn upgrade_shelf_work(
         return Ok((Lookups::default(), card.title));
     }
     let raw = raw.ok_or("取得元の応答が残っていないため、原寸を探せません")?;
-    let mut data: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let data: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    // 棚がもう原寸を持っている表紙（同じシリーズの表紙）は、画像サーバーに確かめない。
+    // 前の実行で取り直した作品の表紙も含むので、実行をまたいでも確かめ直さない。
+    let (mut data, cover_from_shelf) = {
+        let (library, provider) = (Arc::clone(library), card.provider.clone());
+        tokio::task::spawn_blocking(move || {
+            let mut data = data;
+            let filled = crate::downloader::pixiv_originals::fill_cover_original_from_shelf(
+                &library, &mut data, &provider,
+            )?;
+            Ok::<_, String>((data, filled))
+        })
+        .await
+        .map_err(|error| format!("棚の読み込みが途中で止まりました: {error}"))??
+    };
     let lookups = std::sync::Mutex::new(Lookups::default());
     let count = |result: Result<OriginalLookup, String>| {
         let mut lookups = lookups.lock().unwrap_or_else(|error| error.into_inner());
@@ -245,6 +259,9 @@ async fn upgrade_shelf_work(
     let mut lookups = lookups
         .into_inner()
         .unwrap_or_else(|error| error.into_inner());
+    if cover_from_shelf {
+        lookups.found += 1;
+    }
     if lookups.found == 0 {
         return Ok((lookups, card.title));
     }

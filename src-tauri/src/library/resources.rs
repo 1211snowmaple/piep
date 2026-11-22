@@ -335,6 +335,29 @@ impl Library {
             .map_err(Into::into)
     }
 
+    /// 候補（良い順）のうち、棚に原寸として取った記録がある最初の URL。
+    ///
+    /// 原寸の在り処を画像サーバーへ確かめる前に引く。同じシリーズの表紙は、ほかの作品が
+    /// もう原寸を持っていることが多い。候補はまとめて一度で引く（表に索引がないため）。
+    pub fn first_original_image_url(&self, candidates: &[String]) -> Result<Option<String>> {
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.reader()?;
+        let marks = vec!["?"; candidates.len()].join(",");
+        let mut statement = conn.prepare(&format!(
+            "SELECT DISTINCT o.url FROM media_observations o \
+             JOIN media_renditions r ON r.id=o.rendition_id \
+             WHERE r.quality='original' AND o.url IN ({marks})"
+        ))?;
+        let found = statement
+            .query_map(rusqlite::params_from_iter(candidates), |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+        Ok(candidates.iter().find(|url| found.contains(*url)).cloned())
+    }
+
     /// 取得元の同じ URL から原寸として取った画像が棚にあれば、元バイト列を検証して新規の出力先へ
     /// 書き出す。無ければ `false`。
     ///
