@@ -104,12 +104,15 @@ jobs:
           $env:PIEP_REQUIRE_ADMIN_UI = '1'
           cargo build --release --locked --manifest-path src-tauri/Cargo.toml --example piep-server
           if ($LASTEXITCODE -ne 0) { throw 'Could not build piep-server' }
+          # 自前の実行役は CARGO_TARGET_DIR で組み立ての置き場を外に置く。決まった場所を仮定しない。
+          $target = (cargo metadata --format-version 1 --no-deps --manifest-path src-tauri/Cargo.toml | ConvertFrom-Json).target_directory
+          $server = Join-Path $target 'release/examples/piep-server.exe'
           $output = Join-Path $env:RUNNER_TEMP 'server'
-          $zip = ./tools/package-server.ps1 -Version $version -OutputDir $output | Select-Object -Last 1
+          $zip = ./tools/package-server.ps1 -Version $version -Executable $server -OutputDir $output | Select-Object -Last 1
           npx tauri signer sign $zip
           if ($LASTEXITCODE -ne 0) { throw 'Could not sign the server package' }
           $signature = "$zip.sig"
-          & src-tauri/target/release/examples/piep-server.exe verify-package $zip $signature
+          & $server verify-package $zip $signature
           if ($LASTEXITCODE -ne 0) { throw 'The server package does not verify with the embedded key' }
           $name = Split-Path $zip -Leaf
           $manifest = Join-Path $output 'latest-server.json'
@@ -126,7 +129,8 @@ jobs:
           $version = '${{ github.ref_name }}'.Substring(1)
           $out = Join-Path $env:RUNNER_TEMP 'desktop-assets'
           New-Item -ItemType Directory -Force $out | Out-Null
-          $setup = "src-tauri/target/release/bundle/nsis/piep_${version}_x64-setup.exe"
+          $target = (cargo metadata --format-version 1 --no-deps --manifest-path src-tauri/Cargo.toml | ConvertFrom-Json).target_directory
+          $setup = Join-Path $target "release/bundle/nsis/piep_${version}_x64-setup.exe"
           $server = Join-Path $env:RUNNER_TEMP 'server'
           $zip = Join-Path $server "piep-server-$version-windows-x64.zip"
           foreach ($path in @($setup, "$setup.sig", $zip, "$zip.sig", (Join-Path $server 'latest-server.json'))) {
