@@ -78,9 +78,14 @@ pub struct FanboxStatus {
 
 /// 資格情報マネージャーの中の、接続を置く名前の組。
 ///
-/// 試験では別の名前の組を使い、本物の接続に触れない。
+/// 試験では資格情報マネージャーに触れず、手元の入れ物に置く。資格情報マネージャーは
+/// 別々のプロセスから同時に書くと更新を取りこぼす（書けたと返った直後に読むと無い）。
+/// 試験はプロセスごとに並んで走るので、本物に置くと時々落ちるうえ、利用者の本物の
+/// 接続まで巻き込みかねない。Windows との受け渡しは `credential_manager` の試験が見る。
 pub struct Vault {
     prefix: String,
+    #[cfg(test)]
+    memory: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
 }
 
 impl Vault {
@@ -88,17 +93,8 @@ impl Vault {
     pub fn app() -> Self {
         Self {
             prefix: credential_manager::PREFIX.to_string(),
-        }
-    }
-
-    #[cfg(test)]
-    fn for_test() -> Self {
-        Self {
-            prefix: format!(
-                "{}/test/{}",
-                credential_manager::PREFIX,
-                uuid::Uuid::now_v7()
-            ),
+            #[cfg(test)]
+            memory: Default::default(),
         }
     }
 
@@ -106,8 +102,46 @@ impl Vault {
         format!("{}/{source}-connection", self.prefix)
     }
 
+    #[cfg(not(test))]
+    fn load(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
+        credential_manager::read(name)
+    }
+
+    #[cfg(not(test))]
+    fn store(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
+        credential_manager::write(name, bytes)
+    }
+
+    #[cfg(not(test))]
+    fn remove(&self, name: &str) -> Result<(), String> {
+        credential_manager::delete(name)
+    }
+
+    #[cfg(test)]
+    fn load(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.memory.lock().unwrap().get(name).cloned())
+    }
+
+    #[cfg(test)]
+    fn store(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() > credential_manager::MAX_BLOB {
+            return Err("資格情報マネージャーに置ける大きさを超えています".into());
+        }
+        self.memory
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), bytes.to_vec());
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn remove(&self, name: &str) -> Result<(), String> {
+        self.memory.lock().unwrap().remove(name);
+        Ok(())
+    }
+
     fn read<T: for<'de> Deserialize<'de>>(&self, source: &str) -> Result<Option<T>, String> {
-        let Some(bytes) = credential_manager::read(&self.name(source))? else {
+        let Some(bytes) = self.load(&self.name(source))? else {
             return Ok(None);
         };
         serde_json::from_slice(&bytes)
@@ -117,7 +151,7 @@ impl Vault {
 
     fn write<T: Serialize>(&self, source: &str, value: &T) -> Result<(), String> {
         let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-        credential_manager::write(&self.name(source), &bytes)
+        self.store(&self.name(source), &bytes)
     }
 
     pub fn pixiv(&self) -> Result<Option<PixivAccount>, String> {
@@ -139,7 +173,7 @@ impl Vault {
     /// 接続を解く。`source` は `pixiv` か `fanbox`。
     pub fn forget(&self, source: &str) -> Result<(), String> {
         match source {
-            "pixiv" | "fanbox" => credential_manager::delete(&self.name(source)),
+            "pixiv" | "fanbox" => self.remove(&self.name(source)),
             _ => Err(format!("知らない取得元です: {source}")),
         }
     }
@@ -204,19 +238,10 @@ impl Vault {
 mod tests {
     use super::*;
 
-    struct Cleanup(Vault);
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = self.0.forget("pixiv");
-            let _ = self.0.forget("fanbox");
-        }
-    }
-
     #[test]
     fn saved_accounts_come_back_as_credentials_and_status() {
-        let vault = Cleanup(Vault::for_test());
+        let vault = Vault::app();
         vault
-            .0
             .set_pixiv(&PixivAccount {
                 refresh_token: "pixiv-token".into(),
                 web_session: WebSession::pair(
@@ -229,7 +254,6 @@ mod tests {
             })
             .unwrap();
         vault
-            .0
             .set_fanbox(&FanboxAccount {
                 session_id: "fanbox-session".into(),
                 user_agent: "UA/2".into(),
@@ -237,7 +261,7 @@ mod tests {
             })
             .unwrap();
 
-        let credentials = vault.0.update_credentials();
+        let credentials = vault.update_credentials();
         assert_eq!(
             credentials.pixiv_refresh_token.as_deref(),
             Some("pixiv-token")
@@ -250,7 +274,7 @@ mod tests {
         assert_eq!(credentials.fanbox_cookie.as_deref(), Some("fanbox-session"));
         assert_eq!(credentials.fanbox_user_agent.as_deref(), Some("UA/2"));
         assert_eq!(
-            vault.0.status().unwrap(),
+            vault.status().unwrap(),
             ConnectionStatus {
                 pixiv: Some(PixivStatus {
                     name: "ぴくし".into(),
@@ -266,34 +290,33 @@ mod tests {
     #[test]
     fn a_cookie_without_its_user_agent_is_not_kept() {
         assert!(WebSession::pair(Some("PHPSESSID=1".into()), None).is_none());
-        let vault = Cleanup(Vault::for_test());
+        let vault = Vault::app();
         vault
-            .0
             .set_pixiv(&PixivAccount {
                 refresh_token: "t".into(),
                 web_session: WebSession::pair(Some("PHPSESSID=1".into()), None),
                 user_name: String::new(),
             })
             .unwrap();
-        let credentials = vault.0.update_credentials();
+        let credentials = vault.update_credentials();
         assert_eq!(credentials.pixiv_refresh_token.as_deref(), Some("t"));
         assert_eq!(credentials.pixiv_cookie, None);
         assert_eq!(credentials.pixiv_user_agent, None);
-        assert!(!vault.0.status().unwrap().pixiv.unwrap().web_session);
+        assert!(!vault.status().unwrap().pixiv.unwrap().web_session);
     }
 
     #[test]
     fn nothing_connected_reads_as_missing_keys() {
-        let vault = Cleanup(Vault::for_test());
-        let credentials = vault.0.update_credentials();
+        let vault = Vault::app();
+        let credentials = vault.update_credentials();
         assert_eq!(credentials.pixiv_refresh_token, None);
         assert_eq!(credentials.fanbox_cookie, None);
         assert_eq!(
             credentials.fanbox_user_agent.as_deref(),
             Some(DEFAULT_USER_AGENT)
         );
-        assert_eq!(vault.0.status().unwrap(), ConnectionStatus::default());
-        vault.0.forget("pixiv").unwrap();
-        assert!(vault.0.forget("other").is_err());
+        assert_eq!(vault.status().unwrap(), ConnectionStatus::default());
+        vault.forget("pixiv").unwrap();
+        assert!(vault.forget("other").is_err());
     }
 }

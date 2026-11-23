@@ -421,9 +421,13 @@ fn start_writer_reaper() {}
 /// binary, which by the end of a run meant dozens of live writers and pollers
 /// with nothing left to index.
 ///
-/// This does not affect whether the directory can be deleted - `remove_dir_all`
-/// gets through the mmaps. What blocks deletion is SQLite, which is why the
-/// tests drop their `Database` first.
+/// 書き手は統合が終わるのを待ってから手放す（`retire_writer`）。tantivy の書き手は
+/// Drop で統合に「やめろ」の印を立てるだけで、走っている統合は待たない。待たずに
+/// 返すと、統合がまだ新しいセグメントを書いているうちに呼び手が場所を消し、
+/// `remove_dir_all` が「空でない」（os error 145）で落ちた。統合の結果も捨てていた。
+///
+/// mmap は `remove_dir_all` の妨げにならない。妨げになるのは SQLite なので、試験は
+/// 先に `Database` を閉じる。
 ///
 /// 単独サーバーは本棚の DB を入れ替えるときにも、ここで書き手を手放す。
 pub(crate) fn release_runtime(storage_dir: &Path) {
@@ -431,9 +435,15 @@ pub(crate) fn release_runtime(storage_dir: &Path) {
     let Some(runtimes) = RUNTIMES.get() else {
         return;
     };
-    let removed = runtimes.lock().remove(&key);
-    // Dropped outside the map lock: dropping the writer joins its merge threads.
-    drop(removed);
+    // 地図のロックの外で待つ。統合を待つあいだ、ほかの場所の索引を止めない。
+    let Some(removed) = runtimes.lock().remove(&key) else {
+        return;
+    };
+    // 排他の書き手（再構築・統合）は自分で片付ける。ふつうの書き手だけを引き取る。
+    let ordinary = removed.writer_state.lock().ordinary.take();
+    if let Some(ordinary) = ordinary {
+        retire_writer(ordinary);
+    }
 }
 
 const ORDINARY_WRITER_MEMORY_BUDGET: usize = 64_000_000;
