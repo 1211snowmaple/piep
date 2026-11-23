@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { OriginalImageResult, OriginalImageStatus } from "@/services/dbApi";
-import type { DashboardSummary, FacetCount, FilterFacets, LibraryMaintenanceResult, LibraryShelfCounts, SearchIndexOptimizationResult, SearchIndexStatus } from "@/types/library";
+import type { DashboardCounts, FacetCount, FilterFacets, LibraryMaintenanceResult, LibraryShelfCounts, SearchIndexOptimizationResult, SearchIndexStatus } from "@/types/library";
 
 /**
  * 棚の数と手入れ。`src-tauri/src/commands/library_health.rs` と対になる。
@@ -50,9 +50,9 @@ export function shelfSearchIndexStatus(): Promise<SearchIndexStatus> {
   return invoke<SearchIndexStatus>("shelf_search_index_status");
 }
 
-/** ホームの集計。`recentDownloads` は空（最近の保存は棚の一覧で引く）。 */
-export function shelfDashboard(): Promise<DashboardSummary> {
-  return invoke<DashboardSummary>("shelf_dashboard");
+/** ホームの集計。最近の保存は棚の一覧で引く。 */
+export function shelfDashboard(): Promise<DashboardCounts> {
+  return invoke<DashboardCounts>("shelf_dashboard");
 }
 
 /** 横の欄の件数。 */

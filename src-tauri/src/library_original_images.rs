@@ -26,7 +26,10 @@ impl Library {
         let mut stmt = conn.prepare(
             "WITH reduced AS (
                  SELECT DISTINCT rendition_id FROM media_observations
-                 WHERE instr(url,'novel-cover-master/')>0 OR instr(url,'/img-master/')>0
+                 WHERE instr(url,'novel-cover-master/')>0
+                    -- うごイラの止め絵（`{id}_master1200.jpg`、ページ番号が無い）には原寸の止め絵が無い。
+                    -- 公開元にあるのはコマの zip だけなので、縮小版に数えない。
+                    OR (instr(url,'/img-master/')>0 AND url GLOB '*_p[0-9]*_master1200.*')
                     OR (url LIKE 'https://pixiv.pximg.net/c/%' AND instr(url,'/fanbox/public/images/post/')>0)
              )
              SELECT DISTINCT c.entity_id, sm.slot, sm.role FROM reduced x

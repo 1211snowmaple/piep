@@ -1480,13 +1480,22 @@ pub async fn count_saved_deferred_update_candidates(app: tauri::AppHandle) -> Re
         .count_saved_deferred_update_candidates()
 }
 
-/// 一部保存の補完で取り直す作品。保存ジョブへそのまま渡せる形。
+/// 一部保存の補完で取り直す作品。`snapshot` は候補にした版で、試した印はこの版に付ける。
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IncompleteSaveRepairWork {
     pub source: &'static str,
     pub source_id: String,
     pub title: String,
+    pub snapshot: String,
+}
+
+/// 補完の保存ジョブへ渡した作品と、候補にしたときの版。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncompleteSaveRepairAttempt {
+    pub source_id: String,
+    pub snapshot: String,
 }
 
 /// 一部保存の pixiv 作品のうち、今の版でまだ取り直していないものを `limit` 件まで返す。
@@ -1507,26 +1516,37 @@ pub async fn list_incomplete_save_repair_works(
     .map(|works| {
         works
             .into_iter()
-            .map(|(source_id, title)| IncompleteSaveRepairWork {
+            .map(|(source_id, title, snapshot)| IncompleteSaveRepairWork {
                 source: "pixiv",
                 source_id,
                 title,
+                snapshot: snapshot.to_string(),
             })
             .collect()
     })
 }
 
-/// 補完の保存ジョブへ渡した作品を、今の版で試したと記録する。
+/// 補完の保存ジョブへ渡した作品を、候補にしたときの版で試したと記録する。
 #[tauri::command]
 pub async fn record_incomplete_save_repair_attempts(
     app: tauri::AppHandle,
-    source_ids: Vec<String>,
+    attempts: Vec<IncompleteSaveRepairAttempt>,
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let library = state.shelf.library()?;
+    let attempts = attempts
+        .into_iter()
+        .map(|attempt| {
+            let snapshot = attempt
+                .snapshot
+                .parse::<crate::library::LibraryId>()
+                .map_err(|_| "補完した版の ID が不正です".to_string())?;
+            Ok((attempt.source_id, snapshot))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     tokio::task::spawn_blocking(move || {
         library
-            .record_incomplete_save_attempts(&source_ids, chrono::Utc::now().timestamp_millis())
+            .record_incomplete_save_attempts(&attempts, chrono::Utc::now().timestamp_millis())
             .map(|_| ())
             .map_err(|error| error.to_string())
     })

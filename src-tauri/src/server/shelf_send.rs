@@ -121,6 +121,15 @@ fn wire(chunk: &FileChunk) -> WireChunk {
 
 /// 棚の写しを作って送り、サーバーが組み終えるまで待つ。`outgoing` は送り手の作業場所
 /// （中身は毎回作り直す）。
+/// サーバーがこの棚の台帳の版を扱えるか。版を返さないサーバーは、版を返すようになる前の
+/// もので、今の棚を組み立てられない。
+fn receivable(status: &ShipmentStatus) -> Result<(), String> {
+    match status.schema {
+        Some(schema) if schema >= crate::library::schema::VERSION => Ok(()),
+        _ => Err("サーバーがこの棚の形を扱えません。サーバーを更新してから送ってください".into()),
+    }
+}
+
 pub async fn send_shelf(
     remote: &RemoteServer,
     token: &str,
@@ -128,6 +137,15 @@ pub async fn send_shelf(
     outgoing: &Path,
     handle: &SendHandle,
 ) -> Result<ShelfSent, String> {
+    let shipper = Arc::new(Shipper {
+        client: build_client(remote).await?,
+        base: normalized_base(&remote.url),
+        token: token.to_string(),
+        handle: handle.clone(),
+    });
+    // 写しを作る前に、サーバーがこの棚の版を扱えるかを確かめる。
+    let before = shipper.status().await?;
+    receivable(&before)?;
     handle.update(|progress| progress.phase = "snapshot".into());
     if outgoing.exists() {
         fs::remove_dir_all(outgoing).map_err(|error| format!("前の写しを消せません: {error}"))?;
@@ -168,13 +186,6 @@ pub async fn send_shelf(
     }
     let offsets = Arc::new(offsets);
 
-    let shipper = Arc::new(Shipper {
-        client: build_client(remote).await?,
-        base: normalized_base(&remote.url),
-        token: token.to_string(),
-        handle: handle.clone(),
-    });
-    let before = shipper.status().await?;
     let opened: Opened = check_status(
         shipper
             .client
@@ -343,5 +354,24 @@ pub async fn send_shelf(
                 )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    /// 版を返さない古いサーバーや、版の古いサーバーには送らない。同じか新しければ送る。
+    #[test]
+    fn a_shelf_is_sent_only_to_a_server_that_can_assemble_it() {
+        let status = |schema| ShipmentStatus {
+            schema,
+            ..Default::default()
+        };
+        let current = crate::library::schema::VERSION;
+        assert!(receivable(&status(None)).is_err());
+        assert!(receivable(&status(Some(current - 1))).is_err());
+        assert!(receivable(&status(Some(current))).is_ok());
+        assert!(receivable(&status(Some(current + 1))).is_ok());
     }
 }

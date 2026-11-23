@@ -249,7 +249,17 @@ impl Library {
         let (html, assets) = match self.reader_document(work, ResourceScope::Snapshot(base)) {
             Ok(document) => (render_html(&document)?, bound_assets(&document)?),
             // 本文の無い作品（公開範囲の外の投稿など）は空の本文から書く。
-            Err(Error::ResourceUnavailable) => (String::new(), Vec::new()),
+            Err(Error::ResourceUnavailable) if self.source_body(work, base)?.is_none() => {
+                (String::new(), Vec::new())
+            }
+            // 本文はあるが、画像の対応表がまだ無い（古い版）。空の本文で開くと、そのまま
+            // 保存したとき本文を消した下書きになる。取得し直せば対応表が補われる。
+            Err(Error::ResourceUnavailable) => {
+                return Err(Error::Unsupported(
+                    "この版は本文の画像の対応がまだ整っていません。作品を取得し直してから編集してください"
+                        .into(),
+                ))
+            }
             Err(error) => return Err(error),
         };
         // 変換が返す画像の番号（仮の添付の並び）を、ファイルごとの画面の番号へ。

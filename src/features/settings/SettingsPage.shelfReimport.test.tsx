@@ -17,7 +17,7 @@ vi.mock("@/features/library/shelf", async (importOriginal) => ({
 }));
 vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
-  shelfDashboard: vi.fn().mockResolvedValue({ stats: { totalDownloads: 12, totalAssets: 108, totalSizeBytes: 32_000_000 } }),
+  shelfDashboard: vi.fn().mockResolvedValue({ stats: { totalWorks: 12, totalAssets: 108, totalSizeBytes: 32_000_000 } }),
 }));
 vi.mock("@/services/shelfBackupApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfBackupApi")>()),
@@ -27,7 +27,7 @@ vi.mock("@/services/shelfBackupApi", async (importOriginal) => ({
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  getSearchIndexStatus: vi.fn().mockResolvedValue({ totalDownloads: 12, indexedDownloads: 12, pendingDownloads: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 0, semanticIndexedDownloads: 0, semanticPendingDownloads: 12, semanticModelReady: false, embeddingProvider: "CPU", gpuEnabled: false, throughputPerSec: null }),
+  getSearchIndexStatus: vi.fn().mockResolvedValue({ totalWorks: 12, indexedWorks: 12, pendingWorks: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 0, semanticIndexedWorks: 0, semanticPendingWorks: 12, semanticModelReady: false, embeddingProvider: "CPU", gpuEnabled: false, throughputPerSec: null }),
 }));
 vi.mock("@/store", () => ({
   store: { get: vi.fn().mockResolvedValue(null), set: vi.fn(), delete: vi.fn(), save: vi.fn() },

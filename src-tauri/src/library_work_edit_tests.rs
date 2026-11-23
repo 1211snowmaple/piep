@@ -502,3 +502,35 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
     );
     library.verify().unwrap();
 }
+
+/// 本文はあるのに画像の対応表がまだ無い古い版は、空の本文で開かない（そのまま保存すると
+/// 本文を消した下書きになる）。本文がもともと無い作品は、これまでどおり空から書ける。
+#[test]
+fn a_body_without_its_image_bindings_is_not_opened_as_empty() {
+    use crate::library::WorkSave;
+    let temp =
+        Temp(std::env::temp_dir().join(format!("piep-edit-unbound-{}", LibraryId::now_v7())));
+    let library = Library::create(&temp.0).unwrap();
+    let data = json!({"detail":{"title":"原題"},"text":"本文[uploadedimage:1]"});
+    let work = library
+        .save_work(WorkSave {
+            request: LibraryId::now_v7(),
+            provider: "pixiv",
+            key: "unbound",
+            route: "save",
+            data: &data,
+            assets: vec![],
+        })
+        .unwrap()
+        .entity_id;
+    let snapshot = library.current_snapshot(work).unwrap();
+    assert!(library.source_body(work, snapshot).unwrap().is_some());
+    assert!(matches!(
+        library.reader_document(work, crate::library::ResourceScope::Snapshot(snapshot)),
+        Err(Error::ResourceUnavailable)
+    ));
+    let Err(error) = library.editor_view(work) else {
+        panic!("本文があるのに空の本文で開いた");
+    };
+    assert!(error.to_string().contains("取得し直して"), "{error}");
+}

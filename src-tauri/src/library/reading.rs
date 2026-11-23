@@ -18,7 +18,7 @@ pub enum ReadingAnchor {
         block: LibraryId,
         offset: u64,
     },
-    /// 旧系統の読書画面が記録した位置。本文のページ区切り（pixiv の `[newpage]`、編集の
+    /// ページで数えた位置（以前の読書画面が記録したもの。棚に残っている）。本文のページ区切り（pixiv の `[newpage]`、編集の
     /// `page_break`）で数えたページ（0 から）と、そのページの中のスクロールの割合
     /// （百万分率）。割合は表示の幅で変わるので、文字の位置へ推測して直さない。
     /// 読書画面はこの位置から開き、次に読み進めたときに文字の位置で書き直す。
@@ -40,7 +40,7 @@ fn page_within(pages: usize, page: u64, ratio_ppm: u32) -> Result<()> {
     }
 }
 
-/// pixiv の本文のページ数。旧系統の読書画面と同じく `[newpage]` だけで区切る。
+/// pixiv の本文のページ数。ページの位置を記録した読書画面と同じく `[newpage]` だけで区切る。
 fn pixiv_pages(text: &str) -> usize {
     text.matches("[newpage]").count() + 1
 }
@@ -123,7 +123,7 @@ fn check_source_anchor(body: &SourceBody, anchor: &ReadingAnchor) -> Result<()> 
         (SourceBody::PixivText(text), ReadingAnchor::Page { page, ratio_ppm }) => {
             page_within(pixiv_pages(text), *page, *ratio_ppm)
         }
-        // pixiv 以外の本文は旧系統でも一続きの一ページだった。
+        // pixiv 以外の本文は、ページの位置でも一続きの一ページとして記録した。
         (
             SourceBody::PlainText(_) | SourceBody::FanboxBody(_),
             ReadingAnchor::Page { page, ratio_ppm },

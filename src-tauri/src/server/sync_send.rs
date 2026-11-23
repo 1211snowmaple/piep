@@ -149,7 +149,12 @@ pub async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, Stri
         .map_err(net_error)
 }
 
-/// 応答の状態コードを誤りに直す。サーバーの `message` は決まった文だけなのでそのまま出す。
+/// 応答の状態コードを誤りに直す。
+///
+/// 誤りの文は送信の記録と履歴、ログに残る。piep のサーバーは `{code, message}` の形で、
+/// 決まった短い文だけを返すので、その形のときだけ `message` を使う。ほかの形（間に入った
+/// ものの誤りのページ、長い本文、改行や制御文字を含むもの）は中身を写さず、状態コードから
+/// 文を作る（受け取った本文が鍵や要求の中身を写し返していても、記録に残さない）。
 pub(super) async fn check_status(response: reqwest::Response) -> Result<reqwest::Response, String> {
     let status = response.status();
     if status.is_success() {
@@ -158,16 +163,25 @@ pub(super) async fn check_status(response: reqwest::Response) -> Result<reqwest:
     if status == reqwest::StatusCode::UNAUTHORIZED {
         return Err("サーバーに登録が残っていません。登録し直してください".into());
     }
-    let message = response
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .and_then(|body| {
-            body.get("message")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        });
-    Err(message.unwrap_or_else(|| format!("サーバーが要求を断りました（{status}）")))
+    let body = response.json::<serde_json::Value>().await.ok();
+    Err(body
+        .as_ref()
+        .and_then(server_message)
+        .unwrap_or_else(|| format!("サーバーが要求を断りました（{status}）")))
+}
+
+/// piep のサーバーの誤りの形（短い `code` と、短い一行の `message`）なら、その文。
+fn server_message(body: &serde_json::Value) -> Option<String> {
+    const LONGEST: usize = 120;
+    let code = body.get("code")?.as_str()?;
+    let message = body.get("message")?.as_str()?;
+    let code_ok = !code.is_empty()
+        && code.len() <= 40
+        && code.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+    let message_ok = !message.trim().is_empty()
+        && message.chars().count() <= LONGEST
+        && !message.chars().any(char::is_control);
+    (code_ok && message_ok).then(|| message.to_owned())
 }
 
 /// 管理者として登録する。一回限りの鍵を、端末の鍵に換える。
@@ -275,4 +289,37 @@ pub async fn admin_put(
         .map_err(net_error)?;
     check_status(response).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod error_text_tests {
+    use super::server_message;
+    use serde_json::json;
+
+    #[test]
+    fn only_the_servers_own_short_sentences_are_shown() {
+        assert_eq!(
+            server_message(&json!({"code":"too_large","message":"要求が大きすぎます"})).as_deref(),
+            Some("要求が大きすぎます")
+        );
+        // 写し返された長い本文や、形の違うものは使わない。
+        let long = "鍵".repeat(121);
+        assert_eq!(
+            server_message(&json!({"code":"invalid_request","message":long})),
+            None
+        );
+        assert_eq!(
+            server_message(&json!({"code":"invalid_request","message":"一行目\ntoken=abc"})),
+            None
+        );
+        assert_eq!(
+            server_message(&json!({"message":"要求が大きすぎます"})),
+            None
+        );
+        assert_eq!(
+            server_message(&json!({"code":"Bearer abc","message":"要求が大きすぎます"})),
+            None
+        );
+        assert_eq!(server_message(&json!({"error":"x"})), None);
+    }
 }

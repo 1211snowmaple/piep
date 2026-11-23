@@ -164,6 +164,9 @@ fn configure(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "FULL")?;
+    // 書き戻しが一度止まると WAL は数 GB まで伸びる。書き戻せたあと、使い直すときに
+    // この大きさまで縮める（既定では一番伸びた大きさのまま残る）。
+    conn.pragma_update(None, "journal_size_limit", 64 * 1024 * 1024)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(())
 }
