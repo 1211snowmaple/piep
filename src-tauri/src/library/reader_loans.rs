@@ -89,6 +89,8 @@ pub(crate) struct WalState {
     pub(crate) checkpointed: i64,
     /// WAL を頭から使い直すたびに変わる値（ヘッダーの salt）。読めなければ無い。
     pub(crate) generation: Option<u64>,
+    /// 数を読む前後で salt が変わった（読むあいだに使い直した）。
+    pub(crate) reused: bool,
 }
 
 /// 書き戻しの見張りが伝えること。
@@ -117,12 +119,14 @@ impl WalWatch {
             frames,
             checkpointed,
             generation,
+            reused,
         } = state;
         self.checked = Some(now);
         let backlog = frames - checkpointed;
         // 使い直していれば（salt が変わった・フレーム数が減った）、書き戻しは追いついたことが
         // ある。止まっていた時間はそこで切る。
-        let reused = frames < self.frames
+        let reused = reused
+            || frames < self.frames
             || matches!((generation, self.generation), (Some(seen), Some(before)) if seen != before);
         let progressed = reused || checkpointed != self.checkpointed;
         // 伸び続けているかは、同じ WAL（使い直していない）と確かめられたときだけ言う。
@@ -134,7 +138,10 @@ impl WalWatch {
             && frames > self.frames;
         self.frames = frames;
         self.checkpointed = checkpointed;
-        self.generation = generation;
+        // salt を読めなかった回は、最後に読めた salt を残す（次に読めたとき使い直しが分かる）。
+        if generation.is_some() {
+            self.generation = generation;
+        }
         let pinned = backlog >= WAL_BACKLOG && !progressed;
         let unbounded = frames >= WAL_LARGE && grew_in_place;
         if !pinned && !unbounded {
@@ -169,14 +176,20 @@ fn wal_counts(writer: &Mutex<Connection>) -> Result<Option<(i64, i64)>, rusqlite
 }
 
 /// 読んだ数と、その前後で読んだ salt を一つの様子にする。前後の salt が違えば、読むあいだに
-/// 使い直したので、どちらの WAL の数か分からない（`generation` を無しにする）。使い直した直後で
-/// まだ一つもフレームが無いときは、ヘッダーが前の WAL のままのことがあるので読まない。
+/// 使い直した（止まっていた時間はそこで切り、次からは後の salt と比べる）。使い直した直後で
+/// まだ一つもフレームが無いときは、ヘッダーが前の WAL のままのことがあるので salt を使わない。
 fn wal_state(counts: (i64, i64), before: Option<u64>, after: Option<u64>) -> WalState {
     let (frames, checkpointed) = counts;
+    let reused = matches!((before, after), (Some(before), Some(after)) if before != after);
     WalState {
         frames,
         checkpointed,
-        generation: (frames > 0 && before == after).then_some(before).flatten(),
+        generation: if reused {
+            after
+        } else {
+            (frames > 0 && before == after).then_some(before).flatten()
+        },
+        reused,
     }
 }
 
@@ -402,8 +415,10 @@ fn wal_report(table: &Mutex<Table>) -> Option<String> {
                 .values()
                 .map(|loan| describe(loan).to_string())
                 .collect();
+            // 借りている読み取りが無くても、外の接続が読んでいるとは限らない（最後の保存の
+            // あとに書き込みが無く、自動の書き戻しが動いていないだけのこともある）。
             let holders = if loans.is_empty() {
-                "なし（棚の外の接続か、ほかのプロセスが読んでいる）".to_owned()
+                "なし（原因は分かっていない。棚の外の接続・ほかのプロセスの読み取りか、保存が無く書き戻しが動いていないだけか）".to_owned()
             } else {
                 loans.join("、")
             };
@@ -433,7 +448,39 @@ mod tests {
             frames,
             checkpointed,
             generation: Some(generation),
+            reused: false,
         }
+    }
+
+    /// 数を読むあいだに使い直した回と、salt を読めなかった回を挟んでも、前の WAL で止まっていた
+    /// 時間を持ち越さない。
+    #[test]
+    fn reuse_seen_only_while_reading_resets_the_stall() {
+        let start = Instant::now();
+        let mut watch = WalWatch::default();
+        assert_eq!(watch.observe(at(start, 0), reused(100_000, 4, 1)), None);
+        assert_eq!(watch.observe(at(start, 5), reused(100_000, 4, 1)), None);
+        // 読むあいだに salt が 1 から 2 へ変わった。数は同じに見える。
+        let moved = wal_state((100_000, 4), Some(1), Some(2));
+        assert!(moved.reused);
+        assert_eq!(watch.observe(at(start, 10), moved), None);
+        // salt を読めなかった回。最後に読めた salt（2）は残る。
+        let unknown = WalState {
+            frames: 100_000,
+            checkpointed: 4,
+            generation: None,
+            reused: false,
+        };
+        assert_eq!(watch.observe(at(start, 15), unknown), None);
+        assert_eq!(watch.generation, Some(2));
+        // 止まりは使い直したあとの最初の観測（15 分）から数える。最初の観測から 10 分たって
+        // いないので、まだ出さない。
+        assert_eq!(watch.observe(at(start, 24), reused(100_000, 4, 2)), None);
+        // 10 分たてば出す。
+        assert!(matches!(
+            watch.observe(at(start, 25), reused(100_000, 4, 2)),
+            Some(WalEvent::Stalled { .. })
+        ));
     }
 
     #[test]
@@ -539,6 +586,7 @@ mod tests {
                 frames,
                 checkpointed: frames,
                 generation: None,
+                reused: false,
             };
             assert_eq!(watch.observe(at(start, 5 * step), state), None);
         }
@@ -564,7 +612,9 @@ mod tests {
     #[test]
     fn the_salt_is_used_only_when_it_holds_still_around_the_counts() {
         assert_eq!(wal_state((10, 5), Some(1), Some(1)).generation, Some(1));
-        assert_eq!(wal_state((10, 5), Some(1), Some(2)).generation, None);
+        let moved = wal_state((10, 5), Some(1), Some(2));
+        assert!(moved.reused);
+        assert_eq!(moved.generation, Some(2));
         assert_eq!(wal_state((0, 0), Some(1), Some(1)).generation, None);
         assert_eq!(wal_state((10, 5), None, None).generation, None);
     }
