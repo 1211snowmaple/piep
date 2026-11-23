@@ -260,6 +260,12 @@ fn staged_from(dir: &Path, data: &Value, source: &str) -> Result<Vec<StagedAsset
         .collect())
 }
 
+/// 保存フォルダーの一つの版の応答を、取得の入力として記録する形にする。再取り込みは、
+/// どの版まで入ったかをこの形の指紋で照らし合わせる。
+pub(crate) fn folder_input(data: &Value) -> Result<Vec<u8>, String> {
+    serde_json::to_vec_pretty(data).map_err(|e| e.to_string())
+}
+
 /// 保存フォルダーの一つの版（応答の JSON と `data_assets/`）を、取り寄せずに棚へ保存する。
 /// 保存フォルダーの再取り込みに使う。画像・添付はフォルダーにあるものだけを使う。
 pub(crate) async fn save_folder_to_shelf(
@@ -280,11 +286,11 @@ pub(crate) async fn save_folder_to_shelf(
             .begin_acquisition(request, &source, EntityKind::Work, &key, "reimport")
             .map_err(|e| e.to_string())?;
         let saved = (|| {
-            let input = serde_json::to_vec_pretty(&data).map_err(|e| e.to_string())?;
+            let input = folder_input(&data)?;
             library
                 .record_acquisition_payload(
                     request,
-                    "work-save-input",
+                    crate::library::REIMPORT_INPUT,
                     &crate::library::CaptureSource::Bytes(input),
                 )
                 .map_err(|e| e.to_string())?;

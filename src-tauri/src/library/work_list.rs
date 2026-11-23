@@ -1153,6 +1153,52 @@ impl Library {
         found.map(id).transpose()
     }
 
+    /// 保存フォルダーの再取り込みから見た作品の状態。
+    pub fn reimport_state(&self, provider: &str, key: &str) -> Result<ReimportState> {
+        let conn = self.reader()?;
+        let found: Option<(Vec<u8>, bool, bool)> = conn
+            .query_row(
+                "SELECT x.entity_id,
+                        EXISTS(SELECT 1 FROM entity_current c WHERE c.entity_id=x.entity_id),
+                        EXISTS(SELECT 1 FROM library_items l WHERE l.work_id=x.entity_id)
+                 FROM external_identities x WHERE x.provider=?1 AND x.kind='work' AND x.external_key=?2",
+                params![provider, key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((entity, saved, listed)) = found else {
+            return Ok(ReimportState::NeverSaved);
+        };
+        if !saved {
+            return Ok(ReimportState::NeverSaved);
+        }
+        if !listed {
+            return Ok(ReimportState::Removed);
+        }
+        let mut statement = conn.prepare(
+            "SELECT a.route,i.file_id FROM acquisition_attempts a
+             LEFT JOIN acquisition_inputs i ON i.attempt_id=a.id AND i.role='raw_part' AND i.slot=?2
+             WHERE a.entity_id=?1 AND a.state='complete' ORDER BY a.started_at,a.id",
+        )?;
+        let acquisitions = statement
+            .query_map(params![entity, REIMPORT_INPUT], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<Vec<u8>>>(1)?))
+            })?
+            .map(|row| {
+                let (route, input) = row?;
+                Ok(match (route.as_str(), input) {
+                    ("reimport", Some(input)) => {
+                        Some(super::Fingerprint(input.try_into().map_err(|_| {
+                            Error::Integrity("取得の入力の指紋が不正です".into())
+                        })?))
+                    }
+                    _ => None,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ReimportState::OnShelf { acquisitions })
+    }
+
     /// 棚の一覧を一ページ返す。続きは `next` を `after` に渡す。
     pub fn list_works(&self, query: &WorkListQuery) -> Result<WorkListPage> {
         let conn = self.reader()?;
@@ -1292,3 +1338,20 @@ impl Library {
 #[cfg(test)]
 #[path = "work_list_tests.rs"]
 mod tests;
+
+/// 再取り込みが取得の入力として記録する、保存フォルダーの一つの版の応答の受信記録の名前。
+pub const REIMPORT_INPUT: &str = "work-save-input";
+
+/// 保存フォルダーの再取り込みから見た作品の状態。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReimportState {
+    /// 版が一つも無い（取得元の一覧や関係から識別だけが先にできた作品も含む）。
+    NeverSaved,
+    /// 版はあるが、棚から外した。
+    Removed,
+    /// 棚にある。確定した取得を古い順に並べ、再取り込みの取得にはその入力の指紋を添える
+    /// （ほかの取得は `None`）。
+    OnShelf {
+        acquisitions: Vec<Option<super::Fingerprint>>,
+    },
+}
