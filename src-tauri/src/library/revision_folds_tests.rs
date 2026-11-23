@@ -387,7 +387,8 @@ fn reader_bindings_are_compared_even_without_the_acquisition_records() {
         // アーカイブは取得の読む形の記録を写さない。
         tx.execute_batch("DROP TRIGGER acquisition_reader_delete")
             .unwrap();
-        tx.execute("DELETE FROM acquisition_reader_outputs", []).unwrap();
+        tx.execute("DELETE FROM acquisition_reader_outputs", [])
+            .unwrap();
         tx.execute_batch("DROP TRIGGER reader_binding_insert")
             .unwrap();
         tx.execute(
