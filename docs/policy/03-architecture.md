@@ -21,7 +21,8 @@ piep は Tauri 2 のアプリである。ひとつのプロセスの中に、Web
 │ Rust (piep_lib)                                          │
 │                                                          │
 │  commands/   IPC の入口。薄く保つ                          │
-│  database/   SQLite、検索索引、問い合わせ                   │
+│  library/    棚の台帳、実体の管理、問い合わせ                │
+│  library_search/  検索と索引                               │
 │  downloader/ 取得と保存                                    │
 │  pixiv_api/  pixiv の API クライアント                    │
 │  fanbox_api/ FANBOX の API クライアント                    │
@@ -30,10 +31,13 @@ piep は Tauri 2 のアプリである。ひとつのプロセスの中に、Web
 └──────────────────────────────────────────────────────────┘
                           ↓
 ┌──────────────────────────────────────────────────────────┐
-│ %APPDATA%\io.github.u1211snowmaple.piep\                                │
-│   piep.db        メタデータ、タグ、履歴、監視設定           │
-│   downloads/     本文 JSON と画像                          │
-│   templates/     EPUB テンプレート                         │
+│ %APPDATA%\io.github.u1211snowmaple.piep\                    │
+│   library/                                               │
+│     library.json  棚の名札                                │
+│     library.db   メタデータ、タグ、履歴、監視設定            │
+│     objects/     本文、画像、添付などの実体                 │
+│     derived/     作り直せる検索索引                        │
+│   templates/     EPUB テンプレート                        │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -43,7 +47,7 @@ piep は Tauri 2 のアプリである。ひとつのプロセスの中に、Web
 
 - `features/` は `services/` を呼ぶ。`services/` は `features/` を知らない
 - `lib/` は何にも依存しない純粋な道具である。だから単体テストが書きやすい
-- `commands/` は `database/` や `epub/` を呼ぶ。逆はない
+- `commands/` は `library/` や `epub/` を呼ぶ。逆はない
 
 **`services/` だけが `invoke` を知っている。** 画面のコードに Tauri のコマンド名が
 直接現れることはない。名前が変わったときに直す場所を一箇所にするためであり、
@@ -71,13 +75,13 @@ Tauri の外（ブラウザでの開発）でモックに差し替えられる�
 
 ### コマンドは薄く
 
-`commands/` の関数は入口であって、仕事場ではない。実際の処理は `database/`
-`epub/` `downloader/` にある。
+`commands/` の関数は入口であって、仕事場ではない。実際の処理は `library/`
+`library_search/` `epub/` `downloader/` にある。
 
 ### DB 作業は専用スレッドへ逃がす
 
 SQLite の操作は同期的で、そのまま async の中で走らせると WebView の応答が
-止まる。`run_db_blocking` がブロッキング用のスレッドプールへ渡す。
+止まる。`spawn_blocking` でブロッキング用のスレッドプールへ渡す。
 
 ### エラーは文字列で返す
 

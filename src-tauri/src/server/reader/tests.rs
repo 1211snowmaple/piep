@@ -402,6 +402,97 @@ async fn one_bundle_describes_every_readable_file_and_each_chunk_comes_back_thro
 }
 
 #[tokio::test]
+async fn removing_a_work_hides_its_saved_view_without_hiding_shared_chunks() {
+    let server = Server::start().await;
+    let cover = png();
+    let mut input = capture("removed", Some(&cover));
+    input.attachments.push(crate::library::CapturedAttachment {
+        slot: "appendix".into(),
+        original_name: "appendix.txt".into(),
+        mime_type: Some("text/plain".into()),
+        bytes: b"appendix".to_vec().into(),
+    });
+    let removed = save(&server.library, input);
+    let kept = save(&server.library, capture("kept", Some(&cover)));
+    let view = |saved: &crate::library::CaptureResult| {
+        server.shelf(&format!(
+            "/entities/{}/views/snapshot/{}",
+            saved.entity_id, saved.snapshot_id
+        ))
+    };
+    let removed_view = view(&removed);
+    let mut paths = vec![
+        format!("{removed_view}/bundle"),
+        server.shelf(&format!("/works/{}/cover", removed.entity_id)),
+    ];
+    let mut descriptors = Vec::new();
+    for (kind, query) in [
+        ("body", ""),
+        ("media", "?slot=cover"),
+        ("file", "?slot=appendix"),
+    ] {
+        let resource = format!("{removed_view}/resources/{kind}");
+        let manifest = format!("{resource}/manifest{query}");
+        let response = server.get(&manifest).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{manifest}");
+        let transfer =
+            protocol::ValidatedTransfer::parse(&response.bytes().await.unwrap()).unwrap();
+        let chunk = format!("{resource}/files/{}/chunks/0{query}", transfer.file().id);
+        paths.extend([manifest, chunk]);
+        descriptors.push(transfer);
+    }
+
+    let kept_resource = format!("{}/resources/media", view(&kept));
+    let response = server
+        .get(&format!("{kept_resource}/manifest?slot=cover"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let shared = protocol::ValidatedTransfer::parse(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(shared.file().id, descriptors[1].file().id);
+    assert_eq!(
+        shared.file().chunks[0].id,
+        descriptors[1].file().chunks[0].id
+    );
+    let kept_chunk = format!(
+        "{kept_resource}/files/{}/chunks/0?slot=cover",
+        shared.file().id
+    );
+
+    for path in paths.iter().chain(std::iter::once(&kept_chunk)) {
+        assert_eq!(
+            server.get(path).send().await.unwrap().status(),
+            StatusCode::OK,
+            "{path}"
+        );
+    }
+    server
+        .library
+        .remove_work(uuid::Uuid::now_v7(), removed.entity_id, 1)
+        .unwrap();
+
+    let response = server.get(&kept_chunk).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        piep_storage::decode_chunk(&response.bytes().await.unwrap(), &shared.file().chunks[0])
+            .unwrap(),
+        cover
+    );
+    let mut unexpected = Vec::new();
+    for path in paths {
+        let status = server.get(&path).send().await.unwrap().status();
+        if status != StatusCode::NOT_FOUND {
+            unexpected.push((path, status));
+        }
+    }
+    assert!(
+        unexpected.is_empty(),
+        "棚から外した作品の応答が 404 ではない: {unexpected:?}"
+    );
+}
+
+#[tokio::test]
 async fn missing_resources_invalid_parameters_and_wrong_libraries_do_not_fall_back() {
     let server = Server::start().await;
     let saved = save(&server.library, capture("one", None));
@@ -1172,6 +1263,40 @@ async fn edit_reads_are_limited_to_the_subjects_published_and_archived_views() {
         server.get(&bundle).send().await.unwrap().status(),
         StatusCode::NOT_FOUND
     );
+
+    for path in paths(second) {
+        assert_eq!(
+            server
+                .get_as(&path, "second")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK,
+            "{path}"
+        );
+    }
+    let generation = server
+        .library
+        .library_item_generation(saved.entity_id)
+        .unwrap()
+        .unwrap();
+    server
+        .library
+        .remove_work(uuid::Uuid::now_v7(), saved.entity_id, generation)
+        .unwrap();
+    for path in paths(second) {
+        assert_eq!(
+            server
+                .get_as(&path, "second")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1483,6 +1608,77 @@ async fn people_series_and_collections_come_from_the_shelf() {
             .status(),
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn removing_a_work_hides_it_from_lists_search_and_group_pages() {
+    let server = Server::start().await;
+    let works = grouped_shelf(&server.library);
+    let removed = works["w1"];
+    let kept = works["w2"].to_string();
+    server.library.sync_search_index(&mut |_, _| {}).unwrap();
+    server.context.search_ready.store(true, Ordering::SeqCst);
+
+    for on_shelf in [true, false] {
+        if !on_shelf {
+            server
+                .library
+                .remove_work(uuid::Uuid::now_v7(), removed, 1)
+                .unwrap();
+        }
+        let page: protocol::ReaderWorkPage = server.read("/works", "fixture").await;
+        assert_eq!(page.items.len(), if on_shelf { 3 } else { 2 });
+        assert_eq!(
+            page.items
+                .iter()
+                .any(|work| work.view.entity_id.get() == removed),
+            on_shelf
+        );
+
+        for (query, grouped) in [
+            (json!({"text": "w1"}), false),
+            (json!({"personSource": "pixiv", "personKey": "p1"}), true),
+            (json!({"seriesSource": "pixiv", "seriesKey": "s1"}), true),
+        ] {
+            let page = shelf_page(server.search(query.clone()).send().await.unwrap()).await;
+            assert_eq!(
+                page.items.len(),
+                usize::from(on_shelf) + usize::from(grouped),
+                "{query}"
+            );
+            assert_eq!(
+                page.items.iter().any(|work| work.id == removed.to_string()),
+                on_shelf,
+                "{query}"
+            );
+            assert_eq!(
+                page.items.iter().any(|work| work.id == kept),
+                grouped,
+                "{query}"
+            );
+        }
+
+        for (route, key) in [("people", "p1"), ("series", "s1")] {
+            let count = if on_shelf { 2 } else { 1 };
+            let page: piep_mobile_api::MobileEntityPage =
+                server.read(&format!("/{route}"), "fixture").await;
+            assert_eq!(
+                page.items
+                    .iter()
+                    .find(|item| item.source_key == key)
+                    .unwrap()
+                    .count,
+                count
+            );
+            let detail: piep_mobile_api::MobileEntityDetail = server
+                .read(
+                    &format!("/{route}/detail?provider=pixiv&key={key}"),
+                    "fixture",
+                )
+                .await;
+            assert_eq!(detail.work_count, count);
+        }
+    }
 }
 
 #[tokio::test]
