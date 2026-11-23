@@ -185,6 +185,107 @@ fn a_shipped_shelf_is_served_after_restart_and_keeps_what_the_phone_wrote_on_the
 }
 
 #[test]
+fn an_interrupted_swap_keeps_phone_changes_after_restart() {
+    for stop_at in [
+        SwapStage::AfterActivation,
+        SwapStage::BeforeAdoption,
+        SwapStage::AfterAdoption,
+    ] {
+        let temp = TestRoot::created("v2-shipment-restart");
+        let paths = paths_with_config(&temp.0);
+        let desktop = Library::create(&temp.0.join("desktop")).unwrap();
+        let work = save(&desktop, "1", "一[newpage]二");
+        ship(&ShelfShipments::new(paths.clone(), None), &desktop, &temp.0);
+        apply_pending(&paths);
+        let before = load_config(&paths).unwrap().shelf.unwrap();
+        let old = Arc::new(Library::open(&before.root(&paths).unwrap()).unwrap());
+        let shipments = ShelfShipments::new(paths.clone(), Some(Arc::clone(&old)));
+        ship(&shipments, &desktop, &temp.0);
+        let target = shipments.status().generation.unwrap();
+        let phone = LibraryId::now_v7();
+        let location = ReadingLocation::Source {
+            snapshot: work.snapshot_id,
+            anchor: ReadingAnchor::Page {
+                page: 1,
+                ratio_ppm: 0,
+            },
+        };
+        old.set_reading_position(ReadingUpdate {
+            request: LibraryId::now_v7(),
+            work: work.entity_id,
+            user: desktop.id,
+            device: phone,
+            expected: 0,
+            location: Some(location.clone()),
+            finished: false,
+        })
+        .unwrap();
+        let favorite = old.user_state(work.entity_id, desktop.id).unwrap();
+        old.set_favorite(
+            LibraryId::now_v7(),
+            work.entity_id,
+            desktop.id,
+            favorite.generation,
+            true,
+        )
+        .unwrap();
+        // 前の棚をまだ開いているときは引き継げない。配信設定と予約を保って再試行する。
+        let error = apply_pending_with(&paths, |_| {}).unwrap_err();
+        assert!(error.starts_with("前の棚を開けません"), "{error}");
+        let unchanged = load_config(&paths).unwrap().shelf.unwrap();
+        assert_eq!(unchanged.generation, before.generation);
+        assert_eq!(unchanged.sync_epoch, before.sync_epoch);
+        drop(shipments);
+        drop(old);
+
+        let pending = read_pending(&paths).unwrap().unwrap();
+        assert_eq!(pending.library_id, desktop.id);
+        assert_eq!(
+            pending.previous,
+            ShelfSource::Generation(before.generation.unwrap())
+        );
+        assert_eq!(pending.next_generation, target);
+        // 手動で先に配ると引き継げなくなるため、予約した世代の選択は起動時に任せる。
+        assert!(super::super::generations::activate(&paths, target).is_err());
+
+        // 停止点で処理を打ち切り、ディスクに残った記録だけで起動し直す。
+        let interrupted = std::panic::catch_unwind(|| {
+            apply_pending_with(&paths, |stage| {
+                if stage == stop_at {
+                    std::panic::panic_any(stage);
+                }
+            })
+            .unwrap();
+        })
+        .unwrap_err();
+        assert_eq!(interrupted.downcast_ref::<SwapStage>(), Some(&stop_at));
+        assert!(paths.root.join(PENDING).is_file());
+        let interrupted_config = load_config(&paths).unwrap().shelf.unwrap();
+        apply_pending(&paths);
+
+        let after = load_config(&paths).unwrap().shelf.unwrap();
+        assert_eq!(after.generation, Some(target));
+        assert_ne!(after.sync_epoch, before.sync_epoch);
+        let new = Library::open(&after.root(&paths).unwrap()).unwrap();
+        let moved = new.reading_position(work.entity_id, desktop.id).unwrap();
+        assert_eq!(moved.location, Some(location), "{stop_at:?}");
+        assert_eq!(moved.device, Some(phone));
+        let favorite = new.user_state(work.entity_id, desktop.id).unwrap();
+        assert!(favorite.favorite, "{stop_at:?}");
+        assert_eq!(moved.generation, 1);
+        assert_eq!(favorite.generation, 1);
+        if stop_at == SwapStage::AfterActivation {
+            assert_eq!(after.sync_epoch, interrupted_config.sync_epoch);
+        } else {
+            assert_eq!(interrupted_config.generation, before.generation);
+            assert_eq!(interrupted_config.sync_epoch, before.sync_epoch);
+        }
+        assert!(before.root(&paths).unwrap().is_dir());
+        assert!(!paths.root.join(PENDING).exists());
+    }
+}
+
+#[test]
 fn a_shelf_holding_an_empty_file_ships() {
     let temp = TestRoot::created("v2-shipment-empty");
     let paths = paths_with_config(&temp.0);
