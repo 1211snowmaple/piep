@@ -5,6 +5,7 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
+use piep_mobile_api::{MobileDateField, MobileEntitySort, MobileSearchRequest, MobileSortOrder};
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,9 +24,9 @@ pub mod cover_protocol;
 pub(crate) mod device_db;
 mod image_validation;
 pub(crate) mod local_reading;
-pub(crate) mod native_library;
-pub(crate) mod native_reader;
 pub(crate) mod offline;
+pub(crate) mod shelf;
+pub(crate) mod shelf_reader;
 pub(crate) mod shelf_reading;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -40,7 +41,6 @@ const HTTP2_PING_INTERVAL: Duration = Duration::from_secs(15);
 const HTTP2_PING_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ASSET_BYTES: usize = 25 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
-const MAX_NUMBERED_OFFSET: i64 = 5_000;
 const API_VERSION: u32 = 2;
 const PAIRING_VERSION: u32 = 2;
 
@@ -376,7 +376,7 @@ pub struct ConnectionStatus {
     issue: Option<&'static str>,
     capabilities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    native_library: Option<native_library::NativeLibraryStatus>,
+    shelf: Option<shelf::ShelfStatus>,
 }
 
 impl ConnectionStatus {
@@ -388,7 +388,7 @@ impl ConnectionStatus {
             device_name: None,
             issue: None,
             capabilities: Vec::new(),
-            native_library: None,
+            shelf: None,
         }
     }
     fn from_saved(saved: &SavedConnection, reachable: bool, issue: Option<&'static str>) -> Self {
@@ -399,7 +399,7 @@ impl ConnectionStatus {
             device_name: Some(saved.device_name.clone()),
             issue,
             capabilities: saved.capabilities.clone(),
-            native_library: None,
+            shelf: None,
         }
     }
 }
@@ -754,12 +754,12 @@ pub async fn pc_connection_status(
                     .bearer_auth(&saved.token)
                     .timeout(PROBE_TIMEOUT)
                     .send();
-                let (authorized, native_library) =
-                    tokio::join!(about, native_library::discover(&client, &saved, generation),);
+                let (authorized, shelf) =
+                    tokio::join!(about, shelf::discover(&client, &saved, generation),);
                 let issue = match authorized {
                     // 登録は生きているが、棚を読めない（サーバーに棚がまだ無いか、この端末に許可が無い）。
                     Ok(response) if response.status().is_success() => {
-                        native_library.is_none().then_some("no_library")
+                        shelf.is_none().then_some("no_library")
                     }
                     Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
                         Some("revoked")
@@ -774,7 +774,7 @@ pub async fn pc_connection_status(
                 };
                 state.with_connection(generation, || {
                     Ok(ConnectionStatus {
-                        native_library,
+                        shelf,
                         ..ConnectionStatus::from_saved(&saved, issue.is_none(), issue)
                     })
                 })
@@ -870,20 +870,14 @@ pub struct PcWorkScope {
     key: String,
 }
 
-fn split_search_terms(value: &str) -> Result<Option<Vec<String>>, ClientError> {
-    if value.chars().count() > 1_100 {
-        return Err(ClientError::remote());
-    }
+fn split_search_terms(value: &str) -> Option<Vec<String>> {
     let terms: Vec<String> = value
         .split(['\n', '\r', ',', '、', '，'])
         .map(str::trim)
         .filter(|term| !term.is_empty())
         .map(str::to_string)
         .collect();
-    if terms.len() > 10 || terms.iter().any(|term| term.chars().count() > 100) {
-        return Err(ClientError::remote());
-    }
-    Ok((!terms.is_empty()).then_some(terms))
+    (!terms.is_empty()).then_some(terms)
 }
 
 fn parse_search_count(value: &str) -> Result<Option<i64>, ClientError> {
@@ -894,199 +888,95 @@ fn parse_search_count(value: &str) -> Result<Option<i64>, ClientError> {
     if value.len() > 10 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(ClientError::remote());
     }
-    let count = value.parse::<i64>().map_err(|_| ClientError::remote())?;
-    if count > 1_000_000_000 {
-        return Err(ClientError::remote());
-    }
-    Ok(Some(count))
+    value
+        .parse::<i64>()
+        .map(Some)
+        .map_err(|_| ClientError::remote())
 }
 
-fn optional_search_choice<'a>(
-    value: Option<&'a str>,
-    choices: &[&str],
-) -> Result<Option<&'a str>, ClientError> {
-    match value.unwrap_or("") {
-        "" => Ok(None),
-        value if choices.contains(&value) => Ok(Some(value)),
-        _ => Err(ClientError::remote()),
-    }
+/// 画面の空の選択は「指さない」。
+fn search_choice(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
-fn valid_search_date(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if bytes.len() != 10
-        || bytes[4] != b'-'
-        || bytes[7] != b'-'
-        || !bytes
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
-    {
-        return false;
-    }
-    let year = value[0..4].parse::<u32>().unwrap_or(0);
-    let month = value[5..7].parse::<u32>().unwrap_or(0);
-    let day = value[8..10].parse::<u32>().unwrap_or(0);
-    if year == 0 {
-        return false;
-    }
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let max_day = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return false,
-    };
-    (1..=max_day).contains(&day)
+/// 共通の語彙（並べ方・向き・日付の欄）の一語を読む。
+fn vocabulary<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, ClientError> {
+    serde_json::from_value(serde_json::Value::String(value.to_string()))
+        .map_err(|_| ClientError::remote())
 }
 
-fn search_payload(
+/// 画面の条件を、サーバーと共通の `MobileSearchRequest` に組む。検査もサーバーと同じものを通す。
+fn search_request(
     criteria: &PcSearchCriteria,
     cursor: Option<String>,
     offset: Option<i64>,
     scope: Option<PcWorkScope>,
-) -> Result<serde_json::Value, ClientError> {
-    if criteria.text.chars().count() > 200
-        || cursor.as_ref().is_some_and(|cursor| cursor.len() > 4096)
-        || validate_numbered_offset(offset, cursor.as_deref()).is_err()
-    {
-        return Err(ClientError::remote());
-    }
-    let source = optional_search_choice(Some(&criteria.source), &["pixiv", "fanbox"])?;
-    let content_type = optional_search_choice(
-        Some(&criteria.content_type),
-        &["novel", "article", "text", "image", "file"],
-    )?;
+) -> Result<MobileSearchRequest, ClientError> {
+    // 並べ方は `鍵:向き`（`@shared/sortOptions` と同じ）。標準は関連度か保存日で、サーバーが決める。
     let (sort_by, sort_order) = match criteria.sort.as_str() {
         "standard" => (None, None),
-        "dateDesc" => (Some("date"), Some("desc")),
-        "dateAsc" => (Some("date"), Some("asc")),
-        "publishedDesc" => (Some("published"), Some("desc")),
-        "publishedAsc" => (Some("published"), Some("asc")),
-        "titleAsc" => (Some("title"), Some("asc")),
-        "titleDesc" => (Some("title"), Some("desc")),
-        "authorAsc" => (Some("author"), Some("asc")),
-        "authorDesc" => (Some("author"), Some("desc")),
-        "lengthDesc" => (Some("length"), Some("desc")),
-        "lengthAsc" => (Some("length"), Some("asc")),
-        "assetsDesc" => (Some("assets"), Some("desc")),
-        "assetsAsc" => (Some("assets"), Some("asc")),
-        "versionDesc" => (Some("version"), Some("desc")),
-        "versionAsc" => (Some("version"), Some("asc")),
-        "seriesAsc" => (Some("series_order"), Some("asc")),
-        "seriesDesc" => (Some("series_order"), Some("desc")),
-        _ => return Err(ClientError::remote()),
+        value => {
+            let (key, order) = value.split_once(':').ok_or_else(ClientError::remote)?;
+            (Some(vocabulary(key)?), Some(vocabulary(order)?))
+        }
     };
-    let min_chars = parse_search_count(&criteria.min_chars)?;
-    let max_chars = parse_search_count(&criteria.max_chars)?;
-    let min_assets = parse_search_count(criteria.min_assets.as_deref().unwrap_or(""))?;
-    let max_assets = parse_search_count(criteria.max_assets.as_deref().unwrap_or(""))?;
-    if min_chars.zip(max_chars).is_some_and(|(min, max)| min > max)
-        || min_assets
-            .zip(max_assets)
-            .is_some_and(|(min, max)| min > max)
-    {
-        return Err(ClientError::remote());
-    }
-    let tag_mode = optional_search_choice(criteria.tag_mode.as_deref(), &["and", "or"])?;
-    let revision =
-        optional_search_choice(criteria.revision.as_deref(), &["revised", "first_version"])?;
-    let edit = optional_search_choice(criteria.edit.as_deref(), &["edited", "unedited"])?;
-    let cover = optional_search_choice(criteria.cover.as_deref(), &["has_cover", "no_cover"])?;
-    let date_field = optional_search_choice(
-        criteria.date_field.as_deref(),
-        &["downloaded_at", "source_created_at", "source_updated_at"],
-    )?;
-    let date_from = criteria.date_from.as_deref().unwrap_or("").trim();
-    let date_to = criteria.date_to.as_deref().unwrap_or("").trim();
-    if (!date_from.is_empty() && !valid_search_date(date_from))
-        || (!date_to.is_empty() && !valid_search_date(date_to))
-        || (!date_from.is_empty() && !date_to.is_empty() && date_from > date_to)
-    {
-        return Err(ClientError::remote());
-    }
-    let authors_include = split_search_terms(&criteria.author)?;
-    let authors_exclude = split_search_terms(&criteria.author_exclude)?;
-    let tags_include = split_search_terms(&criteria.tag)?;
-    let tags_exclude = split_search_terms(&criteria.tag_exclude)?;
-    let (person_source, person_key, series_source, series_key) = match scope {
-        None => (None, None, None, None),
-        Some(scope)
-            if matches!(scope.source.as_str(), "pixiv" | "fanbox")
-                && !scope.key.is_empty()
-                && scope.key.chars().count() <= 200 =>
-        {
-            match scope.kind.as_str() {
-                "person" => (Some(scope.source), Some(scope.key), None, None),
-                "series" => (None, None, Some(scope.source), Some(scope.key)),
-                _ => return Err(ClientError::remote()),
+    let date_from = search_choice(criteria.date_from.as_deref());
+    let date_to = search_choice(criteria.date_to.as_deref());
+    let date_field = match criteria.date_field.as_deref().map(str::trim) {
+        None | Some("") => MobileDateField::default(),
+        Some(value) => vocabulary(value)?,
+    };
+    let tags_include = split_search_terms(&criteria.tag);
+    let mut request = MobileSearchRequest {
+        text: search_choice(Some(&criteria.text)),
+        cursor,
+        offset,
+        limit: Some(20),
+        source: search_choice(Some(&criteria.source)),
+        content_type: search_choice(Some(&criteria.content_type)),
+        authors_include: split_search_terms(&criteria.author),
+        authors_exclude: split_search_terms(&criteria.author_exclude),
+        tag_filter_mode: search_choice(criteria.tag_mode.as_deref())
+            // 「すべて」は既定なので送らない。「どれか」はタグを指したときだけ意味がある。
+            .filter(|mode| mode != "and" && (mode != "or" || tags_include.is_some())),
+        tags_include,
+        tags_exclude: split_search_terms(&criteria.tag_exclude),
+        min_char_count: parse_search_count(&criteria.min_chars)?,
+        max_char_count: parse_search_count(&criteria.max_chars)?,
+        min_asset_count: parse_search_count(criteria.min_assets.as_deref().unwrap_or(""))?,
+        max_asset_count: parse_search_count(criteria.max_assets.as_deref().unwrap_or(""))?,
+        revision_filter: search_choice(criteria.revision.as_deref()),
+        edit_filter: search_choice(criteria.edit.as_deref()),
+        cover_filter: search_choice(criteria.cover.as_deref()),
+        date_field: (date_from.is_some() || date_to.is_some()).then_some(date_field),
+        date_from,
+        date_to,
+        favorite: criteria.favorite.then_some(true),
+        sort_by,
+        sort_order,
+        ..MobileSearchRequest::default()
+    };
+    if let Some(scope) = scope {
+        match scope.kind.as_str() {
+            "person" => {
+                request.person_source = Some(scope.source);
+                request.person_key = Some(scope.key);
             }
+            "series" => {
+                request.series_source = Some(scope.source);
+                request.series_key = Some(scope.key);
+            }
+            _ => return Err(ClientError::remote()),
         }
-        _ => return Err(ClientError::remote()),
-    };
-    let mut payload = serde_json::json!({
-        "text": criteria.text.trim(), "cursor": cursor, "limit": 20,
-        "source": source, "favorite": criteria.favorite.then_some(true),
-        "contentType": content_type,
-        "authorsInclude": authors_include, "authorsExclude": authors_exclude,
-        "tagsInclude": tags_include, "tagsExclude": tags_exclude,
-        "minCharCount": min_chars, "maxCharCount": max_chars,
-        "sortBy": sort_by, "sortOrder": sort_order,
-        "personSource": person_source, "personKey": person_key,
-        "seriesSource": series_source, "seriesKey": series_key,
-    });
-    if let Some(offset) = offset {
-        payload["offset"] = serde_json::json!(offset);
-    }
-    if tag_mode == Some("or") && payload["tagsInclude"].is_array() {
-        payload["tagFilterMode"] = serde_json::json!("or");
-    }
-    if let Some(count) = min_assets {
-        payload["minAssetCount"] = serde_json::json!(count);
-    }
-    if let Some(count) = max_assets {
-        payload["maxAssetCount"] = serde_json::json!(count);
-    }
-    if let Some(value) = revision {
-        payload["revisionFilter"] = serde_json::json!(value);
-    }
-    if let Some(value) = edit {
-        payload["editFilter"] = serde_json::json!(value);
-    }
-    if let Some(value) = cover {
-        payload["coverFilter"] = serde_json::json!(value);
-    }
-    if !date_from.is_empty() || !date_to.is_empty() {
-        payload["dateField"] = serde_json::json!(date_field.unwrap_or("downloaded_at"));
-        if !date_from.is_empty() {
-            payload["dateFrom"] = serde_json::json!(date_from);
-        }
-        if !date_to.is_empty() {
-            payload["dateTo"] = serde_json::json!(date_to);
+        if request.person_source.is_none() && request.series_source.is_none() {
+            return Err(ClientError::remote());
         }
     }
-    // Keep the original request shape for PC builds that predate these filters.
-    for key in [
-        "authorsExclude",
-        "tagsExclude",
-        "minCharCount",
-        "maxCharCount",
-    ] {
-        if payload[key].is_null() {
-            payload.as_object_mut().unwrap().remove(key);
-        }
-    }
-    Ok(payload)
-}
-
-fn validate_numbered_offset(offset: Option<i64>, cursor: Option<&str>) -> Result<(), ClientError> {
-    if cursor.is_some() && offset.is_some()
-        || offset.is_some_and(|value| !(0..=MAX_NUMBERED_OFFSET).contains(&value))
-    {
-        return Err(ClientError::remote());
-    }
-    Ok(())
+    request.validate().map_err(|_| ClientError::remote())?;
+    Ok(request)
 }
 
 fn valid_entity_identity(source: &str, key: &str) -> bool {
@@ -1094,20 +984,8 @@ fn valid_entity_identity(source: &str, key: &str) -> bool {
 }
 
 fn valid_entity_sort(sort: Option<&str>, order: Option<&str>) -> bool {
-    sort.is_none_or(|value| {
-        matches!(
-            value,
-            "work_count"
-                | "downloaded_at"
-                | "source_created_at"
-                | "source_updated_at"
-                | "name"
-                | "text_length"
-                | "file_size_bytes"
-                | "asset_count"
-                | "current_version"
-        )
-    }) && order.is_none_or(|value| matches!(value, "asc" | "desc"))
+    sort.is_none_or(|value| vocabulary::<MobileEntitySort>(value).is_ok())
+        && order.is_none_or(|value| vocabulary::<MobileSortOrder>(value).is_ok())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1187,6 +1065,7 @@ async fn image_response(response: reqwest::Response) -> Result<MobileAssetData, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use piep_mobile_api::MAX_NUMBERED_OFFSET;
 
     pub(super) async fn local_response(wire_response: impl Into<String>) -> reqwest::Response {
         use std::io::{Read, Write};
@@ -1518,24 +1397,30 @@ mod tests {
 
     #[test]
     fn numbered_search_offsets_are_bounded_and_exclusive_with_cursors() {
-        assert!(validate_numbered_offset(None, None).is_ok());
-        assert!(validate_numbered_offset(Some(0), None).is_ok());
-        assert!(validate_numbered_offset(Some(MAX_NUMBERED_OFFSET), None).is_ok());
-        assert!(validate_numbered_offset(Some(MAX_NUMBERED_OFFSET + 1), None).is_err());
-        assert!(validate_numbered_offset(Some(-1), None).is_err());
-        assert!(validate_numbered_offset(Some(20), Some("cursor")).is_err());
+        let criteria = search_criteria(serde_json::json!({}));
+        let request = |cursor: Option<&str>, offset| {
+            search_request(&criteria, cursor.map(str::to_string), offset, None)
+        };
+        assert!(request(None, None).is_ok());
+        assert!(request(None, Some(0)).is_ok());
+        assert!(request(None, Some(MAX_NUMBERED_OFFSET)).is_ok());
+        assert!(request(None, Some(MAX_NUMBERED_OFFSET + 1)).is_err());
+        assert!(request(None, Some(-1)).is_err());
+        assert!(request(Some("cursor"), Some(20)).is_err());
     }
 
     #[test]
-    fn search_payload_splits_multiple_terms_and_forwards_non_ai_filters() {
+    fn search_request_splits_multiple_terms_and_forwards_non_ai_filters() {
         let criteria = search_criteria(serde_json::json!({
             "author": "作者A、作者B\n作者C", "tag": "猫, 海",
             "tagMode": "or", "minAssets": "2", "maxAssets": "12",
             "revision": "revised", "edit": "edited", "cover": "has_cover",
-            "dateField": "source_created_at", "dateFrom": "2024-02-29", "dateTo": "2026-10-14",
-            "sort": "publishedAsc"
+            "dateField": "published", "dateFrom": "2024-02-29", "dateTo": "2026-10-14",
+            "sort": "published:asc"
         }));
-        let payload = search_payload(&criteria, None, None, None).expect("payload");
+        let payload =
+            serde_json::to_value(search_request(&criteria, None, None, None).expect("request"))
+                .unwrap();
         assert_eq!(
             payload["authorsInclude"],
             serde_json::json!(["作者A", "作者B", "作者C"])
@@ -1547,7 +1432,7 @@ mod tests {
         assert_eq!(payload["revisionFilter"], "revised");
         assert_eq!(payload["editFilter"], "edited");
         assert_eq!(payload["coverFilter"], "has_cover");
-        assert_eq!(payload["dateField"], "source_created_at");
+        assert_eq!(payload["dateField"], "published");
         assert_eq!(payload["dateFrom"], "2024-02-29");
         assert_eq!(payload["dateTo"], "2026-10-14");
         assert_eq!(payload["sortBy"], "published");
@@ -1555,13 +1440,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_new_filters_preserve_legacy_wire_shape() {
+    fn empty_filters_are_left_out_of_the_request() {
         let criteria = search_criteria(serde_json::json!({
             "tagMode": "and", "minAssets": "", "maxAssets": "",
             "revision": "", "edit": "", "cover": "",
-            "dateField": "downloaded_at", "dateFrom": "", "dateTo": ""
+            "dateField": "saved", "dateFrom": "", "dateTo": ""
         }));
-        let payload = search_payload(&criteria, None, None, None).expect("payload");
+        let payload =
+            serde_json::to_value(search_request(&criteria, None, None, None).expect("request"))
+                .unwrap();
         for key in [
             "tagFilterMode",
             "minAssetCount",
@@ -1578,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn search_payload_rejects_invalid_ranges_dates_and_choices() {
+    fn search_request_rejects_invalid_ranges_dates_and_choices() {
         for changes in [
             serde_json::json!({ "author": "a,b,c,d,e,f,g,h,i,j,k" }),
             serde_json::json!({ "tag": "猫", "tagMode": "xor" }),
@@ -1588,10 +1475,12 @@ mod tests {
             serde_json::json!({ "dateFrom": "2026-02-30" }),
             serde_json::json!({ "dateFrom": "2026-10-15", "dateTo": "2026-10-14" }),
             serde_json::json!({ "sort": "privatePath" }),
+            serde_json::json!({ "sort": "saved:sideways" }),
+            serde_json::json!({ "dateField": "downloaded_at", "dateFrom": "2026-10-14" }),
         ] {
             let criteria = search_criteria(changes.clone());
             assert!(
-                search_payload(&criteria, None, None, None).is_err(),
+                search_request(&criteria, None, None, None).is_err(),
                 "accepted {changes}"
             );
         }

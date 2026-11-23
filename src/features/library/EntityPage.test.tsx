@@ -187,10 +187,10 @@ describe("author page", () => {
     expect(screen.getByRole("option", { name: "版番号：大きい順", hidden: true })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("option", { name: "版番号：小さい順", hidden: true }));
 
-    await waitFor(() => expect(window.location.hash).toContain("sort=current_version"));
+    await waitFor(() => expect(window.location.hash).toContain("sort=version"));
     expect(window.location.hash).toContain("order=asc");
     await waitFor(() => expect(shelf.searchShelf).toHaveBeenCalledWith(
-      expect.objectContaining({ sortBy: "current_version", sortOrder: "asc" }),
+      expect.objectContaining({ sortBy: "version", sortOrder: "asc" }),
       { person: PERSON },
     ));
   });
@@ -225,10 +225,10 @@ describe("author page", () => {
     expect(await screen.findByRole("option", { name: "合計容量：大きい順", hidden: true })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("option", { name: "合計容量：小さい順", hidden: true }));
 
-    await waitFor(() => expect(window.location.hash).toContain("series_sort=file_size_bytes"));
+    await waitFor(() => expect(window.location.hash).toContain("series_sort=size"));
     expect(window.location.hash).toContain("series_order=asc");
     await waitFor(() => expect(api.shelfPersonSeries).toHaveBeenCalledWith(PERSON, expect.objectContaining({
-      sort: "file_size_bytes",
+      sort: "size",
       order: "asc",
     })));
   });
@@ -303,7 +303,7 @@ describe("author page", () => {
 
     expect(search).toHaveValue("目当て");
     await waitFor(() => expect(window.location.hash).toContain("series_q=%E7%9B%AE%E5%BD%93%E3%81%A6"), { timeout: 1500 });
-    expect(window.location.hash).toContain("series_sort=file_size_bytes");
+    expect(window.location.hash).toContain("series_sort=size");
   });
 
   it("reports when the archive folder dialog fails", async () => {
@@ -410,7 +410,7 @@ describe("series page", () => {
     const sort = screen.getByRole("combobox", { name: "コレクションの並び順" });
     fireEvent.click(sort);
     fireEvent.click(await screen.findByRole("option", { name: "合計文字数：少ない順", hidden: true }));
-    await waitFor(() => expect(window.location.hash).toContain("collection_sort=text_length"));
+    await waitFor(() => expect(window.location.hash).toContain("collection_sort=length"));
     expect(window.location.hash).toContain("collection_order=asc");
   });
 

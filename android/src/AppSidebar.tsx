@@ -31,7 +31,7 @@ function useShelfCount(shelf: Exclude<Shelf, "reading" | "finished">, enabled: b
   return useQuery({
     queryKey: ["shelf-count", shelf],
     // 欲しいのは件数だけ。一覧の中身を運ばない。
-    queryFn: () => searchPcWorks({ ...defaultPcSearch, ...shelfCriteria[shelf], sort: "dateDesc" }, null, null, null, 1),
+    queryFn: () => searchPcWorks({ ...defaultPcSearch, ...shelfCriteria[shelf], sort: "saved:desc" }, null, null, null, 1),
     enabled,
     staleTime: 60_000,
     select: (page) => page.totalEstimate ?? null,

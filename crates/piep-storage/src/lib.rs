@@ -2,9 +2,11 @@
 //! 保存形式 v1 と既存の元ハッシュは変えない。
 
 mod fingerprint;
+mod media;
 mod store;
 
 pub use fingerprint::Fingerprint;
+pub use media::{sniff_image, SNIFF_BYTES};
 pub use store::{
     decode_chunk, encode_chunk, regular_directory, regular_file, sync_directory, ChunkEncoding,
     ChunkState, ContentFile, FileChunk, ObjectStore, StorageStats, StoredEntry, StoredFile,

@@ -320,14 +320,14 @@ export interface EntityFacet {
  */
 export type EntitySortBy =
   | "work_count"
-  | "downloaded_at"
-  | "source_created_at"
-  | "source_updated_at"
+  | "saved"
+  | "published"
+  | "updated"
   | "name"
-  | "text_length"
-  | "file_size_bytes"
-  | "asset_count"
-  | "current_version";
+  | "length"
+  | "size"
+  | "media"
+  | "version";
 
 /**
  * 一覧そのものにかける条件。
@@ -479,20 +479,17 @@ export type LibraryViewMode =
   | "epubSelection"
   | "updateReview";
 
-/**
- * Sort keys accepted by the desktop search command. The snake-case aliases
- * are kept because saved searches from earlier releases persist these values.
- */
+/** 作品の並べ方。棚の並べ方（`ShelfSort`）と同じ名前。 */
 export type LibrarySortBy =
-  | "downloaded_at"
-  | "source_created_at"
-  | "source_updated_at"
+  | "saved"
+  | "published"
+  | "updated"
   | "title"
-  | "author_name"
-  | "text_length"
-  | "file_size_bytes"
-  | "asset_count"
-  | "current_version"
+  | "author"
+  | "length"
+  | "size"
+  | "media"
+  | "version"
   | "series_order"
   /** Score ranking. Only meaningful together with a text query, where it is the
    *  default; any other key makes the backend order the matches by that column. */
@@ -538,7 +535,7 @@ export type LibraryRevisionFilter = "revised" | "first_version" | "pending_revis
 export type LibraryAcquisitionFilter = "complete" | "attention" | "incomplete" | "unavailable" | "restricted" | "error" | "dismissed";
 export type LibraryEditFilter = "edited" | "unedited";
 export type LibraryCoverFilter = "has_cover" | "no_cover";
-export type LibraryDateField = "downloaded_at" | "source_created_at" | "source_updated_at";
+export type LibraryDateField = "saved" | "published" | "updated";
 
 export type LibrarySortOrder = "asc" | "desc";
 

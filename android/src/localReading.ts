@@ -19,7 +19,6 @@ export interface LocalReading {
   sourceId: string;
   /** 位置が指す本文の版。 */
   version: number;
-  contentHash: string | null;
   editHash: string | null;
   page: number;
   position: SavedPosition | null;
@@ -32,7 +31,6 @@ export interface LocalReading {
   readAt: number;
   /** 最後に読んだときの接続先。作品の番号はサーバーごとに振られるので、別のサーバーの棚に混ぜない。 */
   serverUrl: string | null;
-  workId: number | null;
   work: PcWork | null;
 }
 
@@ -44,7 +42,7 @@ export interface RecentWork {
   server?: string;
 }
 
-export type WorkIdentity = Pick<PcWork, "id" | "source" | "sourceId" | "currentVersion" | "contentHash">;
+export type WorkIdentity = Pick<PcWork, "id" | "source" | "sourceId" | "currentVersion">;
 
 const shelfChanged = "piep:recent-reading-changed";
 const shelfLimit = 120;
@@ -65,7 +63,7 @@ const keyOf = (source: string, sourceId: string) => `${source}:${sourceId}`;
 const workKey = (work: Pick<PcWork, "source" | "sourceId">) => keyOf(work.source, work.sourceId);
 
 function sameRevision(row: LocalReading, work: WorkIdentity, editHash: string | null): boolean {
-  return row.version === work.currentVersion && (row.contentHash ?? null) === (work.contentHash ?? null) && (row.editHash ?? null) === (editHash ?? null);
+  return row.version === work.currentVersion && (row.editHash ?? null) === (editHash ?? null);
 }
 
 /** 今の本文の記録。版が違う記録は、別の本文のものなので使わない。 */
@@ -82,7 +80,6 @@ function editable(work: WorkIdentity, editHash: string | null): LocalReading {
     source: work.source,
     sourceId: work.sourceId,
     version: work.currentVersion,
-    contentHash: work.contentHash ?? null,
     editHash,
     page: 0,
     position: null,
@@ -91,7 +88,6 @@ function editable(work: WorkIdentity, editHash: string | null): LocalReading {
     shelved: row?.shelved ?? false,
     readAt: 0,
     serverUrl: row?.serverUrl ?? null,
-    workId: row?.workId ?? null,
     work: row?.work ?? null,
   };
 }
@@ -207,7 +203,7 @@ export function rememberReading(work: PcWork, editHash: string | null, progress:
   // 頭へ戻した作品は棚から降ろす。読み進めればまた並ぶ。
   const shelved = finished || partRead(progress);
   const joined = shelved !== row.shelved || finished !== row.finished;
-  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, serverUrl: currentServer ?? row.serverUrl, workId: null, work }, shelved || row.shelved, joined);
+  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, serverUrl: currentServer ?? row.serverUrl, work }, shelved || row.shelved, joined);
 }
 
 /** 接続先が変わったら呼ぶ。「続きを読む」は接続先ごとに分ける。 */

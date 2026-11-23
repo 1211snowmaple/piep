@@ -2736,7 +2736,7 @@ web 詳細で確認した空欄・通常の空欄の変更を試験した。同�
 | 頼っているもの | 棚の代わり | 扱い |
 | --- | --- | --- |
 | 登録と接続確認（`/api/v1/pair`・`/api/v1/hello`、`pc_client.rs`） | 無い。v2 は登録で出た鍵を使う | 旧棚とは関係ない。消さない。名前を v2 へ移すかは別に決める |
-| 一覧・作品・ページ・目次・検索・候補・作者・シリーズ・コレクション（`pc_get_page`・`pc_get_outline`・`pc_get_metadata`・`pc_get_collection`・`pc_get_entity_detail`・`pc_get_work_collections`・`pc_list_entities`・`pc_list_entity_series`・`pc_list_collections`・`pc_search_works`・`pc_search_suggest`・`pc_lookup_work`） | `/api/v2/libraries/{id}/…` と読む束（`readerBundle`）。`nativeReading.ts` が能力の札（`worksSearch`・`groups`・`suggest`）を見て選ぶ | 札が無い接続のときだけ使う予備。消せる |
+| 一覧・作品・ページ・目次・検索・候補・作者・シリーズ・コレクション（`pc_get_page`・`pc_get_outline`・`pc_get_metadata`・`pc_get_collection`・`pc_get_entity_detail`・`pc_get_work_collections`・`pc_list_entities`・`pc_list_entity_series`・`pc_list_collections`・`pc_search_works`・`pc_search_suggest`・`pc_lookup_work`） | `/api/v2/libraries/{id}/…` と読む束（`readerBundle`）。`shelf.ts` が能力の札（`worksSearch`・`groups`・`suggest`）を見て選ぶ | 札が無い接続のときだけ使う予備。消せる |
 | お気に入り（`pc_set_favorite` → `/api/v1/favorites/…`） | `…/works/{work}/favorite`（札 `favoriteWrite`） | 同上 |
 | 読書位置の同期（`reading_sync`・`reading_get`・`reading_record` → `/api/v1/reading`） | `…/reading`・`…/works/{work}/reading`（札 `reading`） | 同上 |
 | 表紙と挿絵の URL（`cover_protocol.rs`、`OnlineReader.tsx` の `illustrationUrl(v1WorkId(…))`） | `…/cover`・束の資源 | 同上 |

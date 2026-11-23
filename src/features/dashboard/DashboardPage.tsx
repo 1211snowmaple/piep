@@ -89,7 +89,7 @@ export default function DashboardPage() {
       if (!runtime) return demoDashboard;
       const [counts, recent] = await Promise.all([
         shelfDashboard(),
-        searchShelf({ sortBy: "downloaded_at", sortOrder: "desc", limit: 4 }),
+        searchShelf({ sortBy: "saved", sortOrder: "desc", limit: 4 }),
       ]);
       return { ...counts, recentDownloads: recent.items };
     },
@@ -159,7 +159,7 @@ export default function DashboardPage() {
             the number and its destination agree. */}
         <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
           <StatCard icon={Icons.database} label="保存作品" value={formatNumber(data.stats.totalDownloads)} hint={`pixiv ${formatNumber(data.stats.pixivCount)} · FANBOX ${formatNumber(data.stats.fanboxCount)}`} color="#0d86f4" onClick={() => navigate("/library")} />
-          <StatCard icon={Icons.storage} label="使用容量" value={formatBytes(data.stats.totalSizeBytes)} hint={`${formatNumber(data.stats.totalAssets)}件の画像・添付`} color="#31b497" onClick={() => navigate("/library?sort=file_size_bytes")} />
+          <StatCard icon={Icons.storage} label="使用容量" value={formatBytes(data.stats.totalSizeBytes)} hint={`${formatNumber(data.stats.totalAssets)}件の画像・添付`} color="#31b497" onClick={() => navigate("/library?sort=size")} />
           <StatCard icon={Icons.favorite} label="お気に入り" value={formatNumber(data.favoriteCount)} hint="すぐ読み返せる作品" color="#ef5b78" onClick={() => navigate("/library?favorite=1")} />
           {/* Watching is done per author and series, not per work, so the
               per-work flag this tile used to count is almost always 0 (the

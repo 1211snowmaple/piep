@@ -12,14 +12,11 @@
 //! （サーバーを戻したあとに、戻す前の要求を新しい操作として当てない）。
 
 use super::device_db::{DeviceDb, records_error};
-use super::native_library::{
-    NativeLibraryScope, canonical_generation, check_scope, library_changed,
-};
+use super::shelf::{ShelfScope, canonical_generation, check_scope, library_changed};
 use super::{ClientError, PcClientState, REQUEST_TIMEOUT, bounded_response_bytes};
 use piep_library_protocol::{Id, MAX_IDENTITY_BYTES, MAX_MANIFEST_BYTES};
 use piep_mobile_api::{
-    MobileShelfReading, MobileShelfReadingLocation, MobileShelfReadingPage,
-    MobileShelfReadingUpdate,
+    MobileReading, MobileReadingLocation, MobileReadingPage, MobileReadingUpdate,
 };
 use reqwest::StatusCode;
 use rusqlite::{OptionalExtension, Transaction};
@@ -51,11 +48,11 @@ pub struct ShelfReadingState {
 struct PendingWrite {
     request: String,
     expected: String,
-    location: MobileShelfReadingLocation,
+    location: MobileReadingLocation,
     finished: bool,
 }
 
-fn scope_key(scope: &NativeLibraryScope) -> String {
+fn scope_key(scope: &ShelfScope) -> String {
     format!(
         "{}/{}/{}",
         scope.library_id().get(),
@@ -64,7 +61,7 @@ fn scope_key(scope: &NativeLibraryScope) -> String {
     )
 }
 
-fn valid_location(location: &MobileShelfReadingLocation) -> bool {
+fn valid_location(location: &MobileReadingLocation) -> bool {
     matches!(location.view_kind.as_str(), "snapshot" | "edit")
         && uuid::Uuid::parse_str(&location.view_id)
             .is_ok_and(|id| !id.is_nil() && id.to_string() == location.view_id)
@@ -72,7 +69,7 @@ fn valid_location(location: &MobileShelfReadingLocation) -> bool {
         && location.ratio_ppm <= RATIO_SCALE
 }
 
-fn valid_reading(reading: &MobileShelfReading) -> bool {
+fn valid_reading(reading: &MobileReading) -> bool {
     uuid::Uuid::parse_str(&reading.work).is_ok_and(|id| id.to_string() == reading.work)
         && canonical_generation(&reading.generation)
         && reading.location.as_ref().is_none_or(valid_location)
@@ -115,8 +112,8 @@ fn put_json(
 }
 
 /// 棚の位置を受け取る。世代が手元より古いもの（遅れて届いた応答）では書き換えない。
-fn accept(tx: &Transaction<'_>, reading: &MobileShelfReading) -> Result<(), ClientError> {
-    let old: Option<MobileShelfReading> = query_json(tx, "shelf_positions", &reading.work)?;
+fn accept(tx: &Transaction<'_>, reading: &MobileReading) -> Result<(), ClientError> {
+    let old: Option<MobileReading> = query_json(tx, "shelf_positions", &reading.work)?;
     if old
         .as_ref()
         .is_none_or(|old| generation(&reading.generation) >= generation(&old.generation))
@@ -138,20 +135,20 @@ fn forget_sent(tx: &Transaction<'_>, work: &str, sent: &PendingWrite) -> Result<
 }
 
 fn known_generation(tx: &Transaction<'_>, work: &str) -> Result<String, ClientError> {
-    let known: Option<MobileShelfReading> = query_json(tx, "shelf_positions", work)?;
+    let known: Option<MobileReading> = query_json(tx, "shelf_positions", work)?;
     Ok(known.map_or_else(|| "0".to_string(), |known| known.generation))
 }
 
 #[derive(Deserialize)]
 struct Conflict {
     error: String,
-    current: MobileShelfReading,
+    current: MobileReading,
 }
 
 /// 一件を送った結果。
 enum Sent {
-    Stored(MobileShelfReading),
-    Conflict(MobileShelfReading),
+    Stored(MobileReading),
+    Conflict(MobileReading),
     /// 棚が受け取らない書き込み（外した作品・本文に無い位置）。持ち続けると後ろが詰まる。
     Refused,
 }
@@ -167,7 +164,7 @@ impl ShelfReadingState {
     /// この棚の記録で読み書きする。棚・利用者・同期の世代が変わっていれば先に捨てる。
     fn with_scope<T>(
         &self,
-        scope: &NativeLibraryScope,
+        scope: &ShelfScope,
         action: impl FnOnce(&Transaction<'_>) -> Result<T, ClientError>,
     ) -> Result<T, ClientError> {
         let key = scope_key(scope);
@@ -193,9 +190,9 @@ impl ShelfReadingState {
 
     fn record(
         &self,
-        scope: &NativeLibraryScope,
+        scope: &ShelfScope,
         work: Id,
-        location: MobileShelfReadingLocation,
+        location: MobileReadingLocation,
         finished: bool,
     ) -> Result<(), ClientError> {
         if !valid_location(&location) {
@@ -219,17 +216,13 @@ impl ShelfReadingState {
         })
     }
 
-    fn get(
-        &self,
-        scope: &NativeLibraryScope,
-        work: Id,
-    ) -> Result<Option<MobileShelfReading>, ClientError> {
+    fn get(&self, scope: &ShelfScope, work: Id) -> Result<Option<MobileReading>, ClientError> {
         self.with_scope(scope, |tx| {
             query_json(tx, "shelf_positions", &work.get().to_string())
         })
     }
 
-    async fn sync(&self, pc: &PcClientState, scope: NativeLibraryScope) -> Result<(), ClientError> {
+    async fn sync(&self, pc: &PcClientState, scope: ShelfScope) -> Result<(), ClientError> {
         let _running = self.sync_lock.lock().await;
         // 自分の書き込みの続きを書き直したら、もう一度だけ送る。
         for _ in 0..2 {
@@ -241,11 +234,7 @@ impl ShelfReadingState {
     }
 
     /// 溜まった書き込みを送る。書き直した書き込みがあれば true。
-    async fn push(
-        &self,
-        pc: &PcClientState,
-        scope: NativeLibraryScope,
-    ) -> Result<bool, ClientError> {
+    async fn push(&self, pc: &PcClientState, scope: ShelfScope) -> Result<bool, ClientError> {
         let pending = self.with_scope(&scope, |tx| {
             let mut query = tx
                 .prepare("SELECT work, data FROM shelf_pending ORDER BY work")
@@ -304,7 +293,7 @@ impl ShelfReadingState {
     }
 
     /// 前回の続きから、棚の位置の変わった分を読む。
-    async fn pull(&self, pc: &PcClientState, scope: NativeLibraryScope) -> Result<(), ClientError> {
+    async fn pull(&self, pc: &PcClientState, scope: ShelfScope) -> Result<(), ClientError> {
         for _ in 0..MAX_PULL_PAGES {
             let cursor: String = self.with_scope(&scope, |tx| {
                 tx.query_row(
@@ -347,7 +336,7 @@ impl ShelfReadingState {
 
 fn connection(
     pc: &PcClientState,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
 ) -> Result<(u64, super::SavedConnection, reqwest::Client), ClientError> {
     let (generation, saved) = pc.connection_snapshot()?;
     if !scope.connection_is(generation) {
@@ -360,12 +349,12 @@ fn connection(
 
 async fn send(
     pc: &PcClientState,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     work: &str,
     write: &PendingWrite,
 ) -> Result<Sent, ClientError> {
     let (generation, saved, client) = connection(pc, scope)?;
-    let body = MobileShelfReadingUpdate {
+    let body = MobileReadingUpdate {
         request_id: write.request.clone(),
         expected: write.expected.clone(),
         location: write.location.clone(),
@@ -403,7 +392,7 @@ async fn send(
         _ => {
             let bytes =
                 bounded_response_bytes(check_scope(response, scope)?, MAX_IDENTITY_BYTES).await?;
-            let stored: MobileShelfReading =
+            let stored: MobileReading =
                 serde_json::from_slice(&bytes).map_err(|_| ClientError::protocol())?;
             if stored.work != work || !valid_reading(&stored) {
                 return Err(ClientError::protocol());
@@ -417,9 +406,9 @@ async fn send(
 /// 一ページ読む。印が古いと断られたら None。
 async fn fetch(
     pc: &PcClientState,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     cursor: &str,
-) -> Result<Option<MobileShelfReadingPage>, ClientError> {
+) -> Result<Option<MobileReadingPage>, ClientError> {
     let (generation, saved, client) = connection(pc, scope)?;
     let mut url = reqwest::Url::parse(&format!(
         "{}/api/libraries/{}/reading",
@@ -441,7 +430,7 @@ async fn fetch(
         return pc.with_connection(generation, || Ok(None));
     }
     let bytes = bounded_response_bytes(check_scope(response, scope)?, MAX_MANIFEST_BYTES).await?;
-    let page: MobileShelfReadingPage =
+    let page: MobileReadingPage =
         serde_json::from_slice(&bytes).map_err(|_| ClientError::protocol())?;
     if page.cursor.is_empty() || page.cursor.len() > 256 || !page.items.iter().all(valid_reading) {
         return Err(ClientError::protocol());
@@ -451,11 +440,11 @@ async fn fetch(
 
 /// 読んだ位置を端末に置く。通信はしない。
 #[tauri::command]
-pub async fn pc_native_reading_record(
+pub async fn pc_reading_record(
     state: State<'_, ShelfReadingState>,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     work: Id,
-    location: MobileShelfReadingLocation,
+    location: MobileReadingLocation,
     finished: bool,
 ) -> Result<(), ClientError> {
     state.record(&scope, work, location, finished)
@@ -463,21 +452,21 @@ pub async fn pc_native_reading_record(
 
 /// 溜まった位置を送り、棚の位置の変わった分を受け取る。
 #[tauri::command]
-pub async fn pc_native_reading_sync(
+pub async fn pc_reading_sync(
     state: State<'_, ShelfReadingState>,
     pc: State<'_, PcClientState>,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
 ) -> Result<(), ClientError> {
     state.sync(&pc, scope).await
 }
 
 /// 最後に受け取った、この作品の棚の位置を返す。通信はしない。
 #[tauri::command]
-pub async fn pc_native_reading_get(
+pub async fn pc_reading_get(
     state: State<'_, ShelfReadingState>,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     work: Id,
-) -> Result<Option<MobileShelfReading>, ClientError> {
+) -> Result<Option<MobileReading>, ClientError> {
     state.get(&scope, work)
 }
 
@@ -489,8 +478,8 @@ mod tests {
         Id::new(uuid::Uuid::now_v7()).unwrap()
     }
 
-    fn location(page: u64) -> MobileShelfReadingLocation {
-        MobileShelfReadingLocation {
+    fn location(page: u64) -> MobileReadingLocation {
+        MobileReadingLocation {
             view_kind: "snapshot".into(),
             view_id: uuid::Uuid::now_v7().to_string(),
             page,
@@ -498,8 +487,8 @@ mod tests {
         }
     }
 
-    fn reading(work: Id, generation: &str, mine: bool) -> MobileShelfReading {
-        MobileShelfReading {
+    fn reading(work: Id, generation: &str, mine: bool) -> MobileReading {
+        MobileReading {
             work: work.get().to_string(),
             location: Some(location(1)),
             finished: false,
@@ -509,11 +498,7 @@ mod tests {
         }
     }
 
-    fn pending(
-        state: &ShelfReadingState,
-        scope: &NativeLibraryScope,
-        work: Id,
-    ) -> Option<PendingWrite> {
+    fn pending(state: &ShelfReadingState, scope: &ShelfScope, work: Id) -> Option<PendingWrite> {
         state
             .with_scope(scope, |tx| {
                 query_json(tx, "shelf_pending", &work.get().to_string())
@@ -524,7 +509,7 @@ mod tests {
     #[test]
     fn a_write_takes_the_known_generation_and_the_newest_reading_replaces_it() {
         let state = ShelfReadingState::new(Arc::new(DeviceDb::in_memory()));
-        let scope = NativeLibraryScope::for_tests(id(), id(), id(), 1);
+        let scope = ShelfScope::for_tests(id(), id(), id(), 1);
         let work = id();
         state.record(&scope, work, location(0), false).unwrap();
         let first = pending(&state, &scope, work).unwrap();
@@ -562,7 +547,7 @@ mod tests {
     fn an_older_generation_does_not_replace_a_newer_one_and_another_epoch_starts_empty() {
         let state = ShelfReadingState::new(Arc::new(DeviceDb::in_memory()));
         let (library, subject) = (id(), id());
-        let scope = NativeLibraryScope::for_tests(library, subject, id(), 1);
+        let scope = ShelfScope::for_tests(library, subject, id(), 1);
         let work = id();
         state
             .with_scope(&scope, |tx| {
@@ -573,11 +558,11 @@ mod tests {
         assert_eq!(state.get(&scope, work).unwrap().unwrap().generation, "5");
         state.record(&scope, work, location(0), false).unwrap();
         // 接続を作り直しただけ（同じ棚・利用者・同期の世代）なら残る。
-        let reconnected = NativeLibraryScope::for_tests(library, subject, scope.sync_epoch(), 2);
+        let reconnected = ShelfScope::for_tests(library, subject, scope.sync_epoch(), 2);
         assert!(state.get(&reconnected, work).unwrap().is_some());
         assert!(pending(&state, &reconnected, work).is_some());
         // サーバーを戻した（同期の世代が変わった）なら、位置も未送信の要求も捨てる。
-        let restored = NativeLibraryScope::for_tests(library, subject, id(), 2);
+        let restored = ShelfScope::for_tests(library, subject, id(), 2);
         assert!(state.get(&restored, work).unwrap().is_none());
         assert!(pending(&state, &restored, work).is_none());
     }
@@ -592,16 +577,16 @@ mod tests {
         bad.work = bad.work.to_uppercase();
         assert!(!valid_reading(&bad));
         for change in [
-            |l: &mut MobileShelfReadingLocation| l.view_kind = "page".into(),
-            |l: &mut MobileShelfReadingLocation| l.view_id = "x".into(),
-            |l: &mut MobileShelfReadingLocation| l.ratio_ppm = RATIO_SCALE + 1,
-            |l: &mut MobileShelfReadingLocation| l.page = MAX_PAGE_NUMBER + 1,
+            |l: &mut MobileReadingLocation| l.view_kind = "page".into(),
+            |l: &mut MobileReadingLocation| l.view_id = "x".into(),
+            |l: &mut MobileReadingLocation| l.ratio_ppm = RATIO_SCALE + 1,
+            |l: &mut MobileReadingLocation| l.page = MAX_PAGE_NUMBER + 1,
         ] {
             let mut bad = reading(work, "1", false);
             change(bad.location.as_mut().unwrap());
             assert!(!valid_reading(&bad));
         }
-        let cleared = MobileShelfReading {
+        let cleared = MobileReading {
             location: None,
             ..reading(work, "2", true)
         };

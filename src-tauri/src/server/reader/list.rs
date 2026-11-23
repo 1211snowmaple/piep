@@ -13,7 +13,6 @@ use crate::library::{
 };
 use crate::library_search::{parse_query, TextSearch};
 use crate::library_view::CardKeys;
-use crate::server::dto::MobileSearchRequest;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -22,9 +21,10 @@ use axum::{
     Extension, Json,
 };
 use chrono::{NaiveDate, SecondsFormat};
+use piep_mobile_api::{MobileDateField, MobileSearchRequest, MobileSortOrder, MobileWorkSort};
 use piep_mobile_api::{
     MobilePerson, MobileSearchSuggestion, MobileSearchSuggestions, MobileSeriesMembership,
-    MobileShelfPage, MobileShelfVersion, MobileShelfWork, MobileShelfWorkDetail,
+    MobileVersion, MobileWork, MobileWorkDetail, MobileWorkPage,
 };
 use serde::Deserialize;
 use std::collections::VecDeque;
@@ -95,8 +95,8 @@ pub(super) fn count(value: u64) -> i64 {
 }
 
 /// `state` はこの利用者のお気に入り（一覧の行は棚の持ち主のものなので、利用者ごとに引き直す）。
-pub(super) fn shelf_work(card: &WorkCard, keys: CardKeys, state: &UserState) -> MobileShelfWork {
-    MobileShelfWork {
+pub(super) fn shelf_work(card: &WorkCard, keys: CardKeys, state: &UserState) -> MobileWork {
+    MobileWork {
         id: card.id.to_string(),
         snapshot_id: card.snapshot_id.to_string(),
         source: card.provider.clone(),
@@ -156,6 +156,22 @@ fn decode_cursor(value: &str, epoch: Id, subject: Id) -> Result<WorkCursor, ApiE
 /// 作者の指名（取得元と ID）。棚の作者の ID は要求ごとに棚で引く。
 type PersonKey = (String, String);
 
+/// 携帯の並べ方を棚の並べ方にする。名前は同じ。
+fn work_sort(sort: MobileWorkSort) -> WorkSort {
+    match sort {
+        MobileWorkSort::Saved => WorkSort::Saved,
+        MobileWorkSort::Published => WorkSort::Published,
+        MobileWorkSort::Updated => WorkSort::Updated,
+        MobileWorkSort::Title => WorkSort::Title,
+        MobileWorkSort::Author => WorkSort::Author,
+        MobileWorkSort::Length => WorkSort::Length,
+        MobileWorkSort::Size => WorkSort::Size,
+        MobileWorkSort::Media => WorkSort::Media,
+        MobileWorkSort::Version => WorkSort::Version,
+        MobileWorkSort::SeriesOrder => WorkSort::SeriesOrder,
+    }
+}
+
 /// 携帯の検索の条件を、棚の問い合わせにする。
 pub(super) fn shelf_request(
     request: MobileSearchRequest,
@@ -175,26 +191,15 @@ pub(super) fn shelf_request(
             format!("{text} {term}")
         };
     }
-    let sort = match request.sort_by.as_deref() {
+    let sort = match request.sort_by {
         None if text.is_empty() => WorkSort::Saved,
         None => WorkSort::Relevance,
-        Some("date") => WorkSort::Saved,
-        Some("published") => WorkSort::Published,
-        Some("title") => WorkSort::Title,
-        Some("author") => WorkSort::Author,
-        Some("length") => WorkSort::Length,
-        Some("assets") => WorkSort::Media,
-        Some("version") => WorkSort::Version,
-        Some("series_order") => WorkSort::SeriesOrder,
-        Some(_) => return Err(invalid()),
+        Some(sort) => work_sort(sort),
     };
-    let descending = match request.sort_order.as_deref() {
-        Some("asc") => false,
-        Some(_) => true,
-        None => !matches!(
-            sort,
-            WorkSort::Title | WorkSort::Author | WorkSort::SeriesOrder
-        ),
+    let descending = match (request.sort_order, request.sort_by) {
+        (Some(order), _) => order == MobileSortOrder::Desc,
+        (None, Some(sort)) => !sort.ascending_by_default(),
+        (None, None) => true,
     };
     let after = request
         .cursor
@@ -206,10 +211,10 @@ pub(super) fn shelf_request(
         .unwrap_or(if request.offset.is_some() { 20 } else { 30 })
         .clamp(1, 50);
     let date = (request.date_from.is_some() || request.date_to.is_some()).then(|| DateRange {
-        field: match request.date_field.as_deref() {
-            Some("source_created_at") => DateField::Published,
-            Some("source_updated_at") => DateField::Updated,
-            _ => DateField::Saved,
+        field: match request.date_field.unwrap_or_default() {
+            MobileDateField::Saved => DateField::Saved,
+            MobileDateField::Published => DateField::Published,
+            MobileDateField::Updated => DateField::Updated,
         },
         from: utc_day(request.date_from.as_deref(), 0),
         until: utc_day(request.date_to.as_deref(), 1),
@@ -313,7 +318,7 @@ pub(super) async fn search(
                 Ok(shelf_work(card, keys, &state))
             })
             .collect::<Result<Vec<_>, ApiError>>()?;
-        serde_json::to_vec(&MobileShelfPage {
+        serde_json::to_vec(&MobileWorkPage {
             items,
             next_cursor,
             total_estimate: page.page.total.map(count),
@@ -384,14 +389,14 @@ pub(super) async fn work(
             &state,
         );
         work.excerpt = head.caption.clone();
-        let detail = MobileShelfWorkDetail {
+        let detail = MobileWorkDetail {
             work,
             people,
             series,
             versions: head
                 .versions
                 .iter()
-                .map(|version| MobileShelfVersion {
+                .map(|version| MobileVersion {
                     snapshot_id: version.snapshot.to_string(),
                     version: version.version,
                     text_length: version.text_length,

@@ -8,9 +8,9 @@ use piep_library_protocol::{
     ResourceReference, ResourceScope, WorkReadingView,
 };
 use piep_mobile_api::{
-    MobileCollection, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage,
-    MobileSearchSuggestions, MobileShelfCollectionDetail, MobileShelfFavorite,
-    MobileShelfFavoriteUpdate, MobileShelfPage, MobileShelfWork, MobileShelfWorkDetail,
+    MobileCollection, MobileCollectionDetail, MobileEntityDetail, MobileEntityPage,
+    MobileEntitySeriesPage, MobileFavorite, MobileFavoriteUpdate, MobileSearchSuggestions,
+    MobileWork, MobileWorkDetail, MobileWorkPage,
 };
 use piep_storage::Fingerprint;
 use reqwest::{Response, StatusCode, header::HeaderMap};
@@ -20,7 +20,7 @@ use tauri::State;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct NativeLibraryScope {
+pub struct ShelfScope {
     library_id: Id,
     subject_id: Id,
     sync_epoch: Id,
@@ -29,8 +29,8 @@ pub struct NativeLibraryScope {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct NativeLibraryStatus {
-    scope: NativeLibraryScope,
+pub struct ShelfStatus {
+    scope: ShelfScope,
     reader_bundle: bool,
 }
 
@@ -40,7 +40,7 @@ fn header_is(headers: &HeaderMap, name: &str, expected: &str) -> bool {
     values.next().is_some_and(|value| value == expected) && values.next().is_none()
 }
 
-impl NativeLibraryScope {
+impl ShelfScope {
     pub(super) fn library_id(&self) -> Id {
         self.library_id
     }
@@ -116,12 +116,12 @@ async fn get(
 async fn parse_identity(
     response: Response,
     connection_generation: u64,
-) -> Result<NativeLibraryStatus, ClientError> {
+) -> Result<ShelfStatus, ClientError> {
     let response = check_response(response)?;
     let headers = response.headers().clone();
     let bytes = bounded_response_bytes(response, MAX_IDENTITY_BYTES).await?;
     let identity = LibraryIdentity::parse(&bytes).map_err(|_| ClientError::protocol())?;
-    let scope = NativeLibraryScope {
+    let scope = ShelfScope {
         library_id: identity.library_id,
         subject_id: identity.subject_id,
         sync_epoch: identity.sync_epoch,
@@ -130,7 +130,7 @@ async fn parse_identity(
     if !scope.matches(&headers) {
         return Err(ClientError::protocol());
     }
-    Ok(NativeLibraryStatus {
+    Ok(ShelfStatus {
         scope,
         reader_bundle: identity.capabilities.reader_bundle,
     })
@@ -140,7 +140,7 @@ pub(super) async fn discover(
     client: &reqwest::Client,
     saved: &SavedConnection,
     generation: u64,
-) -> Option<NativeLibraryStatus> {
+) -> Option<ShelfStatus> {
     let response = get(client, saved, "/api/identity", PROBE_TIMEOUT)
         .await
         .ok()?;
@@ -154,14 +154,11 @@ pub(super) fn library_changed() -> ClientError {
     }
 }
 
-pub(super) fn check_scope(
-    response: Response,
-    scope: NativeLibraryScope,
-) -> Result<Response, ClientError> {
+pub(super) fn check_scope(response: Response, scope: ShelfScope) -> Result<Response, ClientError> {
     if response.status() == StatusCode::CONFLICT {
         return Err(library_changed());
     }
-    // v2 の 401 は端末登録の解除と、棚だけの許可不足の両方を含む。
+    // 401 は端末登録の解除と、棚だけの許可不足の両方を含む。
     if response.status() == StatusCode::UNAUTHORIZED {
         return Err(ClientError {
             code: "library_unavailable",
@@ -177,7 +174,7 @@ pub(super) fn check_scope(
 
 async fn read<T>(
     state: &PcClientState,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     endpoint: &str,
     parse: impl FnOnce(&[u8]) -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
@@ -194,7 +191,7 @@ async fn read<T>(
 
 async fn read_bounded<T>(
     state: &PcClientState,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     endpoint: &str,
     maximum: usize,
     timeout: Duration,
@@ -215,9 +212,9 @@ async fn read_bounded<T>(
 /// 本文つきで問い合わせる（一覧の条件は長いので GET の query に載せない）。
 async fn post_bounded<T>(
     state: &PcClientState,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     endpoint: &str,
-    body: &serde_json::Value,
+    body: &impl serde::Serialize,
     parse: impl FnOnce(&[u8]) -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
     let (generation, saved) = state.connection_snapshot()?;
@@ -256,7 +253,7 @@ pub(super) fn canonical_generation(value: &str) -> bool {
 /// （値は今のもの。端末の時刻で勝者を決めない）。
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct NativeFavorite {
+pub struct ShelfFavorite {
     favorite: bool,
     generation: String,
     conflict: bool,
@@ -265,7 +262,7 @@ pub struct NativeFavorite {
 #[derive(Deserialize)]
 struct FavoriteConflict {
     error: String,
-    current: MobileShelfFavorite,
+    current: MobileFavorite,
 }
 
 fn favorite_missing() -> ClientError {
@@ -275,7 +272,7 @@ fn favorite_missing() -> ClientError {
     }
 }
 
-fn parse_favorite(bytes: &[u8], conflict: bool) -> Result<NativeFavorite, ClientError> {
+fn parse_favorite(bytes: &[u8], conflict: bool) -> Result<ShelfFavorite, ClientError> {
     let current = if conflict {
         let body: FavoriteConflict =
             serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
@@ -284,12 +281,12 @@ fn parse_favorite(bytes: &[u8], conflict: bool) -> Result<NativeFavorite, Client
         }
         body.current
     } else {
-        serde_json::from_slice::<MobileShelfFavorite>(bytes).map_err(|_| ClientError::protocol())?
+        serde_json::from_slice::<MobileFavorite>(bytes).map_err(|_| ClientError::protocol())?
     };
     if !canonical_generation(&current.generation) {
         return Err(ClientError::protocol());
     }
-    Ok(NativeFavorite {
+    Ok(ShelfFavorite {
         favorite: current.favorite,
         generation: current.generation,
         conflict,
@@ -299,14 +296,14 @@ fn parse_favorite(bytes: &[u8], conflict: bool) -> Result<NativeFavorite, Client
 /// 棚の作品のお気に入りを付け外しする。`request` は画面が一度の操作ごとに作る UUID で、
 /// 送り直しても一度だけ効く。`expected` は画面が知っている更新世代。
 #[tauri::command]
-pub async fn pc_native_set_favorite(
+pub async fn pc_set_favorite(
     state: State<'_, PcClientState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     work: Id,
     request: Id,
     expected: String,
     favorite: bool,
-) -> Result<NativeFavorite, ClientError> {
+) -> Result<ShelfFavorite, ClientError> {
     if !canonical_generation(&expected) {
         return Err(ClientError::remote());
     }
@@ -316,7 +313,7 @@ pub async fn pc_native_set_favorite(
     }
     let saved = saved.ok_or_else(ClientError::invalid_pairing)?;
     let client = state.client(&saved)?;
-    let body = MobileShelfFavoriteUpdate {
+    let body = MobileFavoriteUpdate {
         request_id: request.get().to_string(),
         expected,
         favorite,
@@ -340,8 +337,8 @@ pub async fn pc_native_set_favorite(
 
 async fn favorite_response(
     response: Response,
-    scope: NativeLibraryScope,
-) -> Result<NativeFavorite, ClientError> {
+    scope: ShelfScope,
+) -> Result<ShelfFavorite, ClientError> {
     match response.status() {
         // 世代の食い違いは棚の入れ替わり（409）と同じ番号で返るので、本文で見分ける。
         StatusCode::CONFLICT if scope.matches(response.headers()) => {
@@ -358,7 +355,7 @@ async fn favorite_response(
 }
 
 /// 一件が棚の作品として読めるか（UUID と取得元の鍵）。
-fn valid_shelf_work(work: &MobileShelfWork) -> bool {
+fn valid_shelf_work(work: &MobileWork) -> bool {
     uuid::Uuid::parse_str(&work.id).is_ok()
         && uuid::Uuid::parse_str(&work.snapshot_id).is_ok()
         && !work.source.is_empty()
@@ -367,27 +364,27 @@ fn valid_shelf_work(work: &MobileShelfWork) -> bool {
         && work.source_id.len() <= 4096
 }
 
-/// 作品の一覧を棚から引く。条件は旧 API の検索と同じ形に組んで送る（検査も同じ）。
+/// 作品の一覧を棚から引く。条件はデスクトップの検索と同じ形に組んで送る（検査も同じ）。
 #[tauri::command]
-pub async fn pc_native_search(
+pub async fn pc_search(
     state: State<'_, PcClientState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     criteria: PcSearchCriteria,
     cursor: Option<String>,
     offset: Option<i64>,
     scope: Option<PcWorkScope>,
     limit: Option<i64>,
-) -> Result<MobileShelfPage, ClientError> {
+) -> Result<MobileWorkPage, ClientError> {
     if limit.is_some_and(|value| !(1..=50).contains(&value)) {
         return Err(ClientError::remote());
     }
-    let mut payload = super::search_payload(&criteria, cursor, offset, scope)?;
-    if let Some(limit) = limit {
-        payload["limit"] = serde_json::json!(limit);
+    let mut payload = super::search_request(&criteria, cursor, offset, scope)?;
+    if limit.is_some() {
+        payload.limit = limit;
     }
     let endpoint = format!("/api/libraries/{}/works/search", library.library_id.get());
     post_bounded(&state, library, &endpoint, &payload, |bytes| {
-        let page: MobileShelfPage =
+        let page: MobileWorkPage =
             serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
         if page.items.len() > 50
             || !page.items.iter().all(valid_shelf_work)
@@ -405,26 +402,26 @@ pub async fn pc_native_search(
 
 /// 作品の画面（説明・作者とシリーズ・版）を棚から引く。
 #[tauri::command]
-pub async fn pc_native_work(
+pub async fn pc_work(
     state: State<'_, PcClientState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     work: Id,
-) -> Result<MobileShelfWorkDetail, ClientError> {
+) -> Result<MobileWorkDetail, ClientError> {
     work_detail(&state, library, work).await
 }
 
 pub(super) async fn work_detail(
     state: &PcClientState,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     work: Id,
-) -> Result<MobileShelfWorkDetail, ClientError> {
+) -> Result<MobileWorkDetail, ClientError> {
     let endpoint = format!(
         "/api/libraries/{}/works/{}",
         library.library_id.get(),
         work.get()
     );
     read(state, library, &endpoint, |bytes| {
-        let detail: MobileShelfWorkDetail =
+        let detail: MobileWorkDetail =
             serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
         if detail.work.id != work.get().to_string() || !valid_shelf_work(&detail.work) {
             return Err(ClientError::protocol());
@@ -435,9 +432,9 @@ pub(super) async fn work_detail(
 }
 
 #[tauri::command]
-pub async fn pc_native_works(
+pub async fn pc_works(
     state: State<'_, PcClientState>,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     after: Option<String>,
 ) -> Result<ReaderWorkPage, ClientError> {
     let mut endpoint = format!("/api/libraries/{}/works", scope.library_id.get());
@@ -516,11 +513,11 @@ fn valid_suggestions(found: &MobileSearchSuggestions) -> bool {
         })
 }
 
-/// 検索欄の候補を棚から引く（旧 API の `search/suggest` と同じ形）。
+/// 検索欄の候補を棚から引く。
 #[tauri::command]
-pub async fn pc_native_suggest(
+pub async fn pc_suggest(
     state: State<'_, PcClientState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     text: String,
 ) -> Result<MobileSearchSuggestions, ClientError> {
     if text.chars().count() > 200 {
@@ -543,9 +540,9 @@ pub async fn pc_native_suggest(
 
 /// 作者・シリーズの一覧（ライブラリの「作者」「シリーズ」）を棚から引く。
 #[tauri::command]
-pub async fn pc_native_entities(
+pub async fn pc_entities(
     state: State<'_, PcClientState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     kind: String,
     text: String,
     offset: i64,
@@ -588,9 +585,9 @@ pub async fn pc_native_entities(
 
 /// 作者・シリーズの画面の頭（説明・リンク・タグ・コレクション）を棚から引く。
 #[tauri::command]
-pub async fn pc_native_entity_detail(
+pub async fn pc_entity_detail(
     state: State<'_, PcClientState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     kind: String,
     source: String,
     key: String,
@@ -620,9 +617,9 @@ pub async fn pc_native_entity_detail(
 /// 作者の作品が属するシリーズの一ページを棚から引く。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn pc_native_entity_series(
+pub async fn pc_entity_series(
     state: State<'_, PcClientState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     source: String,
     key: String,
     text: String,
@@ -672,9 +669,9 @@ pub async fn pc_native_entity_series(
 
 /// コレクションの一覧を棚から引く。
 #[tauri::command]
-pub async fn pc_native_collections(
+pub async fn pc_collections(
     state: State<'_, PcClientState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
 ) -> Result<Vec<MobileCollection>, ClientError> {
     let endpoint = format!("/api/libraries/{}/collections", library.library_id.get());
     read(&state, library, &endpoint, |bytes| {
@@ -689,9 +686,9 @@ pub async fn pc_native_collections(
 
 /// 作品の入ったコレクションと、その中の位置を棚から引く。
 #[tauri::command]
-pub async fn pc_native_work_collections(
+pub async fn pc_work_collections(
     state: State<'_, PcClientState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     work: Id,
 ) -> Result<Vec<MobileCollection>, ClientError> {
     work_collections(&state, library, work).await
@@ -699,7 +696,7 @@ pub async fn pc_native_work_collections(
 
 pub(super) async fn work_collections(
     state: &PcClientState,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     work: Id,
 ) -> Result<Vec<MobileCollection>, ClientError> {
     let endpoint = format!(
@@ -719,11 +716,11 @@ pub(super) async fn work_collections(
 
 /// コレクションの画面（回の作品は一覧と同じ棚の作品の形）を棚から引く。
 #[tauri::command]
-pub async fn pc_native_collection(
+pub async fn pc_collection(
     state: State<'_, PcClientState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     collection: String,
-) -> Result<MobileShelfCollectionDetail, ClientError> {
+) -> Result<MobileCollectionDetail, ClientError> {
     // 棚のコレクションの UUID。サーバーが読み解くので、ここでは道に入れてよい文字かだけを見る。
     if collection.is_empty()
         || collection.len() > 128
@@ -738,7 +735,7 @@ pub async fn pc_native_collection(
         library.library_id.get(),
     );
     read(&state, library, &endpoint, |bytes| {
-        let detail: MobileShelfCollectionDetail = parse_json(bytes)?;
+        let detail: MobileCollectionDetail = parse_json(bytes)?;
         if !valid_collections(std::slice::from_ref(&detail.summary))
             || !detail
                 .members
@@ -752,7 +749,7 @@ pub async fn pc_native_collection(
     .await
 }
 
-fn view_path(scope: NativeLibraryScope, entity: Id, view: &ResourceScope) -> String {
+fn view_path(scope: ShelfScope, entity: Id, view: &ResourceScope) -> String {
     let (kind, id) = match view {
         ResourceScope::Snapshot(id) => ("snapshot", id),
         ResourceScope::Edit(id) => ("edit", id),
@@ -767,21 +764,21 @@ fn view_path(scope: NativeLibraryScope, entity: Id, view: &ResourceScope) -> Str
 
 /// 取得元と作品の鍵から、この利用者が今読む版。棚に無ければ誤り。
 /// 取得元と作品の鍵から、棚の作品（一覧と同じ形）を引く。本文の中のリンクと、検索欄の題の
-/// 候補から開くとき。棚に無い作品は 404 のまま返し、画面は旧 API と同じく他の手を探す。
+/// 候補から開くとき。棚に無い作品は 404 のまま返し、画面が他の手を探す。
 #[tauri::command]
-pub async fn pc_native_lookup_work(
+pub async fn pc_lookup_work(
     state: State<'_, PcClientState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     provider: String,
     key: String,
-) -> Result<MobileShelfWork, ClientError> {
+) -> Result<MobileWork, ClientError> {
     let found = lookup(&state, library, &provider, &key).await?;
     Ok(work_detail(&state, library, found.entity_id).await?.work)
 }
 
 pub(super) async fn lookup(
     state: &PcClientState,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     provider: &str,
     key: &str,
 ) -> Result<WorkReadingView, ClientError> {
@@ -804,7 +801,7 @@ pub(super) async fn lookup(
 
 pub(super) async fn bundle(
     state: &PcClientState,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     entity: Id,
     view: ResourceScope,
 ) -> Result<ReaderBundle, ClientError> {
@@ -825,7 +822,7 @@ pub(super) async fn bundle(
 /// 資産の部分実体を、保存したときの圧縮のまま受け取る。中身の確認は呼び手が行う。
 pub(super) async fn chunk(
     state: &PcClientState,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     entity: Id,
     view: &ResourceScope,
     resource: &ResourceReference,
@@ -856,9 +853,9 @@ pub(super) async fn chunk(
 }
 
 #[tauri::command]
-pub async fn pc_native_bundle(
+pub async fn pc_bundle(
     state: State<'_, PcClientState>,
-    scope: NativeLibraryScope,
+    scope: ShelfScope,
     entity: Id,
     view: ResourceScope,
 ) -> Result<ReaderBundle, ClientError> {
@@ -893,7 +890,7 @@ mod tests {
     }
 
     #[test]
-    fn native_identity_requires_the_wire_format_and_confirmed_header_scope() {
+    fn shelf_identity_requires_the_wire_format_and_confirmed_header_scope() {
         tauri::async_runtime::block_on(async {
             let shelf = identity();
             let wire_headers = headers(&shelf);
@@ -927,10 +924,10 @@ mod tests {
     }
 
     #[test]
-    fn following_reads_reject_a_changed_scope_and_separate_permission_from_v1_revocation() {
+    fn following_reads_reject_a_changed_scope_and_separate_permission_from_revocation() {
         tauri::async_runtime::block_on(async {
             let shelf = identity();
-            let scope = NativeLibraryScope {
+            let scope = ShelfScope {
                 library_id: shelf.library_id,
                 subject_id: shelf.subject_id,
                 sync_epoch: shelf.sync_epoch,
@@ -959,7 +956,7 @@ mod tests {
     fn a_favorite_conflict_returns_the_current_value_and_a_changed_shelf_stays_a_change() {
         tauri::async_runtime::block_on(async {
             let shelf = identity();
-            let scope = NativeLibraryScope {
+            let scope = ShelfScope {
                 library_id: shelf.library_id,
                 subject_id: shelf.subject_id,
                 sync_epoch: shelf.sync_epoch,
@@ -974,7 +971,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 stored,
-                NativeFavorite {
+                ShelfFavorite {
                     favorite: true,
                     generation: "3".into(),
                     conflict: false

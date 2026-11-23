@@ -2,8 +2,8 @@
 
 use super::device_db::DeviceDb;
 use super::image_validation::validate_saved_image;
-use super::native_library::{self, NativeLibraryScope};
-use super::native_reader;
+use super::shelf::{self, ShelfScope};
+use super::shelf_reader;
 use super::*;
 use piep_library_protocol::{Id, ResourceScope, WorkReadingView};
 use piep_reader_render::pages::reader_outline;
@@ -49,7 +49,7 @@ impl OfflineKey {
         (!id.is_nil() && id.to_string() == text).then_some(Self(id))
     }
 
-    fn of(work: &piep_mobile_api::MobileShelfWork) -> Option<Self> {
+    fn of(work: &piep_mobile_api::MobileWork) -> Option<Self> {
         Self::parse(&work.id)
     }
 
@@ -171,17 +171,15 @@ impl OfflineState {
 #[serde(rename_all = "camelCase")]
 pub struct OfflineWork {
     /// 棚の一覧と同じ形で残す。
-    pub work: piep_mobile_api::MobileShelfWork,
+    pub work: piep_mobile_api::MobileWork,
     /// 保存した棚の UUID。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shelf_library: Option<String>,
+    pub shelf_library: String,
     #[serde(default)]
     pub people: Vec<MobilePerson>,
     #[serde(default)]
     pub series: Vec<MobileSeriesMembership>,
     pub saved_at_ms: u64,
     pub saved_version: i64,
-    pub saved_content_hash: Option<String>,
     pub saved_edit_hash: Option<String>,
     pub page_count: usize,
     #[serde(default)]
@@ -194,9 +192,7 @@ pub struct OfflineWork {
     pub has_author_cover: bool,
     #[serde(default)]
     pub has_series_cover: bool,
-    #[serde(default)]
     pub author_cover_entity: Option<OfflineEntityKey>,
-    #[serde(default)]
     pub series_cover_entity: Option<OfflineEntityKey>,
 }
 
@@ -258,15 +254,11 @@ struct Manifest {
     summary: OfflineWork,
     pages: Vec<PageRecord>,
     assets: Vec<AssetRecord>,
-    #[serde(default)]
     cover: Option<CoverRecord>,
-    #[serde(default)]
     author_cover: Option<CoverRecord>,
-    #[serde(default)]
     series_cover: Option<CoverRecord>,
     #[serde(default)]
     collection_covers: Vec<CollectionCoverRecord>,
-    #[serde(default)]
     outline_sha256: Option<String>,
 }
 
@@ -733,13 +725,13 @@ fn publish_snapshot(
 pub async fn offline_save_shelf_work(
     pc: State<'_, PcClientState>,
     state: State<'_, OfflineState>,
-    library: NativeLibraryScope,
+    library: ShelfScope,
     work: Id,
 ) -> Result<OfflineWork, ClientError> {
     let _save_guard = state.save_lock.lock().await;
     let key = OfflineKey(work.get());
     state.work_dir(&key)?;
-    let detail = native_library::work_detail(&pc, library, work).await?;
+    let detail = shelf::work_detail(&pc, library, work).await?;
     if let Ok((existing, _)) = read_manifest(&state, &key)
         && (existing.summary.work.source != detail.work.source
             || existing.summary.work.source_id != detail.work.source_id)
@@ -759,7 +751,7 @@ pub async fn offline_save_shelf_work(
 }
 
 /// 棚が今出している版と、作品の画面で見た版が同じか。
-fn same_view(view: &WorkReadingView, work: &piep_mobile_api::MobileShelfWork) -> bool {
+fn same_view(view: &WorkReadingView, work: &piep_mobile_api::MobileWork) -> bool {
     view.snapshot_id.get().to_string() == work.snapshot_id
         && view.edit_id.map(|id| id.get().to_string()) == work.edit_id
 }
@@ -768,14 +760,14 @@ async fn save_shelf_into(
     pc: &PcClientState,
     client: &reqwest::Client,
     saved: &SavedConnection,
-    library: NativeLibraryScope,
-    detail: &piep_mobile_api::MobileShelfWorkDetail,
+    library: ShelfScope,
+    detail: &piep_mobile_api::MobileWorkDetail,
     staging: &Path,
 ) -> Result<Manifest, ClientError> {
     fs::create_dir(staging.join("pages")).map_err(|_| storage())?;
     fs::create_dir(staging.join("assets")).map_err(|_| storage())?;
     let work = &detail.work;
-    let found = native_library::lookup(pc, library, &work.source, &work.source_id).await?;
+    let found = shelf::lookup(pc, library, &work.source, &work.source_id).await?;
     // 作品の画面を出した後に改稿・編集されていれば、画面と違う版を保存しない。
     if found.entity_id.get().to_string() != work.id || !same_view(&found, work) {
         return Err(ClientError::remote());
@@ -784,8 +776,8 @@ async fn save_shelf_into(
         Some(edit) => ResourceScope::Edit(edit),
         None => ResourceScope::Snapshot(found.snapshot_id),
     };
-    let bundle = native_library::bundle(pc, library, found.entity_id, view).await?;
-    let document = native_reader::build(library, bundle)?;
+    let bundle = shelf::bundle(pc, library, found.entity_id, view).await?;
+    let document = shelf_reader::build(library, bundle)?;
     let page_count = document.pages().len();
     if page_count == 0 || page_count > MAX_PAGES || document.image_count() > MAX_ASSETS {
         return Err(ClientError::remote());
@@ -799,7 +791,6 @@ async fn save_shelf_into(
             html: html.clone(),
             total_plain_text_chars: document.text_chars(),
             source_page_starts: document.source_page_starts().to_vec(),
-            revision: None,
         };
         let bytes = serde_json::to_vec(&page).map_err(|_| storage())?;
         if bytes.len() > MAX_PAGE_BYTES {
@@ -823,9 +814,8 @@ async fn save_shelf_into(
         if target.file.length > MAX_ASSET_BYTES as u64 {
             return Err(ClientError::remote());
         }
-        let bytes = native_reader::fetch_image(pc, &target).await?;
-        let mime_type =
-            super::cover_protocol::sniffed_mime(&bytes).ok_or_else(ClientError::protocol)?;
+        let bytes = shelf_reader::fetch_image(pc, &target).await?;
+        let mime_type = piep_storage::sniff_image(&bytes).ok_or_else(ClientError::protocol)?;
         validate_saved_image(&bytes, mime_type)?;
         total_bytes = total_bytes
             .checked_add(bytes.len())
@@ -912,7 +902,7 @@ async fn save_shelf_into(
     // 作品の入ったコレクション（読む画面の欄と、保存した作品の一覧の絞り込みに使う）。
     let work_id = Id::new(uuid::Uuid::parse_str(&work.id).map_err(|_| ClientError::protocol())?)
         .map_err(|_| ClientError::protocol())?;
-    let collections = native_library::work_collections(pc, library, work_id).await?;
+    let collections = shelf::work_collections(pc, library, work_id).await?;
     let collection_positions = collections
         .iter()
         .filter_map(|collection| {
@@ -935,13 +925,13 @@ async fn save_shelf_into(
         .map(|record| record.collection_id.clone())
         .collect();
     // 受け取っている間に版が変わっていれば、混ざった版を保存しない。
-    let latest = native_library::lookup(pc, library, &work.source, &work.source_id).await?;
+    let latest = shelf::lookup(pc, library, &work.source, &work.source_id).await?;
     if latest.entity_id != found.entity_id || !same_view(&latest, work) {
         return Err(ClientError::remote());
     }
     let summary = OfflineWork {
         work: work.clone(),
-        shelf_library: Some(library.library_id().get().to_string()),
+        shelf_library: library.library_id().get().to_string(),
         people: detail.people.clone(),
         series: detail.series.clone(),
         saved_at_ms: SystemTime::now()
@@ -949,8 +939,7 @@ async fn save_shelf_into(
             .map_err(|_| storage())?
             .as_millis() as u64,
         saved_version: work.current_version,
-        // 版は、残した作品の版と編集の UUID で見分ける（本文のハッシュは持たない）。
-        saved_content_hash: None,
+        // 版は、残した作品の版と編集の UUID で見分ける。
         saved_edit_hash: work.edit_id.as_ref().map(|id| format!("edit:{id}")),
         page_count,
         collections,
@@ -1188,7 +1177,7 @@ pub(super) mod tests {
     ) -> serde_json::Value {
         serde_json::json!({
             "work": work_json(key, source_id, title), "shelfLibrary": Uuid::from_u128(2).to_string(),
-            "savedAtMs": 1, "savedVersion": 1, "savedContentHash": null,
+            "savedAtMs": 1, "savedVersion": 1,
             "savedEditHash": null, "pageCount": pages
         })
     }
@@ -1320,7 +1309,7 @@ pub(super) mod tests {
             },
         )
         .unwrap();
-        // 置き場の名前として正しくないもの（旧 API の番号の置き場を含む）は見ない。
+        // 置き場の名前として正しくないもの（番号だけの置き場を含む）は見ない。
         for name in [
             key(4).dir_name(),
             format!("shelf-{}", Uuid::nil()),
@@ -1371,8 +1360,8 @@ pub(super) mod tests {
             {"source": "pixiv", "key": "anthology", "title": "短編集", "contentOrder": null}
         ]);
         let snapshot = serde_json::json!({
-            "work": work, "people": people, "series": series,
-            "savedAtMs": 1, "savedVersion": 1, "savedContentHash": null,
+            "work": work, "shelfLibrary": Uuid::from_u128(2).to_string(),
+            "people": people, "series": series, "savedAtMs": 1, "savedVersion": 1,
             "savedEditHash": null, "pageCount": 1,
             "hasAuthorCover": true, "hasSeriesCover": true,
             "authorCoverEntity": {"source": "pixiv", "key": "co-author"},
@@ -1546,7 +1535,7 @@ pub(super) mod tests {
                     "seriesTitle": null, "seriesId": null, "sourceCreatedAt": null,
                     "savedAt": "2026-11-19T00:00:00Z"
                 }, "shelfLibrary": Uuid::now_v7().to_string(), "savedAtMs": 1, "savedVersion": 2,
-                    "savedContentHash": null, "savedEditHash": null,
+                    "savedEditHash": null,
                     "pageCount": 1},
                 "pages": [{"page": 0, "sha256": digest(&page)}],
                 "assets": [{"id": 0, "mimeType": "image/png", "sha256": digest(image)}]

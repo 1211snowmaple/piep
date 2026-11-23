@@ -26,8 +26,7 @@ const tabs: [LibraryTab, string, ReactNode][] = [
 /** 読みかけの棚。サーバーへは問い合わせず、この端末で読んだ記録から並べる。 */
 function ReadingShelf({ finished = false, savedRevision, onOpenWork, onOpenDetail, onSaved }: { finished?: boolean; savedRevision: number; onOpenWork: (work: PcWork) => void; onOpenDetail: (work: PcWork) => void; onSaved: () => void }) {
   const items = useReadingShelf(finished);
-  const works = useMemo(() => items.map((item) => item.work), [items]);
-  const savedState = useSavedStates(works, savedRevision, true);
+  const savedState = useSavedStates(savedRevision);
   return <>
     <div className="results-bar"><h2>{finished ? "読了" : "読みかけ"}</h2><span>この端末で読んだ {items.length} 作品</span></div>
     {items.length ? <VirtualWorkList listKey={finished ? "finished-shelf" : "reading-shelf"} items={items} itemKey={(item) => item.work.id} renderItem={(item) => <WorkCard work={item.work} prefix={finished ? "読了" : `${readingPercent(item.progress)}%`} savedState={savedState(item.work)} onSaved={onSaved} onRead={() => onOpenWork(item.work)} onDetail={() => onOpenDetail(item.work)} />} />
@@ -128,7 +127,7 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
   }
 
   return <>
-    <SearchField value={input} label={`${target}を検索`} placeholder={tab === "works" ? "作品・作者・本文を検索" : `${target}を検索`} onChange={setInput} onSubmit={submitSearch} onSuggestion={tab === "works" && status?.nativeLibrary ? (item) => {
+    <SearchField value={input} label={`${target}を検索`} placeholder={tab === "works" ? "作品・作者・本文を検索" : `${target}を検索`} onChange={setInput} onSubmit={submitSearch} onSuggestion={tab === "works" && status?.shelf ? (item) => {
       if (item.kind === "tag") navigation.openTag(item.value);
       else if ((item.kind === "author" || item.kind === "series") && item.source && item.sourceKey) navigation.openEntity(item.kind === "author" ? "person" : "series", item.source, item.sourceKey, item.label);
       else if (item.kind === "author") changeCriteria({ ...criteria, text: "", author: item.label });

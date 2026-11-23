@@ -21,7 +21,7 @@ export async function followContentLink(raw: string, navigation: AppNavigation):
           navigation.openEntity(target.kind, target.source, target.sourceKey, entity.displayName);
           return;
         }
-      } catch { /* 旧サーバー・圏外では保存済みの宛先を探す。 */ }
+      } catch { /* 棚に無い・圏外のときは保存済みの宛先を探す。 */ }
     }
     try {
       const saved = await listOfflineWorks();

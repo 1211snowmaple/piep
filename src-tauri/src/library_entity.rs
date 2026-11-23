@@ -82,14 +82,21 @@ pub struct SeriesFacet {
 #[serde(rename_all = "snake_case")]
 pub enum SeriesSort {
     WorkCount,
-    DownloadedAt,
-    SourceCreatedAt,
-    SourceUpdatedAt,
+    /// 中の作品の最も新しい保存日。
+    Saved,
+    /// 中の作品の最も新しい公開日。
+    Published,
+    /// 中の作品の最も新しい更新日。
+    Updated,
     Name,
-    TextLength,
-    FileSizeBytes,
-    AssetCount,
-    CurrentVersion,
+    /// 中の作品の合計の文字数。
+    Length,
+    /// 中の作品の合計の容量。
+    Size,
+    /// 中の作品の合計の添付数。
+    Media,
+    /// 中の作品の改稿の合計。
+    Version,
 }
 
 impl SeriesSort {
@@ -494,13 +501,13 @@ impl Library {
         let key = |item: &SeriesFacet| -> i64 {
             match sort {
                 SeriesSort::WorkCount => item.work_count as i64,
-                SeriesSort::DownloadedAt => item.latest_saved_at,
-                SeriesSort::SourceCreatedAt => item.latest_published_at,
-                SeriesSort::SourceUpdatedAt => item.latest_updated_at,
-                SeriesSort::TextLength => item.total_text_length as i64,
-                SeriesSort::FileSizeBytes => item.total_size as i64,
-                SeriesSort::AssetCount => item.total_media as i64,
-                SeriesSort::CurrentVersion => item.total_revisions as i64,
+                SeriesSort::Saved => item.latest_saved_at,
+                SeriesSort::Published => item.latest_published_at,
+                SeriesSort::Updated => item.latest_updated_at,
+                SeriesSort::Length => item.total_text_length as i64,
+                SeriesSort::Size => item.total_size as i64,
+                SeriesSort::Media => item.total_media as i64,
+                SeriesSort::Version => item.total_revisions as i64,
                 SeriesSort::Name => 0,
             }
         };

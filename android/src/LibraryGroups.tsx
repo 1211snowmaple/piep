@@ -2,7 +2,7 @@ import { Icons } from "./icons";
 import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { getPcCollection, listPcCollections, listPcEntities, pcErrorMessage, type PcCollection, type PcEntity, type PcWork } from "./pcApi";
-import { nativeShelfKey } from "./nativeReading";
+import { connectedShelfKey } from "./shelf";
 import { WorkCard } from "./WorkCard";
 import { ProviderMark } from "./ProviderMark";
 import { CollectionArtwork } from "./CollectionArtwork";
@@ -40,7 +40,7 @@ export function EntityBrowser({ kind, query, sort, onOpen }: {
 }) {
   const noun = kind === "people" ? "作者・クリエイター" : "シリーズ";
   const list = useInfiniteQuery({
-    queryKey: ["entities", kind, query, sort, nativeShelfKey()],
+    queryKey: ["entities", kind, query, sort, connectedShelfKey()],
     queryFn: ({ pageParam }) => listPcEntities(kind, query, pageParam, splitEntitySort(sort)),
     initialPageParam: 0,
     getNextPageParam: (last) => last.nextOffset ?? undefined,
@@ -69,7 +69,7 @@ export function CollectionCard({ collection, onOpen }: { collection: PcCollectio
 }
 
 export function CollectionBrowser({ query, onOpen }: { query: string; onOpen: (collection: PcCollection) => void }) {
-  const list = useQuery({ queryKey: ["collections", nativeShelfKey()], queryFn: listPcCollections });
+  const list = useQuery({ queryKey: ["collections", connectedShelfKey()], queryFn: listPcCollections });
   useStatusRecovery(list.error);
   const items = list.data ?? [];
   const needle = query.toLocaleLowerCase();
@@ -83,13 +83,12 @@ export function CollectionBrowser({ query, onOpen }: { query: string; onOpen: (c
 }
 
 export function CollectionMembers({ collectionId, query, savedRevision, onOpenWork, onOpenDetail, onSaved }: { collectionId: string; query: string; savedRevision: number; onOpenWork: (work: PcWork) => void; onOpenDetail: (work: PcWork) => void; onSaved: () => void }) {
-  const detail = useQuery({ queryKey: ["collection", collectionId, nativeShelfKey()], queryFn: () => getPcCollection(collectionId) });
+  const detail = useQuery({ queryKey: ["collection", collectionId, connectedShelfKey()], queryFn: () => getPcCollection(collectionId) });
   useStatusRecovery(detail.error);
   const selected = detail.data;
   const needle = query.trim().toLocaleLowerCase();
   const members = selected?.members.filter((member) => !needle || `${member.title} ${member.authorName} ${member.work?.seriesTitle ?? ""} ${member.work?.tags.join(" ") ?? ""}`.toLocaleLowerCase().includes(needle)) ?? [];
-  const memberWorks = useMemo(() => members.flatMap((member) => member.work ? [member.work] : []), [selected, needle]);
-  const savedState = useSavedStates(memberWorks, savedRevision, true);
+  const savedState = useSavedStates(savedRevision);
   return <section className="group-browser">
     {detail.error ? <div className="inline-alert" role="alert">{pcErrorMessage(detail.error)}</div> : null}
     {detail.isPending ? <GroupSkeleton /> : selected && <>

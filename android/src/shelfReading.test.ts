@@ -17,7 +17,7 @@ const document = { key: "k", entityId: work, view: { kind: "snapshot" as const, 
 function status(reachable = true) {
   return {
     url: "https://server", reachable,
-    nativeLibrary: {
+    shelf: {
       scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
       readerBundle: true,
     },
@@ -34,31 +34,31 @@ beforeEach(() => {
 });
 
 it("位置を棚の作品と開いた版に結んで置き、同期で棚と受け渡す", async () => {
-  const native = await import("./nativeReading");
+  const shelf = await import("./shelf");
   const sync = await import("./readingSync");
-  native.adoptNativeLibrary(status());
-  const shelf = sync.shelfReadingFor(document);
-  expect(shelf).toBe(document);
+  shelf.adoptShelf(status());
+  const reading = sync.shelfReadingFor(document);
+  expect(reading).toBe(document);
   await sync.recordShelfReading(work, sync.shelfLocation(document, 1, 0.25), false);
-  expect(api.invoke).toHaveBeenLastCalledWith("pc_native_reading_record", {
+  expect(api.invoke).toHaveBeenLastCalledWith("pc_reading_record", {
     scope: expect.objectContaining({ libraryId: library }), work,
     location: { viewKind: "snapshot", viewId: snapshot, page: 1, ratioPpm: 250_000 }, finished: false,
   });
   await sync.sendReading();
-  expect(api.invoke.mock.calls.map(([command]) => command)).toEqual(["pc_native_reading_record", "pc_native_reading_sync"]);
+  expect(api.invoke.mock.calls.map(([command]) => command)).toEqual(["pc_reading_record", "pc_reading_sync"]);
   await sync.readShelfPosition(work);
-  expect(api.invoke).toHaveBeenLastCalledWith("pc_native_reading_get", { scope: expect.objectContaining({ libraryId: library }), work });
+  expect(api.invoke).toHaveBeenLastCalledWith("pc_reading_get", { scope: expect.objectContaining({ libraryId: library }), work });
 });
 
 it("棚に届かないときや同期を切ったときは、棚へ書かない", async () => {
-  const native = await import("./nativeReading");
+  const shelf = await import("./shelf");
   const sync = await import("./readingSync");
-  native.adoptNativeLibrary(status(false));
+  shelf.adoptShelf(status(false));
   expect(sync.shelfReadingFor(document)).toBeNull();
   await sync.recordShelfReading(work, sync.shelfLocation(document, 0, 0), false);
   await sync.sendReading();
   expect(api.invoke).not.toHaveBeenCalled();
-  native.adoptNativeLibrary(status());
+  shelf.adoptShelf(status());
   sync.setReadingSyncEnabled(false);
   expect(sync.shelfReadingFor(document)).toBeNull();
 });

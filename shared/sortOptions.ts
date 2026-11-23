@@ -13,24 +13,24 @@ export type SortOption = { value: SortChoice; label: string };
  * one list so a work remains sortable the same way wherever it is shown.
  */
 export const WORK_SORT_OPTIONS: SortOption[] = [
-  { value: "downloaded_at:desc", label: "保存日：新しい順" },
-  { value: "downloaded_at:asc", label: "保存日：古い順" },
-  { value: "source_created_at:desc", label: "公開日：新しい順" },
-  { value: "source_created_at:asc", label: "公開日：古い順" },
-  { value: "source_updated_at:desc", label: "更新日：新しい順" },
-  { value: "source_updated_at:asc", label: "更新日：古い順" },
+  { value: "saved:desc", label: "保存日：新しい順" },
+  { value: "saved:asc", label: "保存日：古い順" },
+  { value: "published:desc", label: "公開日：新しい順" },
+  { value: "published:asc", label: "公開日：古い順" },
+  { value: "updated:desc", label: "更新日：新しい順" },
+  { value: "updated:asc", label: "更新日：古い順" },
   { value: "title:asc", label: "タイトル：昇順（あ→ん）" },
   { value: "title:desc", label: "タイトル：降順（ん→あ）" },
-  { value: "author_name:asc", label: "作者名：昇順（あ→ん）" },
-  { value: "author_name:desc", label: "作者名：降順（ん→あ）" },
-  { value: "text_length:desc", label: "文字数：多い順" },
-  { value: "text_length:asc", label: "文字数：少ない順" },
-  { value: "file_size_bytes:desc", label: "容量：大きい順" },
-  { value: "file_size_bytes:asc", label: "容量：小さい順" },
-  { value: "asset_count:desc", label: "添付数：多い順" },
-  { value: "asset_count:asc", label: "添付数：少ない順" },
-  { value: "current_version:desc", label: "版番号：大きい順" },
-  { value: "current_version:asc", label: "版番号：小さい順" },
+  { value: "author:asc", label: "作者名：昇順（あ→ん）" },
+  { value: "author:desc", label: "作者名：降順（ん→あ）" },
+  { value: "length:desc", label: "文字数：多い順" },
+  { value: "length:asc", label: "文字数：少ない順" },
+  { value: "size:desc", label: "容量：大きい順" },
+  { value: "size:asc", label: "容量：小さい順" },
+  { value: "media:desc", label: "添付数：多い順" },
+  { value: "media:asc", label: "添付数：少ない順" },
+  { value: "version:desc", label: "版番号：大きい順" },
+  { value: "version:asc", label: "版番号：小さい順" },
 ];
 
 export const SERIES_ORDER_SORT_OPTIONS: SortOption[] = [
@@ -49,22 +49,22 @@ export const SEARCH_SORT_OPTIONS: SortOption[] = [RELEVANCE_SORT_OPTION, ...WORK
 export const ENTITY_SORT_OPTIONS: SortOption[] = [
   { value: "work_count:desc", label: "作品数：多い順" },
   { value: "work_count:asc", label: "作品数：少ない順" },
-  { value: "downloaded_at:desc", label: "保存日：新しい順" },
-  { value: "downloaded_at:asc", label: "保存日：古い順" },
-  { value: "source_created_at:desc", label: "公開日：新しい順" },
-  { value: "source_created_at:asc", label: "公開日：古い順" },
-  { value: "source_updated_at:desc", label: "更新日：新しい順" },
-  { value: "source_updated_at:asc", label: "更新日：古い順" },
+  { value: "saved:desc", label: "保存日：新しい順" },
+  { value: "saved:asc", label: "保存日：古い順" },
+  { value: "published:desc", label: "公開日：新しい順" },
+  { value: "published:asc", label: "公開日：古い順" },
+  { value: "updated:desc", label: "更新日：新しい順" },
+  { value: "updated:asc", label: "更新日：古い順" },
   { value: "name:asc", label: "名前：昇順（あ→ん）" },
   { value: "name:desc", label: "名前：降順（ん→あ）" },
-  { value: "text_length:desc", label: "合計文字数：多い順" },
-  { value: "text_length:asc", label: "合計文字数：少ない順" },
-  { value: "file_size_bytes:desc", label: "合計容量：大きい順" },
-  { value: "file_size_bytes:asc", label: "合計容量：小さい順" },
-  { value: "asset_count:desc", label: "合計添付数：多い順" },
-  { value: "asset_count:asc", label: "合計添付数：少ない順" },
-  { value: "current_version:desc", label: "改稿回数：多い順" },
-  { value: "current_version:asc", label: "改稿回数：少ない順" },
+  { value: "length:desc", label: "合計文字数：多い順" },
+  { value: "length:asc", label: "合計文字数：少ない順" },
+  { value: "size:desc", label: "合計容量：大きい順" },
+  { value: "size:asc", label: "合計容量：小さい順" },
+  { value: "media:desc", label: "合計添付数：多い順" },
+  { value: "media:asc", label: "合計添付数：少ない順" },
+  { value: "version:desc", label: "改稿回数：多い順" },
+  { value: "version:asc", label: "改稿回数：少ない順" },
 ];
 
 export const COLLECTION_SORT_OPTIONS: SortOption[] = [
@@ -78,15 +78,15 @@ export const COLLECTION_SORT_OPTIONS: SortOption[] = [
   { value: "member_count:asc", label: "登録作品数：少ない順" },
   { value: "available_count:desc", label: "保存済み作品数：多い順" },
   { value: "available_count:asc", label: "保存済み作品数：少ない順" },
-  { value: "text_length:desc", label: "合計文字数：多い順" },
-  { value: "text_length:asc", label: "合計文字数：少ない順" },
+  { value: "length:desc", label: "合計文字数：多い順" },
+  { value: "length:asc", label: "合計文字数：少ない順" },
   { value: "revision:desc", label: "更新回数：多い順" },
   { value: "revision:asc", label: "更新回数：少ない順" },
 ];
 
 export function defaultSortOrderFor(sortBy: string): SortOrder {
   return sortBy === "title"
-    || sortBy === "author_name"
+    || sortBy === "author"
     || sortBy === "name"
     || sortBy === "series_order"
     ? "asc"

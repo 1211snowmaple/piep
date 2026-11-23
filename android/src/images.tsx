@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactEventHandler } from "react";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import type { PcCollection, PcWork } from "./pcApi";
-import { shelfCoverPath, shelfEntityCoverPath } from "./nativeReading";
+import { shelfCoverPath, shelfEntityCoverPath } from "./shelf";
 
 // WebView の HTTP キャッシュも接続ごとに分ける。Rust 側のディスクキャッシュ
 // だけを分けても、同じ URL が先に WebView から返されてしまう。

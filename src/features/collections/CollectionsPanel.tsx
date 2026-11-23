@@ -48,7 +48,7 @@ export function sortCollections(items: WorkCollectionSummary[], sortBy: Collecti
   if (sortBy === "name") return sorted.sort((a, b) => direction * a.name.localeCompare(b.name, "ja") || String(a.id).localeCompare(String(b.id)));
   if (sortBy === "member_count") return sorted.sort((a, b) => direction * (a.memberCount - b.memberCount) || a.name.localeCompare(b.name, "ja"));
   if (sortBy === "available_count") return sorted.sort((a, b) => direction * (a.availableCount - b.availableCount) || a.name.localeCompare(b.name, "ja"));
-  if (sortBy === "text_length") return sorted.sort((a, b) => direction * (a.totalTextLength - b.totalTextLength) || a.name.localeCompare(b.name, "ja"));
+  if (sortBy === "length") return sorted.sort((a, b) => direction * (a.totalTextLength - b.totalTextLength) || a.name.localeCompare(b.name, "ja"));
   if (sortBy === "revision") return sorted.sort((a, b) => direction * (a.revision - b.revision) || a.name.localeCompare(b.name, "ja"));
   if (sortBy === "updated_at") return sorted.sort((a, b) => direction * a.updatedAt.localeCompare(b.updatedAt) || String(a.id).localeCompare(String(b.id)));
   return sorted.sort((a, b) => direction * a.createdAt.localeCompare(b.createdAt) || String(a.id).localeCompare(String(b.id)));

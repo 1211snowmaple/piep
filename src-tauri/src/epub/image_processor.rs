@@ -10,27 +10,29 @@ use std::io::Cursor;
 use std::path::Path;
 use zenjpeg::encoder::{ChromaSubsampling, EncoderConfig, PixelLayout, Unstoppable};
 
-/// ファイルの中身から media-type を見分ける。
+/// ファイルの中身から media-type を見分ける（棚・携帯と同じ `piep_storage::sniff_image`）。
 ///
-/// 見分けられなければ `None` を返し、呼び手が拡張子に頼る。SVG は中身が
-/// テキストなので `image` crate では見分けられず、拡張子のままでよい。
+/// EPUB 3 の中核の形式でなければ `None` を返し、呼び手が拡張子に頼る。SVG は中身が
+/// テキストなので見分けられず、拡張子のままでよい。
 fn sniff_image_mime(path: &Path) -> Option<&'static str> {
-    let format = ImageReader::open(path)
+    use std::io::Read;
+    let mut head = Vec::with_capacity(piep_storage::SNIFF_BYTES);
+    std::fs::File::open(path)
         .ok()?
-        .with_guessed_format()
-        .ok()?
-        .format()?;
-    format_mime(format)
+        .take(piep_storage::SNIFF_BYTES as u64)
+        .read_to_end(&mut head)
+        .ok()?;
+    core_mime(&head)
 }
 
-fn format_mime(format: ImageFormat) -> Option<&'static str> {
-    match format {
-        ImageFormat::Jpeg => Some("image/jpeg"),
-        ImageFormat::Png => Some("image/png"),
-        ImageFormat::WebP => Some("image/webp"),
-        ImageFormat::Gif => Some("image/gif"),
-        _ => None,
-    }
+/// 中身が EPUB 3 の中核の画像（JPEG・PNG・WebP・GIF）なら、その media-type。
+fn core_mime(bytes: &[u8]) -> Option<&'static str> {
+    piep_storage::sniff_image(bytes).filter(|mime| {
+        matches!(
+            *mime,
+            "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+        )
+    })
 }
 
 /// 画像を圧縮・リサイズし、バイト列として返す。
@@ -125,10 +127,7 @@ pub fn process_image_bytes(
     let reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| format!("画像デコードエラー: {}", e))?;
-    let original_mime = reader
-        .format()
-        .and_then(format_mime)
-        .ok_or_else(|| "画像の形式が分かりません".to_string())?;
+    let original_mime = core_mime(bytes).ok_or_else(|| "画像の形式が分かりません".to_string())?;
     if !options.enabled || original_mime == "image/gif" {
         return Ok((bytes.to_vec(), original_mime.to_string()));
     }

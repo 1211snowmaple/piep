@@ -2,35 +2,6 @@
 // 元は crates/piep-mobile-api/src/lib.rs。直すときはそちらを直して、
 // `cargo run --manifest-path tools/api-types/Cargo.toml -- --repo .` で生成し直す。
 
-export interface MobileWork {
-  id: number;
-  source: string;
-  sourceId: string;
-  title: string;
-  authorName: string;
-  authorId: string;
-  contentType: string;
-  tags: string[];
-  excerpt: string | null;
-  textLength: number;
-  assetCount: number;
-  hasCover: boolean;
-  currentVersion: number;
-  contentHash: string | null;
-  favorite: boolean;
-  seriesTitle: string | null;
-  seriesId: string | null;
-  sourceCreatedAt: string | null;
-  savedAt: string;
-}
-
-export interface MobileSearchPage {
-  items: MobileWork[];
-  nextCursor: string | null;
-  totalEstimate: number | null;
-  indexComplete: boolean;
-}
-
 export interface MobileEntity {
   source: string;
   sourceKey: string;
@@ -84,7 +55,6 @@ export interface MobileCollection {
   collectionKind: string;
   memberCount: number;
   availableCount: number;
-  coverWorkId: number | null;
   coverMode: string;
   coverRevision: number;
   hasSingleCover: boolean;
@@ -101,25 +71,6 @@ export interface MobileCollectionCoverTile {
   hasCover: boolean;
 }
 
-export interface MobileCollectionMember {
-  title: string;
-  authorName: string;
-  position: number;
-  work: MobileWork | null;
-}
-
-export interface MobileCollectionDetail extends MobileCollection {
-  members: MobileCollectionMember[];
-}
-
-export interface MobileVersion {
-  version: number;
-  contentHash: string | null;
-  textLength: number;
-  assetCount: number;
-  createdAt: string;
-}
-
 export interface MobilePerson {
   source: string;
   key: string;
@@ -134,36 +85,16 @@ export interface MobileSeriesMembership {
   contentOrder: number | null;
 }
 
-export interface MobileMetadata {
-  work: MobileWork;
-  people: MobilePerson[];
-  series: MobileSeriesMembership[];
-  versions: MobileVersion[];
-  isEdited: boolean;
-  activeEditId: number | null;
-  activeEditHash: string | null;
-}
-
 export interface MobilePage {
   page: number;
   pageCount: number;
   html: string;
   totalPlainTextChars: number;
   sourcePageStarts: number[];
-  /** この本文がどの版のものか。端末が本文の前後でメタデータを取り直さずに済む。 */
-  /** サーバーは必ず入れる。端末に残っている古い保存分には無い。 */
-  revision?: MobileRevision;
 }
 
-/** 本文の版を見分ける三つ組み。`MobileMetadata` の同じ値と一致する。 */
-export interface MobileRevision {
-  currentVersion: number;
-  contentHash: string | null;
-  activeEditHash: string | null;
-}
-
-/** 棚の作品の一件（棚の UUID で指す）。項目は `MobileWork` に揃える。 */
-export interface MobileShelfWork {
+/** 棚の作品の一件（棚の UUID で指す）。 */
+export interface MobileWork {
   /** 作品の UUID。 */
   id: string;
   /** 今の保存版の UUID。版が変わると変わるので、表紙を取り直す目印になる。 */
@@ -198,14 +129,14 @@ export interface MobileShelfWork {
 
 /** 棚の作品のお気に入りを付け外しする。`request_id` は端末が作る UUID で、送り直しても */
 /** 一度だけ効く。`expected` は手元の更新世代（十進の文字列）。違えば 409 で今の値が返る。 */
-export interface MobileShelfFavoriteUpdate {
+export interface MobileFavoriteUpdate {
   requestId: string;
   expected: string;
   favorite: boolean;
 }
 
 /** お気に入りの今の値と更新世代（十進の文字列）。 */
-export interface MobileShelfFavorite {
+export interface MobileFavorite {
   favorite: boolean;
   generation: string;
 }
@@ -213,7 +144,7 @@ export interface MobileShelfFavorite {
 /** 棚の読書位置の場所。`view_kind` は `snapshot`（版の写し）か `edit`（編集）で、 */
 /** `view_id` はその UUID。ページは本文の区切り（pixiv の `[newpage]`、編集の改ページ）で数えた */
 /** 0 からの番号、`ratio_ppm` はそのページの中のスクロールの割合（百万分率）。 */
-export interface MobileShelfReadingLocation {
+export interface MobileReadingLocation {
   viewKind: string;
   viewId: string;
   page: number;
@@ -223,9 +154,9 @@ export interface MobileShelfReadingLocation {
 /** 棚の作品の読書位置（認証した利用者のもの）。`location` が空なのは、消した位置か、 */
 /** ページで表せない位置。`mine` はこの端末が書いた位置か。`updated_at` は棚が受けた時刻 */
 /** （ミリ秒）。`generation` は更新世代（十進の文字列。まだ位置が無ければ "0"）。 */
-export interface MobileShelfReading {
+export interface MobileReading {
   work: string;
-  location: MobileShelfReadingLocation | null;
+  location: MobileReadingLocation | null;
   finished: boolean;
   mine: boolean;
   updatedAt: number | null;
@@ -234,31 +165,31 @@ export interface MobileShelfReading {
 
 /** 読書位置の一覧の一ページ。初めは `cursor` を空で頼み、返った `cursor` を次へ渡す。 */
 /** `more` なら続きがある。続きが無くなったあとも、同じ `cursor` で変わった分だけを受け取れる。 */
-export interface MobileShelfReadingPage {
-  items: MobileShelfReading[];
+export interface MobileReadingPage {
+  items: MobileReading[];
   cursor: string;
   more: boolean;
 }
 
 /** 棚の作品の読書位置を書く。`request_id` は端末が作る UUID で、送り直しても一度だけ */
 /** 効く。`expected` は手元の更新世代（十進の文字列）。違えば 409 で今の位置が返る。 */
-export interface MobileShelfReadingUpdate {
+export interface MobileReadingUpdate {
   requestId: string;
   expected: string;
-  location: MobileShelfReadingLocation;
+  location: MobileReadingLocation;
   finished: boolean;
 }
 
 /** 棚の一覧の一ページ。続きは `next_cursor` を変えずに次の要求へ渡す。 */
-export interface MobileShelfPage {
-  items: MobileShelfWork[];
+export interface MobileWorkPage {
+  items: MobileWork[];
   nextCursor: string | null;
   totalEstimate: number | null;
   indexComplete: boolean;
 }
 
 /** 棚の作品の保存した版の一つ。 */
-export interface MobileShelfVersion {
+export interface MobileVersion {
   /** その版の写しの ID。以前の版を読むときはこの写しの本を引く。 */
   snapshotId: string;
   version: number;
@@ -268,12 +199,12 @@ export interface MobileShelfVersion {
 }
 
 /** 棚の作品の画面。`work.excerpt` は取得元の説明。 */
-export interface MobileShelfWorkDetail {
-  work: MobileShelfWork;
+export interface MobileWorkDetail {
+  work: MobileWork;
   people: MobilePerson[];
   series: MobileSeriesMembership[];
   /** 古い順。 */
-  versions: MobileShelfVersion[];
+  versions: MobileVersion[];
   /** 反映中の編集の基準の版。編集がなければ空。 */
   editBaseVersion: number | null;
 }
@@ -297,15 +228,15 @@ export interface MobileSearchSuggestions {
 }
 
 /** 棚のコレクションの一回。棚に無い（未保存の）回は `work` が空で、入れた時の題と作者。 */
-export interface MobileShelfCollectionMember {
+export interface MobileCollectionMember {
   title: string;
   authorName: string;
   position: number;
-  work: MobileShelfWork | null;
+  work: MobileWork | null;
 }
 
 /** 棚のコレクションの画面。`id` は棚の UUID、表紙は `cover_mode` の枠ごとに */
 /** `/collections/{id}/cover/{single|file|tile-N}` から引く。 */
-export interface MobileShelfCollectionDetail extends MobileCollection {
-  members: MobileShelfCollectionMember[];
+export interface MobileCollectionDetail extends MobileCollection {
+  members: MobileCollectionMember[];
 }

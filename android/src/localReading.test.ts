@@ -28,8 +28,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 const work: PcWork = {
   id: "w7", source: "pixiv", sourceId: "100", title: "作品", authorName: "作者", authorId: "1",
   contentType: "novel", tags: [], excerpt: null, textLength: 1, assetCount: 0, hasCover: false, favorite: false, seriesTitle: null, seriesId: null,
-  currentVersion: 2, contentHash: "abc",
-} as PcWork;
+  currentVersion: 2, snapshotId: "s1", edited: false, editId: null, favoriteGeneration: "0", sourceCreatedAt: null, savedAt: "2026-11-01T00:00:00Z",
+};
 const position = { page: 3, top: 40, ratio: 0.5, fontSize: 18, lineHeight: 1.8, readerWidth: 640, fontFamily: "serif" as const };
 
 async function fresh() {

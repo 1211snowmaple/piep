@@ -16,10 +16,10 @@ use axum::{
     response::Response,
     Extension,
 };
+use piep_mobile_api::MobileEntitySort;
 use piep_mobile_api::{
-    MobileCollection, MobileCollectionCoverTile, MobileEntity, MobileEntityDetail,
-    MobileEntityPage, MobileEntitySeriesPage, MobileFacet, MobileShelfCollectionDetail,
-    MobileShelfCollectionMember,
+    MobileCollection, MobileCollectionCoverTile, MobileCollectionDetail, MobileCollectionMember,
+    MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage, MobileFacet,
 };
 use serde::Deserialize;
 use std::collections::VecDeque;
@@ -71,12 +71,29 @@ fn text(value: Option<String>) -> Result<String, ApiError> {
     Ok(value)
 }
 
+/// 携帯の作者・シリーズの並べ方を棚の並べ方にする。名前は同じ。
+fn entity_sort(sort: MobileEntitySort) -> SeriesSort {
+    match sort {
+        MobileEntitySort::WorkCount => SeriesSort::WorkCount,
+        MobileEntitySort::Saved => SeriesSort::Saved,
+        MobileEntitySort::Published => SeriesSort::Published,
+        MobileEntitySort::Updated => SeriesSort::Updated,
+        MobileEntitySort::Name => SeriesSort::Name,
+        MobileEntitySort::Length => SeriesSort::Length,
+        MobileEntitySort::Size => SeriesSort::Size,
+        MobileEntitySort::Media => SeriesSort::Media,
+        MobileEntitySort::Version => SeriesSort::Version,
+    }
+}
+
 /// 並べる鍵と向き。向きを省くと鍵ごとの既定（名前だけ昇順）。
 fn sort(sort: Option<&str>, order: Option<&str>) -> Result<(SeriesSort, bool), ApiError> {
     let sort = match sort {
         None => SeriesSort::WorkCount,
-        Some(value) => serde_json::from_value(serde_json::Value::String(value.to_owned()))
-            .map_err(|_| invalid())?,
+        Some(value) => entity_sort(
+            serde_json::from_value(serde_json::Value::String(value.to_owned()))
+                .map_err(|_| invalid())?,
+        ),
     };
     let ascending = match order {
         None => sort.ascending_by_default(),
@@ -120,7 +137,6 @@ pub(super) fn mobile_collection(
         member_count: count(summary.member_count),
         available_count: count(summary.available_count),
         // 作品番号は無い。単独の表紙は `cover/single` から引く。
-        cover_work_id: None,
         cover_mode: summary.cover_mode,
         cover_revision: summary.revision,
         has_single_cover: summary.cover.is_some(),
@@ -590,14 +606,14 @@ pub(super) async fn collection(
                 }
                 None => None,
             };
-            members.push(MobileShelfCollectionMember {
+            members.push(MobileCollectionMember {
                 title: member.title,
                 author_name: member.author_name,
                 position: member.position,
                 work,
             });
         }
-        json(&MobileShelfCollectionDetail {
+        json(&MobileCollectionDetail {
             summary: mobile_collection(detail.summary, None),
             members,
         })

@@ -97,8 +97,6 @@
 .reader-scroll:focus-visible { outline: none; }
 .reading-paper { max-width: 680px; min-height: 100%; margin: 0 auto; padding: 28px 22px 48px; color: var(--reader-ink); font-family: "Noto Sans JP", "Yu Gothic UI", sans-serif; overflow-wrap: anywhere; }
 .reader-bars--auto .reading-paper { padding-top: 68px; }
-.reader-font--serif { font-family: "Noto Serif JP", "Yu Mincho", "Hiragino Mincho ProN", serif; }
-.reader-font--sans { font-family: "Noto Sans JP", "Yu Gothic UI", sans-serif; }
 .reader-eyebrow { margin-bottom: 8px; color: var(--reader-muted); font-family: system-ui, sans-serif; font-size: 12px; font-weight: 700; letter-spacing: .12em; }
 .reading-paper h1 { margin: 0 0 10px; color: inherit; font-size: clamp(20px, 1.18em, 30px); line-height: 1.4; }
 .reading-paper h2 { margin: 0 0 1.6em; font-size: 1.08em; line-height: 1.6; }

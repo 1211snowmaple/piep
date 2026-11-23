@@ -13,7 +13,6 @@ fn fill(staging: &Path, pages: &[&str]) -> Result<Manifest, ClientError> {
             html: format!("<p>{text}</p>"),
             total_plain_text_chars: 2,
             source_page_starts: vec![0],
-            revision: None,
         };
         let bytes = write_json(&staging.join("pages").join(format!("{index}.json")), &page)?;
         records.push(PageRecord {

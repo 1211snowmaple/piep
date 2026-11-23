@@ -1,6 +1,6 @@
 # Android 開発環境
 
-このリポジトリは Windows 版 piep の閲覧用 Android アプリです。デスクトップ版は別リポジトリで開発します。Android Studio、Android SDK、JDK 17、Rust の Android ターゲット、Node.js を用意します。Tauri 2 の [Android 前提条件](https://v2.tauri.app/start/prerequisites/) を参照してください。
+このフォルダーは piep の閲覧用 Android アプリです。デスクトップ版・サーバーと同じリポジトリにあり、共通の部品（`crates/`・`shared/`）を使います。Android Studio、Android SDK、JDK 17、Rust の Android ターゲット、Node.js を用意します。Tauri 2 の [Android 前提条件](https://v2.tauri.app/start/prerequisites/) を参照してください。
 
 ## エミュレーターで起動
 

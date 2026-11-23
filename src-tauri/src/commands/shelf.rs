@@ -263,22 +263,9 @@ pub fn respond(state: &Shelf, path: &str) -> tauri::http::Response<Vec<u8>> {
         log::error!("棚のファイルを読めません: {id}: {error}");
         return respond(500, Vec::new(), None);
     }
-    let mime = sniff(&bytes);
+    // 分からなければ付けない（WebView に推測させず、画像としては表示されない）。
+    let mime = piep_storage::sniff_image(&bytes);
     respond(200, bytes, mime)
-}
-
-/// 画像の種類を先頭のバイト列から決める。棚のファイルは種類を持たない（中身で指す）。
-/// 分からなければ付けない（WebView に推測させず、画像としては表示されない）。
-fn sniff(bytes: &[u8]) -> Option<&'static str> {
-    match bytes {
-        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
-        [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
-        [b'G', b'I', b'F', b'8', ..] => Some("image/gif"),
-        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
-        [_, _, _, _, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f', ..] => Some("image/avif"),
-        [b'B', b'M', ..] => Some("image/bmp"),
-        _ => None,
-    }
 }
 
 /// 棚の状態（ない・開いている・索引の同期中・使える・失敗）。
@@ -1017,7 +1004,7 @@ pub async fn shelf_person_series(
     limit: usize,
 ) -> Result<SeriesFacetPage, String> {
     let state = Arc::clone(&state);
-    let sort = sort.unwrap_or(SeriesSort::SourceCreatedAt);
+    let sort = sort.unwrap_or(SeriesSort::Published);
     let ascending = match order.as_deref() {
         Some("asc") => true,
         Some("desc") => false,

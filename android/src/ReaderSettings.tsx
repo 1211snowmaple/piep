@@ -1,5 +1,6 @@
 import { Icons } from "./icons";
-import { typeLimits, type ReaderBehavior, type ReaderFont, type ReaderTheme, type ReaderType } from "./readerPrefs";
+import { READER_FONTS } from "@shared/readerType";
+import { readerFonts, typeLimits, type ReaderBehavior, type ReaderTheme, type ReaderType } from "./readerPrefs";
 
 const themes: { id: ReaderTheme; label: string }[] = [
   { id: "white", label: "白" },
@@ -7,10 +8,6 @@ const themes: { id: ReaderTheme; label: string }[] = [
   { id: "night", label: "ナイト" },
 ];
 
-const fonts: { id: ReaderFont; label: string }[] = [
-  { id: "sans", label: "ゴシック" },
-  { id: "serif", label: "明朝" },
-];
 
 function round(value: number, digits = 2): number {
   const scale = 10 ** digits;
@@ -76,7 +73,7 @@ export function ReaderTypeControls({ value, onChange }: { value: ReaderType; onC
     <div className="reader-choice">
       <div className="reader-control-heading"><span>書体</span></div>
       <div className="reader-font-choices" role="group" aria-label="書体">
-        {fonts.map((font) => <button key={font.id} type="button" className={`reader-font--${font.id}`} aria-pressed={value.fontFamily === font.id} onClick={() => onChange({ fontFamily: font.id })}><span aria-hidden="true">永あ</span><small>{font.label}</small></button>)}
+        {readerFonts.map((font) => <button key={font} type="button" style={{ fontFamily: READER_FONTS[font].family }} aria-pressed={value.fontFamily === font} onClick={() => onChange({ fontFamily: font })}><span aria-hidden="true">永あ</span><small>{READER_FONTS[font].label}</small></button>)}
       </div>
     </div>
     <SliderRow label="文字サイズ" value={value.fontSize} display={`${value.fontSize}px`} {...typeLimits.fontSize} onChange={(fontSize) => onChange({ fontSize })} decrease="文字を小さくする" increase="文字を大きくする" />

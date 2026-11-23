@@ -47,7 +47,7 @@ enum Route {
         collection_id: String,
     },
     /// 棚の本文の画像。開いた文書の鍵と、その文書の中の画像の番号。
-    Native {
+    ShelfPage {
         key: String,
         asset: usize,
     },
@@ -326,11 +326,17 @@ fn parse_route(path: &str) -> Option<Route> {
                 refreshes: false,
             })
         }
-        ["native", entity, kind @ ("snapshot" | "edit"), view, asset] => {
+        [
+            "shelf-page",
+            entity,
+            kind @ ("snapshot" | "edit"),
+            view,
+            asset,
+        ] => {
             let entity = uuid::Uuid::parse_str(entity).ok()?;
             let view = uuid::Uuid::parse_str(view).ok()?;
             let asset: usize = asset.parse().ok().filter(|asset| *asset < 1_000_000)?;
-            Some(Route::Native {
+            Some(Route::ShelfPage {
                 key: format!("{entity}/{kind}/{view}"),
                 asset,
             })
@@ -489,25 +495,15 @@ async fn serve_remote<R: Runtime>(
     }
 }
 
-pub(super) fn sniffed_mime(bytes: &[u8]) -> Option<&'static str> {
-    Some(match image::guess_format(bytes).ok()? {
-        image::ImageFormat::Jpeg => "image/jpeg",
-        image::ImageFormat::Png => "image/png",
-        image::ImageFormat::WebP => "image/webp",
-        image::ImageFormat::Gif => "image/gif",
-        _ => return None,
-    })
-}
-
 /// 棚の本文の画像。開いた文書の一式に載っているファイルだけを取りに行く。
 /// 中身のハッシュで決まるので、接続先とハッシュで残す（改稿で古い絵が出ることはない）。
-async fn serve_native<R: Runtime>(
+async fn serve_shelf_page<R: Runtime>(
     app: &AppHandle<R>,
     key: &str,
     asset: usize,
 ) -> Response<Vec<u8>> {
-    use super::native_reader::{NativeReaderState, fetch_image, image_target};
-    let Some(target) = image_target(&app.state::<NativeReaderState>(), key, asset) else {
+    use super::shelf_reader::{ShelfReaderState, fetch_image, image_target};
+    let Some(target) = image_target(&app.state::<ShelfReaderState>(), key, asset) else {
         return failure(StatusCode::NOT_FOUND);
     };
     if target.file.length > MAX_ASSET_BYTES as u64 {
@@ -518,7 +514,11 @@ async fn serve_native<R: Runtime>(
     let Ok((generation, Some(saved))) = state.connection_snapshot() else {
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let file = cache_path(&cache.dir, &saved.url, &format!("native/{}", target.id()));
+    let file = cache_path(
+        &cache.dir,
+        &saved.url,
+        &format!("shelf-page/{}", target.id()),
+    );
     let Ok(cached) = state.with_connection(generation, || Ok(read_cached(&file))) else {
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -529,7 +529,7 @@ async fn serve_native<R: Runtime>(
     let Ok(bytes) = fetch_image(&state, &target).await else {
         return failure(StatusCode::BAD_GATEWAY);
     };
-    let Some(mime) = sniffed_mime(&bytes) else {
+    let Some(mime) = piep_storage::sniff_image(&bytes) else {
         return failure(StatusCode::BAD_GATEWAY);
     };
     if validate_display_image(&bytes, mime).is_err() {
@@ -555,7 +555,7 @@ async fn serve<R: Runtime>(app: &AppHandle<R>, path: &str) -> Response<Vec<u8>> 
             endpoint,
             refreshes,
         } => return serve_remote(app, path, &endpoint, refreshes).await,
-        Route::Native { key, asset } => return serve_native(app, &key, asset).await,
+        Route::ShelfPage { key, asset } => return serve_shelf_page(app, &key, asset).await,
         Route::SavedCover { work_id } => saved_cover(&app.state::<OfflineState>(), &work_id).await,
         Route::SavedEntity { work_id, kind } => {
             saved_entity_cover(&app.state::<OfflineState>(), &work_id, &kind).await
@@ -746,7 +746,7 @@ mod tests {
             format!("/shelf-entity%2F{library}%2Fpeople%2Fother%2F9"),
             "/shelf-entity%2Fnot-a-uuid%2Fpeople%2Fpixiv%2F9".to_string(),
             format!("/shelf-collection%2F{library}%2F{work}%2Ftile-4%2F4"),
-            format!("/shelf-collection%2F{library}%2Flegacy-id%2Ffile%2F4"),
+            format!("/shelf-collection%2F{library}%2Fnot-a-uuid%2Ffile%2F4"),
             format!("/shelf-collection%2F{library}%2F{work}%2Ffile%2F-1"),
         ] {
             assert_eq!(parse_route(&bad), None, "{bad}");
@@ -769,7 +769,7 @@ mod tests {
             parse_route(&format!("/saved%2F{}%2F1", shelf.simple())),
             None
         );
-        // 旧 API の形はもう受け付けない。
+        // 棚の外を指す形は受け付けない。
         for bad in [
             "/work%2F12%2F3%2Fabc",
             "/work%2F12%2F3%2Fabc%2Flarge",

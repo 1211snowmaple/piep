@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { pcErrorMessage, type PcWork } from "./pcApi";
-import { nativeShelf, setShelfFavorite } from "./nativeReading";
+import { connectedShelf, setShelfFavorite } from "./shelf";
 import { useAppNavigation } from "./appHistory";
 import { favoriteReadRevision, nextFavoriteRevision } from "./favoriteFreshness";
 
@@ -71,7 +71,7 @@ export function useFavorite(work: PcWork): { favorite: boolean; busy: boolean; o
   const favorite = refreshed ? work.favorite : entry?.favorite ?? work.favorite;
   const busy = entry?.busy ?? false;
 
-  const remoteGeneration = work.shelf?.favoriteGeneration;
+  const remoteGeneration = work.favoriteGeneration;
   useEffect(() => {
     if (!refreshed || entries.get(key) !== entry) return;
     entries.set(key, { favorite: work.favorite, busy: false, revision: remoteRevision, generation: remoteGeneration });
@@ -85,8 +85,8 @@ export function useFavorite(work: PcWork): { favorite: boolean; busy: boolean; o
   }, [queryClient]);
 
   // 棚に届いているときだけ押せる。
-  const shelf = navigation.canBrowseServer ? nativeShelf() : null;
-  const writable = shelf !== null && work.shelf !== undefined;
+  const shelf = navigation.canBrowseServer ? connectedShelf() : null;
+  const writable = shelf !== null;
   const generation = (refreshed ? undefined : entry?.generation) ?? remoteGeneration ?? "0";
 
   const toggle = useCallback((next: boolean) => {

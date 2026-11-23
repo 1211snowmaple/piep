@@ -1,4 +1,5 @@
 import { readingPercent } from "@shared/readingProgress";
+import { READER_FONTS, READER_TYPE_DEFAULTS, READER_TYPE_LIMITS, readerTypeFont, readerTypeNumber, type ReaderFont } from "@shared/readerType";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActionIcon,
@@ -237,23 +238,27 @@ interface ReaderSettings {
   writing: "horizontal" | "vertical";
 }
 
-type ReaderFont = "serif" | "sans" | "ud-serif" | "ud-sans";
-
-/**
- * 書体の選択肢。明朝とゴシックの二つだけでは、長く読むと目が疲れる人や、
- * 細い横線が見えにくい人に応えられなかった。BIZ UD は Windows に最初から
- * 入っている読みやすさ重視の書体で、等幅（UDP でない方）を選ぶのは、
- * 小説の地の文、とくに縦書きで字の並びが揃って見えるため。入っていない
- * 環境では、いつもの明朝・ゴシックに落ちる。
- */
-const READER_FONTS: Record<ReaderFont, { label: string; family: string }> = {
-  serif: { label: "明朝", family: '"Noto Serif JP", "Yu Mincho", serif' },
-  sans: { label: "ゴシック", family: '"Noto Sans JP", "Yu Gothic UI", sans-serif' },
-  "ud-serif": { label: "UD明朝", family: '"BIZ UDMincho", "Noto Serif JP", "Yu Mincho", serif' },
-  "ud-sans": { label: "UDゴシック", family: '"BIZ UDGothic", "Noto Sans JP", "Yu Gothic UI", sans-serif' },
+const defaults: ReaderSettings = {
+  fontSize: READER_TYPE_DEFAULTS.fontSize,
+  lineHeight: READER_TYPE_DEFAULTS.lineHeight,
+  maxWidth: READER_TYPE_DEFAULTS.width,
+  font: READER_TYPE_DEFAULTS.font,
+  theme: "white",
+  writing: "horizontal",
 };
 
-const defaults: ReaderSettings = { fontSize: 18, lineHeight: 1.72, maxWidth: 680, font: "serif", theme: "white", writing: "horizontal" };
+/** 覚えていた設定を、いまの範囲・刻み・選択肢に収める（範囲を変えても古い値で崩れない）。 */
+function readerSettings(stored: Partial<Record<keyof ReaderSettings, unknown>> | null | undefined): ReaderSettings {
+  const value = stored ?? {};
+  return {
+    fontSize: readerTypeNumber(value.fontSize, READER_TYPE_LIMITS.fontSize, defaults.fontSize),
+    lineHeight: readerTypeNumber(value.lineHeight, READER_TYPE_LIMITS.lineHeight, defaults.lineHeight),
+    maxWidth: readerTypeNumber(value.maxWidth, READER_TYPE_LIMITS.width, defaults.maxWidth),
+    font: readerTypeFont(value.font, Object.keys(READER_FONTS) as ReaderFont[], defaults.font),
+    theme: value.theme === "paper" || value.theme === "night" ? value.theme : "white",
+    writing: value.writing === "vertical" ? "vertical" : "horizontal",
+  };
+}
 
 /** 棚へ読書位置を書く間隔の下限（ミリ秒）。同じページを読んでいるあいだ。 */
 const SHELF_READING_INTERVAL = 15_000;
@@ -287,7 +292,8 @@ function Reader({ source }: { source: ReaderSource }) {
   const requestedVersion = Number(searchParams.get("version"));
   const normalizedRequestedVersion = Number.isFinite(requestedVersion) && requestedVersion > 0 ? requestedVersion : null;
   const [version, setVersion] = useState<number | null>(normalizedRequestedVersion);
-  const [settings, setSettings] = useLocalStorage<ReaderSettings>({ key: "piep.reader-settings", defaultValue: defaults });
+  const [storedSettings, setSettings] = useLocalStorage<ReaderSettings>({ key: "piep.reader-settings", defaultValue: defaults });
+  const settings = useMemo(() => readerSettings(storedSettings), [storedSettings]);
   const [settingsOpened, settingsDrawer] = useDisclosure(false);
   const [searchOpened, searchDrawer] = useDisclosure(false);
   const [outlineOpened, outlineDrawer] = useDisclosure(false);
@@ -1020,7 +1026,7 @@ function Reader({ source }: { source: ReaderSource }) {
               "--reader-font-size": `${settings.fontSize}px`,
               "--reader-line-height": settings.lineHeight,
               "--reader-max-width": `${settings.maxWidth}px`,
-              "--reader-font-family": (READER_FONTS[settings.font] ?? READER_FONTS.serif).family,
+              "--reader-font-family": READER_FONTS[settings.font].family,
             }}
           >
             {!contentReady ? <LoadingState label="読書位置のページを読み込んでいます" /> : <>
@@ -1100,9 +1106,9 @@ function Reader({ source }: { source: ReaderSource }) {
 
       <Drawer opened={settingsOpened} onClose={settingsDrawer.close} position="right" title="読書設定" size={360}>
         <Stack gap="xl">
-          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>文字サイズ</Text><Text size="xs" c="dimmed">{settings.fontSize}px</Text></Group><Slider aria-label="文字サイズ" min={14} max={28} step={1} value={settings.fontSize} onChange={(fontSize) => setSettings({ ...settings, fontSize })} marks={[{ value: 14, label: "小" }, { value: 21, label: "標準" }, { value: 28, label: "大" }]} /></Box>
-          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>行間</Text><Text size="xs" c="dimmed">{settings.lineHeight.toFixed(2)}</Text></Group><Slider aria-label="行間" min={1.4} max={2.4} step={0.05} value={settings.lineHeight} onChange={(lineHeight) => setSettings({ ...settings, lineHeight })} /></Box>
-          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>本文幅</Text><Text size="xs" c="dimmed">{settings.maxWidth}px</Text></Group><Slider aria-label="本文幅" min={520} max={900} step={20} value={settings.maxWidth} onChange={(maxWidth) => setSettings({ ...settings, maxWidth })} /></Box>
+          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>文字サイズ</Text><Text size="xs" c="dimmed">{settings.fontSize}px</Text></Group><Slider aria-label="文字サイズ" {...READER_TYPE_LIMITS.fontSize} value={settings.fontSize} onChange={(fontSize) => setSettings({ ...settings, fontSize })} marks={[{ value: READER_TYPE_LIMITS.fontSize.min, label: "小" }, { value: defaults.fontSize, label: "標準" }, { value: READER_TYPE_LIMITS.fontSize.max, label: "大" }]} /></Box>
+          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>行間</Text><Text size="xs" c="dimmed">{settings.lineHeight.toFixed(2)}</Text></Group><Slider aria-label="行間" {...READER_TYPE_LIMITS.lineHeight} value={settings.lineHeight} onChange={(lineHeight) => setSettings({ ...settings, lineHeight })} /></Box>
+          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>本文幅</Text><Text size="xs" c="dimmed">{settings.maxWidth}px</Text></Group><Slider aria-label="本文幅" {...READER_TYPE_LIMITS.width} value={settings.maxWidth} onChange={(maxWidth) => setSettings({ ...settings, maxWidth })} /></Box>
           <Box><Text size="sm" fw={700} mb="sm">書体</Text><SegmentedControl aria-label="書体" fullWidth value={settings.font} onChange={(font) => setSettings({ ...settings, font: font as ReaderSettings["font"] })} data={(Object.keys(READER_FONTS) as ReaderFont[]).map((value) => ({ value, label: READER_FONTS[value].label }))} /><Text size="xs" c="dimmed" mt={6}>UD は字の形を見分けやすくした書体です。</Text></Box>
           {/* EPUB には最初からあった設定が、読む画面にだけ無かった。 */}
           <Box><Text size="sm" fw={700} mb="sm">組み方</Text><SegmentedControl aria-label="組み方" fullWidth value={settings.writing === "vertical" ? "vertical" : "horizontal"} onChange={(writing) => setSettings({ ...settings, writing: writing as ReaderSettings["writing"] })} data={[{ value: "horizontal", label: "横書き" }, { value: "vertical", label: "縦書き" }]} /><Text size="xs" c="dimmed" mt={6}>縦書きは右から左へ進みます。矢印キーの向きも入れ替わります。</Text></Box>

@@ -8,7 +8,7 @@ import { WorkThumbnail } from "./WorkThumbnail";
 import { WorkFavoriteButton } from "./FavoriteButton";
 import { WorkFacts, workFacts } from "./WorkFacts";
 import { defaultPcSearch, deleteOfflineWork, getPcMetadata, getPcWorkCollections, listOfflineWorks, pcErrorMessage, sameSavedVersion, sameWork, saveOfflineWork, type OfflineWork, type PcCollection, type PcWork } from "./pcApi";
-import { nativeShelfKey } from "./nativeReading";
+import { connectedShelfKey } from "./shelf";
 import { homePage, useAppNavigation } from "./appHistory";
 import { hasReadingPosition } from "./OnlineReader";
 import { plainText } from "./workText";
@@ -34,7 +34,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
   const browsable = navigation.canBrowseServer;
   const online = !selected.offline;
   const metadataQuery = useQuery({ queryKey: ["metadata", selected.work.id], queryFn: () => getPcMetadata(selected.work.id), enabled: online });
-  const collectionsQuery = useQuery({ queryKey: ["work-collections", selected.work.id, nativeShelfKey()], queryFn: () => getPcWorkCollections(selected.work.id), enabled: online });
+  const collectionsQuery = useQuery({ queryKey: ["work-collections", selected.work.id, connectedShelfKey()], queryFn: () => getPcWorkCollections(selected.work.id), enabled: online });
   const savedQuery = useQuery({ queryKey: ["offline-works", savedRevision], queryFn: listOfflineWorks, enabled: online, staleTime: Infinity });
   const metadata = metadataQuery.data;
   const work = metadata?.work ?? selected.work;
@@ -56,8 +56,8 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
   const description = useMemo(() => plainText(work.excerpt), [work.excerpt]);
   const tags = work.tags ?? [];
   const resume = hasReadingPosition(work, selected.offline ? selected.snapshot.savedEditHash : metadata?.activeEditHash ?? null);
-  // 棚の作品は版と編集の UUID で比べる。旧 API の作品は編集の印を作品の情報から見る。
-  const outdated = Boolean(online && saved && (!sameSavedVersion(work, saved) || (!work.shelf && metadata && metadata.activeEditHash !== saved.savedEditHash)));
+  // 版と編集の UUID で比べる。
+  const outdated = Boolean(online && saved && !sameSavedVersion(work, saved));
 
   useEffect(() => {
     const node = descriptionRef.current;
@@ -98,7 +98,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
           <div className="detail-cover"><WorkThumbnail work={work} offline={selected.offline} snapshotGeneration={selected.offline ? selected.snapshot.savedAtMs : undefined} variant="detail" /></div>
           <div className="detail-heading">
             <div className="detail-top">
-              <div className="detail-labels"><ProviderMark source={work.source} /><span>{CONTENT_TYPE_LABELS[work.contentType] ?? "作品"}</span>{metadata?.isEdited && <span><Icons.edit aria-hidden="true" />編集版</span>}{selected.offline && <span>端末に保存</span>}</div>
+              <div className="detail-labels"><ProviderMark source={work.source} /><span>{CONTENT_TYPE_LABELS[work.contentType] ?? "作品"}</span>{metadata?.work.edited && <span><Icons.edit aria-hidden="true" />編集版</span>}{selected.offline && <span>端末に保存</span>}</div>
               <div className="detail-utility">{menu}<button className="detail-icon detail-close" type="button" onClick={onBack} aria-label="閉じる"><Icons.cancel aria-hidden="true" /></button></div>
             </div>
             {series.map((entry) => {

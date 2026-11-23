@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { MobileShelfReading, MobileShelfReadingLocation } from "@shared/mobileApi";
-import { nativeShelf, type NativeOpened } from "./nativeReading";
+import type { MobileReading, MobileReadingLocation } from "@shared/mobileApi";
+import { connectedShelf, type OpenedShelfWork } from "./shelf";
 
 /** 読む画面が溜めておく、次に書く位置。 */
 export interface ReadingWrite {
@@ -44,8 +44,8 @@ function run(): Promise<void> {
     do {
       sendAgain = false;
       // 棚の作品の位置を送り、変わった分を受け取る。
-      const shelf = nativeShelf();
-      if (shelf) await invoke<void>("pc_native_reading_sync", { scope: shelf }).catch(() => {});
+      const shelf = connectedShelf();
+      if (shelf) await invoke<void>("pc_reading_sync", { scope: shelf }).catch(() => {});
       // 同時に届いた保存・画面終了の知らせは一回にまとめる。別々の
       // .then(run) を積むと、同じ同期の直後に何本も起動してしまう。
     } while (sendAgain && active());
@@ -79,26 +79,26 @@ export function refreshReadingWithin(limitMs: number): Promise<void> {
 }
 
 /** 読んだ位置を、棚の作品の位置として端末に置く。通信はしない（次の同期で送る）。 */
-export async function recordShelfReading(work: string, location: MobileShelfReadingLocation, finished: boolean): Promise<void> {
-  const scope = nativeShelf();
+export async function recordShelfReading(work: string, location: MobileReadingLocation, finished: boolean): Promise<void> {
+  const scope = connectedShelf();
   if (!active() || !scope) return;
-  try { await invoke<void>("pc_native_reading_record", { scope, work, location, finished }); } catch { /* 読書を止めない */ }
+  try { await invoke<void>("pc_reading_record", { scope, work, location, finished }); } catch { /* 読書を止めない */ }
 }
 
 /** 最後に受け取った、棚のこの作品の位置。 */
-export async function readShelfPosition(work: string): Promise<MobileShelfReading | null> {
-  const scope = nativeShelf();
+export async function readShelfPosition(work: string): Promise<MobileReading | null> {
+  const scope = connectedShelf();
   if (!active() || !scope) return null;
-  try { return await invoke<MobileShelfReading | null>("pc_native_reading_get", { scope, work }); } catch { return null; }
+  try { return await invoke<MobileReading | null>("pc_reading_get", { scope, work }); } catch { return null; }
 }
 
 /** 棚と位置を受け渡す本か（読む画面で棚から開いた今の版の本）。 */
-export function shelfReadingFor(document: NativeOpened | null): NativeOpened | null {
-  return document && active() && nativeShelf() ? document : null;
+export function shelfReadingFor(document: OpenedShelfWork | null): OpenedShelfWork | null {
+  return document && active() && connectedShelf() ? document : null;
 }
 
 /** 読む画面のページ（0 から）とその中の割合を、開いた本の版に結んだ棚の位置にする。 */
-export function shelfLocation(document: NativeOpened, page: number, ratio: number): MobileShelfReadingLocation {
+export function shelfLocation(document: OpenedShelfWork, page: number, ratio: number): MobileReadingLocation {
   return { viewKind: document.view.kind, viewId: document.view.id, page, ratioPpm: Math.round(Math.min(1, Math.max(0, ratio)) * 1_000_000) };
 }
 
@@ -107,7 +107,7 @@ export function shelfLocation(document: NativeOpened, page: number, ratio: numbe
  * 細かい位置が残っているのでそちらを使う（入れ直して手元に何も無いときだけ棚の位置）。
  * 別の版や編集で読んでいた位置はページだけの目安にする。
  */
-export function shelfStart(remote: MobileShelfReading | null, localTime: number, document: NativeOpened): RemoteStart | null {
+export function shelfStart(remote: MobileReading | null, localTime: number, document: OpenedShelfWork): RemoteStart | null {
   if (!remote?.location || remote.updatedAt === null) return null;
   if (remote.mine ? localTime > 0 : remote.updatedAt <= localTime) return null;
   const sameText = remote.location.viewKind === document.view.kind && remote.location.viewId === document.view.id;
