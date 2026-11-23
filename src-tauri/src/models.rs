@@ -1,55 +1,9 @@
-//! データベース用の構造体定義。
+//! IPC で画面と受け渡す型。
 
 use serde::{Deserialize, Serialize};
 
 pub use piep_reader_render::pages::{ReaderOutlineEntry, ReaderSearchHit};
 pub use piep_reader_render::{AssetEntry, WorkBlock};
-
-/// ダウンロードエントリ（DB行に対応）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadEntry {
-    pub id: i64,
-    pub source: String,
-    pub source_id: String,
-    pub title: String,
-    pub author_name: String,
-    pub author_id: String,
-    pub content_type: String,
-    pub tags: Vec<String>,
-    pub excerpt: Option<String>,
-    pub cover_path: Option<String>,
-    pub json_path: String,
-    pub original_json_path: Option<String>,
-    pub asset_count: i64,
-    pub file_size_bytes: i64,
-    pub saved_at: String,
-    pub source_created_at: Option<String>,
-    pub content_hash: Option<String>,
-    pub text_length: i64,
-    pub source_updated_at: Option<String>,
-    pub watch_updates: bool,
-    pub current_version: i64,
-    pub favorite: bool,
-    pub person_id: Option<String>,
-    pub person_name: Option<String>,
-    /// Creator avatar, so cards can show a face next to the author name.
-    pub person_icon_path: Option<String>,
-    pub series_id: Option<String>,
-    pub series_title: Option<String>,
-    pub search_score: Option<f64>,
-    pub match_fields: Vec<String>,
-    pub score_reasons: Vec<ScoreReason>,
-    pub match_highlights: Vec<SearchHighlight>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sort_key: Option<String>,
-    /// Saved revision that matched when the current revision did not.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub matched_version: Option<i64>,
-    /// Older saved revisions that also matched this query.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub historical_match_count: i64,
-}
 
 /// 保存済み作品から参照されているが、取得元での完全確認が終わっていない
 /// 作者・シリーズ。`last_fetched_at` が埋まるまで何度でも検出できるため、
@@ -111,11 +65,11 @@ pub struct WorkBlockInput {
     pub attrs_json: Option<String>,
 }
 
-/// データベースの統計情報
+/// 棚の数え
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DbStats {
-    pub total_downloads: i64,
+pub struct ShelfStats {
+    pub total_works: i64,
     pub pixiv_count: i64,
     pub fanbox_count: i64,
     pub total_assets: i64,
@@ -198,7 +152,7 @@ pub struct SourceBreakdown {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardSummary {
-    pub stats: DbStats,
+    pub stats: ShelfStats,
     pub favorite_count: i64,
     pub watched_count: i64,
     pub update_target_count: i64,
@@ -206,9 +160,8 @@ pub struct DashboardSummary {
     pub pending_index_count: i64,
     pub top_tags: Vec<FacetCount>,
     pub top_authors: Vec<FacetCount>,
-    pub recent_downloads: Vec<DownloadEntry>,
     pub source_breakdown: Vec<SourceBreakdown>,
-    pub monthly_downloads: Vec<DashboardTrendPoint>,
+    pub monthly_saves: Vec<DashboardTrendPoint>,
 }
 
 /// 取得元をまたいでも衝突しない、保存状態に依存しない作品識別子。
@@ -777,10 +730,6 @@ pub struct UpdateJobItemInput {
     pub status: String,
 }
 
-fn is_zero(value: &i64) -> bool {
-    *value == 0
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchSuggestion {
@@ -806,16 +755,16 @@ pub struct SearchSuggestResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchIndexStatus {
-    pub total_downloads: i64,
-    pub indexed_downloads: i64,
-    pub pending_downloads: i64,
+    pub total_works: i64,
+    pub indexed_works: i64,
+    pub pending_works: i64,
     /// 全文索引だけの話。意味索引の遅れはここに入らないので、画面が
     /// 「意味検索も最新」と言うために使ってはいけない。
     pub is_complete: bool,
     pub phase: String,
     pub semantic_indexed_chunks: i64,
-    pub semantic_indexed_downloads: i64,
-    pub semantic_pending_downloads: i64,
+    pub semantic_indexed_works: i64,
+    pub semantic_pending_works: i64,
     pub semantic_enabled: bool,
     pub semantic_model_ready: bool,
     pub embedding_provider: String,

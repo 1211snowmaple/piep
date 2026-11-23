@@ -99,7 +99,7 @@ export function ShelfDiagnosticsSection({ runtime, busy }: { runtime: boolean; b
 
   const data = diagnostics.data;
   const index = data?.searchIndex;
-  const indexRatio = index?.totalDownloads ? index.indexedDownloads / index.totalDownloads * 100 : 100;
+  const indexRatio = index?.totalWorks ? index.indexedWorks / index.totalWorks * 100 : 100;
   return <>
     <Card p="lg" mt="lg">
       <Group justify="space-between" align="center" wrap="wrap">
@@ -126,12 +126,12 @@ export function ShelfDiagnosticsSection({ runtime, busy }: { runtime: boolean; b
       <SimpleGrid cols={{ base: 1, sm: 2, xl: 4 }}>
         <MetricCard label="作品" value={`${formatNumber(data.works)}件`} detail={`${formatNumber(data.textLength)}文字 · ${formatNumber(data.versions)}版`} icon={Icons.database} />
         <MetricCard label="保存ファイル" value={formatBytes(data.storedBytes)} detail={`同じ中身は1回だけ保存 · ${formatNumber(data.files)}ファイル（元 ${formatBytes(data.logicalBytes)}）`} icon={Icons.storage} color="gray" />
-        <MetricCard label="検索索引" value={`${indexRatio.toFixed(1)}%`} detail={`${formatNumber(index?.indexedDownloads ?? 0)} / ${formatNumber(index?.totalDownloads ?? 0)}作品`} icon={Icons.search} color={index?.isComplete ? "green" : "yellow"} />
+        <MetricCard label="検索索引" value={`${indexRatio.toFixed(1)}%`} detail={`${formatNumber(index?.indexedWorks ?? 0)} / ${formatNumber(index?.totalWorks ?? 0)}作品`} icon={Icons.search} color={index?.isComplete ? "green" : "yellow"} />
         <MetricCard label="アプリ全体メモリ" value={data.processPrivateMemoryBytes === null ? (data.processMemoryBytes === null ? "取得不可" : formatBytes(data.processMemoryBytes)) : formatBytes(data.processPrivateMemoryBytes)} detail={`GPU ${data.gpuDedicatedMemoryBytes === null ? "取得不可" : formatBytes(data.gpuDedicatedMemoryBytes)}`} icon={Icons.activity} color="gray" />
       </SimpleGrid>
       <Card p="lg"><Text fw={700}>索引と台帳</Text><Stack gap="sm" mt="md">
         <Group justify="space-between"><Box><Text size="sm">全文索引</Text><Text size="xs" c="dimmed">{formatNumber(data.lexicalIndexSegments)}セグメント · 過去の版 {formatBytes(data.historyIndexBytes)}</Text></Box><Text size="sm" fw={650}>{formatBytes(data.lexicalIndexBytes)}</Text></Group>
-        <Group justify="space-between"><Box><Text size="sm">意味検索索引</Text><Text size="xs" c="dimmed">{index?.semanticEnabled ? `${formatNumber(index.semanticIndexedDownloads)} / ${formatNumber(index.totalDownloads)}作品` : "意味検索は使っていません"}</Text></Box><Text size="sm" fw={650}>{formatBytes(data.semanticIndexBytes)}</Text></Group>
+        <Group justify="space-between"><Box><Text size="sm">意味検索索引</Text><Text size="xs" c="dimmed">{index?.semanticEnabled ? `${formatNumber(index.semanticIndexedWorks)} / ${formatNumber(index.totalWorks)}作品` : "意味検索は使っていません"}</Text></Box><Text size="sm" fw={650}>{formatBytes(data.semanticIndexBytes)}</Text></Group>
         <Group justify="space-between"><Box><Text size="sm">データベース</Text><Text size="xs" c="dimmed">中身 {formatBytes(data.liveDatabaseBytes)} · 書き込み途中 {formatBytes(data.walBytes)}</Text></Box><Text size="sm" fw={650}>{formatBytes(data.databaseBytes)}</Text></Group>
       </Stack></Card>
       <Text size="xs" c="dimmed">最終計測: {new Date(data.measuredAt).toLocaleString("ja-JP")} · 計測値はこの端末から送信されません。</Text>

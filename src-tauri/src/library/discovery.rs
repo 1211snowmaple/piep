@@ -219,29 +219,6 @@ impl Library {
         Ok(())
     }
 
-    /// 旧形式から移した候補だけ、一度原本から表示の写しを作る。以降の一覧は原本を開かない。
-    pub fn prepare_discovery_summaries(&self) -> Result<()> {
-        let mut cursor = None;
-        loop {
-            let rows = self.discoveries(
-                None,
-                cursor
-                    .as_ref()
-                    .map(|(p, k): &(String, String)| (p.as_str(), k.as_str())),
-                500,
-            )?;
-            let Some(last) = rows.last() else {
-                break;
-            };
-            cursor = Some((last.provider.clone(), last.key.clone()));
-            for row in rows.into_iter().filter(|r| r.summary.is_none()) {
-                let payload: Value = serde_json::from_str(&self.discovery_payload(row.id)?)?;
-                let conn = self.conn.lock().map_err(|_| Error::Busy)?;
-                conn.execute("INSERT INTO discovery_summaries(candidate_id,payload_file_id,summary_json) SELECT id,payload_file_id,?3 FROM discovery_candidates WHERE id=?1 AND payload_file_id=?2 ON CONFLICT(candidate_id) DO UPDATE SET payload_file_id=excluded.payload_file_id,summary_json=excluded.summary_json",params![row.id.as_bytes().as_slice(),row.payload.0.as_slice(),summary(&payload).to_string()])?;
-            }
-        }
-        Ok(())
-    }
     /// 取得元の鍵の順で全件をたどる。本文の原本は開かない。
     pub fn discoveries(
         &self,

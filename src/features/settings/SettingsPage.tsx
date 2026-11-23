@@ -92,14 +92,14 @@ type ConnectionState = ConnectionStatus;
 
 /** ブラウザプレビュー用の索引の様子。追いついた棚を見せる。 */
 const PREVIEW_INDEX_STATUS: SearchIndexStatus = {
-  totalDownloads: 1284,
-  indexedDownloads: 1284,
-  pendingDownloads: 0,
+  totalWorks: 1284,
+  indexedWorks: 1284,
+  pendingWorks: 0,
   isComplete: true,
   phase: "ready",
   semanticIndexedChunks: 4192,
-  semanticIndexedDownloads: 1284,
-  semanticPendingDownloads: 0,
+  semanticIndexedWorks: 1284,
+  semanticPendingWorks: 0,
   semanticEnabled: true,
   semanticModelReady: true,
   embeddingProvider: "DirectML (preview)",
@@ -166,7 +166,7 @@ export default function SettingsPage() {
   });
   // 数と保存先は棚のもの。
   const shelfStatus = useShelfStatus(runtime);
-  const stats = useQuery({ queryKey: ["stats"], queryFn: () => runtime ? shelfDashboard().then((summary) => summary.stats) : Promise.resolve({ totalDownloads: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 }) });
+  const stats = useQuery({ queryKey: ["stats"], queryFn: () => runtime ? shelfDashboard().then((summary) => summary.stats) : Promise.resolve({ totalWorks: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 }) });
   const shelfPath = shelfStatus.data && "path" in shelfStatus.data ? shelfStatus.data.path : null;
   const storagePath = useQuery({ queryKey: ["storage-path", shelfPath], enabled: !runtime || shelfPath !== null, queryFn: () => Promise.resolve(runtime ? shelfPath! : "C:\\Users\\preview\\AppData\\Roaming\\io.github.u1211snowmaple.piep\\library") });
   const index = useQuery({ queryKey: ["search-index-status"], queryFn: () => runtime ? getSearchIndexStatus() : Promise.resolve(PREVIEW_INDEX_STATUS) });
@@ -236,7 +236,7 @@ export default function SettingsPage() {
    * 全作品の作り直しが要る。作り直しの押しついでに起きてよい規模ではない。
    */
   const startRebuild = (includeSemantic: boolean) => {
-    const covered = index.data?.semanticIndexedDownloads ?? 0;
+    const covered = index.data?.semanticIndexedWorks ?? 0;
     if (includeSemantic || !index.data?.semanticEnabled) {
       rebuildMutation.mutate(includeSemantic);
       return;
@@ -257,7 +257,7 @@ export default function SettingsPage() {
   const rebuildMutation = useMutation({
     mutationFn: async (includeSemantic: boolean) => {
       if (!runtime) throw new Error("デスクトップアプリで利用できます");
-      const pending = index.data?.pendingDownloads ?? index.data?.totalDownloads ?? 0;
+      const pending = index.data?.pendingWorks ?? index.data?.totalWorks ?? 0;
       const jobId = await startSearchRebuildIndex({ includeSemantic });
       const operation = startOperation({
         kind: "search",
@@ -343,7 +343,7 @@ function ConnectionCard({ source, user, note, runtime, loading, onWeb, onDisconn
   const provider = getProvider(source); return <Card p="lg"><Group justify="space-between" align="flex-start"><Group><Avatar size={54} color="gray" variant="light" style={{ color: provider.color }}>{provider.icon}</Avatar><Box><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge color={user ? "green" : "gray"} variant="light">{user ? "取得用接続済み" : "未接続"}</Badge></Group><Text size="sm" c="dimmed" mt={4}>{user?.name || provider.description}</Text>{note && <Text size="xs" c="dimmed" mt={2}>{note}</Text>}</Box></Group>{user ? <Group gap="xs"><Button variant="light" size="xs" disabled={!runtime} loading={loading} onClick={onWeb}>再接続</Button><DangerButton size="xs" leftSection={<Icons.delete size={IconSize.menu} />} onClick={onDisconnect}>接続解除</DangerButton></Group> : <Button disabled={!runtime} loading={loading} leftSection={<Icons.credentials size={IconSize.menu} />} onClick={onWeb}>ブラウザで接続</Button>}</Group>{!user && <><Divider my="lg" label="または手動入力" labelPosition="center" />{manual}</>}</Card>;
 }
 
-function LibrarySection({ stats, path, runtime, pending, busy, reimport }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; busy: boolean; reimport: () => void }) { return <Stack gap="lg"><SectionIntro title="保存とバックアップ" description="保存先の確認、バックアップの作成と復元を行います。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="画像・添付" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><ShelfBackupCard runtime={runtime} busy={busy} /><Card p="lg"><Group justify="space-between" align="flex-start" wrap="nowrap"><Box miw={0}><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>アプリのフォルダーの downloads に置いた保存フォルダーを調べ、棚にまだ無い作品を版ごと取り込みます。棚にある作品や、棚から外した作品には触れません。</Text></Box><Button style={{ flexShrink: 0 }} disabled={!runtime || busy} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={reimport}>保存フォルダーを調べる</Button></Group></Card></Stack>; }
+function LibrarySection({ stats, path, runtime, pending, busy, reimport }: { stats?: { totalWorks: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; busy: boolean; reimport: () => void }) { return <Stack gap="lg"><SectionIntro title="保存とバックアップ" description="保存先の確認、バックアップの作成と復元を行います。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalWorks)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="画像・添付" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><ShelfBackupCard runtime={runtime} busy={busy} /><Card p="lg"><Group justify="space-between" align="flex-start" wrap="nowrap"><Box miw={0}><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>アプリのフォルダーの downloads に置いた保存フォルダーを調べ、棚にまだ無い作品を版ごと取り込みます。棚にある作品や、棚から外した作品には触れません。</Text></Box><Button style={{ flexShrink: 0 }} disabled={!runtime || busy} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={reimport}>保存フォルダーを調べる</Button></Group></Card></Stack>; }
 
 function Metric({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string }) { return <Card p="md"><Group><ThemeIcon variant="light"><Icon size={17} /></ThemeIcon><Box><Text size="xs" c="dimmed">{label}</Text><Text fw={750}>{value}</Text></Box></Group></Card>; }
 
@@ -359,7 +359,7 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
   const [defaultSearchMode, setDefaultSearchMode] = useDefaultSearchMode();
   const [includeSemantic, setIncludeSemantic] = useState(status?.semanticEnabled ?? false);
   useEffect(() => setIncludeSemantic(status?.semanticEnabled ?? false), [status?.semanticEnabled]);
-  const indexedRatio = status?.totalDownloads ? status.indexedDownloads / status.totalDownloads * 100 : 100;
+  const indexedRatio = status?.totalWorks ? status.indexedWorks / status.totalWorks * 100 : 100;
   const running = rebuilding && rebuild && rebuild.status === "running";
   return <Stack gap="lg">
     <SectionIntro title="検索" description="いつもの探し方と、検索に使うデータを管理します。" />
@@ -368,8 +368,8 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
     <Card p="lg">
       <Group justify="space-between" align="flex-start">
         <Box>
-          <Group gap="xs"><Text fw={700}>全文検索インデックス</Text><Badge color={status?.isComplete ? "green" : "yellow"}>{status?.isComplete ? "最新" : `${formatNumber(status?.pendingDownloads)}件が未反映`}</Badge></Group>
-          <Text size="sm" c="dimmed" mt={5}>{formatNumber(status?.indexedDownloads)} / {formatNumber(status?.totalDownloads)}作品</Text>
+          <Group gap="xs"><Text fw={700}>全文検索インデックス</Text><Badge color={status?.isComplete ? "green" : "yellow"}>{status?.isComplete ? "最新" : `${formatNumber(status?.pendingWorks)}件が未反映`}</Badge></Group>
+          <Text size="sm" c="dimmed" mt={5}>{formatNumber(status?.indexedWorks)} / {formatNumber(status?.totalWorks)}作品</Text>
         </Box>
         <ThemeIcon size={48} variant="light"><Icons.search size={IconSize.feature} /></ThemeIcon>
       </Group>
@@ -411,11 +411,11 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
       <Divider my="md" />
       {/* 断片の数だけでは、棚のどこまで届いているのかが分からない。作品数で言う。 */}
       <Group gap="xl">
-        <Text size="sm">検索データを保存済みの作品 <b>{formatNumber(status?.semanticIndexedDownloads)}</b> / {formatNumber(status?.totalDownloads)}</Text>
+        <Text size="sm">検索データを保存済みの作品 <b>{formatNumber(status?.semanticIndexedWorks)}</b> / {formatNumber(status?.totalWorks)}</Text>
         <Text size="sm">作品ベクトル <b>{formatNumber(status?.semanticIndexedChunks)}</b></Text>
         <Text size="sm">GPU <b>{!status?.semanticModelReady ? "読み込み前" : status.gpuEnabled ? "有効" : "未使用"}</b></Text>
       </Group>
-      {status?.semanticEnabled && Boolean(status?.semanticPendingDownloads) && <Note mt="md">{formatNumber(status?.semanticPendingDownloads)}件は意味検索の対象になっていません。上の「作品単位の意味検索」を有効にして再構築すると追いつきます。</Note>}
+      {status?.semanticEnabled && Boolean(status?.semanticPendingWorks) && <Note mt="md">{formatNumber(status?.semanticPendingWorks)}件は意味検索の対象になっていません。上の「作品単位の意味検索」を有効にして再構築すると追いつきます。</Note>}
       <Note mt="md">全文検索の索引作成はCPUで行います。意味検索は初回利用時にモデルを読み込み、利用可能な環境ではGPU（DirectML）を使います。保存済みの検索データを作り直す必要はありません。</Note>
     </Card>
     <Note>再構築中もライブラリの通常検索は利用できます。中止したり、アプリを終了したりした場合は、確定済みのところまでが保持され、次回は続きから再開します。</Note>
