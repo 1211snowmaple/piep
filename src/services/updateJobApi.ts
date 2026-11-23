@@ -144,13 +144,19 @@ export function countSavedDeferredUpdateCandidatesCommand(): Promise<number> {
   return invoke("count_saved_deferred_update_candidates");
 }
 
-/** 一部保存のうち、今の版でまだ取り直していない作品。保存ジョブへそのまま渡せる。 */
-export function listIncompleteSaveRepairWorksCommand(limit: number): Promise<SaveJobWork[]> {
+/** 一部保存の補完で取り直す作品。`snapshot` は候補にしたときの版（試した印はこの版に付ける）。 */
+export interface IncompleteSaveRepairWork extends SaveJobWork {
+  snapshot: string;
+}
+
+/** 一部保存のうち、今の版でまだ取り直していない作品。 */
+export function listIncompleteSaveRepairWorksCommand(limit: number): Promise<IncompleteSaveRepairWork[]> {
   return invoke("list_incomplete_save_repair_works", { limit });
 }
 
-export function recordIncompleteSaveRepairAttemptsCommand(sourceIds: string[]): Promise<void> {
-  return invoke("record_incomplete_save_repair_attempts", { sourceIds });
+/** 補完の保存ジョブへ渡した作品を、候補にしたときの版で試したと記録する。 */
+export function recordIncompleteSaveRepairAttemptsCommand(attempts: Array<{ sourceId: string; snapshot: string }>): Promise<void> {
+  return invoke("record_incomplete_save_repair_attempts", { attempts });
 }
 
 export function recheckDeferredUpdateCandidatesCommand(keys: string[], refreshPostAccess = false): Promise<UpdateJobSnapshot> {
