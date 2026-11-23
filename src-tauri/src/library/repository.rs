@@ -162,13 +162,18 @@ pub struct Library {
     root: PathBuf,
     pub id: LibraryId,
     pub objects: ObjectStore,
+    /// いま貸している読み取り。返されないものが WAL の書き戻しを止めるので見張る。
+    ///
+    /// **`conn` より前に置く（先に捨てる）。** 見張りは書き手の接続で WAL の様子を読む。
+    /// `Loans` を捨てるときに見張りがその接続を手放すまで待つので、棚を閉じた時点で
+    /// 接続も閉じている（閉じた直後にフォルダーの名前を変える処理が、Windows で
+    /// 開いたままのファイルに当たらない）。
+    pub(super) loans: super::reader_loans::Loans,
     /// 書き込みはこの一本だけが行う。
-    /// 読み取りの見張りも書き戻しを試すのに使う（`reader_loans`）。
+    /// 読み取りの見張りも WAL の様子を読むのに使う（`reader_loans`）。
     pub(crate) conn: Arc<Mutex<Connection>>,
     /// 使い終えた読み取り専用の接続。`reader` が貸し出す。
     readers: Mutex<Vec<Connection>>,
-    /// いま貸している読み取り。返されないものが WAL の書き戻しを止めるので見張る。
-    pub(super) loans: super::reader_loans::Loans,
     /// 実体の回収と、台帳の全ファイルを読む処理（検証・バックアップ）を同時に走らせない。
     pub(crate) storage_gate: Mutex<()>,
     _process_lock: File,

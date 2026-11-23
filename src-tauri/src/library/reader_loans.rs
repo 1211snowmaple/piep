@@ -6,9 +6,13 @@
 //! ものを一度だけログに出す。借りる・返すの費用はロック一回と時刻の読み取りだけ。
 //!
 //! 借りた場所が分かるのは `Library::reader` で借りた読み取りだけである。それ以外のもの
-//! （生の接続や、ほかのプロセス）が書き戻しを止めても分かるよう、見張りは数分ごとに書き手の
-//! 接続で書き戻しを試し（`wal_checkpoint(PASSIVE)`。待たずにできる分だけ書き戻す）、書き戻せない
-//! 分が溜まったまま進まなければ、いま借りられている読み取りを全部ログに出す。
+//! （生の接続や、ほかのプロセス）が書き戻しを止めても分かるよう、見張りは数分ごとに WAL の
+//! 様子を読み（`wal_checkpoint(NOOP)`。書き戻しはせず、フレーム数と書き戻し済みの数だけを
+//! 読む。書き戻しそのものは保存の確定ごとの自動の書き戻しに任せる）、次のどちらかが続けば、
+//! いま借りられている読み取りを全部ログに出す。
+//!
+//! - 書き戻せない分が溜まったまま、書き戻し済みの数が進まない（古い時点を読み続けている）。
+//! - WAL が大きいまま頭から使い直されない（書き戻しは進むが、読み取りが途切れない）。
 
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -21,10 +25,12 @@ use std::time::{Duration, Instant};
 const INTERVAL: Duration = Duration::from_secs(30);
 /// これ以上借りたままの読み取りをログに出す。
 const LONG: Duration = Duration::from_secs(60);
-/// 書き戻しを試す間隔。
+/// WAL の様子を読む間隔。
 const WAL_EVERY: Duration = Duration::from_secs(5 * 60);
 /// 書き戻せずに残ってよいフレームの数（4 KiB のページで約 256 MiB）。
 const WAL_BACKLOG: i64 = 65_536;
+/// 使い直されないまま、ここまで伸びてよい WAL のフレーム数（約 1 GiB）。
+const WAL_LARGE: i64 = 262_144;
 /// 書き戻しが進まないまま、これだけ経ったらログに出す。
 const WAL_STALL: Duration = Duration::from_secs(10 * 60);
 
@@ -38,7 +44,7 @@ struct Loan {
 struct Table {
     next: u64,
     open: HashMap<u64, Loan>,
-    /// 書き戻しを試す書き手の接続。棚を閉じれば消える。
+    /// WAL の様子を読む書き手の接続。棚を閉じるとき（`Loans` を捨てるとき）に外す。
     writer: Weak<Mutex<Connection>>,
     wal: WalWatch,
 }
@@ -52,6 +58,7 @@ pub(super) struct Loans {
 #[derive(Debug, Default)]
 pub(crate) struct WalWatch {
     checked: Option<Instant>,
+    frames: i64,
     checkpointed: i64,
     stalled_since: Option<Instant>,
     reported: bool,
@@ -60,14 +67,18 @@ pub(crate) struct WalWatch {
 /// 書き戻しの見張りが伝えること。
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum WalEvent {
-    /// 書き戻せない分が溜まったまま進んでいない。
-    Stalled { backlog: i64, minutes: u64 },
+    /// 書き戻せない分が溜まったまま進んでいないか、WAL が大きいまま使い直されていない。
+    Stalled {
+        frames: i64,
+        backlog: i64,
+        minutes: u64,
+    },
     /// 止まっていた書き戻しが戻った。
     Recovered,
 }
 
 impl WalWatch {
-    /// 次に書き戻しを試すころか。
+    /// 次に WAL の様子を読むころか。
     fn due(&self, now: Instant) -> bool {
         self.checked
             .is_none_or(|checked| now.duration_since(checked) >= WAL_EVERY)
@@ -82,16 +93,16 @@ impl WalWatch {
     ) -> Option<WalEvent> {
         self.checked = Some(now);
         let backlog = frames - checkpointed;
-        // 書き手が WAL を頭から使い直すと、書き戻し済みの数は小さくなる。
+        // 書き手が WAL を頭から使い直すと、フレーム数も書き戻し済みの数も小さくなる。
+        let restarted = frames < self.frames;
         let progressed = checkpointed != self.checkpointed;
+        self.frames = frames;
         self.checkpointed = checkpointed;
-        if backlog < WAL_BACKLOG {
+        let pinned = backlog >= WAL_BACKLOG && !progressed;
+        let unbounded = frames >= WAL_LARGE && !restarted;
+        if !pinned && !unbounded {
             self.stalled_since = None;
             return std::mem::take(&mut self.reported).then_some(WalEvent::Recovered);
-        }
-        if progressed {
-            self.stalled_since = None;
-            return None;
         }
         let since = *self.stalled_since.get_or_insert(now);
         let stalled = now.duration_since(since);
@@ -100,24 +111,25 @@ impl WalWatch {
         }
         self.reported = true;
         Some(WalEvent::Stalled {
+            frames,
             backlog,
             minutes: stalled.as_secs() / 60,
         })
     }
 }
 
-/// 書き手の接続で、待たずにできる分だけ書き戻す。WAL のフレーム数と書き戻し済みの数を返す。
-/// 書き手が使用中なら試さない（保存を待たせない）。
-fn checkpoint(writer: &Mutex<Connection>) -> Option<(i64, i64)> {
+/// 書き手の接続で WAL の様子を読む。WAL のフレーム数と書き戻し済みの数を返す。
+/// 書き戻しはしない（NOOP）ので一瞬で終わる。書き手が使用中なら読まない（保存を待たせない）。
+fn wal_state(writer: &Mutex<Connection>) -> Option<(i64, i64)> {
     let conn = writer.try_lock().ok()?;
-    match conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+    match conn.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| {
         Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
     }) {
         // WAL でない（-1）ときは見張らない。
         Ok((frames, checkpointed)) if frames >= 0 => Some((frames, checkpointed)),
         Ok(_) => None,
         Err(error) => {
-            log::warn!("台帳の書き戻しを試せません: {error}");
+            log::warn!("台帳の WAL の様子を読めません: {error}");
             None
         }
     }
@@ -154,6 +166,11 @@ impl Loans {
         }));
         watch(Arc::downgrade(&table));
         Self { table }
+    }
+
+    /// 棚を閉じる。見張りが書き手の接続を使っていれば、手放すまで待つ。
+    fn close(&self) {
+        self.table.lock().unwrap_or_else(|e| e.into_inner()).writer = Weak::new();
     }
 
     /// 借りた読み取りを載せ、外すときの番号を返す。
@@ -198,6 +215,12 @@ impl Loans {
     pub(crate) fn open(&self) -> Vec<LongLoan> {
         let table = self.table.lock().unwrap_or_else(|e| e.into_inner());
         table.open.values().map(describe).collect()
+    }
+}
+
+impl Drop for Loans {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -261,23 +284,29 @@ fn watch(table: Weak<Mutex<Table>>) {
     }
 }
 
-/// 書き戻しを試し、止まっていれば、いま借りられている読み取りを全部ログに出す。
+/// WAL の様子を読み、止まっていれば、いま借りられている読み取りを全部ログに出す。
 fn watch_wal(table: &Mutex<Table>) {
-    let writer = {
-        let table = table.lock().unwrap_or_else(|e| e.into_inner());
-        if !table.wal.due(Instant::now()) {
-            return;
-        }
-        table.writer.upgrade()
-    };
-    let Some(writer) = writer else { return };
-    // 書き戻しは長くかかることがあるので、一覧のロックを持たずに行う。
-    let Some((frames, checkpointed)) = checkpoint(&writer) else {
+    // 一覧のロックを持ったまま書き手の接続を使い、使い終えてから放す。棚を閉じる側
+    // （`Loans::close`）はこのロックを待つので、閉じたあとまで接続を生かさない。
+    // NOOP は一瞬で終わり、書き手は try_lock なので、借りる・返す側を長く待たせない。
+    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
+    if !table.wal.due(Instant::now()) {
+        return;
+    }
+    let Some(writer) = table.writer.upgrade() else {
         return;
     };
-    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
+    let state = wal_state(&writer);
+    drop(writer);
+    let Some((frames, checkpointed)) = state else {
+        return;
+    };
     match table.wal.observe(Instant::now(), frames, checkpointed) {
-        Some(WalEvent::Stalled { backlog, minutes }) => {
+        Some(WalEvent::Stalled {
+            frames,
+            backlog,
+            minutes,
+        }) => {
             let loans: Vec<String> = table
                 .open
                 .values()
@@ -289,7 +318,7 @@ fn watch_wal(table: &Mutex<Table>) {
                 loans.join("、")
             };
             log::warn!(
-                "台帳の WAL を書き戻せないまま {minutes} 分たちました（未書き戻し {backlog} フレーム）。いま借りられている読み取り: {holders}"
+                "台帳の WAL が {minutes} 分のあいだ書き戻しも使い直しもされていません（{frames} フレーム、未書き戻し {backlog}）。いま借りられている読み取り: {holders}"
             );
         }
         Some(WalEvent::Recovered) => log::warn!("台帳の WAL の書き戻しが戻りました"),
@@ -314,6 +343,7 @@ mod tests {
         assert_eq!(
             watch.observe(at(start, 15), 150_000, 4),
             Some(WalEvent::Stalled {
+                frames: 150_000,
                 backlog: 149_996,
                 minutes: 10
             })
@@ -334,9 +364,49 @@ mod tests {
         for step in 0..10u64 {
             let checkpointed = 1_000 * (step as i64 + 1);
             assert_eq!(
-                watch.observe(at(start, 5 * step), 500_000, checkpointed),
+                watch.observe(at(start, 5 * step), 200_000, checkpointed),
                 None
             );
+        }
+    }
+
+    /// 書き戻しは追いついていても、読み取りが途切れず WAL を頭から使い直せないと伸び続ける。
+    #[test]
+    fn a_wal_that_keeps_growing_without_being_reused_is_reported() {
+        let start = Instant::now();
+        let mut watch = WalWatch::default();
+        let mut frames = 0;
+        for step in 0..2u64 {
+            frames = 300_000 + 10_000 * step as i64;
+            assert_eq!(
+                watch.observe(at(start, 5 * step), frames, frames - 10),
+                None
+            );
+        }
+        frames += 10_000;
+        assert_eq!(
+            watch.observe(at(start, 10), frames, frames - 10),
+            Some(WalEvent::Stalled {
+                frames,
+                backlog: 10,
+                minutes: 10
+            })
+        );
+        // 使い直された。
+        assert_eq!(
+            watch.observe(at(start, 20), 500, 500),
+            Some(WalEvent::Recovered)
+        );
+    }
+
+    /// 大きな取り込みで一度だけ伸びた WAL は、使い直されれば何も出さない。
+    #[test]
+    fn a_large_wal_that_is_reused_is_not_a_stall() {
+        let start = Instant::now();
+        let mut watch = WalWatch::default();
+        for step in 0..10u64 {
+            let frames = if step % 2 == 0 { 400_000 } else { 300_000 };
+            assert_eq!(watch.observe(at(start, 5 * step), frames, frames), None);
         }
     }
 
@@ -360,14 +430,47 @@ mod tests {
                 .execute("INSERT INTO t VALUES(zeroblob(8192))", [])
                 .unwrap();
         }
+        let passive = |writer: &Mutex<Connection>| {
+            writer
+                .lock()
+                .unwrap()
+                .execute_batch("PRAGMA wal_checkpoint(PASSIVE)")
+                .unwrap()
+        };
         let writer = Mutex::new(writer);
-        let (frames, pinned) = checkpoint(&writer).unwrap();
+        passive(&writer);
+        let (frames, pinned) = wal_state(&writer).unwrap();
         assert!(frames - pinned >= 50, "{frames} {pinned}");
         reader.execute_batch("ROLLBACK").unwrap();
-        let (frames, checkpointed) = checkpoint(&writer).unwrap();
+        // 見るだけで、書き戻しはしない。
+        assert_eq!(wal_state(&writer).unwrap(), (frames, pinned));
+        passive(&writer);
+        let (frames, checkpointed) = wal_state(&writer).unwrap();
         assert_eq!(frames, checkpointed);
         drop(reader);
         drop(writer);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 棚を閉じたら、見張りは書き手の接続をもう使えない（閉じたあとまで生かさない）。
+    #[test]
+    fn closing_takes_the_writer_away_from_the_watch() {
+        let writer = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+        let loans = Loans::new(&writer);
+        let table = Arc::downgrade(&loans.table);
+        drop(loans);
+        assert!(table.upgrade().is_none());
+        assert_eq!(Arc::strong_count(&writer), 1);
+        let watched = Arc::new(Mutex::new(Table {
+            next: 0,
+            open: HashMap::new(),
+            writer: Arc::downgrade(&writer),
+            wal: WalWatch::default(),
+        }));
+        let loans = Loans {
+            table: watched.clone(),
+        };
+        drop(loans);
+        assert!(watched.lock().unwrap().writer.upgrade().is_none());
     }
 }
