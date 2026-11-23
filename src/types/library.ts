@@ -170,7 +170,7 @@ export interface ReaderSearchHit {
 
 export interface LibraryDiagnostics {
   measuredAt: string;
-  totalDownloads: number;
+  totalWorks: number;
   totalAssets: number;
   totalVersions: number;
   totalTextLength: number;
@@ -232,17 +232,17 @@ export interface LibraryFileIssue {
 }
 
 export interface SearchIndexStatus {
-  totalDownloads: number;
-  indexedDownloads: number;
-  pendingDownloads: number;
+  totalWorks: number;
+  indexedWorks: number;
+  pendingWorks: number;
   /** 全文索引だけの話。意味索引の遅れはここに出ない。 */
   isComplete: boolean;
   phase: string;
   semanticIndexedChunks: number;
   /** 意味索引が最新の版で覆えている作品数。断片数と違い、棚の何割かが分かる。 */
-  semanticIndexedDownloads: number;
+  semanticIndexedWorks: number;
   /** 意味索引がまだ追いついていない作品数。 */
-  semanticPendingDownloads: number;
+  semanticPendingWorks: number;
   /** Persistent policy shared by rebuilds and incremental updates. */
   semanticEnabled: boolean;
   semanticModelReady: boolean;
@@ -277,8 +277,8 @@ export interface EditorDocument {
   blocks: WorkBlock[];
 }
 
-export interface DbStats {
-  totalDownloads: number;
+export interface ShelfStats {
+  totalWorks: number;
   pixivCount: number;
   fanboxCount: number;
   totalAssets: number;
@@ -459,8 +459,9 @@ export interface SourceBreakdown {
   totalSizeBytes: number;
 }
 
-export interface DashboardSummary {
-  stats: DbStats;
+/** `shelf_dashboard` が返す集計。 */
+export interface DashboardCounts {
+  stats: ShelfStats;
   favoriteCount: number;
   watchedCount: number;
   updateTargetCount: number;
@@ -468,9 +469,13 @@ export interface DashboardSummary {
   pendingIndexCount: number;
   topTags: FacetCount[];
   topAuthors: FacetCount[];
-  recentDownloads: ShelfEntry[];
   sourceBreakdown: SourceBreakdown[];
-  monthlyDownloads: DashboardTrendPoint[];
+  monthlySaves: DashboardTrendPoint[];
+}
+
+/** ホームが出す形。最近の保存は棚の一覧から足す。 */
+export interface DashboardSummary extends DashboardCounts {
+  recentWorks: ShelfEntry[];
 }
 
 export type LibraryViewMode =
@@ -637,9 +642,9 @@ export interface SearchRebuildProgress {
   /** "automatic" when the app caught its own index up at launch. */
   origin?: "manual" | "automatic" | string;
   status: "running" | "completed" | "canceled" | "failed" | string;
-  totalDownloads: number;
-  indexedDownloads: number;
-  pendingDownloads: number;
+  totalWorks: number;
+  indexedWorks: number;
+  pendingWorks: number;
   isComplete: boolean;
   phase?: string;
   /** Documents handled by this run. The bar tracks these, not the library-wide

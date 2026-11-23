@@ -281,10 +281,6 @@ impl Candidates<'_> {
         limit: i64,
         display: bool,
     ) -> Result<Vec<UpdateCandidateRow>, String> {
-        let library = self.library()?;
-        library
-            .prepare_discovery_summaries()
-            .map_err(|e| e.to_string())?;
         let mut rows = self.all(Some(status))?;
         rows.sort_by_key(|row| std::cmp::Reverse((row.updated_at, row.id)));
         if limit >= 0 {
