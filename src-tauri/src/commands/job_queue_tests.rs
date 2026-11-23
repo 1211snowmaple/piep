@@ -155,6 +155,42 @@ fn queue_preserves_exact_inputs_stop_resume_and_recovery() {
     library.verify().unwrap();
 }
 
+/// 画面は作品ごとに軽い差分（数えた列そのまま）を受け取る。一件終えるたびに数が進むこと。
+/// ジョブの ID を文字のまま渡して一行も当たらず、まるごと読み直すまで数が止まっていた。
+#[test]
+fn finishing_an_item_advances_the_counts_the_live_progress_reads() {
+    let (_temp, state, _library) = fixture();
+    let job = id();
+    state
+        .jobs()
+        .create_update_job_if_idle(
+            &job,
+            &request(),
+            &[item("1", "work", "queued"), item("2", "work", "queued")],
+        )
+        .unwrap();
+    let progress = |state: &AppState| {
+        let summary = state
+            .jobs()
+            .update_job_progress_delta(&job, None)
+            .unwrap()
+            .summary;
+        (summary.processed, summary.saved_count, summary.error_count)
+    };
+    let first = state.jobs().next_update_job_item(&job).unwrap().unwrap();
+    state
+        .jobs()
+        .complete_update_job_item(first.id, "skipped", None)
+        .unwrap();
+    assert_eq!(progress(&state), (1, 0, 0));
+    let second = state.jobs().next_update_job_item(&job).unwrap().unwrap();
+    state
+        .jobs()
+        .complete_update_job_item(second.id, "failed", Some("取得できません"))
+        .unwrap();
+    assert_eq!(progress(&state), (2, 0, 1));
+}
+
 #[test]
 fn results_belong_to_the_work_and_survive_backup() {
     let (temp, state, library) = fixture();

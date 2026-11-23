@@ -342,7 +342,7 @@ impl Queue<'_> {
                     delta[3],
                     delta[4],
                     chrono::Utc::now().to_rfc3339(),
-                    job_id,
+                    job_bytes(&job_id)?,
                 ],
             )
             .map_err(|e| format!("Failed to advance update job counters: {e}"))?;
