@@ -64,14 +64,6 @@ fn an_existing_library_opens_indexes_and_serves_files_by_their_fingerprint() {
 }
 
 #[test]
-fn image_kinds_come_from_the_bytes() {
-    assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("image/jpeg"));
-    assert_eq!(sniff(b"GIF89a"), Some("image/gif"));
-    assert_eq!(sniff(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
-    assert_eq!(sniff(b"<html>"), None);
-}
-
-#[test]
 fn the_shelf_lives_inside_the_app_folder() {
     let app = Path::new("C:/Users/u/AppData/Roaming/io.github.example.piep");
     if std::env::var_os(DIR_ENV).is_none() {

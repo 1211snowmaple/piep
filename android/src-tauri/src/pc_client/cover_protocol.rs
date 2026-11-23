@@ -495,16 +495,6 @@ async fn serve_remote<R: Runtime>(
     }
 }
 
-pub(super) fn sniffed_mime(bytes: &[u8]) -> Option<&'static str> {
-    Some(match image::guess_format(bytes).ok()? {
-        image::ImageFormat::Jpeg => "image/jpeg",
-        image::ImageFormat::Png => "image/png",
-        image::ImageFormat::WebP => "image/webp",
-        image::ImageFormat::Gif => "image/gif",
-        _ => return None,
-    })
-}
-
 /// 棚の本文の画像。開いた文書の一式に載っているファイルだけを取りに行く。
 /// 中身のハッシュで決まるので、接続先とハッシュで残す（改稿で古い絵が出ることはない）。
 async fn serve_shelf_page<R: Runtime>(
@@ -539,7 +529,7 @@ async fn serve_shelf_page<R: Runtime>(
     let Ok(bytes) = fetch_image(&state, &target).await else {
         return failure(StatusCode::BAD_GATEWAY);
     };
-    let Some(mime) = sniffed_mime(&bytes) else {
+    let Some(mime) = piep_storage::sniff_image(&bytes) else {
         return failure(StatusCode::BAD_GATEWAY);
     };
     if validate_display_image(&bytes, mime).is_err() {

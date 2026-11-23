@@ -815,8 +815,7 @@ async fn save_shelf_into(
             return Err(ClientError::remote());
         }
         let bytes = shelf_reader::fetch_image(pc, &target).await?;
-        let mime_type =
-            super::cover_protocol::sniffed_mime(&bytes).ok_or_else(ClientError::protocol)?;
+        let mime_type = piep_storage::sniff_image(&bytes).ok_or_else(ClientError::protocol)?;
         validate_saved_image(&bytes, mime_type)?;
         total_bytes = total_bytes
             .checked_add(bytes.len())
