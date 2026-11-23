@@ -833,6 +833,29 @@ impl PageSql {
 }
 
 impl Library {
+    /// 保存履歴には現在版でなく、その取得で確定した版の題・字数・版番号を使う。
+    pub fn work_snapshot_summary(
+        &self,
+        work: LibraryId,
+        snapshot: LibraryId,
+    ) -> Result<(String, i64, i64)> {
+        let conn = self.reader()?;
+        let (title, length, revision): (String, i64, i64) = conn.query_row(
+            "SELECT CAST(coalesce(json_extract(s.metadata_json,'$.title'),'') AS TEXT),
+                    coalesce(t.text_length,
+                      CASE json_type(s.metadata_json,'$.text_length')
+                        WHEN 'integer' THEN max(json_extract(s.metadata_json,'$.text_length'),0)
+                      END,0),
+                    r.ordinal
+             FROM revision_snapshots s JOIN source_revisions r ON r.id=s.revision_id
+             LEFT JOIN body_text_stats t ON t.file_id=s.body_file_id
+             WHERE s.entity_id=?1 AND s.id=?2 AND s.published=1",
+            params![work.as_bytes().as_slice(), snapshot.as_bytes().as_slice()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        Ok((title.trim().to_owned(), length, revision))
+    }
+
     /// 一作品の一覧の行を作り直す。保存・編集・お気に入りなど、行の値を変える書き込みの中で呼ぶ。
     pub(super) fn refresh_work_list(&self, tx: &Connection, work: LibraryId) -> Result<()> {
         let edit: Option<(Vec<u8>, Vec<u8>)> = tx
