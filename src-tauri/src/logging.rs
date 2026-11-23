@@ -75,15 +75,23 @@ impl FileLogger {
 impl log::Log for FileLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         // **他所の Debug は書かない。** 索引を作り直すあいだ、tantivy は
-        // ファイルを開くたびに1行出す。開発版では記録がそれで埋まり
-        // （8.4MB まで膨らんで回転していた）、こちらの記録が読めなくなるうえ、
-        // 1行ごとの同期書き込みが作り直しそのものを遅くする。
+        // ファイルを開くたびに1行出す。1行ごとの同期書き込みが作り直しそのものを遅くもする。
+        //
+        // **tantivy は Info も書かない。** 保存のたびの索引の確定・統合で数行ずつ出し、配布版では
+        // 半日で 8 MB を埋めて回転した（2026-11-23、10 時間で約 8,600 行）。起動直後の記録が
+        // 消えて、WAL が書き戻されない原因を追えなかった。
         //
         // piep が自分で書いたものは全部残す。困ったときに読むのはこちらである。
-        if metadata.level() > log::Level::Info && !metadata.target().starts_with("piep") {
-            return false;
+        let target = metadata.target();
+        if target.starts_with("piep") {
+            return true;
         }
-        true
+        let quiet = if target.starts_with("tantivy") {
+            log::Level::Warn
+        } else {
+            log::Level::Info
+        };
+        metadata.level() <= quiet
     }
 
     fn log(&self, record: &log::Record) {
@@ -215,6 +223,11 @@ mod tests {
         // 外から来たものでも、警告と誤りは落とさない。
         assert!(allowed(log::Level::Warn, "tantivy::indexer"));
         assert!(allowed(log::Level::Info, "tauri_plugin_updater::updater"));
+        // 索引の確定・統合のたびの Info は、記録を押し流すので書かない。
+        assert!(!allowed(
+            log::Level::Info,
+            "tantivy::indexer::segment_updater"
+        ));
     }
 
     /// 記録は残らなければ意味が無い。行の形まで含めて確かめる。
