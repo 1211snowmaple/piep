@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { visibleTagCount } from "@shared/tagRow";
 
 const gap = 4;
 
@@ -16,26 +17,25 @@ export function MobileTagRow({ tags, onTag, onMore }: { tags: string[]; onTag?: 
     row.removeAttribute("data-overflow");
     items.forEach((item) => item.removeAttribute("data-hidden"));
     overflow?.removeAttribute("data-hidden");
-    const naturalWidth = items.reduce((width, item, index) => width + item.offsetWidth + (index ? gap : 0), 0);
-    if (naturalWidth <= row.clientWidth) {
+    const available = row.clientWidth;
+    if (visibleTagCount({ widths: items.map((item) => item.offsetWidth), available, gap }) === items.length) {
       overflow?.setAttribute("data-hidden", "");
       setVisibleCount(items.length);
       return;
     }
     // 長い先頭タグは省略時の幅で測る。自然幅だけで判定すると表示可能なタグまで隠れる。
     row.setAttribute("data-overflow", "");
-    let used = 0;
-    let fits = 0;
-    for (const [index, item] of items.slice(0, -1).entries()) {
-      const next = used + (index ? gap : 0) + item.offsetWidth;
+    let count = visibleTagCount({
+      widths: items.map((item) => item.offsetWidth),
+      available,
+      gap,
+      limit: items.length - 1,
       // +9 と +10 では実際の幅が違うため、候補ごとの残件数を表示して測る。
-      if (overflow) overflow.textContent = `+${items.length - index - 1}`;
-      const overflowWidth = overflow ? overflow.offsetWidth + gap : 0;
-      if (next + overflowWidth > row.clientWidth) break;
-      used = next;
-      fits += 1;
-    }
-    let count = Math.max(1, fits);
+      overflowWidth: overflow ? (hidden) => {
+        overflow.textContent = `+${hidden}`;
+        return overflow.offsetWidth;
+      } : undefined,
+    });
     const show = () => {
       items.forEach((item, index) => item.toggleAttribute("data-hidden", index >= count));
       if (overflow) overflow.textContent = `+${items.length - count}`;

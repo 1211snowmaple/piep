@@ -1,4 +1,7 @@
 import type { ShelfEntry, SourceKind } from "@/types/library";
+import type { CollectionCoverMode } from "@shared/collectionCover";
+
+export type { CollectionCoverMode };
 
 export interface WorkKey {
   source: string;
@@ -16,9 +19,6 @@ export type CollectionSortBy =
   | "available_count"
   | "length"
   | "revision";
-
-/** 表紙の作り方。既定はメンバーの表紙を並べる `mosaic`。 */
-export type CollectionCoverMode = "mosaic" | "spine" | "single" | "sigil" | "file";
 
 /**
  * 候補の見つかり方。読む順のある続き物か、味が同じテーマか。

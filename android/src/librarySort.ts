@@ -1,5 +1,6 @@
 import { contentTypeLabel } from "@shared/format";
 import { ENTITY_SORT_OPTIONS, RELEVANCE_SORT_OPTION, SERIES_ORDER_SORT_OPTIONS, WORK_SORT_OPTIONS, sortLabel, type SortChoice } from "@shared/sortOptions";
+import { publishedSortTime } from "@shared/workSort";
 import { defaultPcSearch, type FixedSort, type OfflineWork, type PcSearchCriteria, type PcSort, type PcWorkSort } from "./pcApi";
 
 export type { FixedSort } from "./pcApi";
@@ -56,7 +57,10 @@ function time(value: string | null | undefined): number {
 
 function offlineCompare(sort: FixedSort): (left: OfflineWork, right: OfflineWork) => number {
   const saved = (item: OfflineWork) => time(item.work.savedAt) || item.savedAtMs;
-  const published = (item: OfflineWork) => time(item.work.sourceCreatedAt);
+  const published = (item: OfflineWork) => {
+    const key = publishedSortTime(item.work.sourceCreatedAt, item.work.savedAt);
+    return Number.isNaN(key) ? item.savedAtMs : key;
+  };
   const text = (a: string, b: string) => a.localeCompare(b, "ja");
   switch (sort) {
     case "saved:desc": return (a, b) => saved(b) - saved(a);

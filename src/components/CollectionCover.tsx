@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
 import { Box } from "@mantine/core";
 import { WorkCover } from "@/components/WorkCover";
+import { selectCollectionCover } from "@shared/collectionCover";
 import { authorHue, sigilCells } from "@shared/coverSigil";
 import { getAssetUrl } from "@/services/dbApi";
 import { shelfFileUrl } from "@/services/shelfApi";
-import type { CollectionCoverTile, WorkCollectionSummary } from "@/types/collections";
+import type { WorkCollectionSummary } from "@/types/collections";
 
 type CollectionCoverData = Pick<
   WorkCollectionSummary,
@@ -31,31 +32,26 @@ export function CollectionCover({
   variant?: "card" | "detail";
   className?: string;
 }) {
-  const tiles = collection.coverTiles ?? [];
   // 棚の表紙はパスでなくファイルの識別子。
   const asset = collection.shelf === true ? shelfFileUrl : getAssetUrl;
-  const requestedMode = resolveMode(collection, tiles);
+  const requestedMode = collection.coverMode;
   const [failedImage, setFailedImage] = useState<string | null>(null);
   const imageSrc = requestedMode === "file"
     ? asset(collection.coverImagePath)
     : requestedMode === "single"
       ? asset(collection.coverPath)
       : null;
-  const imageUnavailable = (requestedMode === "file" || requestedMode === "single")
-    && (!imageSrc || failedImage === imageSrc);
-  const mode = imageUnavailable ? (tiles.length === 0 ? "sigil" : "mosaic") : requestedMode;
+  const { mode, tiles } = selectCollectionCover(requestedMode, collection.coverTiles ?? [], Boolean(imageSrc && failedImage !== imageSrc));
   const classes = ["collection-cover", `collection-cover--${variant}`, `collection-cover--${mode}`, className]
     .filter(Boolean)
     .join(" ");
 
-  if (mode === "file" || mode === "single") {
-    const src = imageSrc;
-    if (src && failedImage !== src) {
+  if ((mode === "file" || mode === "single") && imageSrc) {
       return (
         <Box className={classes}>
           <img
             className="collection-cover__backdrop"
-            src={src}
+            src={imageSrc}
             alt=""
             aria-hidden
             loading={variant === "detail" ? "eager" : "lazy"}
@@ -64,27 +60,23 @@ export function CollectionCover({
           />
           <img
             className="collection-cover__image"
-            src={src}
+            src={imageSrc}
             alt={`${collection.name}の表紙`}
             loading={variant === "detail" ? "eager" : "lazy"}
             decoding="async"
-            onError={() => setFailedImage(src)}
+            onError={() => setFailedImage(imageSrc)}
           />
         </Box>
       );
-    }
   }
 
-  if (mode === "sigil" || tiles.length === 0) {
+  if (mode === "sigil") {
     return <CollectionSigil collection={collection} className={classes} />;
   }
 
-  // 2×2 まで。それ以上並べると1マスが小さくなりすぎて、何の絵か分からない。
-  // 4枚に満たないときは席を詰めるのではなく、並べる枚数そのものを変える。
-  const shown = tiles.slice(0, 4);
   return (
-    <Box className={classes} data-tiles={shown.length} role="img" aria-label={`${collection.name}の複合表紙`}>
-      {shown.map((tile, index) => {
+    <Box className={classes} data-tiles={tiles.length} role="img" aria-label={`${collection.name}の複合表紙`}>
+      {tiles.map((tile, index) => {
         const backdrop = asset(tile.coverPath);
         return (
           // 背表紙は奥へ向かってずれる。手前が並び順の先頭。ずらす量は外の枠に
@@ -140,12 +132,3 @@ function CollectionSigil({ collection, className }: { collection: CollectionCove
   );
 }
 
-/** 指定された作り方が使えないときに、無理なく落ちる先を選ぶ。 */
-function resolveMode(collection: CollectionCoverData, tiles: CollectionCoverTile[]) {
-  if (collection.coverMode === "file" && collection.coverImagePath) return "file";
-  if (collection.coverMode === "single" && collection.coverPath) return "single";
-  if (collection.coverMode === "sigil") return "sigil";
-  if (tiles.length === 0) return "sigil";
-  if (collection.coverMode === "spine" && tiles.length >= 2) return "spine";
-  return "mosaic";
-}

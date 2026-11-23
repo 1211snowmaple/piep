@@ -1,7 +1,7 @@
 import DOMPurify from "dompurify";
 import { formatDate, formatDateNumeric, parseDate } from "@shared/format";
 
-export { minimumReadProgress, progressLabel, readingFinished, readingPercent } from "@shared/readingProgress";
+export { minimumReadProgress, progressLabel, readingPercent } from "@shared/readingProgress";
 
 /** 取得元の説明は HTML で来る。改行だけ残して文字にする。 */
 export function plainText(source: string | null | undefined): string {

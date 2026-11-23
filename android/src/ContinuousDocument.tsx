@@ -14,7 +14,7 @@ export type ContinuousTarget = {
   nonce: number;
 };
 
-export type LivePosition = { page: number; top: number; ratio: number; pageCount: number };
+export type LivePosition = { page: number; top: number; ratio: number; pageCount: number; atPageEnd: boolean };
 
 type Section = { page: number; html: string; generation: string | null };
 export type LoadedSection = { page: PcPage; html: string; generation: string | null };
@@ -110,8 +110,8 @@ export function ContinuousDocument({ viewportRef, load, imageSource, isSnapshotC
     const lastSection = sectionsRef.current[sectionsRef.current.length - 1];
     const atEnd = lastSection.page === count - 1 && viewport.scrollTop >= viewport.scrollHeight - viewport.clientHeight - 2;
     const position: LivePosition = atEnd
-      ? { page: count - 1, top: offset, ratio: 1, pageCount: count }
-      : { page: current.page, top: offset, ratio: length > 0 ? Math.min(1, offset / length) : 0, pageCount: count };
+      ? { page: count - 1, top: offset, ratio: 1, pageCount: count, atPageEnd: true }
+      : { page: current.page, top: offset, ratio: length > 0 ? Math.min(1, offset / length) : 0, pageCount: count, atPageEnd: false };
     latest.current = position;
     callbacks.current.onPosition(position);
     const origin = restoredAt.current;
