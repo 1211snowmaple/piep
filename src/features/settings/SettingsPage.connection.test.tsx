@@ -64,6 +64,14 @@ describe("SettingsPage connection flow", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "接続解除" })).not.toBeInTheDocument());
   });
 
+  it("says which saved connection could not be read, and keeps the other one", async () => {
+    authApi.getConnectionStatus.mockResolvedValue({ pixiv: { name: "pixiv利用者", webSession: true }, fanbox: null, unreadable: ["fanbox"] });
+    renderConnectionSettings();
+
+    expect(await screen.findByText("pixiv利用者")).toBeInTheDocument();
+    expect(screen.getByText("保存された接続を読み取れませんでした。接続し直してください")).toBeInTheDocument();
+  });
+
   it("offers a browser reconnect when the pixiv connection lacks a web session", async () => {
     authApi.getConnectionStatus.mockResolvedValue({ pixiv: { name: "pixiv利用者", webSession: false }, fanbox: null });
     renderConnectionSettings();
