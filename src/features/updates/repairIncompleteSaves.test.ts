@@ -11,7 +11,7 @@ import { REPAIR_BATCH_SIZE, startIncompleteSaveRepair, useIncompleteSaveRepair }
 // DB の代わり。一部保存の作品と、今の版で試した作品を覚える。
 let incomplete: string[] = [];
 const attempted = new Set<string>();
-const work = (sourceId: string) => ({ source:"pixiv",sourceId,title:sourceId==="1"?"作品":`作品${sourceId}` });
+const work = (sourceId: string) => ({ source:"pixiv",sourceId,title:sourceId==="1"?"作品":`作品${sourceId}`,snapshot:`版${sourceId}` });
 
 beforeEach(() => {
   localStorage.clear();
@@ -21,13 +21,14 @@ beforeEach(() => {
   api.jobs.mockResolvedValue([]);
   api.connection.mockResolvedValue({ pixiv:{ name:"利用者",webSession:true },fanbox:null });
   api.list.mockImplementation(async (limit:number) => incomplete.filter((id)=>!attempted.has(id)).slice(0,limit).map(work));
-  api.record.mockImplementation(async (ids:string[]) => { ids.forEach((id)=>attempted.add(id)); });
+  api.record.mockImplementation(async (attempts:Array<{sourceId:string;snapshot:string}>) => { attempts.forEach(({sourceId})=>attempted.add(sourceId)); });
   api.start.mockResolvedValue({ jobId:"repair-job",status:"running" });
 });
 
 it("queues missing details through the normal save job and does not repeat accepted work", async () => {
   expect((await startIncompleteSaveRepair()).job?.jobId).toBe("repair-job");
   expect(api.start).toHaveBeenCalledWith([{source:"pixiv",sourceId:"1",title:"作品"}],false);
+  expect(api.record).toHaveBeenCalledWith([{sourceId:"1",snapshot:"版1"}]);
   expect(await startIncompleteSaveRepair()).toEqual({ waiting:false });
   expect(api.start).toHaveBeenCalledOnce();
 });
