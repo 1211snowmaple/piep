@@ -52,8 +52,8 @@ fn discover(library: &Library, key: &str, kind: &str, hold: Option<&str>) {
         )
         .unwrap();
 }
-fn keys(rows: Vec<(String, String)>) -> Vec<String> {
-    let mut keys: Vec<String> = rows.into_iter().map(|(key, _)| key).collect();
+fn keys(rows: Vec<(String, String, LibraryId)>) -> Vec<String> {
+    let mut keys: Vec<String> = rows.into_iter().map(|(key, ..)| key).collect();
     keys.sort();
     keys
 }
@@ -116,8 +116,17 @@ fn incomplete_saves_are_tried_once_per_snapshot() {
     assert_eq!(library.incomplete_save_repairs(0).unwrap().len(), 1);
     assert_eq!(library.incomplete_save_repairs(1).unwrap()[0].1, "題");
 
-    // 棚に無い作品は記録しない。同じ版の記録は重ねても一件。
-    let keys_tried = ["1".to_owned(), "9".to_owned(), "missing".to_owned()];
+    // 棚に無い作品・その作品の版でないものは記録しない。同じ版の記録は重ねても一件。
+    let listed = library.incomplete_save_repairs(50).unwrap();
+    let first = listed.iter().find(|(key, ..)| key == "1").unwrap().2;
+    let second = listed.iter().find(|(key, ..)| key == "2").unwrap().2;
+    let keys_tried = [
+        ("1".to_owned(), first),
+        ("9".to_owned(), first),
+        ("missing".to_owned(), first),
+        ("2".to_owned(), first),
+    ];
+    assert_ne!(first, second);
     assert_eq!(
         library
             .record_incomplete_save_attempts(&keys_tried, 10)
@@ -140,4 +149,26 @@ fn incomplete_saves_are_tried_once_per_snapshot() {
         ["1", "2"]
     );
     library.verify().unwrap();
+}
+
+/// 補完のジョブが先に新しい版を保存してから印を付けても、印は試した版にだけ付き、新しい版は
+/// 次の候補に残る。
+#[test]
+fn the_attempt_mark_stays_on_the_version_that_was_tried() {
+    let (_temp, library) = fixture();
+    save(&library, "1", "本文");
+    discover(&library, "1", "revision", Some("incomplete"));
+    let listed = library.incomplete_save_repairs(50).unwrap();
+    assert_eq!(keys(listed.clone()), ["1"]);
+    let tried = listed[0].2;
+    // ジョブが先に保存を確定した（まだ一部保存のまま）。
+    save(&library, "1", "直した本文");
+    discover(&library, "1", "revision", Some("incomplete"));
+    assert_eq!(
+        library
+            .record_incomplete_save_attempts(&[("1".to_owned(), tried)], 10)
+            .unwrap(),
+        1
+    );
+    assert_eq!(keys(library.incomplete_save_repairs(50).unwrap()), ["1"]);
 }

@@ -7,11 +7,6 @@ use serde_json::value::RawValue;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SuggestionJson(Box<RawValue>);
-impl SuggestionJson {
-    pub fn original_json(&self) -> &str {
-        self.0.get()
-    }
-}
 impl PartialEq for SuggestionJson {
     fn eq(&self, other: &Self) -> bool {
         self.0.get() == other.0.get()

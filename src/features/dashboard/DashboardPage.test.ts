@@ -20,20 +20,20 @@ describe("quickSaveSource", () => {
 });
 
 describe("searchIndexNote", () => {
-  const complete = { pendingDownloads: 0, isComplete: true, semanticIndexedChunks: 4192, semanticPendingDownloads: 0 };
+  const complete = { pendingWorks: 0, isComplete: true, semanticIndexedChunks: 4192, semanticPendingWorks: 0 };
 
   it("reports the full-text backlog while it is still catching up", () => {
-    expect(searchIndexNote({ ...complete, pendingDownloads: 42, isComplete: false })).toBe("42件を処理中");
+    expect(searchIndexNote({ ...complete, pendingWorks: 42, isComplete: false })).toBe("42件を処理中");
   });
 
   it("does not claim semantic search is current when it is behind", () => {
-    const note = searchIndexNote({ ...complete, semanticPendingDownloads: 318 });
+    const note = searchIndexNote({ ...complete, semanticPendingWorks: 318 });
     expect(note).toContain("全文検索は最新です");
     expect(note).toContain("318件が未反映");
   });
 
   it("says nothing about semantic search on a shelf that has never built it", () => {
-    expect(searchIndexNote({ ...complete, semanticIndexedChunks: 0, semanticPendingDownloads: 1284 })).toBe("全文検索は最新です");
+    expect(searchIndexNote({ ...complete, semanticIndexedChunks: 0, semanticPendingWorks: 1284 })).toBe("全文検索は最新です");
   });
 
   it("claims both only when both are caught up", () => {

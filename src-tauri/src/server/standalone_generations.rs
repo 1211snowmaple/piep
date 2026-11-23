@@ -1,5 +1,7 @@
 //! 単独サーバーへ検証済みの棚の写しを置き、停止中に配信する世代を選ぶ。
-use super::{load_config, lock_server, ServerConfig, ServerPaths, CONFIG_FILE};
+use super::{
+    load_config, lock_server, shipment, ReaderShelfConfig, ServerConfig, ServerPaths, CONFIG_FILE,
+};
 use crate::library::{protocol::Id, Library};
 use piep_storage::{regular_directory, regular_file, sync_directory};
 use std::fs::{self, OpenOptions};
@@ -44,15 +46,20 @@ pub(super) fn stage(paths: &ServerPaths, source: &Path) -> Result<Id, String> {
 
 pub(super) fn activate(paths: &ServerPaths, generation: Id) -> Result<(), String> {
     let _lock = lock_server(paths)?;
-    activate_locked(paths, generation, true)
+    shipment::check_manual_activation(paths, generation)?;
+    activate_locked(paths, generation, |_, library| {
+        library
+            .verify()
+            .map_err(|error| format!("選んだ棚を検証できません: {error}"))?;
+        Ok(())
+    })
 }
 
-/// 置き場の錠を持ったまま、配る世代を選ぶ。`verify` が偽なら中身の全体の検査を省く
-/// （受け取って組んだときに検査を通した世代を、起動のときに選ぶ場合）。
+/// 置き場の錠を持ったまま、棚の検査や引き継ぎを済ませてから配る世代を選ぶ。
 pub(super) fn activate_locked(
     paths: &ServerPaths,
     generation: Id,
-    verify: bool,
+    prepare: impl FnOnce(Option<&ReaderShelfConfig>, &Library) -> Result<(), String>,
 ) -> Result<(), String> {
     if paths
         .config_trial()
@@ -74,17 +81,13 @@ pub(super) fn activate_locked(
         None => Library::open(&root),
     }
     .map_err(|error| format!("選んだ棚を開けません: {error}"))?;
-    if verify {
-        library
-            .verify()
-            .map_err(|error| format!("選んだ棚を検証できません: {error}"))?;
-    }
+    prepare(config.shelf.as_ref(), &library)?;
     if config
         .shelf
         .as_ref()
         .is_some_and(|settings| settings.generation == Some(generation))
     {
-        return Ok(());
+        return sync_directory(&paths.root).map_err(|error| error.to_string());
     }
     let mut document: DocumentMut = text
         .parse()

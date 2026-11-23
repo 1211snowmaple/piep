@@ -73,13 +73,13 @@ fn counts_and_the_dashboard_follow_the_current_versions() {
 
     let stats = library.shelf_stats().unwrap();
     assert_eq!(
-        (stats.total_downloads, stats.pixiv_count, stats.fanbox_count),
+        (stats.total_works, stats.pixiv_count, stats.fanbox_count),
         (3, 3, 0)
     );
 
     library.sync_search_index(&mut |_, _| {}).unwrap();
     let index = library.search_index_status(false).unwrap();
-    assert_eq!((index.total_downloads, index.pending_downloads), (3, 0));
+    assert_eq!((index.total_works, index.pending_works), (3, 0));
     assert!(index.is_complete && !index.semantic_enabled);
 
     let summary = library.dashboard(&index).unwrap();
@@ -98,14 +98,9 @@ fn counts_and_the_dashboard_follow_the_current_versions() {
     assert_eq!(authors, vec![("甲", 2), ("乙", 1)]);
     assert_eq!(summary.source_breakdown.len(), 1);
     assert_eq!(
-        summary
-            .monthly_downloads
-            .iter()
-            .map(|m| m.count)
-            .sum::<i64>(),
+        summary.monthly_saves.iter().map(|m| m.count).sum::<i64>(),
         3
     );
-    assert!(summary.recent_downloads.is_empty());
 }
 
 #[test]
@@ -138,7 +133,7 @@ fn an_unindexed_work_is_pending_until_the_index_catches_up() {
     library.sync_search_index(&mut |_, _| {}).unwrap();
     save(&library, "2", "甲", &[], "本文");
     let status = library.search_index_status(false).unwrap();
-    assert_eq!((status.indexed_downloads, status.pending_downloads), (1, 1));
+    assert_eq!((status.indexed_works, status.pending_works), (1, 1));
     assert!(!status.is_complete);
 }
 

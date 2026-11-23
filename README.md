@@ -95,7 +95,7 @@ npx playwright test readme-shots --project=1440x900-light-200dpi --project=1440x
 | --- | --- |
 | 画面 | React 19 / TypeScript / Mantine 9 / TanStack Query・Virtual |
 | アプリ基盤 | Tauri 2（Rust）、内蔵WebViewによる取得と認証 |
-| 保存 | SQLite（rusqlite + r2d2）、ローカルファイル |
+| 保存 | SQLite（rusqlite）、内容で名前を付けた実体の保管（piep-storage） |
 | 検索 | Tantivy（全文・n-gram・読み正規化）、fastembed + ONNX Runtime（意味検索、DirectML対応） |
 | 書き出し | minijinja テンプレート + ZIP、oxipng / zenjpeg / webp による画像最適化 |
 | 添付の取り込み | pdfium（添付PDFの本文。タグ付きなら構造ツリー、無ければ行の形から組み直す） |
