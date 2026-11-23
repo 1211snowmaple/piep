@@ -38,6 +38,36 @@ pub struct ShelfSaved {
     pub missing_references: Vec<String>,
 }
 
+pub(super) enum ShelfSaveError {
+    Superseded,
+    Failed(String),
+}
+
+impl ShelfSaveError {
+    /// 画面やジョブへ返す文言。基準の版が変わったときも、そうと分かる文言にする。
+    pub(super) fn into_message(self) -> String {
+        match self {
+            Self::Superseded => crate::library::Error::Superseded.to_string(),
+            Self::Failed(error) => error,
+        }
+    }
+}
+
+impl From<String> for ShelfSaveError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<crate::library::Error> for ShelfSaveError {
+    fn from(error: crate::library::Error) -> Self {
+        match error {
+            crate::library::Error::Superseded => Self::Superseded,
+            error => Self::Failed(error.to_string()),
+        }
+    }
+}
+
 pub(in crate::commands) const JOB_ACQUISITION_REQUEST: &str = "acquisitionRequest";
 pub(in crate::commands) const JOB_ACQUISITION_RETRY: &str = "acquisitionRetryRequired";
 
@@ -336,9 +366,10 @@ pub(super) async fn save_to_shelf(
     user_agent: Option<String>,
 ) -> Result<ShelfSaved, String> {
     save_to_shelf_as(
-        shelf, library, data, source, source_id, cookie, user_agent, false, None,
+        shelf, library, data, source, source_id, cookie, user_agent, None, None,
     )
     .await
+    .map_err(ShelfSaveError::into_message)
 }
 
 /// 保存済みの応答（pixiv・FANBOX）に原寸の在り処を足したものを、保存し直す（縮小版の画像の取り直し）。
@@ -346,17 +377,32 @@ pub(super) async fn save_to_shelf(
 /// 手元の版と同じ応答でも保存する（表紙の枠は名前によらず一つなので、普段の保存は「持っている」と
 /// みて何もしない）。URL が変わらない画像・添付は棚から戻し、原寸に変わった画像だけを取りに行く。
 /// 棚は画質の違いを版の違いとして扱わないので、版は増えない。
+/// 応答を読んだときの保存版が現在版でなくなった場合は `None` を返す。
 pub(crate) async fn save_originals_to_shelf(
     shelf: Arc<Shelf>,
     library: Arc<Library>,
     data: Value,
     source: String,
     source_id: String,
-) -> Result<ShelfSaved, String> {
-    save_to_shelf_as(
-        shelf, library, data, source, source_id, None, None, true, None,
+    base_snapshot: LibraryId,
+) -> Result<Option<ShelfSaved>, String> {
+    match save_to_shelf_as(
+        shelf,
+        library,
+        data,
+        source,
+        source_id,
+        None,
+        None,
+        Some(base_snapshot),
+        None,
     )
     .await
+    {
+        Ok(saved) => Ok(Some(saved)),
+        Err(ShelfSaveError::Superseded) => Ok(None),
+        Err(ShelfSaveError::Failed(error)) => Err(error),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -368,10 +414,11 @@ pub(super) async fn save_to_shelf_as(
     source_id: String,
     cookie: Option<String>,
     user_agent: Option<String>,
-    upgrade_images: bool,
+    base_snapshot: Option<LibraryId>,
     job: Option<(&crate::AppState, &crate::models::UpdateJobItem)>,
-) -> Result<ShelfSaved, String> {
+) -> Result<ShelfSaved, ShelfSaveError> {
     let mut data = data;
+    let upgrade_images = base_snapshot.is_some();
     let work_lock = work_save_mutex(&source, &source_id);
     let _work_guard = work_lock.lock().await;
     // 原寸の取り直しが渡すのは、棚がもう持っている応答そのもの（原寸の在り処を足しただけ）。
@@ -381,7 +428,7 @@ pub(super) async fn save_to_shelf_as(
         && source == "fanbox"
         && data.get("isRestricted").and_then(Value::as_bool) == Some(true)
     {
-        return Err(fanbox_missing_material_error(&data));
+        return Err(fanbox_missing_material_error(&data).into());
     }
     // 一覧や関係で識別だけ先にできた作品（版が無い）は、初めての保存として扱う。
     let existing = {
@@ -398,7 +445,7 @@ pub(super) async fn save_to_shelf_as(
     let bodyless_upgrade = upgrade_images && !fetched_has_material_content(&data, &source);
     // 空の応答は保存しない（初めてなら棚に入れない、あれば手元の版を守る）。
     if !upgrade_images && !fetched_has_material_content(&data, &source) {
-        return Err(match (existing.is_some(), source.as_str()) {
+        let error = match (existing.is_some(), source.as_str()) {
             (_, "fanbox") => fanbox_missing_material_error(&data),
             (false, _) => {
                 "この作品の本文を取得できませんでした。閲覧制限がかかっている可能性があります"
@@ -407,7 +454,8 @@ pub(super) async fn save_to_shelf_as(
             (true, _) => {
                 "取得した作品に本文も挿絵もありません。手元の版は変更せずに保護しました".to_string()
             }
-        });
+        };
+        return Err(error.into());
     }
     let card = |library: Arc<Library>, work: LibraryId| async move {
         blocking(move || library.work_card(work).map_err(|e| e.to_string())).await
@@ -523,21 +571,26 @@ pub(super) async fn save_to_shelf_as(
     {
         let (library, source, key) = (Arc::clone(&library), source.clone(), source_id.clone());
         let input = serde_json::to_vec_pretty(&data).map_err(|e| e.to_string())?;
-        blocking(move || {
-            library
-                .begin_acquisition(request, &source, EntityKind::Work, &key, route)
-                .map_err(|e| e.to_string())?;
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Some(snapshot) = base_snapshot {
+                library.begin_work_acquisition_from_snapshot(
+                    request, &source, &key, route, snapshot,
+                )?;
+            } else {
+                library.begin_acquisition(request, &source, EntityKind::Work, &key, route)?;
+            }
             if let Err(error) = library.record_acquisition_payload(
                 request,
                 "work-save-input",
                 &crate::library::CaptureSource::Bytes(input),
             ) {
                 let _ = library.cancel_acquisition(request);
-                return Err(error.to_string());
+                return Err(error);
             }
             Ok(())
         })
-        .await?;
+        .await
+        .map_err(|e| e.to_string())??;
     }
     let staging = std::env::temp_dir().join(format!("piep-save-{}", request.simple()));
     let saved = async {
@@ -603,7 +656,7 @@ pub(super) async fn save_to_shelf_as(
         }
         if reader_only {
             let (library, held) = (Arc::clone(&library), assets.clone());
-            let work = existing.ok_or("読書の対応を補う対象がありません")?;
+            let work = existing.ok_or_else(|| "読書の対応を補う対象がありません".to_string())?;
             blocking(move || repairs::require_all_held(&library, work, &held)).await?;
         }
         let present: Vec<(String, Option<String>)> = assets
@@ -622,7 +675,7 @@ pub(super) async fn save_to_shelf_as(
             source.clone(),
             source_id.clone(),
         );
-        let result = blocking(move || {
+        let result = tauri::async_runtime::spawn_blocking(move || {
             let save = WorkSave {
                 request,
                 provider: &source,
@@ -636,10 +689,10 @@ pub(super) async fn save_to_shelf_as(
             } else {
                 library.save_readable_work(save, observation)
             }
-            .map_err(|e| e.to_string())
         })
-        .await?;
-        Ok::<_, String>((result, missing, asset_failure))
+        .await
+        .map_err(|e| e.to_string())??;
+        Ok::<_, ShelfSaveError>((result, missing, asset_failure))
     }
     .await;
     if let Err(error) = tokio::fs::remove_dir_all(&staging).await {
@@ -684,7 +737,7 @@ pub(super) async fn save_to_shelf_as(
         .await?;
     }
     if let Some(error) = asset_failure {
-        return Err(error);
+        return Err(error.into());
     }
     if source == "pixiv" {
         missing = references_left_by_edit(

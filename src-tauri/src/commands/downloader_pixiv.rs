@@ -584,9 +584,11 @@ mod tests {
             upgraded,
             "pixiv".into(),
             "1".into(),
+            first.snapshot_id,
         )
         .await
-        .unwrap_or_else(|error| panic!("{error} {:?}", paths.lock().unwrap()));
+        .unwrap_or_else(|error| panic!("{error} {:?}", paths.lock().unwrap()))
+        .unwrap();
         assert_eq!(saved.work, first.entity_id);
         // 版が増えないことは、pixiv の画像の住所で `library_original_images` の試験が確かめる
         // （ここの住所は手元のサーバーなので、縮小版と原寸を同じ画像とみなせない）。
@@ -700,7 +702,7 @@ mod tests {
         assert!(!library
             .export_original_image_by_url(&original_cover, &temp.0.join("none.png"))
             .unwrap());
-        for (key, data, _) in &works {
+        for (key, data, work) in &works {
             let mut upgraded = data.clone();
             upgraded[crate::downloader::pixiv_originals::COVER_ORIGINAL_FIELD] =
                 json!(original_cover);
@@ -710,9 +712,11 @@ mod tests {
                 upgraded,
                 "pixiv".into(),
                 (*key).into(),
+                library.current_snapshot(*work).unwrap(),
             )
             .await
-            .unwrap_or_else(|error| panic!("{error} {:?}", paths.lock().unwrap()));
+            .unwrap_or_else(|error| panic!("{error} {:?}", paths.lock().unwrap()))
+            .unwrap();
         }
         let mut newcomer = json!({"detail":{"title":"題3", "caption":"説明", "tags":["タグ"]},
             "text":"本文", "cover_url":cover});
@@ -815,8 +819,10 @@ mod tests {
             upgraded,
             "fanbox".into(),
             "9".into(),
+            first.snapshot_id,
         )
         .await
+        .unwrap()
         .unwrap();
         assert_eq!(saved.work, first.entity_id);
         let snapshot = library.current_snapshot(first.entity_id).unwrap();

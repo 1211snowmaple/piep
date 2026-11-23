@@ -247,15 +247,17 @@ struct WorkLabel {
 }
 
 /// 一作品の縮小版を原寸に取り直す。原寸が一枚も見つからなければ保存しない。
-async fn upgrade_shelf_work(
+async fn upgrade_shelf_work<F, Fut>(
     shelf: &Arc<crate::commands::shelf::Shelf>,
     library: &Arc<crate::library::Library>,
-    client: &reqwest::Client,
-    known: &KnownLookups,
-    asked: &AtomicUsize,
     work: crate::library::LibraryId,
+    find: F,
     label: &mut WorkLabel,
-) -> Result<Lookups, String> {
+) -> Result<Lookups, String>
+where
+    F: Fn(&str, String) -> Fut,
+    Fut: std::future::Future<Output = Result<OriginalLookup, String>>,
+{
     let (card, raw) = {
         let library = Arc::clone(library);
         tokio::task::spawn_blocking(move || {
@@ -316,34 +318,15 @@ async fn upgrade_shelf_work(
             }
         }
     };
+    let lookup = |url| {
+        let pending = find(&card.provider, url);
+        let count = &count;
+        async move { count(pending.await) }
+    };
     if card.provider == "pixiv" {
-        crate::downloader::pixiv_originals::add_original_urls_with(&mut data, |url| {
-            let count = &count;
-            async move {
-                count(
-                    remembered(known, url, |url| async move {
-                        asked.fetch_add(1, Ordering::Relaxed);
-                        find_original(client, &url).await
-                    })
-                    .await,
-                )
-            }
-        })
-        .await;
+        crate::downloader::pixiv_originals::add_original_urls_with(&mut data, lookup).await;
     } else {
-        crate::downloader::pixiv_originals::add_fanbox_original_cover_with(&mut data, |url| {
-            let count = &count;
-            async move {
-                count(
-                    remembered(known, url, |url| async move {
-                        asked.fetch_add(1, Ordering::Relaxed);
-                        find_fanbox_original_cover(client, &url).await
-                    })
-                    .await,
-                )
-            }
-        })
-        .await;
+        crate::downloader::pixiv_originals::add_fanbox_original_cover_with(&mut data, lookup).await;
     }
     let mut lookups = lookups
         .into_inner()
@@ -354,21 +337,27 @@ async fn upgrade_shelf_work(
     if lookups.found == 0 && lookups.improved == 0 {
         return Ok(lookups);
     }
-    if let Err(error) = crate::commands::downloader::shelf::save_originals_to_shelf(
+    match crate::commands::downloader::shelf::save_originals_to_shelf(
         Arc::clone(shelf),
         Arc::clone(library),
         data,
         card.provider.clone(),
         card.external_key.clone(),
+        card.snapshot_id,
     )
     .await
     {
-        // 見つけた原寸は保存できていない。縮小版のまま残る。
-        lookups.failed += lookups.found + lookups.improved;
-        lookups.unavailable -= lookups.improved;
-        lookups.found = 0;
-        lookups.improved = 0;
-        lookups.last_error = Some(error);
+        Ok(Some(_)) => {}
+        // 次回の実行で、現在の保存版に残っている縮小版を選び直す。
+        Ok(None) => return Ok(Lookups::default()),
+        Err(error) => {
+            // 見つけた原寸は保存できていない。縮小版のまま残る。
+            lookups.failed += lookups.found + lookups.improved;
+            lookups.unavailable -= lookups.improved;
+            lookups.found = 0;
+            lookups.improved = 0;
+            lookups.last_error = Some(error);
+        }
     }
     Ok(lookups)
 }
@@ -411,6 +400,21 @@ pub async fn shelf_upgrade_images_to_original(
             .collect(),
     );
     let asked = AtomicUsize::new(0);
+    let find = |provider: &str, url: String| {
+        let pixiv = provider == "pixiv";
+        let (known, asked, client) = (&known, &asked, &client);
+        async move {
+            remembered(known, url, |url| async move {
+                asked.fetch_add(1, Ordering::Relaxed);
+                if pixiv {
+                    find_original(client, &url).await
+                } else {
+                    find_fanbox_original_cover(client, &url).await
+                }
+            })
+            .await
+        }
+    };
     let works = shelf_reduced_works(Arc::clone(&shelf)).await?;
     let total: usize = works
         .iter()
@@ -471,24 +475,15 @@ pub async fn shelf_upgrade_images_to_original(
         let images = reduced.covers + reduced.illustrations;
         let asked_before = asked.load(Ordering::Relaxed);
         let mut label = WorkLabel::default();
-        let lookups = match upgrade_shelf_work(
-            &shelf,
-            &library,
-            &client,
-            &known,
-            &asked,
-            reduced.work,
-            &mut label,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => Lookups {
-                failed: images,
-                last_error: Some(error),
-                ..Lookups::default()
-            },
-        };
+        let lookups =
+            match upgrade_shelf_work(&shelf, &library, reduced.work, &find, &mut label).await {
+                Ok(result) => result,
+                Err(error) => Lookups {
+                    failed: images,
+                    last_error: Some(error),
+                    ..Lookups::default()
+                },
+            };
         completed += images;
         upgraded += lookups.found;
         unavailable += lookups.unavailable;
@@ -607,7 +602,88 @@ pub async fn shelf_upgrade_images_to_original(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::shelf::Shelf;
+    use crate::downloader::pixiv_originals::COVER_ORIGINAL_FIELD;
+    use crate::library::{Library, LibraryId, StagedAsset, WorkSave};
+    use serde_json::json;
     use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test]
+    async fn original_lookup_does_not_save_over_a_newer_snapshot() {
+        const REDUCED: &str =
+            "https://i.pximg.net/novel-cover-master/img/2024/01/01/00/00/00/1_master1200.png";
+        const ORIGINAL: &str =
+            "https://i.pximg.net/novel-cover-original/img/2024/01/01/00/00/00/1.png";
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp =
+            Temp(std::env::temp_dir().join(format!("piep-original-race-{}", LibraryId::now_v7())));
+        let library = Arc::new(Library::create(&temp.0.join("shelf")).unwrap());
+        let shelf = Arc::new(Shelf::with_test_library(Arc::clone(&library)));
+        let save = |text: &str, cover: &str, name: &str| {
+            let mut data = json!({"detail": {"title": "題"}, "text": text, "cover_url": REDUCED});
+            if cover == ORIGINAL {
+                data[COVER_ORIGINAL_FIELD] = json!(ORIGINAL);
+            }
+            let path = temp.0.join(name);
+            image::RgbImage::from_pixel(1, 1, image::Rgb([1, 2, 3]))
+                .save(&path)
+                .unwrap();
+            library
+                .save_readable_work(
+                    WorkSave {
+                        request: LibraryId::now_v7(),
+                        provider: "pixiv",
+                        key: "1",
+                        route: "save",
+                        data: &data,
+                        assets: vec![StagedAsset {
+                            role: "cover".into(),
+                            name: name.into(),
+                            path,
+                            url: Some(cover.into()),
+                            mime_type: Some("image/png".into()),
+                        }],
+                    },
+                    None,
+                )
+                .unwrap()
+        };
+        let first = save("最初の本文", REDUCED, "1_master1200.png");
+        let newer = std::cell::OnceCell::new();
+        let lookups = upgrade_shelf_work(
+            &shelf,
+            &library,
+            first.entity_id,
+            |provider: &str, url: String| {
+                assert_eq!(provider, "pixiv");
+                assert_eq!(url, REDUCED);
+                let newer = &newer;
+                async move {
+                    // 原寸の在り処の問い合わせ中に、別の保存が新しい本文と原寸の表紙を確定する。
+                    // 原寸の実体も棚に置くので、その後の保存経路でも外部通信は起きない。
+                    let saved = save("新しい本文", ORIGINAL, "1.png");
+                    assert!(saved.created_revision);
+                    assert!(newer.set(saved.snapshot_id).is_ok());
+                    Ok(OriginalLookup::Found(ORIGINAL.into()))
+                }
+            },
+            &mut WorkLabel::default(),
+        )
+        .await
+        .unwrap();
+
+        let newer = newer.into_inner().unwrap();
+        assert_eq!(library.current_snapshot(first.entity_id).unwrap(), newer);
+        assert_eq!(library.snapshots(first.entity_id).unwrap().len(), 2);
+        assert_eq!(lookups.found, 0);
+        assert_eq!(lookups.failed, 0);
+        library.verify().unwrap();
+    }
 
     #[tokio::test]
     async fn the_same_reduced_url_is_looked_up_once_but_a_failure_is_tried_again() {

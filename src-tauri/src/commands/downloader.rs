@@ -775,10 +775,11 @@ pub(super) async fn download_and_save(
         source_id,
         cookie,
         user_agent,
-        false,
+        None,
         Some((state, item)),
     )
     .await
+    .map_err(shelf::ShelfSaveError::into_message)
 }
 
 pub(crate) fn fanbox_missing_material_error(data: &serde_json::Value) -> String {

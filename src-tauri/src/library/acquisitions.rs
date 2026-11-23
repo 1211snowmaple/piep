@@ -190,6 +190,12 @@ pub(super) fn raw_parts(conn: &Connection, id: LibraryId) -> Result<Vec<RawPart>
     records
 }
 
+enum AcquisitionBase {
+    Current,
+    EmptyProfile,
+    Snapshot(LibraryId),
+}
+
 impl Library {
     /// 上流へ接続する前に呼ぶ。同じ entity の後から始まった取得が古い結果に負けない。
     pub fn begin_acquisition(
@@ -200,7 +206,26 @@ impl Library {
         key: &str,
         route: &str,
     ) -> Result<AcquisitionInfo> {
-        self.begin_acquisition_inner(id, provider, kind, key, route, false)
+        self.begin_acquisition_inner(id, provider, kind, key, route, AcquisitionBase::Current)
+    }
+
+    /// 保存済みの応答から始める取得は、その応答の版を基準として確定まで引き継ぐ。
+    pub fn begin_work_acquisition_from_snapshot(
+        &self,
+        id: LibraryId,
+        provider: &str,
+        key: &str,
+        route: &str,
+        snapshot: LibraryId,
+    ) -> Result<AcquisitionInfo> {
+        self.begin_acquisition_inner(
+            id,
+            provider,
+            EntityKind::Work,
+            key,
+            route,
+            AcquisitionBase::Snapshot(snapshot),
+        )
     }
 
     /// 作品に付いてくる控えは、既存の版や進行中の詳細取得を押し退けない。
@@ -215,7 +240,14 @@ impl Library {
         if !matches!(kind, EntityKind::Person | EntityKind::Series) {
             return Err(Error::Integrity("プロフィールの対象が不正です".into()));
         }
-        self.begin_acquisition_inner(id, provider, kind, key, route, true)
+        self.begin_acquisition_inner(
+            id,
+            provider,
+            kind,
+            key,
+            route,
+            AcquisitionBase::EmptyProfile,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -226,7 +258,7 @@ impl Library {
         kind: EntityKind,
         key: &str,
         route: &str,
-        only_if_empty: bool,
+        required_base: AcquisitionBase,
     ) -> Result<AcquisitionInfo> {
         if provider.is_empty()
             || provider.len() > 128
@@ -251,6 +283,8 @@ impl Library {
                 || info.ticket.kind != kind
                 || info.ticket.external_key != key
                 || info.ticket.route != route
+                || matches!(required_base, AcquisitionBase::Snapshot(snapshot)
+                    if info.ticket.base_snapshot != Some(snapshot))
             {
                 return Err(Error::Integrity(
                     "同じ要求 ID が異なる取得に使われました".into(),
@@ -278,12 +312,20 @@ impl Library {
             )
             .optional()?;
         let (base, generation) = current.map(|(s, g)| (Some(s), g)).unwrap_or((None, 0));
-        if only_if_empty {
-            // 同じ控えの未完了分は再起動後にやり直せる。別の経路の詳細取得は守る。
-            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM acquisition_attempts a JOIN acquisition_heads h ON h.entity_id=a.entity_id AND h.epoch=a.epoch WHERE a.entity_id=?1 AND a.state='pending' AND a.route<>?2)",params![entity.as_bytes().as_slice(),route],|r|r.get(0))?;
-            if base.is_some() || pending {
+        match required_base {
+            AcquisitionBase::Snapshot(snapshot)
+                if base.as_deref() != Some(snapshot.as_bytes().as_slice()) =>
+            {
                 return Err(Error::Superseded);
             }
+            AcquisitionBase::EmptyProfile => {
+                // 同じ控えの未完了分は再起動後にやり直せる。別の経路の詳細取得は守る。
+                let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM acquisition_attempts a JOIN acquisition_heads h ON h.entity_id=a.entity_id AND h.epoch=a.epoch WHERE a.entity_id=?1 AND a.state='pending' AND a.route<>?2)",params![entity.as_bytes().as_slice(),route],|r|r.get(0))?;
+                if base.is_some() || pending {
+                    return Err(Error::Superseded);
+                }
+            }
+            _ => {}
         }
         let old: i64 = tx
             .query_row(
