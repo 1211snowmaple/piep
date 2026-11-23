@@ -366,13 +366,13 @@ impl Library {
         let key = |row: &EntityRow| -> i64 {
             match sort {
                 SeriesSort::WorkCount => row.work_count as i64,
-                SeriesSort::DownloadedAt => row.latest_saved_at,
-                SeriesSort::SourceCreatedAt => row.latest_published_at,
-                SeriesSort::SourceUpdatedAt => row.latest_updated_at,
-                SeriesSort::TextLength => row.total_text_length as i64,
-                SeriesSort::FileSizeBytes => row.total_size as i64,
-                SeriesSort::AssetCount => row.total_media as i64,
-                SeriesSort::CurrentVersion => row.total_revisions as i64,
+                SeriesSort::Saved => row.latest_saved_at,
+                SeriesSort::Published => row.latest_published_at,
+                SeriesSort::Updated => row.latest_updated_at,
+                SeriesSort::Length => row.total_text_length as i64,
+                SeriesSort::Size => row.total_size as i64,
+                SeriesSort::Media => row.total_media as i64,
+                SeriesSort::Version => row.total_revisions as i64,
                 SeriesSort::Name => 0,
             }
         };

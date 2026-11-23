@@ -1,31 +1,30 @@
 import { contentTypeLabel } from "@shared/format";
 import { ENTITY_SORT_OPTIONS, RELEVANCE_SORT_OPTION, SERIES_ORDER_SORT_OPTIONS, WORK_SORT_OPTIONS, sortLabel, type SortChoice } from "@shared/sortOptions";
-import { defaultPcSearch, type OfflineWork, type PcSearchCriteria, type PcSort, type PcWorkSort } from "./pcApi";
+import { defaultPcSearch, type FixedSort, type OfflineWork, type PcSearchCriteria, type PcSort, type PcWorkSort } from "./pcApi";
 
-export type FixedSort = Exclude<PcSort, "standard">;
+export type { FixedSort } from "./pcApi";
 export type MenuGroup<T extends string> = { label: string; items: { value: T; label: string }[] };
 
-/** 携帯の順の名前と、デスクトップと共通の順の対応。呼び名は共通の定義から引く。 */
-const sortChoices: Record<FixedSort, SortChoice> = {
-  dateDesc: "downloaded_at:desc", dateAsc: "downloaded_at:asc", publishedDesc: "source_created_at:desc", publishedAsc: "source_created_at:asc",
-  titleAsc: "title:asc", titleDesc: "title:desc", authorAsc: "author_name:asc", authorDesc: "author_name:desc",
-  lengthDesc: "text_length:desc", lengthAsc: "text_length:asc", assetsDesc: "asset_count:desc", assetsAsc: "asset_count:asc",
-  versionDesc: "current_version:desc", versionAsc: "current_version:asc",
-};
+/** 携帯で選べる順。値と呼び名はデスクトップと共通の定義（`@shared/sortOptions`）のまま。 */
+const fixedSorts: FixedSort[] = [
+  "saved:desc", "saved:asc", "published:desc", "published:asc",
+  "title:asc", "title:desc", "author:asc", "author:desc",
+  "length:desc", "length:asc", "media:desc", "media:asc", "version:desc", "version:asc",
+];
 
 export const sortLabels = Object.fromEntries(
-  Object.entries(sortChoices).map(([sort, choice]) => [sort, sortLabel(WORK_SORT_OPTIONS, choice)]),
+  fixedSorts.map((sort) => [sort, sortLabel(WORK_SORT_OPTIONS, sort as SortChoice)]),
 ) as Record<FixedSort, string>;
 
 export const relevanceLabel = RELEVANCE_SORT_OPTION.label;
 
 export const sortGroups: { label: string; items: FixedSort[] }[] = [
-  { label: "日付", items: ["dateDesc", "dateAsc", "publishedDesc", "publishedAsc"] },
-  { label: "名前", items: ["titleAsc", "titleDesc", "authorAsc", "authorDesc"] },
-  { label: "内容", items: ["lengthDesc", "lengthAsc", "assetsDesc", "assetsAsc", "versionDesc", "versionAsc"] },
+  { label: "日付", items: ["saved:desc", "saved:asc", "published:desc", "published:asc"] },
+  { label: "名前", items: ["title:asc", "title:desc", "author:asc", "author:desc"] },
+  { label: "内容", items: ["length:desc", "length:asc", "media:desc", "media:asc", "version:desc", "version:asc"] },
 ];
 
-const defaultSort: FixedSort = "dateDesc";
+const defaultSort: FixedSort = "saved:desc";
 const rememberedKey = "piep.android.library.sort";
 const savedConditionsKey = "piep.android.library.saved-conditions";
 
@@ -60,20 +59,20 @@ function offlineCompare(sort: FixedSort): (left: OfflineWork, right: OfflineWork
   const published = (item: OfflineWork) => time(item.work.sourceCreatedAt);
   const text = (a: string, b: string) => a.localeCompare(b, "ja");
   switch (sort) {
-    case "dateDesc": return (a, b) => saved(b) - saved(a);
-    case "dateAsc": return (a, b) => saved(a) - saved(b);
-    case "publishedDesc": return (a, b) => published(b) - published(a);
-    case "publishedAsc": return (a, b) => published(a) - published(b);
-    case "titleAsc": return (a, b) => text(a.work.title, b.work.title);
-    case "titleDesc": return (a, b) => text(b.work.title, a.work.title);
-    case "authorAsc": return (a, b) => text(a.work.authorName, b.work.authorName);
-    case "authorDesc": return (a, b) => text(b.work.authorName, a.work.authorName);
-    case "lengthDesc": return (a, b) => b.work.textLength - a.work.textLength;
-    case "lengthAsc": return (a, b) => a.work.textLength - b.work.textLength;
-    case "assetsDesc": return (a, b) => b.work.assetCount - a.work.assetCount;
-    case "assetsAsc": return (a, b) => a.work.assetCount - b.work.assetCount;
-    case "versionDesc": return (a, b) => b.work.currentVersion - a.work.currentVersion;
-    case "versionAsc": return (a, b) => a.work.currentVersion - b.work.currentVersion;
+    case "saved:desc": return (a, b) => saved(b) - saved(a);
+    case "saved:asc": return (a, b) => saved(a) - saved(b);
+    case "published:desc": return (a, b) => published(b) - published(a);
+    case "published:asc": return (a, b) => published(a) - published(b);
+    case "title:asc": return (a, b) => text(a.work.title, b.work.title);
+    case "title:desc": return (a, b) => text(b.work.title, a.work.title);
+    case "author:asc": return (a, b) => text(a.work.authorName, b.work.authorName);
+    case "author:desc": return (a, b) => text(b.work.authorName, a.work.authorName);
+    case "length:desc": return (a, b) => b.work.textLength - a.work.textLength;
+    case "length:asc": return (a, b) => a.work.textLength - b.work.textLength;
+    case "media:desc": return (a, b) => b.work.assetCount - a.work.assetCount;
+    case "media:asc": return (a, b) => a.work.assetCount - b.work.assetCount;
+    case "version:desc": return (a, b) => b.work.currentVersion - a.work.currentVersion;
+    case "version:asc": return (a, b) => a.work.currentVersion - b.work.currentVersion;
   }
 }
 
@@ -122,16 +121,16 @@ export function hasConditionToSave(criteria: PcSearchCriteria): boolean {
 
 // ---- 作者・シリーズの一覧の順。デスクトップ版の ENTITY_SORT_OPTIONS と同じ項目を持つ。
 
-export type EntitySortField = "work_count" | "downloaded_at" | "source_created_at" | "source_updated_at" | "name" | "text_length" | "file_size_bytes" | "asset_count" | "current_version";
+export type EntitySortField = "work_count" | "saved" | "published" | "updated" | "name" | "length" | "size" | "media" | "version";
 export type EntitySort = `${EntitySortField}:${"asc" | "desc"}`;
 
 const entityItems = (...sorts: EntitySort[]) => sorts.map((value) => ({ value, label: sortLabel(ENTITY_SORT_OPTIONS, value) }));
 
 export const entitySortGroups: MenuGroup<EntitySort>[] = [
   { label: "作品数", items: entityItems("work_count:desc", "work_count:asc") },
-  { label: "日付", items: entityItems("downloaded_at:desc", "downloaded_at:asc", "source_created_at:desc", "source_created_at:asc", "source_updated_at:desc", "source_updated_at:asc") },
+  { label: "日付", items: entityItems("saved:desc", "saved:asc", "published:desc", "published:asc", "updated:desc", "updated:asc") },
   { label: "名前", items: entityItems("name:asc", "name:desc") },
-  { label: "合計", items: entityItems("text_length:desc", "text_length:asc", "file_size_bytes:desc", "file_size_bytes:asc", "asset_count:desc", "asset_count:asc", "current_version:desc", "current_version:asc") },
+  { label: "合計", items: entityItems("length:desc", "length:asc", "size:desc", "size:asc", "media:desc", "media:asc", "version:desc", "version:asc") },
 ];
 
 const entitySortValues = new Map(entitySortGroups.flatMap((group) => group.items).map((item) => [item.value as string, item.label]));
@@ -148,7 +147,7 @@ export function splitEntitySort(sort: EntitySort): { sort: string; order: string
 }
 
 export function loadEntitySort(kind: "people" | "series" | typeof entitySeriesKey): EntitySort {
-  const fallback: EntitySort = kind === entitySeriesKey ? "source_created_at:desc" : "work_count:desc";
+  const fallback: EntitySort = kind === entitySeriesKey ? "published:desc" : "work_count:desc";
   try {
     const value = window.localStorage.getItem(entitySortKey(kind));
     return value && entitySortValues.has(value) ? value as EntitySort : fallback;
@@ -161,12 +160,12 @@ export function saveEntitySort(kind: "people" | "series" | typeof entitySeriesKe
 
 // ---- 作者・シリーズの中の作品の順。
 
-export type EntityWorkSort = FixedSort | "seriesAsc" | "seriesDesc";
-const seriesOrderLabels = { seriesAsc: sortLabel(SERIES_ORDER_SORT_OPTIONS, "series_order:asc"), seriesDesc: sortLabel(SERIES_ORDER_SORT_OPTIONS, "series_order:desc") };
+export type EntityWorkSort = FixedSort | "series_order:asc" | "series_order:desc";
+const seriesOrderLabels = { "series_order:asc": sortLabel(SERIES_ORDER_SORT_OPTIONS, "series_order:asc"), "series_order:desc": sortLabel(SERIES_ORDER_SORT_OPTIONS, "series_order:desc") };
 const entityWorkSortKey = (kind: string) => `piep.android.entity-work-sort.${kind}`;
 
 export function entityWorkSortLabel(sort: EntityWorkSort): string {
-  return sort === "seriesAsc" || sort === "seriesDesc" ? seriesOrderLabels[sort] : sortLabels[sort];
+  return sort === "series_order:asc" || sort === "series_order:desc" ? seriesOrderLabels[sort] : sortLabels[sort];
 }
 
 /**
@@ -176,20 +175,20 @@ export function entityWorkSortLabel(sort: EntityWorkSort): string {
 export function entityWorkSortGroups(kind: "person" | "series", hasQuery: boolean): MenuGroup<PcWorkSort>[] {
   const groups: MenuGroup<PcWorkSort>[] = [];
   if (hasQuery) groups.push({ label: "この検索だけ", items: [{ value: "standard", label: relevanceLabel }] });
-  if (kind === "series") groups.push({ label: "シリーズ内順", items: [{ value: "seriesAsc", label: seriesOrderLabels.seriesAsc }, { value: "seriesDesc", label: seriesOrderLabels.seriesDesc }] });
+  if (kind === "series") groups.push({ label: "シリーズ内順", items: [{ value: "series_order:asc", label: seriesOrderLabels["series_order:asc"] }, { value: "series_order:desc", label: seriesOrderLabels["series_order:desc"] }] });
   for (const group of sortGroups) {
-    const items = group.items.filter((sort) => sort !== "authorAsc" && sort !== "authorDesc");
+    const items = group.items.filter((sort) => sort !== "author:asc" && sort !== "author:desc");
     groups.push({ label: group.label, items: items.map((sort) => ({ value: sort, label: sortLabels[sort] })) });
   }
   return groups;
 }
 
 export function loadEntityWorkSort(kind: "person" | "series"): EntityWorkSort {
-  const fallback: EntityWorkSort = kind === "series" ? "seriesAsc" : "publishedDesc";
+  const fallback: EntityWorkSort = kind === "series" ? "series_order:asc" : "published:desc";
   try {
     const value = window.localStorage.getItem(entityWorkSortKey(kind));
-    if (value === "seriesAsc" || value === "seriesDesc") return kind === "series" ? value : fallback;
-    if (value === "authorAsc" || value === "authorDesc") return fallback;
+    if (value === "series_order:asc" || value === "series_order:desc") return kind === "series" ? value : fallback;
+    if (value === "author:asc" || value === "author:desc") return fallback;
     return value && value in sortLabels ? value as FixedSort : fallback;
   } catch { return fallback; }
 }

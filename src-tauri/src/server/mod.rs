@@ -7,7 +7,6 @@
 pub mod admin_assets;
 pub mod admin_store;
 pub mod desktop;
-pub mod dto;
 pub mod http;
 pub mod install;
 #[cfg(windows)]

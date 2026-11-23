@@ -258,7 +258,7 @@ fn an_authors_series_are_aggregated_filtered_sorted_and_paged() {
         .unwrap()
         .unwrap();
     let page = library
-        .person_series(person, "", SeriesSort::SourceCreatedAt, false, 0, 10)
+        .person_series(person, "", SeriesSort::Published, false, 0, 10)
         .unwrap();
     assert_eq!(page.total, 2);
     assert_eq!(page.next, None);
@@ -287,21 +287,21 @@ fn an_authors_series_are_aggregated_filtered_sorted_and_paged() {
     assert_eq!(counted.items[0].external_key, "s2");
     // 名前か説明に語を含むもの。
     let found = library
-        .person_series(person, "あらす", SeriesSort::SourceCreatedAt, false, 0, 10)
+        .person_series(person, "あらす", SeriesSort::Published, false, 0, 10)
         .unwrap();
     assert_eq!(found.total, 1);
     assert_eq!(found.items[0].external_key, "s1");
     let found = library
-        .person_series(person, "S2 の", SeriesSort::SourceCreatedAt, false, 0, 10)
+        .person_series(person, "S2 の", SeriesSort::Published, false, 0, 10)
         .unwrap();
     assert_eq!(found.items[0].external_key, "s2");
     // ページを分けても同じ並び。
     let head = library
-        .person_series(person, "", SeriesSort::SourceCreatedAt, false, 0, 1)
+        .person_series(person, "", SeriesSort::Published, false, 0, 1)
         .unwrap();
     assert_eq!(head.next, Some(1));
     let tail = library
-        .person_series(person, "", SeriesSort::SourceCreatedAt, false, 1, 1)
+        .person_series(person, "", SeriesSort::Published, false, 1, 1)
         .unwrap();
     assert_eq!(head.items[0].external_key, "s1");
     assert_eq!(tail.items[0].external_key, "s2");

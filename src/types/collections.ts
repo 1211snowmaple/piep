@@ -14,7 +14,7 @@ export type CollectionSortBy =
   | "name"
   | "member_count"
   | "available_count"
-  | "text_length"
+  | "length"
   | "revision";
 
 /** 表紙の作り方。既定はメンバーの表紙を並べる `mosaic`。 */

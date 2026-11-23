@@ -430,8 +430,8 @@ export interface ShelfSeriesFacetPage {
 }
 
 export type ShelfSeriesSort =
-  | "work_count" | "downloaded_at" | "source_created_at" | "source_updated_at" | "name"
-  | "text_length" | "file_size_bytes" | "asset_count" | "current_version";
+  | "work_count" | "saved" | "published" | "updated" | "name"
+  | "length" | "size" | "media" | "version";
 
 /** 取得元の ID から作者・シリーズの頭を引く。棚に無ければ null。 */
 export function shelfEntity(kind: "person" | "series", provider: string, key: string): Promise<ShelfEntityHead | null> {

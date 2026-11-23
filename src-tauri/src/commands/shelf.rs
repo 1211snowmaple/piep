@@ -1017,7 +1017,7 @@ pub async fn shelf_person_series(
     limit: usize,
 ) -> Result<SeriesFacetPage, String> {
     let state = Arc::clone(&state);
-    let sort = sort.unwrap_or(SeriesSort::SourceCreatedAt);
+    let sort = sort.unwrap_or(SeriesSort::Published);
     let ascending = match order.as_deref() {
         Some("asc") => true,
         Some("desc") => false,

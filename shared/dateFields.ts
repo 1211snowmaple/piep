@@ -1,11 +1,11 @@
 // 作品の日付の種類と、その呼び名。
 
-export type DateField = "downloaded_at" | "source_created_at" | "source_updated_at";
+export type DateField = "saved" | "published" | "updated";
 
 export const DATE_FIELD_OPTIONS: { value: DateField; label: string }[] = [
-  { value: "downloaded_at", label: "保存日" },
-  { value: "source_created_at", label: "公開日" },
-  { value: "source_updated_at", label: "更新日" },
+  { value: "saved", label: "保存日" },
+  { value: "published", label: "公開日" },
+  { value: "updated", label: "更新日" },
 ];
 
 export function dateFieldLabel(value: DateField): string {

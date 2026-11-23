@@ -52,7 +52,7 @@ describe("collection ordering", () => {
     ["updated_at", "desc", "small"],
     ["member_count", "asc", "small"],
     ["available_count", "desc", "large"],
-    ["text_length", "desc", "large"],
+    ["length", "desc", "large"],
     ["revision", "asc", "small"],
     ["name", "desc", "large"],
   ] as const)("sorts %s %s across the whole collection list", (sortBy, order, first) => {

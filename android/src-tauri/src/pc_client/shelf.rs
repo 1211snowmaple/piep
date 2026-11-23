@@ -214,7 +214,7 @@ async fn post_bounded<T>(
     state: &PcClientState,
     scope: ShelfScope,
     endpoint: &str,
-    body: &serde_json::Value,
+    body: &impl serde::Serialize,
     parse: impl FnOnce(&[u8]) -> Result<T, ClientError>,
 ) -> Result<T, ClientError> {
     let (generation, saved) = state.connection_snapshot()?;
@@ -378,9 +378,9 @@ pub async fn pc_search(
     if limit.is_some_and(|value| !(1..=50).contains(&value)) {
         return Err(ClientError::remote());
     }
-    let mut payload = super::search_payload(&criteria, cursor, offset, scope)?;
-    if let Some(limit) = limit {
-        payload["limit"] = serde_json::json!(limit);
+    let mut payload = super::search_request(&criteria, cursor, offset, scope)?;
+    if limit.is_some() {
+        payload.limit = limit;
     }
     let endpoint = format!("/api/libraries/{}/works/search", library.library_id.get());
     post_bounded(&state, library, &endpoint, &payload, |bytes| {

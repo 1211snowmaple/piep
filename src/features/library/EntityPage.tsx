@@ -175,7 +175,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   // one entry per keystroke in the search box would bury everything else.
   const workQuery = (urlParams.get("q") ?? "").slice(0, 200);
   const activeTags = urlParams.getAll("tag").slice(0, 20);
-  const builtInWorkSort: LibrarySortBy = kind === "series" ? "series_order" : "source_created_at";
+  const builtInWorkSort: LibrarySortBy = kind === "series" ? "series_order" : "published";
   const [storedWorkSort, setStoredWorkSort] = useLocalStorage<unknown>({
     key: `piep.entity-work-sort.${kind}`,
     defaultValue: builtInWorkSort,
@@ -199,7 +199,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     // Inside one author every row has that author's name, so that key cannot
     // move anything. Series can contain works from multiple authors.
     const workOptions = kind === "person"
-      ? WORK_SORT_OPTIONS.filter((option) => !option.value.startsWith("author_name:"))
+      ? WORK_SORT_OPTIONS.filter((option) => !option.value.startsWith("author:"))
       : WORK_SORT_OPTIONS;
     const columnOptions = kind === "series"
       ? [...SERIES_ORDER_SORT_OPTIONS, ...workOptions]
@@ -1011,7 +1011,7 @@ function parseEntityWorkSort(
   if (typeof value !== "string" || !ENTITY_WORK_SORT_VALUES.has(value as LibrarySortBy)) return fallback;
   if (value === "relevance" && !hasQuery) return fallback;
   if (value === "series_order" && kind !== "series") return fallback;
-  if (value === "author_name" && kind === "person") return fallback;
+  if (value === "author" && kind === "person") return fallback;
   return value as LibrarySortBy;
 }
 

@@ -130,7 +130,7 @@ const initialFilters: Filters = {
   authorsInclude: [], authorsExclude: [], tagsInclude: [], tagsExclude: [],
   tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", minSizeMb: "", maxSizeMb: "", assetFilter: null, seriesFilter: null, seriesKey: null, seriesSource: null, seriesLabel: "",
   revisionFilter: null, acquisitionFilter: null, editFilter: null, coverFilter: null,
-  dateField: "downloaded_at", dateFrom: "", dateTo: "",
+  dateField: "saved", dateFrom: "", dateTo: "",
 };
 
 /**
@@ -224,7 +224,7 @@ function parseCoverFilter(value: unknown): LibraryCoverFilter | null {
 }
 
 function parseDateField(value: unknown): LibraryDateField {
-  return value === "source_created_at" || value === "source_updated_at" ? value : "downloaded_at";
+  return value === "published" || value === "updated" ? value : "saved";
 }
 
 function dateFilter(value: unknown): string {
@@ -236,7 +236,7 @@ function dateFilter(value: unknown): string {
 }
 
 function parseSortBy(value: unknown): LibrarySortBy {
-  return typeof value === "string" && SORT_VALUES.has(value as LibrarySortBy) ? value as LibrarySortBy : "downloaded_at";
+  return typeof value === "string" && SORT_VALUES.has(value as LibrarySortBy) ? value as LibrarySortBy : "saved";
 }
 
 
@@ -250,10 +250,10 @@ function parseSortBy(value: unknown): LibrarySortBy {
  * choice survive closing the app. It never applies to a search: ranking by
  * relevance is the point of typing a query.
  */
-export function resolveSortBy(raw: string | null, hasQuery: boolean, preferred: LibrarySortBy = "downloaded_at"): LibrarySortBy {
+export function resolveSortBy(raw: string | null, hasQuery: boolean, preferred: LibrarySortBy = "saved"): LibrarySortBy {
   const parsed = typeof raw === "string" && SORT_VALUES.has(raw as LibrarySortBy) ? raw as LibrarySortBy : null;
   // 覚えていた値も信用しない。保存先は書き換えられるし、並び順の名前は版で変わる。
-  const fallback = SORT_VALUES.has(preferred) && preferred !== "relevance" ? preferred : "downloaded_at";
+  const fallback = SORT_VALUES.has(preferred) && preferred !== "relevance" ? preferred : "saved";
   if (!hasQuery) return parsed && parsed !== "relevance" ? parsed : fallback;
   return parsed ?? "relevance";
 }
@@ -479,7 +479,7 @@ export function parseSavedParams(json: string): {
     return {
       tab: "works",
       filters: initialFilters,
-      sortBy: "downloaded_at",
+      sortBy: "saved",
       sortOrder: "desc",
       entityScope: initialEntityScope,
       entitySortBy: "work_count",
@@ -619,7 +619,7 @@ export default function LibraryPage() {
   const semanticIntent = tab === "works" && resolvedSearchMode === "semantic";
   // writeUrl は URL 側の書き手。記憶した並び順は「既定はどれか」の判断にしか
   // 使わないので、参照で渡して依存関係を増やさない。
-  const preferredSortRef = useRef<LibrarySortBy>("downloaded_at");
+  const preferredSortRef = useRef<LibrarySortBy>("saved");
   const writeUrl = useCallback((patch: {
     q?: string;
     tab?: LibraryTab;
@@ -786,7 +786,7 @@ export default function LibraryPage() {
   const [pageSize] = usePageSize();
   // 並び順は「この人の見かた」なので覚える。検索語・絞り込み・ページ番号は
   // 「そのときの問い」なので覚えない（保存した検索がその役目を持っている）。
-  const [storedSort, setStoredSort] = useLocalStorage<unknown>({ key: "piep.library-sort", defaultValue: "downloaded_at", getInitialValueInEffect: false });
+  const [storedSort, setStoredSort] = useLocalStorage<unknown>({ key: "piep.library-sort", defaultValue: "saved", getInitialValueInEffect: false });
   const [storedSortOrder, setStoredSortOrder] = useLocalStorage<unknown>({ key: "piep.library-sort-order", defaultValue: null, getInitialValueInEffect: false });
   const preferredSort = parseSortBy(storedSort);
   const preferredSortOrder = parseSortOrder(storedSortOrder, defaultSortOrderFor(preferredSort));
@@ -1276,7 +1276,7 @@ export default function LibraryPage() {
             projection: "bulk",
             // シリーズは話数の順。保存した順に並べると、あとから拾った
             // 1話目が最後に来る本ができあがる。
-            sortBy: entityKind === "series" ? "series_order" : "downloaded_at",
+            sortBy: entityKind === "series" ? "series_order" : "saved",
             sortOrder: "asc",
           };
           // 作品の ID で積む（書き出しは棚から読む）。

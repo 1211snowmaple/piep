@@ -38,7 +38,7 @@ describe("保存した作品の本文検索", () => {
     api.listOfflineIssues.mockResolvedValue([]);
     api.searchOfflineText.mockResolvedValue([{ workId: "w2", page: 3, snippet: "…そこで灯台守は言った…", pages: 2 }]);
     const open = vi.fn();
-    render(<OfflineLibrary page={{ name: "offline", tab: "works", groupId: null }} onOpenWork={open} onOpenDetail={() => {}} onShowPc={() => {}} savedRevision={0} pagingMode="auto" rememberedSort="dateDesc" onRememberedSortChange={() => {}} />);
+    render(<OfflineLibrary page={{ name: "offline", tab: "works", groupId: null }} onOpenWork={open} onOpenDetail={() => {}} onShowPc={() => {}} savedRevision={0} pagingMode="auto" rememberedSort="saved:desc" onRememberedSortChange={() => {}} />);
     await screen.findByText("夏の話");
 
     const field = screen.getByRole("searchbox");
@@ -58,7 +58,7 @@ describe("保存した作品の本文検索", () => {
     api.listOfflineWorks.mockResolvedValue([saved(1, "夏の話"), saved(2, "冬の話")]);
     api.listOfflineIssues.mockResolvedValue([]);
     api.searchOfflineText.mockRejectedValue({ code: "device_records" });
-    render(<OfflineLibrary page={{ name: "offline", tab: "works", groupId: null }} onOpenWork={() => {}} onOpenDetail={() => {}} onShowPc={() => {}} savedRevision={1} pagingMode="auto" rememberedSort="dateDesc" onRememberedSortChange={() => {}} />);
+    render(<OfflineLibrary page={{ name: "offline", tab: "works", groupId: null }} onOpenWork={() => {}} onOpenDetail={() => {}} onShowPc={() => {}} savedRevision={1} pagingMode="auto" rememberedSort="saved:desc" onRememberedSortChange={() => {}} />);
     await screen.findByText("夏の話");
     const field = screen.getByRole("searchbox");
     fireEvent.change(field, { target: { value: "冬" } });

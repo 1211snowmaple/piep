@@ -49,7 +49,7 @@ it("一覧・作品の画面・表紙を棚から引く", async () => {
     throw new Error(command);
   });
 
-  const page = await pc.searchPcWorks({ ...pc.defaultPcSearch, text: "題", sort: "dateDesc" });
+  const page = await pc.searchPcWorks({ ...pc.defaultPcSearch, text: "題", sort: "saved:desc" });
   expect(api.invoke.mock.calls[0][0]).toBe("pc_search");
   expect(api.invoke.mock.calls[0][1]).toMatchObject({ library: { libraryId: library }, cursor: null, scope: null });
   const [item] = page.items;
@@ -84,7 +84,7 @@ it("棚に届かない接続では、一覧を引かずに知らせる", async (
   const shelf = await import("./shelf");
   const pc = await import("./pcApi");
   shelf.adoptShelf(status(false));
-  await expect(pc.searchPcWorks({ ...pc.defaultPcSearch, sort: "dateDesc" })).rejects.toMatchObject({ code: "library_changed" });
+  await expect(pc.searchPcWorks({ ...pc.defaultPcSearch, sort: "saved:desc" })).rejects.toMatchObject({ code: "library_changed" });
   await expect(pc.saveOfflineWork(work)).rejects.toMatchObject({ code: "library_changed" });
   expect(api.invoke).not.toHaveBeenCalled();
   expect(shelf.connectedShelfKey()).toBeNull();

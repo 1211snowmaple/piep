@@ -249,7 +249,7 @@ fn pages_split_one_order_and_the_total_does_not_depend_on_the_page() {
     let library = Library::create(&temp.0).unwrap();
     shelf(&library);
     let mut request = query(EntityKind::Person);
-    request.sort = SeriesSort::SourceCreatedAt;
+    request.sort = SeriesSort::Published;
     request.limit = 1;
     let head = library.list_entities(&request).unwrap();
     request.offset = 1;

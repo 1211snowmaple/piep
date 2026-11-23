@@ -100,7 +100,7 @@ export function CollectionAddWorksModal({
   const params = useMemo<SearchParams>(() => {
     const base: SearchParams = {
       query: debouncedQuery.trim() || null,
-      sortBy: debouncedQuery.trim() ? "relevance" : "downloaded_at",
+      sortBy: debouncedQuery.trim() ? "relevance" : "saved",
       sortOrder: "desc",
       limit: PAGE_SIZE,
       projection: "libraryGallery",

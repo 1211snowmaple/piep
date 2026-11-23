@@ -28,7 +28,7 @@ import {
   type ShelfTextSearch,
 } from "@/services/shelfApi";
 import type { CollectionCoverMode, CollectionNameSource, WorkCollection, WorkCollectionSummary } from "@/types/collections";
-import type { EntityFacet, EntityFacetScope, EntitySortBy, EntityVersion, LibrarySortBy, PersonEntry, SearchParams, SearchResult, SeriesEntry, ShelfEntry, SourceKind } from "@/types/library";
+import type { EntityFacet, EntityFacetScope, EntitySortBy, EntityVersion, PersonEntry, SearchParams, SearchResult, SeriesEntry, ShelfEntry, SourceKind } from "@/types/library";
 
 /**
  * ライブラリの一覧を棚から出す。
@@ -76,26 +76,6 @@ export class ShelfUnsupportedError extends Error {
     this.name = "ShelfUnsupportedError";
   }
 }
-
-const SORTS: Partial<Record<LibrarySortBy, ShelfSort>> = {
-  downloaded_at: "saved",
-  source_created_at: "published",
-  source_updated_at: "updated",
-  title: "title",
-  author_name: "author",
-  text_length: "length",
-  file_size_bytes: "size",
-  asset_count: "media",
-  current_version: "version",
-  series_order: "series_order",
-  relevance: "relevance",
-};
-
-const DATE_FIELDS = {
-  downloaded_at: "saved",
-  source_created_at: "published",
-  source_updated_at: "updated",
-} as const;
 
 const MEDIA = {
   has_assets: "any",
@@ -161,7 +141,7 @@ export function shelfFilter(params: SearchParams, scope: ShelfEntityScope = {}):
     logical_size: range(params.minFileSizeBytes, params.maxFileSizeBytes),
     date: params.dateFrom || params.dateTo
       ? {
-          field: DATE_FIELDS[params.dateField ?? "downloaded_at"],
+          field: params.dateField ?? "saved",
           from: utcDay(params.dateFrom),
           until: utcDay(params.dateTo, 1),
         }
@@ -186,9 +166,7 @@ export function shelfFilter(params: SearchParams, scope: ShelfEntityScope = {}):
 export function shelfRequest(params: SearchParams, scope: ShelfEntityScope = {}): { search: ShelfTextSearch; query: ShelfListQuery; person: ShelfEntityKey | null } {
   const unsupported: string[] = [];
   if (params.personKey && !params.personSource) unsupported.push("取得元のない作者の指名");
-  const sortBy = params.sortBy ?? "downloaded_at";
-  const sort = SORTS[sortBy];
-  if (!sort) unsupported.push("この並び順");
+  const sort: ShelfSort = params.sortBy ?? "saved";
   if (unsupported.length) throw new ShelfUnsupportedError(unsupported);
 
   const terms = [params.text?.trim() ?? ""];

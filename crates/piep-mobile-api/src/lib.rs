@@ -5,9 +5,13 @@
 //! （`shared/mobileApi.ts`）は、このファイルから `tools/api-types` が生成する。
 //! 型を足すとき・項目を変えるときは、ここを直して生成し直す。
 //!
-//! ここには型だけを置く。DB の行からの変換はサーバー側の `dto.rs` にある。
+//! ここには型と、両側で同じにしたい検査（一覧の条件の `validate`）だけを置く。
+//! 棚の問い合わせへの変換はサーバー側（`server::reader`）にある。
 
 use serde::{Deserialize, Serialize};
+
+mod search;
+pub use search::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -304,18 +308,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_page_saved_before_revisions_still_reads_and_writes_back_without_the_key() {
-        let old = r#"{"page":0,"pageCount":1,"html":"<p>本文</p>","totalPlainTextChars":2,"sourcePageStarts":[0]}"#;
-        let page: MobilePage = serde_json::from_str(old).unwrap();
-        assert_eq!(page.revision, None);
-        assert_eq!(serde_json::to_string(&page).unwrap(), old);
-    }
-
-    #[test]
     fn a_collection_detail_is_one_flat_object_on_the_wire() {
-        let json = r#"{"id":"c1","name":"棚","description":null,"collectionKind":"manual","memberCount":1,"availableCount":0,"coverWorkId":null,"members":[{"title":"題","authorName":"作者","position":0,"work":null}]}"#;
+        let json = r#"{"id":"c1","name":"棚","description":null,"collectionKind":"manual","memberCount":1,"availableCount":0,"coverMode":"tiles","coverRevision":0,"hasSingleCover":false,"hasFileCover":false,"coverTiles":[],"members":[{"title":"題","authorName":"作者","position":0,"work":null}]}"#;
         let detail: MobileCollectionDetail = serde_json::from_str(json).unwrap();
-        assert_eq!(detail.summary.cover_mode, "");
+        assert_eq!(detail.summary.cover_mode, "tiles");
         assert_eq!(detail.members.len(), 1);
         let written = serde_json::to_value(&detail).unwrap();
         assert_eq!(written["name"], "棚");

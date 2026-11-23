@@ -16,6 +16,7 @@ use axum::{
     response::Response,
     Extension,
 };
+use piep_mobile_api::MobileEntitySort;
 use piep_mobile_api::{
     MobileCollection, MobileCollectionCoverTile, MobileCollectionDetail, MobileCollectionMember,
     MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage, MobileFacet,
@@ -70,12 +71,29 @@ fn text(value: Option<String>) -> Result<String, ApiError> {
     Ok(value)
 }
 
+/// 携帯の作者・シリーズの並べ方を棚の並べ方にする。名前は同じ。
+fn entity_sort(sort: MobileEntitySort) -> SeriesSort {
+    match sort {
+        MobileEntitySort::WorkCount => SeriesSort::WorkCount,
+        MobileEntitySort::Saved => SeriesSort::Saved,
+        MobileEntitySort::Published => SeriesSort::Published,
+        MobileEntitySort::Updated => SeriesSort::Updated,
+        MobileEntitySort::Name => SeriesSort::Name,
+        MobileEntitySort::Length => SeriesSort::Length,
+        MobileEntitySort::Size => SeriesSort::Size,
+        MobileEntitySort::Media => SeriesSort::Media,
+        MobileEntitySort::Version => SeriesSort::Version,
+    }
+}
+
 /// 並べる鍵と向き。向きを省くと鍵ごとの既定（名前だけ昇順）。
 fn sort(sort: Option<&str>, order: Option<&str>) -> Result<(SeriesSort, bool), ApiError> {
     let sort = match sort {
         None => SeriesSort::WorkCount,
-        Some(value) => serde_json::from_value(serde_json::Value::String(value.to_owned()))
-            .map_err(|_| invalid())?,
+        Some(value) => entity_sort(
+            serde_json::from_value(serde_json::Value::String(value.to_owned()))
+                .map_err(|_| invalid())?,
+        ),
     };
     let ascending = match order {
         None => sort.ascending_by_default(),

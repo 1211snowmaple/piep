@@ -101,7 +101,7 @@ export interface PcSearchCriteria {
   revision: "" | "revised" | "first_version";
   edit: "" | "edited" | "unedited";
   cover: "" | "has_cover" | "no_cover";
-  dateField: "downloaded_at" | "source_created_at" | "source_updated_at";
+  dateField: "saved" | "published" | "updated";
   dateFrom: string;
   dateTo: string;
   // remembered は画面だけの値で「検索ボタン横のいつもの順に従う」。送る前に実際の順へ直す。
@@ -109,13 +109,18 @@ export interface PcSearchCriteria {
 }
 
 // standard はサーバーの標準の順。検索語があれば関連度、シリーズの中ならシリーズの順になる。
-export type PcSort = "standard" | "dateDesc" | "dateAsc" | "publishedDesc" | "publishedAsc" | "titleAsc" | "titleDesc" | "authorAsc" | "authorDesc" | "lengthDesc" | "lengthAsc" | "assetsDesc" | "assetsAsc" | "versionDesc" | "versionAsc";
+/** 携帯で選べる作品の順。値はデスクトップと共通の `鍵:向き`（`@shared/sortOptions`）。 */
+export type FixedSort =
+  | "saved:desc" | "saved:asc" | "published:desc" | "published:asc"
+  | "title:asc" | "title:desc" | "author:asc" | "author:desc"
+  | "length:desc" | "length:asc" | "media:desc" | "media:asc" | "version:desc" | "version:asc";
+export type PcSort = "standard" | FixedSort;
 
 /** 作者やシリーズの中だけで使える順を足したもの。 */
-export type PcWorkSort = PcSort | "seriesAsc" | "seriesDesc";
+export type PcWorkSort = PcSort | "series_order:asc" | "series_order:desc";
 export type PcWorkSearch = Omit<PcSearchCriteria, "sort"> & { sort: PcWorkSort };
 
-export const defaultPcSearch: PcSearchCriteria = { text: "", source: "", contentType: "", author: "", authorExclude: "", favorite: false, tag: "", tagExclude: "", tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", revision: "", edit: "", cover: "", dateField: "downloaded_at", dateFrom: "", dateTo: "", sort: "remembered" };
+export const defaultPcSearch: PcSearchCriteria = { text: "", source: "", contentType: "", author: "", authorExclude: "", favorite: false, tag: "", tagExclude: "", tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", revision: "", edit: "", cover: "", dateField: "saved", dateFrom: "", dateTo: "", sort: "remembered" };
 
 /** 作品の保存した版。写しの ID で以前の版を棚から開く。 */
 export type PcVersion = MobileVersion;

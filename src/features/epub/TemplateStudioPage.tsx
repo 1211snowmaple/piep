@@ -823,7 +823,7 @@ function SamplePicker({ sampleId, onChange, runtime }: { sampleId: SampleId | nu
     queryKey: ["template-preview-works", query],
     queryFn: (): Promise<{ items: ShelfEntry[] }> => {
       if (!runtime) return Promise.resolve({ items: [] });
-      return searchShelf({ text: query || null, limit: 20, sortBy: "downloaded_at", sortOrder: "desc" });
+      return searchShelf({ text: query || null, limit: 20, sortBy: "saved", sortOrder: "desc" });
     },
     enabled: runtime,
     staleTime: 30_000,

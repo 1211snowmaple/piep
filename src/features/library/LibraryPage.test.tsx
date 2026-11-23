@@ -202,14 +202,14 @@ describe("LibraryPage search", () => {
 
     await waitFor(() => {
       const query = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
-      expect(query.get("sort")).toBe("asset_count");
+      expect(query.get("sort")).toBe("media");
       expect(query.get("order")).toBe("asc");
     });
     await waitFor(() => {
       const query = client.getQueryCache().findAll({ queryKey: ["shelf"] })
         .find((item) => {
           const params = item.queryKey[1] as SearchParams | undefined;
-          return params?.sortBy === "asset_count" && params.sortOrder === "asc";
+          return params?.sortBy === "media" && params.sortOrder === "asc";
         });
       expect(query).toBeDefined();
     });
@@ -330,7 +330,7 @@ describe("LibraryPage search", () => {
         tab: "series",
         filters: {},
         entityScope: { watch: "paused", minWorkCount: 3, concluded: false },
-        entitySortBy: "asset_count",
+        entitySortBy: "media",
         entitySortOrder: "asc",
       }),
       createdAt: "2026-01-01T00:00:00Z",
@@ -344,7 +344,7 @@ describe("LibraryPage search", () => {
       expect(query.get("ewatch")).toBe("paused");
       expect(query.get("emin")).toBe("3");
       expect(query.get("edone")).toBe("0");
-      expect(query.get("esort")).toBe("asset_count");
+      expect(query.get("esort")).toBe("media");
       expect(query.get("eorder")).toBe("asc");
       expect(query.has("csort")).toBe(false);
       expect(query.has("corder")).toBe(false);
@@ -582,7 +582,7 @@ describe("LibraryPage search", () => {
   });
 
   it("restores the drawer's filters when history returns to them", async () => {
-    window.location.hash = "#/library?source=pixiv&tag=%E5%89%B5%E4%BD%9C&minchars=5000&minassets=2&maxassets=20&minsizemb=1.5&maxsizemb=50&assets=has_images&seriesmode=in_series&revision=revised&localedit=edited&cover=has_cover&versions=all&datefield=source_updated_at&datefrom=2026-01-01&dateto=2026-09-01";
+    window.location.hash = "#/library?source=pixiv&tag=%E5%89%B5%E4%BD%9C&minchars=5000&minassets=2&maxassets=20&minsizemb=1.5&maxsizemb=50&assets=has_images&seriesmode=in_series&revision=revised&localedit=edited&cover=has_cover&versions=all&datefield=updated&datefrom=2026-01-01&dateto=2026-09-01";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
@@ -686,28 +686,28 @@ describe("remembered library order", () => {
   // 並び順は「この人の見かた」。アプリを閉じても続くべき設定として扱う。
   it("uses the remembered order when the address says nothing", () => {
     expect(resolveSortBy(null, false, "title")).toBe("title");
-    expect(resolveSortBy(null, false)).toBe("downloaded_at");
+    expect(resolveSortBy(null, false)).toBe("saved");
   });
 
   it("lets the address win, so a link opens what it says", () => {
-    expect(resolveSortBy("text_length", false, "title")).toBe("text_length");
+    expect(resolveSortBy("length", false, "title")).toBe("length");
   });
 
   // 検索したときの既定は関連度。覚えた順序で上書きしない。
   it("keeps relevance as the default for a search", () => {
     expect(resolveSortBy(null, true, "title")).toBe("relevance");
-    expect(resolveSortBy("title", true, "downloaded_at")).toBe("title");
+    expect(resolveSortBy("title", true, "saved")).toBe("title");
   });
 
   // 関連度は検索の外では意味を持たないので、覚えていても使わない。
   it("never falls back to relevance without a query", () => {
-    expect(resolveSortBy(null, false, "relevance")).toBe("downloaded_at");
+    expect(resolveSortBy(null, false, "relevance")).toBe("saved");
     expect(resolveSortBy("relevance", false, "title")).toBe("title");
   });
 
   // 保存先は手で書き換えられるし、並び順の名前は版で変わりうる。
   it("falls back when the stored value is not an order any more", () => {
-    expect(resolveSortBy(null, false, "nonsense" as never)).toBe("downloaded_at");
+    expect(resolveSortBy(null, false, "nonsense" as never)).toBe("saved");
   });
 });
 
@@ -738,7 +738,7 @@ describe("library entity paging", () => {
 
   // 古い鍵で選んであった並びは、そのまま引き継ぐ。黙って既定へ戻さない。
   it("carries the order chosen before the two tabs were split", async () => {
-    window.localStorage.setItem("piep.library-entity-sort", JSON.stringify("downloaded_at"));
+    window.localStorage.setItem("piep.library-entity-sort", JSON.stringify("saved"));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
@@ -804,12 +804,12 @@ describe("library entity paging", () => {
  */
 describe("saved search parameters", () => {
   it("remembers that a search was a semantic one", () => {
-    const saved = JSON.stringify({ tab: "works", filters: {}, sortBy: "downloaded_at", searchMode: "semantic" });
+    const saved = JSON.stringify({ tab: "works", filters: {}, sortBy: "saved", searchMode: "semantic" });
     expect(parseSavedParams(saved).searchMode).toBe("semantic");
   });
 
   it("treats an ordinary search as an ordinary search", () => {
-    const saved = JSON.stringify({ tab: "works", filters: {}, sortBy: "downloaded_at" });
+    const saved = JSON.stringify({ tab: "works", filters: {}, sortBy: "saved" });
     expect(parseSavedParams(saved).searchMode).toBeNull();
     expect(parseSavedParams(saved).versionScope).toBe("current");
     expect(parseSavedParams(saved).sortOrder).toBe("desc");
@@ -839,12 +839,12 @@ describe("saved search parameters", () => {
       tab: "series",
       filters: {},
       entityScope: { watch: "paused", minWorkCount: 4, concluded: false },
-      entitySortBy: "asset_count",
+      entitySortBy: "media",
       entitySortOrder: "asc",
     });
     expect(parseSavedParams(saved)).toEqual(expect.objectContaining({
       entityScope: { watch: "paused", minWorkCount: 4, concluded: false },
-      entitySortBy: "asset_count",
+      entitySortBy: "media",
       entitySortOrder: "asc",
     }));
   });
