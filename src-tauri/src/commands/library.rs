@@ -143,13 +143,13 @@ pub struct SearchRebuildProgress {
     /// the UI uses differs, and an automatic run must not read as an error.
     origin: String,
     status: String,
-    total_downloads: i64,
-    indexed_downloads: i64,
-    pending_downloads: i64,
+    total_works: i64,
+    indexed_works: i64,
+    pending_works: i64,
     is_complete: bool,
     phase: String,
     /// Documents handled by this run, which is what the progress bar tracks.
-    /// `indexed_downloads` counts the whole library and moves in commit-sized
+    /// `indexed_works` counts the whole library and moves in commit-sized
     /// steps, so on its own it looks stalled for minutes at a time.
     processed: i64,
     processed_total: i64,
@@ -247,9 +247,9 @@ fn spawn_shelf_index_job(
                         job_id: progress_job.clone(),
                         origin: origin.to_string(),
                         status: "running".to_string(),
-                        total_downloads: 0,
-                        indexed_downloads: 0,
-                        pending_downloads: total.saturating_sub(done) as i64,
+                        total_works: 0,
+                        indexed_works: 0,
+                        pending_works: total.saturating_sub(done) as i64,
                         is_complete: false,
                         phase: phase.to_string(),
                         processed: done as i64,
@@ -344,9 +344,9 @@ fn emit_search_index_progress(
             job_id: job_id.to_string(),
             origin: origin.to_string(),
             status: status.to_string(),
-            total_downloads: index.total_downloads,
-            indexed_downloads: index.indexed_downloads,
-            pending_downloads: index.pending_downloads,
+            total_works: index.total_works,
+            indexed_works: index.indexed_works,
+            pending_works: index.pending_works,
             is_complete: index.is_complete,
             phase: if status == "completed" {
                 "ready".to_string()

@@ -18,9 +18,7 @@
     "tauri:dev": "tauri dev"
   },
   "dependencies": {
-    "@mantine/code-highlight": "^9.7.3",
     "@mantine/core": "^9.7.3",
-    "@mantine/dropzone": "^9.7.3",
     "@mantine/form": "^9.7.3",
     "@mantine/hooks": "^9.7.3",
     "@mantine/modals": "^9.7.3",
@@ -41,8 +39,7 @@
     "postcss-simple-vars": "^7.0.1",
     "qrcode.react": "^4.2.0",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1",
-    "recharts": "^3.10.1"
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
