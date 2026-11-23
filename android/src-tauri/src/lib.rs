@@ -72,7 +72,6 @@ pub fn run() {
             pc_client::shelf::pc_lookup_work,
             pc_client::shelf::pc_bundle,
             pc_client::shelf_reader::pc_open,
-            pc_client::shelf_reader::pc_open_snapshot,
             pc_client::shelf_reader::pc_page,
             pc_client::shelf_reading::pc_reading_record,
             pc_client::shelf_reading::pc_reading_sync,
