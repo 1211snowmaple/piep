@@ -199,7 +199,6 @@ export type AppNavigation = {
   openTag: (tag: string) => void;
   /** サーバーの本棚へ移動できるときだけ、作者やシリーズへの導線を出す。 */
   canBrowseServer: boolean;
-  /** サーバーが `favorite-write` を持ち、つながっているときだけお気に入りを押せる。 */
 };
 
 const NavigationContext = createContext<AppNavigation | null>(null);
