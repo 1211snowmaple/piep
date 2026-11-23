@@ -46,6 +46,7 @@ pub enum CollectionEdit {
         cover_work: Option<LibraryId>,
         cover_mode: Option<String>,
         cover_image: Option<Option<Fingerprint>>,
+        cover_selection: Option<LibraryId>,
     },
     /// 末尾に足す。もう入っている作品は飛ばす。
     Add {
@@ -69,6 +70,7 @@ struct Head {
     describe: Option<(String, Option<String>, bool)>,
     cover: Option<Option<LibraryId>>,
     cover_image: Option<Option<Fingerprint>>,
+    cover_selection: Option<LibraryId>,
     cover_mode: Option<String>,
     name_source: Option<String>,
 }
@@ -288,6 +290,7 @@ impl Library {
                         describe: Some((title, description, ordered)),
                         cover: None,
                         cover_image: None,
+                        cover_selection: None,
                         cover_mode: None,
                         name_source,
                     },
@@ -297,6 +300,7 @@ impl Library {
                 cover_work,
                 cover_mode,
                 cover_image,
+                cover_selection,
             } => {
                 return self.write_collection_head(
                     request,
@@ -306,6 +310,7 @@ impl Library {
                         describe: None,
                         cover: Some(cover_work),
                         cover_image,
+                        cover_selection,
                         cover_mode,
                         name_source: None,
                     },
@@ -482,6 +487,9 @@ impl Library {
                 "UPDATE collections SET cover_file_id=?2 WHERE id=?1",
                 params![key.as_slice(), image.map(|f| f.0.to_vec())],
             )?;
+            if let (Some(file), Some(selection)) = (image, head.cover_selection) {
+                Self::consume_image_selection(&tx, selection, file)?;
+            }
         }
         let payload = serde_json::json!({
             "describe": head.describe,

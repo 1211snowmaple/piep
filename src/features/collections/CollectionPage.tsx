@@ -294,11 +294,12 @@ function CollectionDetail({ collection, readOnly: previewOnly, onEdit, onChanged
   });
 
   const coverMutation = useMutation({
-    mutationFn: ({ input, coverWork }: { input: WorkCollectionInput; coverWork: { source: string; sourceId: string } | null }) => editOnShelf({
+    mutationFn: ({ input, coverWork, selection }: { input: WorkCollectionInput; coverWork: { source: string; sourceId: string } | null; selection?: string }) => editOnShelf({
       kind: "look",
       cover_work: input.coverMode === "single" && coverWork ? workKey(coverWork) : null,
       cover_mode: input.coverMode ?? null,
       cover_image: input.coverImagePath ?? null,
+      ...(selection ? { cover_selection: selection } : {}),
     }),
     onSuccess: (value) => {
       onChanged(value);
@@ -631,8 +632,8 @@ function CollectionDetail({ collection, readOnly: previewOnly, onEdit, onChanged
         onClose={coverModal.close}
         collection={collection}
         busy={coverMutation.isPending}
-        importImage={async (path) => (await shelfImportEditImage(path)).file}
-        onSave={(input, coverWork) => coverMutation.mutate({ input, coverWork })}
+        importImage={shelfImportEditImage}
+        onSave={(input, coverWork, selection) => coverMutation.mutate({ input, coverWork, selection })}
       />}
       {!editOff && <CollectionSplitAssist
         opened={splitOpened}

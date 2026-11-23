@@ -242,6 +242,8 @@ pub async fn send_shelf(
         .map(|chunk| {
             let shipper = Arc::clone(&shipper);
             let library = Arc::clone(&library);
+            // 送信が中断されても、始まった読み出しが終わるまで実体を守る。
+            let objects = Arc::clone(&objects);
             let snapshot = Arc::clone(&snapshot);
             let offset = offsets.get(&chunk.id).copied();
             let shipment = shipment.clone();
@@ -249,6 +251,7 @@ pub async fn send_shelf(
                 shipper.handle.check_cancel()?;
                 let read = chunk.clone();
                 let body = tokio::task::spawn_blocking(move || {
+                    let _pin = objects;
                     let sent = match offset {
                         // 台帳の部分は写しから読んで、その場で符号化する。
                         Some(offset) => read_part(&snapshot, offset, &read),

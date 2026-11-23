@@ -716,6 +716,7 @@ impl Library {
                 cover_work: works.first().copied(),
                 cover_mode: Some("mosaic".into()),
                 cover_image: None,
+                cover_selection: None,
             },
         )
         .map_err(err)?;

@@ -19,10 +19,16 @@ const api = vi.hoisted(() => ({
   shelfCollection: vi.fn(),
   shelfCollections: vi.fn(),
   shelfEditCollection: vi.fn(),
+  shelfImportEditImage: vi.fn(),
 }));
 vi.mock("@/services/shelfApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfApi")>()),
   ...api,
+}));
+const openSingleDialog = vi.hoisted(() => vi.fn());
+vi.mock("@/services/dialogApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/dialogApi")>()),
+  openSingleDialog,
 }));
 const suggest = vi.hoisted(() => ({
   listCollectionSuggestions: vi.fn(),
@@ -179,6 +185,20 @@ describe("collections on the shelf", () => {
       api.shelfEditCollection.mockResolvedValueOnce(null);
       fireEvent.click(await screen.findByRole("button", { name: "削除する" }));
       await waitFor(() => expect(api.shelfEditCollection).toHaveBeenLastCalledWith("0195f1c2-0000-7000-8000-0000000000d1", { kind: "delete" }));
+    });
+
+    it("saves the selection of a newly imported cover", async () => {
+      const file = "cd".repeat(32);
+      openSingleDialog.mockResolvedValueOnce("C:/画像/表紙.png");
+      api.shelfImportEditImage.mockResolvedValueOnce({ file, selection: "cover-selection" });
+      renderWith(<CollectionPage />, "#/collections/0195f1c2-0000-7000-8000-0000000000d1");
+      fireEvent.click(await screen.findByRole("button", { name: "表紙を変える" }));
+      fireEvent.click(await screen.findByRole("button", { name: /画像を選ぶ/ }));
+      expect(await screen.findByText(file)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "この表紙にする" }));
+      await waitFor(() => expect(api.shelfEditCollection).toHaveBeenCalledWith("0195f1c2-0000-7000-8000-0000000000d1", {
+        kind: "look", cover_work: null, cover_mode: "file", cover_image: file, cover_selection: "cover-selection",
+      }));
     });
 
     it("adds the works found for the collection by their keys", async () => {

@@ -44,6 +44,9 @@ pub struct EditorMedia {
     pub file: String,
     pub name: String,
     pub mime_type: Option<String>,
+    /// 画面で選んだ画像の保留。保存済みの画像には付かない。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<LibraryId>,
 }
 
 /// 編集画面を開くときの中身。
@@ -202,6 +205,7 @@ impl Library {
                     file: media.file.to_string(),
                     name: media.original_name.clone(),
                     mime_type: media.mime_type.clone(),
+                    selection: None,
                 })
                 .collect();
             let blocks = info
@@ -267,6 +271,7 @@ impl Library {
                         file,
                         name: asset.filename.clone(),
                         mime_type: asset.mime_type.clone(),
+                        selection: None,
                     });
                     id
                 }
@@ -313,6 +318,7 @@ impl Library {
             save.media.iter().map(|media| (media.id, media)).collect();
         let mut media: Vec<EditMedia> = Vec::new();
         let mut blocks = Vec::new();
+        let mut selections = std::collections::BTreeSet::new();
         for (index, block) in normalize_block_inputs(&save.blocks).into_iter().enumerate() {
             let slot = match block.asset_id {
                 Some(id) => {
@@ -323,6 +329,9 @@ impl Library {
                         .map_err(|_| Error::Integrity("画像の識別子が不正です".into()))?;
                     // 棚に無いファイルは指せない。
                     self.file(file)?;
+                    if let Some(selection) = item.selection {
+                        selections.insert((selection, file.0));
+                    }
                     if !media.iter().any(|entry| entry.slot == item.file) {
                         media.push(EditMedia {
                             slot: item.file.clone(),
@@ -364,19 +373,34 @@ impl Library {
             }
             None => false,
         };
+        let selections: Vec<_> = selections
+            .into_iter()
+            .map(|(selection, file)| (selection, Fingerprint(file)))
+            .collect();
         let mut state = state;
         if !unchanged {
-            self.save_edit(EditRequest {
-                request_id: request,
-                work,
-                user: self.id,
-                base: save.base,
-                parent: state.draft.or(state.active),
-                expected: save.expected,
-                content: &content,
-                activate: false,
-            })?;
+            self.save_edit_with_selections(
+                EditRequest {
+                    request_id: request,
+                    work,
+                    user: self.id,
+                    base: save.base,
+                    parent: state.draft.or(state.active),
+                    expected: save.expected,
+                    content: &content,
+                    activate: false,
+                },
+                &selections,
+            )?;
             state = self.edit_state(work, self.id)?;
+        } else if !selections.is_empty() {
+            // 同じ下書きの正式な参照がすでにある。
+            let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
+            let tx = conn.transaction()?;
+            for (selection, file) in selections {
+                Self::consume_image_selection(&tx, selection, file)?;
+            }
+            tx.commit()?;
         }
         if save.publish {
             state = self.change_edit_pointers(

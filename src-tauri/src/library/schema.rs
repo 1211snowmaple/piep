@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 32;
+pub(crate) const VERSION: i64 = 33;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -37,6 +37,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_030_acquisition_routes.sql"),
     include_str!("migration_031_restore_reader_guards.sql"),
     include_str!("migration_032_library_tasks.sql"),
+    include_str!("migration_033_pending_edit_images.sql"),
 ];
 /// これらの版の SQL を当てた直後に、触れた版の指紋を計算し直す。
 /// 28: 区分を指紋から外した。30: 移した取得の経路と画像の画質をそろえた。
@@ -170,6 +171,50 @@ fn configure(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_a_version_32_shelf_adds_pending_edit_images_with_a_file_reference() {
+        let conn = Connection::open_in_memory().unwrap();
+        let library = LibraryId::now_v7();
+        configure(&conn).unwrap();
+        for (index, sql) in MIGRATIONS.iter().enumerate().take(32) {
+            run_migration(&conn, index, sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO library_meta(singleton,library_id) VALUES(1,?1)",
+            [library.as_bytes().as_slice()],
+        )
+        .unwrap();
+        conn.pragma_update(None, "application_id", APPLICATION_ID)
+            .unwrap();
+        conn.pragma_update(None, "user_version", 32).unwrap();
+        conn.execute(
+            "INSERT INTO content_files(id,original_size) VALUES(zeroblob(32),0)",
+            [],
+        )
+        .unwrap();
+
+        open(&conn, library).unwrap();
+        open(&conn, library).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            33
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM pending_edit_images", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        conn.execute(
+            "INSERT INTO pending_edit_images VALUES(zeroblob(16),zeroblob(32),123)",
+            [],
+        )
+        .unwrap();
+        assert!(conn.execute("DELETE FROM content_files", []).is_err());
+    }
     fn version_one(id: LibraryId) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         configure(&conn).unwrap();

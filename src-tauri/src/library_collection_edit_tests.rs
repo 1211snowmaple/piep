@@ -109,12 +109,14 @@ fn one_edit_at_a_time_creates_reorders_sorts_dresses_and_deletes_a_collection() 
         cover_work: Some(first),
         cover_mode: Some("single".into()),
         cover_image: None,
+        cover_selection: None,
     })
     .is_err());
     edit(CollectionEdit::Look {
         cover_work: Some(second),
         cover_mode: Some("single".into()),
         cover_image: None,
+        cover_selection: None,
     })
     .unwrap();
     let summary = library.list_collections().unwrap().remove(0);
@@ -129,32 +131,64 @@ fn one_edit_at_a_time_creates_reorders_sorts_dresses_and_deletes_a_collection() 
         cover_work: None,
         cover_mode: Some("file".into()),
         cover_image: Some(Some(missing)),
+        cover_selection: None,
     })
     .is_err());
     let image = std::env::temp_dir().join(format!("piep-cover-{}.png", LibraryId::now_v7()));
     std::fs::write(&image, b"PNG cover").unwrap();
-    let stored = library
-        .store_original(&crate::library::CaptureSource::File(image.clone()))
+    let (stored, selection) = library
+        .store_pending_image(&crate::library::CaptureSource::File(image.clone()))
         .unwrap();
+    let (duplicate, other_selection) = library
+        .store_pending_image(&crate::library::CaptureSource::File(image.clone()))
+        .unwrap();
+    assert_eq!(stored.id, duplicate.id);
+    assert_ne!(selection, other_selection);
     let _ = std::fs::remove_file(&image);
+    library.reclaim(Default::default()).unwrap();
     edit(CollectionEdit::Look {
         cover_work: None,
         cover_mode: Some("file".into()),
         cover_image: Some(Some(stored.id)),
+        cover_selection: Some(selection),
     })
     .unwrap();
     let summary = library.list_collections().unwrap().remove(0);
     assert_eq!(summary.cover_image, Some(stored.id.to_string()));
+    let pending = |selection: LibraryId| -> bool {
+        library
+            .reader()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pending_edit_images WHERE id=?1)",
+                [selection.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert!(!pending(selection));
+    assert!(pending(other_selection));
     edit(CollectionEdit::Look {
         cover_work: None,
         cover_mode: Some("mosaic".into()),
         cover_image: Some(None),
+        cover_selection: None,
     })
     .unwrap();
     assert_eq!(
         library.list_collections().unwrap().remove(0).cover_image,
         None
     );
+    library.reclaim(Default::default()).unwrap();
+    assert!(library.file(stored.id).is_ok());
+    library
+        .reclaim_at(
+            Default::default(),
+            std::time::SystemTime::now() + std::time::Duration::from_secs(2 * 24 * 60 * 60),
+        )
+        .unwrap();
+    assert!(!pending(other_selection));
+    assert!(library.file(stored.id).is_err());
 
     edit(CollectionEdit::Delete).unwrap();
     assert!(library.list_collections().unwrap().is_empty());

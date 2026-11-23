@@ -182,14 +182,16 @@ fn the_editor_opens_the_source_saves_drafts_once_publishes_and_goes_back() {
     let texts: Vec<_> = view.blocks.iter().filter_map(|b| b.text.clone()).collect();
     assert!(texts.iter().any(|t| t.contains("一行目")), "{texts:?}");
 
-    let image = library
-        .store_original(&CaptureSource::Bytes(b"edit image".to_vec()))
+    let (image, selection) = library
+        .store_pending_image(&CaptureSource::Bytes(b"edit image".to_vec()))
         .unwrap();
+    library.reclaim(Default::default()).unwrap();
     let media = vec![EditorMedia {
         id: 7,
         file: image.id.to_string(),
         name: "絵.png".into(),
         mime_type: Some("image/png".into()),
+        selection: Some(selection),
     }];
     let save = |expected, title: Option<&str>, publish| EditorSave {
         base: view.base,
@@ -208,6 +210,16 @@ fn the_editor_opens_the_source_saves_drafts_once_publishes_and_goes_back() {
         .save_editor(LibraryId::now_v7(), work, save(0, Some("元の題"), false))
         .unwrap();
     assert_eq!(drafted.generation, 1);
+    let pending: bool = library
+        .reader()
+        .unwrap()
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_edit_images WHERE id=?1)",
+            [selection.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!pending);
     let again = library
         .save_editor(LibraryId::now_v7(), work, save(1, Some(" 元の題 "), false))
         .unwrap();
@@ -472,6 +484,7 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
              INSERT INTO outbox_v17 SELECT sequence,request_id,entity_id,operation,payload_json,created_at,saved_search_id,user_id FROM outbox;
              DROP TABLE outbox; ALTER TABLE outbox_v17 RENAME TO outbox;
              DROP TABLE library_tasks;
+             DROP TABLE pending_edit_images;
              DELETE FROM schema_migrations WHERE version>=18; PRAGMA user_version=17;",
         )
         .unwrap();

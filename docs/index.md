@@ -64,7 +64,7 @@ features:
 | IPC コマンド | <!--stat:commands.total-->188<!--/stat--> |
 | うち説明のあるもの | <!--stat:commands.described-->188<!--/stat--> |
 | イベント | <!--stat:events.total-->12<!--/stat--> |
-| テーブル | <!--stat:tables.total-->79<!--/stat--> |
+| テーブル | <!--stat:tables.total-->80<!--/stat--> |
 
 この表の数は手で書いていない。抽出器が数え、`docs:check` が古くなっていないかを
 検査している。説明は Rust の `///`、モジュールの `//!`、呼び出す TS 関数の JSDoc
