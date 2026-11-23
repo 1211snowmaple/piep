@@ -19,7 +19,7 @@ use crate::library::{
 };
 use axum::{
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
@@ -375,17 +375,32 @@ fn conflict(current: MobileReading) -> Response {
     response
 }
 
+fn scope_header_is(headers: &HeaderMap, name: &str, id: Id) -> bool {
+    let values = headers.get_all(name);
+    let mut values = values.iter();
+    values
+        .next()
+        .is_some_and(|value| value == id.get().to_string().as_str())
+        && values.next().is_none()
+}
+
 /// 読書位置を書く。読む画面のページ（0 から）とその中の割合を、読んでいる版の写しか編集に結ぶ。
 pub(super) async fn put(
     State(ctx): State<Arc<Context>>,
     Extension(principal): Extension<Principal>,
     path: Result<Path<WorkPath>, axum::extract::rejection::PathRejection>,
+    headers: HeaderMap,
     body: Result<Json<ReadingBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Path(location) = path.map_err(|_| invalid())?;
     let Json(update) = body.map_err(|_| invalid())?;
     if location.library != ctx.library_id {
         return Err(not_found());
+    }
+    if !scope_header_is(&headers, "x-piep-subject-id", principal.subject)
+        || !scope_header_is(&headers, "x-piep-sync-epoch", ctx.sync_epoch)
+    {
+        return Err(ApiError(StatusCode::CONFLICT, "library_changed"));
     }
     let request = uuid::Uuid::parse_str(&update.request_id)
         .ok()
@@ -440,7 +455,7 @@ pub(super) async fn put(
             finished: update.finished,
         }) {
             Ok(position) => Ok(Json(reading_item(work, &position, device)).into_response()),
-            // 世代の食い違いか、本文に無い位置（別の作品の版・範囲の外）。
+            // 世代の食い違いでは、現在の位置を返す。
             Err(crate::library::Error::Integrity(_)) => {
                 let current = library
                     .reading_position(work, subject)
@@ -455,10 +470,11 @@ pub(super) async fn put(
                 Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "busy"))
             }
             // その作品のものでない版・編集（引いても見つからない）。
-            Err(crate::library::Error::ResourceUnavailable)
-            | Err(crate::library::Error::Sql(rusqlite::Error::QueryReturnedNoRows)) => {
-                Err(invalid())
-            }
+            Err(crate::library::Error::InvalidReadingLocation)
+            | Err(crate::library::Error::ResourceUnavailable)
+            | Err(crate::library::Error::Sql(rusqlite::Error::QueryReturnedNoRows)) => Err(
+                ApiError(StatusCode::BAD_REQUEST, "invalid_reading_location"),
+            ),
             Err(error) => {
                 log::error!("棚の読書位置を書けません: {error}");
                 Err(internal())

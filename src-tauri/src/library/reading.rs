@@ -80,7 +80,7 @@ pub struct ReadingUpdate {
 }
 
 fn invalid_anchor() -> Error {
-    Error::Integrity("読書位置が指定した本文の範囲にありません".into())
+    Error::InvalidReadingLocation
 }
 
 fn text_boundary(text: &str, offset: u64) -> Result<()> {

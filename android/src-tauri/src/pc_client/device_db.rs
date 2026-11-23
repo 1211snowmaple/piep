@@ -12,7 +12,7 @@ use rusqlite::{Connection, Transaction};
 use std::path::Path;
 
 const DB_FILE: &str = "piep.sqlite3";
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// 端末内の読書位置と「続きを読む」、保存した作品の本文の索引。
 ///
@@ -180,7 +180,7 @@ pub(crate) mod tests {
             "readings",
             "offline_catalog",
             "offline_text",
-            "shelf_reading_meta",
+            "shelf_reading_cursors",
         ] {
             count(&db, table);
         }

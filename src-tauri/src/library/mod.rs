@@ -109,6 +109,8 @@ pub enum Error {
     ResourceUnavailable,
     #[error("読取範囲が元ファイルを超えています")]
     InvalidRange,
+    #[error("読書位置が指定した本文の範囲にありません")]
+    InvalidReadingLocation,
     #[error("対応していないライブラリ形式です: {0}")]
     Unsupported(String),
     #[error("保存先が安全な管理領域ではありません: {}", .0.display())]

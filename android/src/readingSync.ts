@@ -33,23 +33,27 @@ export function setReadingSyncEnabled(enabled: boolean): void {
 }
 
 const active = () => isTauri() && readingSyncEnabled();
+type ShelfScope = NonNullable<ReturnType<typeof connectedShelf>>;
 
 let running: Promise<void> | null = null;
+let runningScope: ShelfScope | null = null;
 let sendAgain = false;
-let lastFinished = 0;
+let lastFinished: { scope: ShelfScope; time: number } | null = null;
 
-function run(): Promise<void> {
+function run(shelf: ShelfScope): Promise<void> {
   // 圏外でも読書は続く。届かなかった位置は端末に残り、次の同期で送られる。
   const current = (async () => {
+    let scope: ShelfScope | null = shelf;
     do {
       sendAgain = false;
-      // 棚の作品の位置を送り、変わった分を受け取る。
-      const shelf = connectedShelf();
-      if (shelf) await invoke<void>("pc_reading_sync", { scope: shelf }).catch(() => {});
+      runningScope = scope;
+      await invoke<void>("pc_reading_sync", { scope }).catch(() => {});
+      lastFinished = { scope, time: Date.now() };
       // 同時に届いた保存・画面終了の知らせは一回にまとめる。別々の
       // .then(run) を積むと、同じ同期の直後に何本も起動してしまう。
-    } while (sendAgain && active());
-    lastFinished = Date.now();
+      scope = sendAgain && active() ? connectedShelf() : null;
+    } while (scope);
+    runningScope = null;
     running = null;
   })();
   running = current;
@@ -58,20 +62,25 @@ function run(): Promise<void> {
 
 /** 位置を受け取る。少し前に同期したばかりなら、やり直さない。 */
 export function refreshReading(maxAgeMs = 5000): Promise<void> {
-  if (!active()) return Promise.resolve();
-  if (running) return running;
-  if (Date.now() - lastFinished < maxAgeMs) return Promise.resolve();
-  return run();
+  const scope = connectedShelf();
+  if (!active() || !scope) return Promise.resolve();
+  if (running) {
+    if (runningScope !== scope) sendAgain = true;
+    return running;
+  }
+  if (lastFinished?.scope === scope && Date.now() - lastFinished.time < maxAgeMs) return Promise.resolve();
+  return run(scope);
 }
 
 /** 溜まった位置を今すぐ送る。走っている同期には間に合わないので、その後にもう一度走らせる。 */
 export function sendReading(): Promise<void> {
-  if (!active()) return Promise.resolve();
+  const scope = connectedShelf();
+  if (!active() || !scope) return Promise.resolve();
   if (running) {
     sendAgain = true;
     return running;
   }
-  return run();
+  return run(scope);
 }
 
 export function refreshReadingWithin(limitMs: number): Promise<void> {
@@ -89,7 +98,10 @@ export async function recordShelfReading(work: string, location: MobileReadingLo
 export async function readShelfPosition(work: string): Promise<MobileReading | null> {
   const scope = connectedShelf();
   if (!active() || !scope) return null;
-  try { return await invoke<MobileReading | null>("pc_reading_get", { scope, work }); } catch { return null; }
+  try {
+    const position = await invoke<MobileReading | null>("pc_reading_get", { scope, work });
+    return connectedShelf() === scope ? position : null;
+  } catch { return null; }
 }
 
 /** 棚と位置を受け渡す本か（読む画面で棚から開いた今の版の本）。 */

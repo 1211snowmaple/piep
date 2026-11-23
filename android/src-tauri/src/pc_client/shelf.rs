@@ -53,11 +53,6 @@ impl ShelfScope {
         self.sync_epoch
     }
 
-    /// この接続（登録し直していない）か。
-    pub(super) fn connection_is(&self, generation: u64) -> bool {
-        self.connection_generation == generation
-    }
-
     /// 同じ接続の同じ棚・利用者か。
     pub(super) fn same_as(&self, other: &Self) -> bool {
         self.library_id == other.library_id
@@ -95,6 +90,35 @@ impl ShelfScope {
             "x-piep-sync-epoch",
             &self.sync_epoch.get().to_string(),
         )
+    }
+}
+
+impl ShelfStatus {
+    pub(super) fn scope(&self) -> ShelfScope {
+        self.scope
+    }
+}
+
+impl PcClientState {
+    /// 棚の照合から端末への記録の確定まで、登録変更と棚の確認結果の更新を待たせる。
+    pub(super) fn with_shelf_scope<T>(
+        &self,
+        scope: ShelfScope,
+        action: impl FnOnce() -> Result<T, ClientError>,
+    ) -> Result<T, ClientError> {
+        self.with_connection(scope.connection_generation, || {
+            let current = self
+                .shelf_scope
+                .lock()
+                .map_err(|_| ClientError::storage())?;
+            if !current
+                .as_ref()
+                .is_some_and(|current| scope.same_as(current))
+            {
+                return Err(library_changed());
+            }
+            action()
+        })
     }
 }
 
