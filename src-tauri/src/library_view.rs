@@ -343,11 +343,15 @@ impl Library {
         work: LibraryId,
         scope: ResourceScope,
     ) -> Result<piep_library_protocol::ReaderBundle> {
-        let provider: String = self.reader()?.query_row(
-            "SELECT provider FROM work_current_projection WHERE work_id=?1",
-            rusqlite::params![work.as_bytes().as_slice()],
-            |r| r.get(0),
-        )?;
+        let provider: String = self
+            .reader()?
+            .query_row(
+                "SELECT provider FROM work_current_projection WHERE work_id=?1",
+                rusqlite::params![work.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(crate::library::Error::ResourceUnavailable)?;
         let (document, text_chars) = self.reading_document(work, scope, &provider)?;
         self.bundle_of(
             &document,
