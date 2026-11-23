@@ -166,6 +166,8 @@ pub struct Library {
     pub(crate) conn: Mutex<Connection>,
     /// 使い終えた読み取り専用の接続。`reader` が貸し出す。
     readers: Mutex<Vec<Connection>>,
+    /// いま貸している読み取り。返されないものが WAL の書き戻しを止めるので見張る。
+    pub(super) loans: super::reader_loans::Loans,
     /// 実体の回収と、台帳の全ファイルを読む処理（検証・バックアップ）を同時に走らせない。
     pub(crate) storage_gate: Mutex<()>,
     _process_lock: File,
@@ -176,6 +178,8 @@ pub struct Library {
 pub(crate) struct Reader<'a> {
     conn: Option<Connection>,
     pool: &'a Mutex<Vec<Connection>>,
+    loans: &'a super::reader_loans::Loans,
+    loan: u64,
 }
 
 impl std::ops::Deref for Reader<'_> {
@@ -187,6 +191,7 @@ impl std::ops::Deref for Reader<'_> {
 
 impl Drop for Reader<'_> {
     fn drop(&mut self) {
+        self.loans.give_back(self.loan);
         let Some(conn) = self.conn.take() else { return };
         // 読み取りを閉じられなかった接続は、古い時点を見せ続けないよう捨てる。
         if conn.execute_batch("ROLLBACK").is_err() {
@@ -318,6 +323,7 @@ impl Library {
             objects,
             conn: Mutex::new(conn),
             readers: Mutex::new(Vec::new()),
+            loans: super::reader_loans::Loans::new(),
             storage_gate: Mutex::new(()),
             _process_lock: lock,
         };
@@ -378,6 +384,7 @@ impl Library {
             objects,
             conn: Mutex::new(conn),
             readers: Mutex::new(Vec::new()),
+            loans: super::reader_loans::Loans::new(),
             storage_gate: Mutex::new(()),
             _process_lock: lock,
         };
@@ -420,7 +427,10 @@ impl Library {
 
     /// 読み取り専用の接続を借りる。書き込み用の一本をふさがないので、
     /// 一覧・読書・配信・検証が保存の確定を待たず、互いにも待たない。
+    /// 借りた場所を記録し、長く返されないものは場所をログに出す（`reader_loans`）。
+    #[track_caller]
     pub(crate) fn reader(&self) -> Result<Reader<'_>> {
+        let place = std::panic::Location::caller();
         let idle = self.readers.lock().map_err(|_| Error::Busy)?.pop();
         let conn = match idle {
             Some(conn) => conn,
@@ -440,6 +450,8 @@ impl Library {
         Ok(Reader {
             conn: Some(conn),
             pool: &self.readers,
+            loans: &self.loans,
+            loan: self.loans.lend(place),
         })
     }
 
@@ -1678,6 +1690,37 @@ impl Library {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_reader_kept_open_is_listed_with_where_it_was_taken_and_is_reported_once() {
+        let temp = Temp::new();
+        let library = Library::create(&temp.0).unwrap();
+        assert!(library.loans.open().is_empty());
+        let line = line!() + 1;
+        let reader = library.reader().unwrap();
+        let open = library.loans.open();
+        assert_eq!(open.len(), 1);
+        // 借りた場所は `reader` の中ではなく、呼んだ所を指す。
+        assert!(open[0].place.file().ends_with("repository.rs"));
+        assert_eq!(open[0].place.line(), line);
+        assert_eq!(
+            open[0].thread,
+            std::thread::current().name().unwrap_or_default()
+        );
+        // 長く借りたものは一度だけ出す。
+        assert_eq!(library.loans.newly_long(std::time::Duration::ZERO).len(), 1);
+        assert!(library
+            .loans
+            .newly_long(std::time::Duration::ZERO)
+            .is_empty());
+        drop(reader);
+        assert!(library.loans.open().is_empty());
+        // 返した接続を使い回しても、借りるたびに載り、返すと消える。
+        let again = library.reader().unwrap();
+        assert_eq!(library.loans.open().len(), 1);
+        drop(again);
+        assert!(library.loans.open().is_empty());
+    }
 
     #[test]
     fn reading_and_verifying_do_not_wait_for_a_save_that_is_being_committed() {
