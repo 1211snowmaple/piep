@@ -15,14 +15,14 @@
 //! - 同じ WAL（ヘッダーの salt が同じ）が大きいまま伸び続ける（書き戻しは進むが、読み取りが
 //!   途切れず頭から使い直せない）。
 //!
-//! ログは一覧のロックを放してから書く（ログの書き込みが詰まっても、借りる・返す・棚を閉じる
-//! 側を待たせない）。
+//! ログは一覧のロックを放してから書き、WAL のヘッダーも一覧と書き手のロックの外で読む
+//! （ファイルの読み書きが詰まっても、保存・借りる・返す側を待たせない）。
 
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::io::Read;
 use std::panic::Location;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
@@ -52,7 +52,16 @@ struct Table {
     open: HashMap<u64, Loan>,
     /// WAL の様子を読む書き手の接続。棚を閉じるとき（`Loans` を捨てるとき）に外す。
     writer: Weak<Mutex<Connection>>,
+    /// WAL のファイル。ヘッダーの salt を読む。
+    wal_path: Option<PathBuf>,
+    /// 見張りが WAL のファイルを読むあいだ持つ。棚を閉じる側もこれを待つので、閉じたあとに
+    /// ファイルを開かない（閉じた直後のフォルダーの名前の変更と当たらない）。
+    io: Arc<Mutex<()>>,
     wal: WalWatch,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// 棚ごとの、いま借りられている読み取りの一覧。
@@ -111,12 +120,18 @@ impl WalWatch {
         } = state;
         self.checked = Some(now);
         let backlog = frames - checkpointed;
-        let progressed = checkpointed != self.checkpointed;
+        // 使い直していれば（salt が変わった・フレーム数が減った）、書き戻しは追いついたことが
+        // ある。止まっていた時間はそこで切る。
+        let reused = frames < self.frames
+            || matches!((generation, self.generation), (Some(seen), Some(before)) if seen != before);
+        let progressed = reused || checkpointed != self.checkpointed;
         // 伸び続けているかは、同じ WAL（使い直していない）と確かめられたときだけ言う。
         // 見ていない間に使い直して前より伸びたものや、書き戻し終えて止まっているだけの
         // 大きな WAL は、伸び続けているとは言わない。
-        let grew_in_place =
-            generation.is_some() && generation == self.generation && frames > self.frames;
+        let grew_in_place = !reused
+            && generation.is_some()
+            && generation == self.generation
+            && frames > self.frames;
         self.frames = frames;
         self.checkpointed = checkpointed;
         self.generation = generation;
@@ -140,9 +155,9 @@ impl WalWatch {
     }
 }
 
-/// 書き手の接続で WAL の様子を読む。書き戻しはしない（NOOP）ので一瞬で終わる。
-/// 書き手が使用中なら読まない（保存を待たせない）。WAL でなければ読まない。
-fn wal_state(writer: &Mutex<Connection>) -> Result<Option<WalState>, rusqlite::Error> {
+/// 書き手の接続で、WAL のフレーム数と書き戻し済みの数を読む。書き戻しはしない（NOOP）ので
+/// 一瞬で終わる。書き手が使用中なら読まない（保存を待たせない）。WAL でなければ読まない。
+fn wal_counts(writer: &Mutex<Connection>) -> Result<Option<(i64, i64)>, rusqlite::Error> {
     let Ok(conn) = writer.try_lock() else {
         return Ok(None);
     };
@@ -150,18 +165,19 @@ fn wal_state(writer: &Mutex<Connection>) -> Result<Option<WalState>, rusqlite::E
         Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
     })?;
     // WAL でない（-1）ときは見張らない。
-    if frames < 0 {
-        return Ok(None);
-    }
-    // 書き手のロックを持っているあいだは、この処理の中で WAL を使い直す書き込みは起きない。
-    let generation = conn
-        .path()
-        .and_then(|path| wal_generation(Path::new(&format!("{path}-wal"))));
-    Ok(Some(WalState {
+    Ok((frames >= 0).then_some((frames, checkpointed)))
+}
+
+/// 読んだ数と、その前後で読んだ salt を一つの様子にする。前後の salt が違えば、読むあいだに
+/// 使い直したので、どちらの WAL の数か分からない（`generation` を無しにする）。使い直した直後で
+/// まだ一つもフレームが無いときは、ヘッダーが前の WAL のままのことがあるので読まない。
+fn wal_state(counts: (i64, i64), before: Option<u64>, after: Option<u64>) -> WalState {
+    let (frames, checkpointed) = counts;
+    WalState {
         frames,
         checkpointed,
-        generation,
-    }))
+        generation: (frames > 0 && before == after).then_some(before).flatten(),
+    }
 }
 
 /// WAL のヘッダーの salt（16〜24 バイト目）。使い直すたびに書き換わる。
@@ -196,19 +212,27 @@ impl std::fmt::Display for LongLoan {
 
 impl Loans {
     pub(super) fn new(writer: &Arc<Mutex<Connection>>) -> Self {
+        let wal_path = lock(writer)
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(|path| PathBuf::from(format!("{path}-wal")));
         let table = Arc::new(Mutex::new(Table {
             next: 0,
             open: HashMap::new(),
             writer: Arc::downgrade(writer),
+            wal_path,
+            io: Arc::new(Mutex::new(())),
             wal: WalWatch::default(),
         }));
         watch(Arc::downgrade(&table));
         Self { table }
     }
 
-    /// 棚を閉じる。見張りが書き手の接続を使っていれば、手放すまで待つ。
+    /// 棚を閉じる。見張りが書き手の接続や WAL のファイルを使っていれば、手放すまで待つ。
     fn close(&self) {
-        self.table.lock().unwrap_or_else(|e| e.into_inner()).writer = Weak::new();
+        let io = Arc::clone(&lock(&self.table).io);
+        let _io = lock(&io);
+        lock(&self.table).writer = Weak::new();
     }
 
     /// 借りた読み取りを載せ、外すときの番号を返す。
@@ -331,27 +355,42 @@ fn watch_wal(table: &Mutex<Table>) {
 
 /// WAL の様子を読み、ログに出すことがあれば文言を返す。
 ///
-/// 一覧のロックを持ったまま書き手の接続を使い、使い終えてから放す。棚を閉じる側
-/// （`Loans::close`）はこのロックを待つので、閉じたあとまで接続を生かさない。
-/// NOOP は一瞬で終わり、書き手は try_lock なので、借りる・返す側を長く待たせない。
-/// ログはロックを放してから書く（呼び出し元）。
+/// 数を読むあいだだけ一覧のロックと書き手の接続を持ち、使い終えてから放す。WAL のヘッダーは
+/// どちらのロックも持たずに読む。棚を閉じる側（`Loans::close`）は `io` と一覧のロックを待つ
+/// ので、閉じたあとまで接続を生かさず、ファイルも開かない。ログはロックを放してから書く
+/// （呼び出し元）。
 fn wal_report(table: &Mutex<Table>) -> Option<String> {
-    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
-    if !table.wal.due(now) {
+    let (io, path) = {
+        let table = lock(table);
+        if !table.wal.due(now) {
+            return None;
+        }
+        (Arc::clone(&table.io), table.wal_path.clone())
+    };
+    let _io = lock(&io);
+    // `io` を持ってから、棚がまだ開いているかを確かめる（閉じる側は `io` を持って外す）。
+    if lock(table).writer.strong_count() == 0 {
         return None;
     }
-    let writer = table.writer.upgrade()?;
-    let state = wal_state(&writer);
-    drop(writer);
-    let state = match state {
-        Ok(state) => state?,
-        Err(error) => {
-            // 次の間隔まで出さない。
-            table.wal.checked = Some(now);
-            return Some(format!("台帳の WAL の様子を読めません: {error}"));
+    let salt = || path.as_deref().and_then(wal_generation);
+    let before = salt();
+    let counts = {
+        let mut table = lock(table);
+        let writer = table.writer.upgrade()?;
+        let counts = wal_counts(&writer);
+        drop(writer);
+        match counts {
+            Ok(counts) => counts?,
+            Err(error) => {
+                // 次の間隔まで出さない。
+                table.wal.checked = Some(now);
+                return Some(format!("台帳の WAL の様子を読めません: {error}"));
+            }
         }
     };
+    let state = wal_state(counts, before, salt());
+    let mut table = lock(table);
     match table.wal.observe(now, state)? {
         WalEvent::Stalled {
             frames,
@@ -505,6 +544,31 @@ mod tests {
         }
     }
 
+    /// 書き戻し済みの数が同じでも、見ていない間に WAL を使い直していれば、止まっていたとは
+    /// 言わない（止まっていた時間はそこで切る）。
+    #[test]
+    fn a_backlog_in_a_reused_wal_does_not_carry_the_stall_over() {
+        let start = Instant::now();
+        let mut watch = WalWatch::default();
+        assert_eq!(watch.observe(at(start, 0), reused(100_000, 4, 1)), None);
+        for step in 1..10u64 {
+            assert_eq!(
+                watch.observe(at(start, 5 * step), reused(100_000, 4, step + 1)),
+                None
+            );
+        }
+    }
+
+    /// 前後で salt が違えば、どちらの WAL の数か分からない。まだフレームの無い WAL の
+    /// ヘッダーは前の WAL のままのことがあるので使わない。
+    #[test]
+    fn the_salt_is_used_only_when_it_holds_still_around_the_counts() {
+        assert_eq!(wal_state((10, 5), Some(1), Some(1)).generation, Some(1));
+        assert_eq!(wal_state((10, 5), Some(1), Some(2)).generation, None);
+        assert_eq!(wal_state((0, 0), Some(1), Some(1)).generation, None);
+        assert_eq!(wal_state((10, 5), None, None).generation, None);
+    }
+
     /// 開いたままの読み取りが一本あると、書き戻しはその時点で止まる（SQLite の答えの形の確認）。
     #[test]
     fn an_open_read_pins_the_checkpoint_where_it_began() {
@@ -533,7 +597,12 @@ mod tests {
                 .unwrap()
         };
         let writer = Mutex::new(writer);
-        let look = |writer: &Mutex<Connection>| wal_state(writer).unwrap().unwrap();
+        let wal = dir.join("t.db-wal");
+        let look = |writer: &Mutex<Connection>| {
+            let before = wal_generation(&wal);
+            let counts = wal_counts(writer).unwrap().unwrap();
+            wal_state(counts, before, wal_generation(&wal))
+        };
         passive(&writer);
         let pinned = look(&writer);
         assert!(pinned.frames - pinned.checkpointed >= 50, "{pinned:?}");
@@ -572,6 +641,8 @@ mod tests {
             next: 0,
             open: HashMap::new(),
             writer: Arc::downgrade(&writer),
+            wal_path: None,
+            io: Arc::new(Mutex::new(())),
             wal: WalWatch::default(),
         }));
         let loans = Loans {
