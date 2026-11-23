@@ -105,6 +105,15 @@ fn a_shipped_shelf_is_served_after_restart_and_keeps_what_the_phone_wrote_on_the
     let first = ShelfShipments::new(paths.clone(), None);
     let sent = ship(&first, &desktop, &temp.0);
     assert!(sent > 0);
+    let first_id = first.status().shipment_id.unwrap();
+    assert_eq!(
+        first.result(&first_id).unwrap().state,
+        PublicationState::Pending { restarting: false }
+    );
+    assert!(matches!(
+        first.open(desktop.id),
+        Err(ShipError::Conflict(_))
+    ));
     apply_pending(&paths);
     let config = load_config(&paths).unwrap().shelf.unwrap();
     assert_eq!(config.library_id.get(), desktop.id);
@@ -122,8 +131,20 @@ fn a_shipped_shelf_is_served_after_restart_and_keeps_what_the_phone_wrote_on_the
     // 二回目：足した作品の実体だけを送る。送ったあと、携帯が配っている棚に書いた。
     save(&desktop, "3", "三つめ");
     let second = ShelfShipments::new(paths.clone(), Some(Arc::clone(served.library())));
+    let first_result = PublicationState::Published(PublishedShelf {
+        sync_epoch: config.sync_epoch,
+        works: 2,
+    });
+    assert_eq!(second.result(&first_id).unwrap().state, first_result);
     let sent_again = ship(&second, &desktop, &temp.0);
     assert!(sent_again > 0 && sent_again < sent + 3, "{sent_again}");
+    let second_id = second.status().shipment_id.unwrap();
+    assert_ne!(second_id, first_id);
+    assert_eq!(second.result(&first_id).unwrap().state, first_result);
+    assert_eq!(
+        second.result(&second_id).unwrap().state,
+        PublicationState::Pending { restarting: false }
+    );
     let phone = LibraryId::now_v7();
     let at = ReadingLocation::Source {
         snapshot: paged.snapshot_id,
@@ -179,6 +200,8 @@ fn a_shipped_shelf_is_served_after_restart_and_keeps_what_the_phone_wrote_on_the
         .collect();
     assert_eq!(names.len(), 2);
     assert!(!names.contains(&first_generation.get().to_string()));
+    let restarted = ShelfShipments::new(paths.clone(), None);
+    assert_eq!(restarted.result(&first_id).unwrap().state, first_result);
     // 台帳の部分は、最後に組んだ台帳のもの（小さな台帳なので一つ）だけが残る。
     let parts = ObjectStore::open(&paths.root.join(DATABASE_PARTS)).unwrap();
     assert_eq!(parts.listing().unwrap().len(), 1);
@@ -202,6 +225,7 @@ fn an_interrupted_swap_keeps_phone_changes_after_restart() {
         let shipments = ShelfShipments::new(paths.clone(), Some(Arc::clone(&old)));
         ship(&shipments, &desktop, &temp.0);
         let target = shipments.status().generation.unwrap();
+        let shipment_id = shipments.status().shipment_id.unwrap();
         let phone = LibraryId::now_v7();
         let location = ReadingLocation::Source {
             snapshot: work.snapshot_id,
@@ -232,6 +256,10 @@ fn an_interrupted_swap_keeps_phone_changes_after_restart() {
         // 前の棚をまだ開いているときは引き継げない。配信設定と予約を保って再試行する。
         let error = apply_pending_with(&paths, |_| {}).unwrap_err();
         assert!(error.starts_with("前の棚を開けません"), "{error}");
+        assert_eq!(
+            shipments.result(&shipment_id).unwrap().state,
+            PublicationState::Pending { restarting: false }
+        );
         let unchanged = load_config(&paths).unwrap().shelf.unwrap();
         assert_eq!(unchanged.generation, before.generation);
         assert_eq!(unchanged.sync_epoch, before.sync_epoch);
@@ -266,6 +294,16 @@ fn an_interrupted_swap_keeps_phone_changes_after_restart() {
         let after = load_config(&paths).unwrap().shelf.unwrap();
         assert_eq!(after.generation, Some(target));
         assert_ne!(after.sync_epoch, before.sync_epoch);
+        assert_eq!(
+            ShelfShipments::new(paths.clone(), None)
+                .result(&shipment_id)
+                .unwrap()
+                .state,
+            PublicationState::Published(PublishedShelf {
+                sync_epoch: after.sync_epoch,
+                works: 1
+            })
+        );
         let new = Library::open(&after.root(&paths).unwrap()).unwrap();
         let moved = new.reading_position(work.entity_id, desktop.id).unwrap();
         assert_eq!(moved.location, Some(location), "{stop_at:?}");
@@ -368,6 +406,104 @@ fn a_shipment_from_another_shelf_is_refused_and_an_interrupted_one_resumes() {
     ));
     again.abort(&resumed.shipment_id).unwrap();
     assert!(!incoming(&paths).exists());
+    let restarted = ShelfShipments::new(paths.clone(), None);
+    assert_eq!(
+        restarted.result(&resumed.shipment_id).unwrap().state,
+        PublicationState::Rejected {
+            reason: Rejection::Canceled
+        }
+    );
+}
+
+#[test]
+fn an_interrupted_assembly_is_rejected_and_its_id_cannot_be_reused() {
+    let temp = TestRoot::created("v2-shipment-interrupted");
+    let paths = paths_with_config(&temp.0);
+    let library_id = LibraryId::now_v7();
+    let receiver = ShelfShipments::new(paths.clone(), None);
+    let id = receiver.open(library_id).unwrap().shipment_id;
+    write_result(&paths, &id, &PublicationState::Assembling).unwrap();
+    drop(receiver);
+
+    apply_pending(&paths);
+    let restarted = ShelfShipments::new(paths, None);
+    assert_ne!(restarted.open(library_id).unwrap().shipment_id, id);
+    assert_eq!(
+        restarted.result(&id).unwrap().state,
+        PublicationState::Rejected {
+            reason: Rejection::Interrupted
+        }
+    );
+}
+
+#[test]
+fn a_failed_assembly_keeps_its_rejection_after_restart() {
+    let temp = TestRoot::created("v2-shipment-assembly-failure");
+    let paths = paths_with_config(&temp.0);
+    let receiver = ShelfShipments::new(paths.clone(), None);
+    let id = receiver.open(LibraryId::now_v7()).unwrap().shipment_id;
+    // 実体と台帳のハッシュは合うが、棚として開けない台帳を送る。
+    let bytes = b"invalid database";
+    let database = ObjectStore::plan(&bytes[..]).unwrap();
+    let (chunk, body) = piep_storage::encode_chunk(bytes).unwrap();
+    receiver
+        .put_chunk(
+            &id,
+            &WireChunk {
+                id: chunk.id.to_string(),
+                length: chunk.length,
+            },
+            &body,
+        )
+        .unwrap();
+    receiver.commit(&id, &database).unwrap();
+    let rejected = PublicationState::Rejected {
+        reason: Rejection::AssemblyFailed,
+    };
+    for _ in 0..600 {
+        let state = receiver.result(&id).unwrap().state;
+        if state != PublicationState::Assembling {
+            assert_eq!(state, rejected);
+            drop(receiver);
+            apply_pending(&paths);
+            let restarted = ShelfShipments::new(paths, None);
+            assert_eq!(restarted.result(&id).unwrap().state, rejected);
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("組み立ての拒否を確認できません");
+}
+
+#[test]
+fn a_superseded_reservation_is_rejected_for_its_own_shipment() {
+    let temp = TestRoot::created("v2-shipment-superseded");
+    let paths = paths_with_config(&temp.0);
+    let desktop = Library::create(&temp.0.join("desktop")).unwrap();
+    save(&desktop, "1", "本文");
+    let receiver = ShelfShipments::new(paths.clone(), None);
+    ship(&receiver, &desktop, &temp.0);
+    let id = receiver.status().shipment_id.unwrap();
+    let staged = temp.0.join("staged");
+    desktop.backup(&staged).unwrap();
+    let alternative = super::super::generations::stage(&paths, &staged).unwrap();
+    super::super::generations::activate(&paths, alternative).unwrap();
+    drop(receiver);
+
+    apply_pending(&paths);
+    let restarted = ShelfShipments::new(paths.clone(), None);
+    assert_eq!(
+        restarted.result(&id).unwrap().state,
+        PublicationState::Rejected {
+            reason: Rejection::Superseded
+        }
+    );
+    assert_eq!(
+        load_config(&paths).unwrap().shelf.unwrap().generation,
+        Some(alternative)
+    );
+    assert!(!restarted.pending());
+    assert!(restarted.open(desktop.id).is_ok());
 }
 
 #[test]
@@ -397,6 +533,7 @@ fn reading_permission_is_written_per_device_and_keeps_the_rest_of_the_settings()
 /// 単独サーバーを一つ、この試験の中で動かす（`run_locked` と同じ組み方）。
 async fn serve(
     paths: &ServerPaths,
+    address: &str,
 ) -> (
     String,
     Arc<ServerStore>,
@@ -418,10 +555,31 @@ async fn serve(
     let shipments = Arc::new(ShelfShipments::new(paths.clone(), served));
     parts.context.set_shipments(paths.clone(), shipments);
     let router = crate::server::http::combined_router(Arc::clone(&parts.context));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let serving = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     (base, store, shelf, serving)
+}
+
+async fn restart_when_pending(
+    paths: &ServerPaths,
+    base: &str,
+    serving: tokio::task::JoinHandle<()>,
+) -> (
+    String,
+    Arc<ServerStore>,
+    Option<Arc<crate::server::reader::Context>>,
+    tokio::task::JoinHandle<()>,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while !paths.root.join(PENDING).is_file() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("棚を組み終えません");
+    stop(serving).await;
+    serve(paths, base.strip_prefix("http://").unwrap()).await
 }
 
 /// 止めて、開いていた棚を手放すまで待つ（つないだままの接続も閉じる）。
@@ -443,7 +601,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     let paged = save(&desktop, "1", "一[newpage]二");
     save(&desktop, "2", "本文");
 
-    let (base, store, shelf, serving) = serve(&paths).await;
+    let (base, store, shelf, serving) = serve(&paths, "127.0.0.1:0").await;
     assert!(shelf.is_none());
     let admin = store
         .consume_pairing(
@@ -476,34 +634,31 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     .is_err());
     let handle = SendHandle::new();
     let outgoing = temp.0.join("outgoing");
-    let first = crate::server::shelf_send::send_shelf(
-        &remote,
-        &admin.token,
-        Arc::clone(&desktop),
-        &outgoing,
-        &handle,
-    )
-    .await
-    .unwrap();
-    assert_eq!(first.works, Some(2));
+    drop(store);
+    let (first, (_, store, shelf, serving)) = tokio::join!(
+        crate::server::shelf_send::send_shelf(
+            &remote,
+            &admin.token,
+            Arc::clone(&desktop),
+            &outgoing,
+            &handle,
+        ),
+        restart_when_pending(&paths, &remote.url, serving),
+    );
+    let first = first.unwrap();
+    assert_eq!(first.works, 2);
     assert!(first.sent > 0);
     assert!(!outgoing.exists(), "送り手の作業場所は片付ける");
-    // 見張り役がいないので、立ち上げ直すまで配るのを待っている。
-    let status = admin_get(&remote, &admin.token, "status").await.unwrap();
-    assert_eq!(status["shelfPending"], true);
-    stop(serving).await;
-    drop(store);
 
     // 立ち上げ直すと送った棚を配る。携帯ごとに許可を付けると、すぐ読める。
-    let (base, store, shelf, serving) = serve(&paths).await;
-    let remote = RemoteServer {
-        url: base,
-        fingerprint: None,
-    };
     let shelf = shelf.expect("送った棚を配る");
     assert!(!shelf.reads(&phone.device_id));
     let status = admin_get(&remote, &admin.token, "status").await.unwrap();
     assert_eq!(status["shelfPending"], false);
+    assert_eq!(
+        status["shelf"]["syncEpoch"],
+        first.sync_epoch.get().to_string()
+    );
     admin_put(
         &remote,
         &admin.token,
@@ -607,22 +762,22 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
 
     // 二回目：一作品だけ足した。送るのは新しい実体と、変わった台帳の部分だけ。
     save(&desktop, "3", "三つめ");
-    let second = crate::server::shelf_send::send_shelf(
-        &remote,
-        &admin.token,
-        Arc::clone(&desktop),
-        &outgoing,
-        &handle,
-    )
-    .await
-    .unwrap();
-    assert_eq!(second.works, Some(3));
-    assert!(second.sent < first.sent, "{second:?} / {first:?}");
-    stop(serving).await;
     drop(shelf);
     drop(store);
-
-    let (_base, _store, shelf, serving) = serve(&paths).await;
+    let (second, (_, _store, shelf, serving)) = tokio::join!(
+        crate::server::shelf_send::send_shelf(
+            &remote,
+            &admin.token,
+            Arc::clone(&desktop),
+            &outgoing,
+            &handle,
+        ),
+        restart_when_pending(&paths, &remote.url, serving),
+    );
+    let second = second.unwrap();
+    assert_eq!(second.works, 3);
+    assert!(second.sent < first.sent, "{second:?} / {first:?}");
+    assert_ne!(second.sync_epoch, first.sync_epoch);
     let shelf = shelf.unwrap();
     assert!(shelf.reads(&phone.device_id), "許可は設定に残る");
     let moved = shelf
@@ -739,7 +894,7 @@ async fn probe_shipping_a_real_partial_shelf() {
             &uuid::Uuid::now_v7().simple().to_string()[..8]
         ));
     let paths = paths_with_config(&server_root);
-    let (base, store, _, serving) = serve(&paths).await;
+    let (base, store, _, serving) = serve(&paths, "127.0.0.1:0").await;
     let admin = store
         .consume_pairing(
             &store
@@ -755,25 +910,21 @@ async fn probe_shipping_a_real_partial_shelf() {
     let handle = SendHandle::new();
     let outgoing = probe.join("outgoing");
     let started = Instant::now();
-    let first = crate::server::shelf_send::send_shelf(
-        &remote,
-        &admin.token,
-        Arc::clone(&desktop),
-        &outgoing,
-        &handle,
-    )
-    .await
-    .unwrap_or_else(|error| panic!("{error} ({})", handle.progress.lock().unwrap().phase));
+    drop(store);
+    let (first, (_, store, shelf, serving)) = tokio::join!(
+        crate::server::shelf_send::send_shelf(
+            &remote,
+            &admin.token,
+            Arc::clone(&desktop),
+            &outgoing,
+            &handle,
+        ),
+        restart_when_pending(&paths, &remote.url, serving),
+    );
+    let first =
+        first.unwrap_or_else(|error| panic!("{error} ({})", handle.progress.lock().unwrap().phase));
     let first_time = started.elapsed();
     let first_bytes = handle.progress.lock().unwrap().bytes_total;
-    stop(serving).await;
-    drop(store);
-
-    let (base, store, shelf, serving) = serve(&paths).await;
-    let remote = RemoteServer {
-        url: base,
-        fingerprint: None,
-    };
     let shelf = shelf.unwrap();
     let status = admin_get(&remote, &admin.token, "status").await.unwrap();
     println!(
@@ -802,15 +953,19 @@ async fn probe_shipping_a_real_partial_shelf() {
         )
         .unwrap();
     let started = Instant::now();
-    let second = crate::server::shelf_send::send_shelf(
-        &remote,
-        &admin.token,
-        Arc::clone(&desktop),
-        &outgoing,
-        &handle,
-    )
-    .await
-    .unwrap();
+    drop(shelf);
+    drop(store);
+    let (second, (_, store, shelf, serving)) = tokio::join!(
+        crate::server::shelf_send::send_shelf(
+            &remote,
+            &admin.token,
+            Arc::clone(&desktop),
+            &outgoing,
+            &handle,
+        ),
+        restart_when_pending(&paths, &remote.url, serving),
+    );
+    let second = second.unwrap();
     let second_bytes = handle.progress.lock().unwrap().bytes_total;
     println!(
         "second send (one favorite) sent={} bytes={} time={:?}",

@@ -70,6 +70,18 @@ pub(super) async fn status(
     json(&shipments(&ctx)?.status())
 }
 
+/// 指定した送信の公開結果を返す。
+pub(super) async fn result(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&ctx, &headers)?;
+    let shipments = shipments(&ctx)?;
+    let result = run(move || shipments.result(&id)).await?;
+    json(&result)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct NeededRequest {
