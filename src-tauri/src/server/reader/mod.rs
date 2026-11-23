@@ -20,6 +20,7 @@ use axum::{
     Extension, Json, Router,
 };
 use headers::{authorization::Bearer, Authorization, HeaderMapExt};
+use piep_mobile_api::ReaderErrorCode as ErrorCode;
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -133,10 +134,11 @@ struct Principal {
 }
 
 #[derive(Debug)]
-pub struct ApiError(StatusCode, &'static str);
+pub struct ApiError(StatusCode, ErrorCode);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let mut response = (self.0, Json(serde_json::json!({"error":self.1}))).into_response();
+        let mut response =
+            (self.0, Json(piep_mobile_api::ReaderError { code: self.1 })).into_response();
         response.headers_mut().insert(
             header::CACHE_CONTROL,
             header::HeaderValue::from_static("no-store"),
@@ -150,22 +152,22 @@ impl IntoResponse for ApiError {
     }
 }
 fn denied() -> ApiError {
-    ApiError(StatusCode::UNAUTHORIZED, "unauthorized")
+    ApiError(StatusCode::UNAUTHORIZED, ErrorCode::Unauthorized)
 }
 fn invalid() -> ApiError {
-    ApiError(StatusCode::BAD_REQUEST, "invalid_request")
+    ApiError(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest)
 }
 fn not_found() -> ApiError {
-    ApiError(StatusCode::NOT_FOUND, "resource_unavailable")
+    ApiError(StatusCode::NOT_FOUND, ErrorCode::ResourceUnavailable)
 }
 fn internal() -> ApiError {
-    ApiError(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
+    ApiError(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::StorageError)
 }
 fn library_error(error: crate::library::Error) -> ApiError {
     match error {
         crate::library::Error::ResourceUnavailable => not_found(),
         crate::library::Error::InvalidRange => {
-            ApiError(StatusCode::RANGE_NOT_SATISFIABLE, "invalid_range")
+            ApiError(StatusCode::RANGE_NOT_SATISFIABLE, ErrorCode::InvalidRange)
         }
         _ => internal(),
     }
@@ -195,10 +197,10 @@ async fn authorize(
         .grant(token.token(), ctx.library_id)
         .ok_or_else(denied)?;
     if request.headers().contains_key(header::ORIGIN) {
-        return Err(ApiError(StatusCode::FORBIDDEN, "origin_forbidden"));
+        return Err(ApiError(StatusCode::FORBIDDEN, ErrorCode::OriginForbidden));
     }
     if request.uri().to_string().len() > 32768 {
-        return Err(ApiError(StatusCode::URI_TOO_LONG, "uri_too_long"));
+        return Err(ApiError(StatusCode::URI_TOO_LONG, ErrorCode::UriTooLong));
     }
     request
         .extensions_mut()
@@ -235,7 +237,7 @@ struct ReadPermit {
 }
 
 async fn read_permit(ctx: &Context, device: &str) -> Result<ReadPermit, ApiError> {
-    let busy = || ApiError(StatusCode::TOO_MANY_REQUESTS, "busy");
+    let busy = || ApiError(StatusCode::TOO_MANY_REQUESTS, ErrorCode::Busy);
     let own = {
         let mut devices = ctx.devices.lock().map_err(|_| internal())?;
         // 使われていない端末の枠は捨てる（登録を消した端末が残り続けないように）。
@@ -271,7 +273,7 @@ fn reader_resource(
     // 原応答や旧ファイルの書庫は読書用 API へ出さない。元データは保管層で保持する。
     // 旧原応答にはローカルパス等の内部情報を含むものがあるため、別の管理契約が必要。
     if matches!(reference, ResourceReference::Original { .. }) {
-        return Err(ApiError(StatusCode::FORBIDDEN, "archive_forbidden"));
+        return Err(ApiError(StatusCode::FORBIDDEN, ErrorCode::ArchiveForbidden));
     }
     if matches!(reference, ResourceReference::File { .. }) {
         let info = ctx
@@ -279,7 +281,7 @@ fn reader_resource(
             .resource_info(entity, scope, reference)
             .map_err(library_error)?;
         if !crate::library::reader_may_read(&info) {
-            return Err(ApiError(StatusCode::FORBIDDEN, "archive_forbidden"));
+            return Err(ApiError(StatusCode::FORBIDDEN, ErrorCode::ArchiveForbidden));
         }
     }
     Ok(())
@@ -379,7 +381,7 @@ fn work_page_boundary(value: &str, epoch: Id, subject: Id) -> Result<(i64, uuid:
         return Err(invalid());
     }
     if epoch.get().to_string() != *saved_epoch || subject.get().to_string() != *saved_subject {
-        return Err(ApiError(StatusCode::CONFLICT, "stale_cursor"));
+        return Err(ApiError(StatusCode::CONFLICT, ErrorCode::StaleCursor));
     }
     Ok((saved_at, work_id))
 }
@@ -657,7 +659,7 @@ async fn chunk(
             return Err(not_found());
         }
         let ordinal = usize::try_from(location.ordinal.get())
-            .map_err(|_| ApiError(StatusCode::RANGE_NOT_SATISFIABLE, "invalid_range"))?;
+            .map_err(|_| ApiError(StatusCode::RANGE_NOT_SATISFIABLE, ErrorCode::InvalidRange))?;
         let mut bytes = Vec::new();
         ctx.library
             .export_resource_chunk(

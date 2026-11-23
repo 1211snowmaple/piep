@@ -3,6 +3,7 @@
 //! 棚の送信そのものは `shelf_send`。取得元の認証情報はこの経路を通らない。
 
 use super::tls::certificate_fingerprint;
+use piep_library_protocol::{PairReply, PairReplyError, Role};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -198,14 +199,15 @@ pub async fn pair_admin(
         .await
         .map_err(net_error)?;
     let response = check_status(response).await?;
-    let body: serde_json::Value = response.json().await.map_err(net_error)?;
-    if body.get("role").and_then(|role| role.as_str()) != Some("admin") {
-        return Err("この登録文字列は携帯用です".into());
-    }
-    body.get("token")
-        .and_then(|token| token.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| "サーバーの応答を読み取れません".to_string())
+    let reply: PairReply = response
+        .json()
+        .await
+        .map_err(|_| "サーバーの登録応答を読み取れません")?;
+    reply.validate(Role::Admin).map_err(|error| match error {
+        PairReplyError::Role => "この登録文字列は携帯用です",
+        PairReplyError::Version => "サーバーの API の版が一致しません",
+    })?;
+    Ok(reply.token)
 }
 
 pub async fn admin_get(

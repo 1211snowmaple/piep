@@ -10,7 +10,8 @@ use piep_library_protocol::{
 use piep_mobile_api::{
     MobileCollection, MobileCollectionDetail, MobileEntityDetail, MobileEntityPage,
     MobileEntitySeriesPage, MobileFavorite, MobileFavoriteUpdate, MobileSearchSuggestions,
-    MobileWork, MobileWorkDetail, MobileWorkPage,
+    MobileWork, MobileWorkDetail, MobileWorkPage, MutationConflict, ReaderError,
+    ReaderErrorCode as ErrorCode,
 };
 use piep_storage::Fingerprint;
 use reqwest::{Response, StatusCode, header::HeaderMap};
@@ -32,6 +33,8 @@ pub struct ShelfScope {
 pub struct ShelfStatus {
     scope: ShelfScope,
     reader_bundle: bool,
+    #[serde(skip)]
+    mutations: bool,
 }
 
 fn header_is(headers: &HeaderMap, name: &str, expected: &str) -> bool {
@@ -133,7 +136,23 @@ async fn parse_identity(
     Ok(ShelfStatus {
         scope,
         reader_bundle: identity.capabilities.reader_bundle,
+        mutations: identity.capabilities.mutations,
     })
+}
+
+/// 書く前に、今の接続先が同じ棚への書き込みに対応しているか確かめる。
+pub(super) async fn supports_mutations(
+    state: &PcClientState,
+    client: &reqwest::Client,
+    saved: &SavedConnection,
+    scope: ShelfScope,
+) -> Result<bool, ClientError> {
+    let response = check_scope(
+        get(client, saved, "/api/identity", PROBE_TIMEOUT).await?,
+        scope,
+    )?;
+    let status = parse_identity(response, scope.connection_generation).await?;
+    state.with_connection(scope.connection_generation, || Ok(status.mutations))
 }
 
 pub(super) async fn discover(
@@ -231,15 +250,36 @@ async fn post_bounded<T>(
         .send()
         .await
         .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
-    if response.status() == StatusCode::SERVICE_UNAVAILABLE {
-        return Err(ClientError {
-            code: "search_indexing",
-            message: "サーバーは本文の検索の準備中です。しばらくしてからもう一度検索してください",
-        });
-    }
-    let bytes = bounded_response_bytes(check_scope(response, scope)?, MAX_MANIFEST_BYTES).await?;
+    let response = check_search_response(response, scope).await?;
+    let bytes = bounded_response_bytes(response, MAX_MANIFEST_BYTES).await?;
     let result = parse(&bytes)?;
     state.with_connection(generation, || Ok(result))
+}
+
+async fn check_search_response(
+    response: Response,
+    scope: ShelfScope,
+) -> Result<Response, ClientError> {
+    if response.status() == StatusCode::SERVICE_UNAVAILABLE {
+        if scope.matches(response.headers())
+            && response_code(response).await == Some(ErrorCode::SearchIndexing)
+        {
+            return Err(ClientError {
+                code: "search_indexing",
+                message: "サーバーは本文の検索の準備中です。しばらくしてからもう一度検索してください",
+            });
+        }
+        return Err(ClientError::not_ready());
+    }
+    check_scope(response, scope)
+}
+
+pub(super) async fn response_code(response: Response) -> Option<ErrorCode> {
+    let bytes = bounded_response_bytes(response, MAX_IDENTITY_BYTES)
+        .await
+        .ok()?;
+    let error: ReaderError = serde_json::from_slice(&bytes).ok()?;
+    Some(error.code)
 }
 
 /// 十進の数字だけ（符号・空白・先頭の 0 の重ねを受け付けない）。
@@ -259,12 +299,6 @@ pub struct ShelfFavorite {
     conflict: bool,
 }
 
-#[derive(Deserialize)]
-struct FavoriteConflict {
-    error: String,
-    current: MobileFavorite,
-}
-
 fn favorite_missing() -> ClientError {
     ClientError {
         code: "favorite_missing",
@@ -274,9 +308,9 @@ fn favorite_missing() -> ClientError {
 
 fn parse_favorite(bytes: &[u8], conflict: bool) -> Result<ShelfFavorite, ClientError> {
     let current = if conflict {
-        let body: FavoriteConflict =
+        let body: MutationConflict<MobileFavorite> =
             serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
-        if body.error != "favorite_conflict" {
+        if body.code != ErrorCode::FavoriteConflict {
             return Err(ClientError::protocol());
         }
         body.current
@@ -313,6 +347,12 @@ pub async fn pc_set_favorite(
     }
     let saved = saved.ok_or_else(ClientError::invalid_pairing)?;
     let client = state.client(&saved)?;
+    if !supports_mutations(&state, &client, &saved, library).await? {
+        return Err(ClientError {
+            code: "mutations_unavailable",
+            message: "接続先の本棚は書き込みに対応していません",
+        });
+    }
     let body = MobileFavoriteUpdate {
         request_id: request.get().to_string(),
         expected,
@@ -345,7 +385,13 @@ async fn favorite_response(
             let bytes = bounded_response_bytes(response, MAX_IDENTITY_BYTES).await?;
             parse_favorite(&bytes, true).map_err(|_| library_changed())
         }
-        StatusCode::NOT_FOUND => Err(favorite_missing()),
+        StatusCode::NOT_FOUND if scope.matches(response.headers()) => {
+            if response_code(response).await == Some(ErrorCode::ResourceUnavailable) {
+                Err(favorite_missing())
+            } else {
+                Err(ClientError::remote())
+            }
+        }
         _ => {
             let bytes =
                 bounded_response_bytes(check_scope(response, scope)?, MAX_IDENTITY_BYTES).await?;
@@ -375,18 +421,12 @@ pub async fn pc_search(
     scope: Option<PcWorkScope>,
     limit: Option<i64>,
 ) -> Result<MobileWorkPage, ClientError> {
-    if limit.is_some_and(|value| !(1..=50).contains(&value)) {
-        return Err(ClientError::remote());
-    }
-    let mut payload = super::search_request(&criteria, cursor, offset, scope)?;
-    if limit.is_some() {
-        payload.limit = limit;
-    }
+    let payload = super::search_request(&criteria, cursor, offset, scope, limit)?;
     let endpoint = format!("/api/libraries/{}/works/search", library.library_id.get());
     post_bounded(&state, library, &endpoint, &payload, |bytes| {
         let page: MobileWorkPage =
             serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
-        if page.items.len() > 50
+        if page.items.len() > piep_mobile_api::MAX_SEARCH_LIMIT as usize
             || !page.items.iter().all(valid_shelf_work)
             || page
                 .next_cursor
@@ -890,6 +930,57 @@ mod tests {
     }
 
     #[test]
+    fn only_an_indexing_code_with_a_503_reports_search_indexing() {
+        tauri::async_runtime::block_on(async {
+            let shelf = identity();
+            let scope =
+                ShelfScope::for_tests(shelf.library_id, shelf.subject_id, shelf.sync_epoch, 1);
+            let wire = headers(&shelf);
+            for (status, body, indexing) in [
+                (
+                    "503 Service Unavailable",
+                    r#"{"code":"search_indexing"}"#,
+                    true,
+                ),
+                ("503 Service Unavailable", r#"{"code":"busy"}"#, false),
+                ("503 Service Unavailable", "<html>proxy</html>", false),
+                ("400 Bad Request", r#"{"code":"search_indexing"}"#, false),
+            ] {
+                let error = check_search_response(response(status, &wire, body).await, scope)
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.code == "search_indexing", indexing, "{status} {body}");
+            }
+        });
+    }
+
+    #[test]
+    fn shelf_identity_keeps_reading_enabled_when_mutations_are_false_or_missing() {
+        tauri::async_runtime::block_on(async {
+            let shelf = identity();
+            let wire = headers(&shelf);
+            for (declared, writable) in [(Some(true), true), (Some(false), false), (None, false)] {
+                let mut body = serde_json::to_value(&shelf).unwrap();
+                let capabilities = body["capabilities"].as_object_mut().unwrap();
+                match declared {
+                    Some(value) => {
+                        capabilities.insert("mutations".into(), value.into());
+                    }
+                    None => {
+                        capabilities.remove("mutations");
+                    }
+                }
+                let body = body.to_string();
+                let status = parse_identity(response("200 OK", &wire, &body).await, 1)
+                    .await
+                    .unwrap();
+                assert_eq!(status.mutations, writable);
+                assert!(status.reader_bundle);
+            }
+        });
+    }
+
+    #[test]
     fn shelf_identity_requires_the_wire_format_and_confirmed_header_scope() {
         tauri::async_runtime::block_on(async {
             let shelf = identity();
@@ -981,7 +1072,7 @@ mod tests {
                 response(
                     "409 Conflict",
                     &wire,
-                    r#"{"error":"favorite_conflict","current":{"favorite":false,"generation":"4"}}"#,
+                    r#"{"code":"favorite_conflict","current":{"favorite":false,"generation":"4"}}"#,
                 )
                 .await,
                 scope,
@@ -1005,16 +1096,22 @@ mod tests {
                 (
                     "409 Conflict",
                     other.clone(),
-                    r#"{"error":"favorite_conflict","current":{"favorite":false,"generation":"4"}}"#,
+                    r#"{"code":"favorite_conflict","current":{"favorite":false,"generation":"4"}}"#,
                     "library_changed",
                 ),
                 (
                     "409 Conflict",
                     wire.clone(),
-                    r#"{"error":"library_changed"}"#,
+                    r#"{"code":"library_changed"}"#,
                     "library_changed",
                 ),
-                ("404 Not Found", wire.clone(), "", "favorite_missing"),
+                (
+                    "404 Not Found",
+                    wire.clone(),
+                    r#"{"code":"resource_unavailable"}"#,
+                    "favorite_missing",
+                ),
+                ("404 Not Found", wire.clone(), "", "remote_error"),
                 (
                     "200 OK",
                     wire.clone(),

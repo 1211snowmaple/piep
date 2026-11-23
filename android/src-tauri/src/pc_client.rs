@@ -5,6 +5,7 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
+use piep_library_protocol::{API_VERSION, MAX_IDENTITY_BYTES, PairReply, Role};
 use piep_mobile_api::{MobileDateField, MobileEntitySort, MobileSearchRequest, MobileSortOrder};
 use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,6 @@ const HTTP2_PING_INTERVAL: Duration = Duration::from_secs(15);
 const HTTP2_PING_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ASSET_BYTES: usize = 25 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
-const API_VERSION: u32 = 2;
 const PAIRING_VERSION: u32 = 2;
 
 pub struct PcClientState {
@@ -413,14 +413,6 @@ struct Hello {
     capabilities: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PairResult {
-    device_id: String,
-    token: String,
-    api_version: u32,
-}
-
 fn validate_url(value: &str) -> Result<Url, ClientError> {
     let url = Url::parse(value).map_err(|_| ClientError::invalid_pairing())?;
     if url.scheme() != "https"
@@ -693,16 +685,7 @@ pub async fn pc_pair(
     if !response.status().is_success() {
         return Err(ClientError::remote());
     }
-    let result: PairResult = response.bounded_json().await?;
-    if result.api_version != API_VERSION
-        || URL_SAFE_NO_PAD
-            .decode(&result.token)
-            .map_err(|_| ClientError::protocol())?
-            .len()
-            != 32
-    {
-        return Err(ClientError::protocol());
-    }
+    let result = parse_pair_reply(response).await?;
     let saved = SavedConnection {
         url: pairing.url,
         fingerprint: pairing.fingerprint,
@@ -714,6 +697,22 @@ pub async fn pc_pair(
     };
     state.save(&saved)?;
     Ok(ConnectionStatus::from_saved(&saved, true, None))
+}
+
+async fn parse_pair_reply(response: reqwest::Response) -> Result<PairReply, ClientError> {
+    let result: PairReply = bounded_json_response(response, MAX_IDENTITY_BYTES).await?;
+    result
+        .validate(Role::Reader)
+        .map_err(|_| ClientError::protocol())?;
+    if URL_SAFE_NO_PAD
+        .decode(&result.token)
+        .map_err(|_| ClientError::protocol())?
+        .len()
+        != 32
+    {
+        return Err(ClientError::protocol());
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -914,6 +913,7 @@ fn search_request(
     cursor: Option<String>,
     offset: Option<i64>,
     scope: Option<PcWorkScope>,
+    limit: Option<i64>,
 ) -> Result<MobileSearchRequest, ClientError> {
     // 並べ方は `鍵:向き`（`@shared/sortOptions` と同じ）。標準は関連度か保存日で、サーバーが決める。
     let (sort_by, sort_order) = match criteria.sort.as_str() {
@@ -934,7 +934,7 @@ fn search_request(
         text: search_choice(Some(&criteria.text)),
         cursor,
         offset,
-        limit: Some(20),
+        limit: Some(limit.unwrap_or(20)),
         source: search_choice(Some(&criteria.source)),
         content_type: search_choice(Some(&criteria.content_type)),
         authors_include: split_search_terms(&criteria.author),
@@ -1399,7 +1399,7 @@ mod tests {
     fn numbered_search_offsets_are_bounded_and_exclusive_with_cursors() {
         let criteria = search_criteria(serde_json::json!({}));
         let request = |cursor: Option<&str>, offset| {
-            search_request(&criteria, cursor.map(str::to_string), offset, None)
+            search_request(&criteria, cursor.map(str::to_string), offset, None, None)
         };
         assert!(request(None, None).is_ok());
         assert!(request(None, Some(0)).is_ok());
@@ -1418,9 +1418,10 @@ mod tests {
             "dateField": "published", "dateFrom": "2024-02-29", "dateTo": "2026-10-14",
             "sort": "published:asc"
         }));
-        let payload =
-            serde_json::to_value(search_request(&criteria, None, None, None).expect("request"))
-                .unwrap();
+        let payload = serde_json::to_value(
+            search_request(&criteria, None, None, None, None).expect("request"),
+        )
+        .unwrap();
         assert_eq!(
             payload["authorsInclude"],
             serde_json::json!(["作者A", "作者B", "作者C"])
@@ -1446,9 +1447,10 @@ mod tests {
             "revision": "", "edit": "", "cover": "",
             "dateField": "saved", "dateFrom": "", "dateTo": ""
         }));
-        let payload =
-            serde_json::to_value(search_request(&criteria, None, None, None).expect("request"))
-                .unwrap();
+        let payload = serde_json::to_value(
+            search_request(&criteria, None, None, None, None).expect("request"),
+        )
+        .unwrap();
         for key in [
             "tagFilterMode",
             "minAssetCount",
@@ -1480,9 +1482,36 @@ mod tests {
         ] {
             let criteria = search_criteria(changes.clone());
             assert!(
-                search_request(&criteria, None, None, None).is_err(),
+                search_request(&criteria, None, None, None, None).is_err(),
                 "accepted {changes}"
             );
         }
+    }
+    #[test]
+    fn reader_pairing_checks_the_reply_version_and_role() {
+        tauri::async_runtime::block_on(async {
+            for (version, role, accepted) in [
+                (API_VERSION, "reader", true),
+                (API_VERSION + 1, "reader", false),
+                (API_VERSION, "admin", false),
+            ] {
+                let body = serde_json::json!({
+                    "apiVersion": version,
+                    "role": role,
+                    "deviceId": "fixture",
+                    "token": URL_SAFE_NO_PAD.encode([7; 32]),
+                });
+                let response = local_response(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.to_string().len(),
+                ))
+                .await;
+                assert_eq!(
+                    parse_pair_reply(response).await.is_ok(),
+                    accepted,
+                    "{version} {role}"
+                );
+            }
+        });
     }
 }

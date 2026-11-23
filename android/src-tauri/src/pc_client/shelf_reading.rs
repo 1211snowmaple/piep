@@ -12,11 +12,15 @@
 //! （サーバーを戻したあとに、戻す前の要求を新しい操作として当てない）。
 
 use super::device_db::{DeviceDb, records_error};
-use super::shelf::{ShelfScope, canonical_generation, check_scope, library_changed};
+use super::shelf::{
+    ShelfScope, canonical_generation, check_scope, library_changed, response_code,
+    supports_mutations,
+};
 use super::{ClientError, PcClientState, REQUEST_TIMEOUT, bounded_response_bytes};
 use piep_library_protocol::{Id, MAX_IDENTITY_BYTES, MAX_MANIFEST_BYTES};
 use piep_mobile_api::{
-    MobileReading, MobileReadingLocation, MobileReadingPage, MobileReadingUpdate,
+    MobileReading, MobileReadingLocation, MobileReadingPage, MobileReadingUpdate, MutationConflict,
+    ReaderErrorCode as ErrorCode,
 };
 use reqwest::StatusCode;
 use rusqlite::{OptionalExtension, Transaction};
@@ -139,12 +143,6 @@ fn known_generation(tx: &Transaction<'_>, work: &str) -> Result<String, ClientEr
     Ok(known.map_or_else(|| "0".to_string(), |known| known.generation))
 }
 
-#[derive(Deserialize)]
-struct Conflict {
-    error: String,
-    current: MobileReading,
-}
-
 /// 一件を送った結果。
 enum Sent {
     Stored(MobileReading),
@@ -253,6 +251,13 @@ impl ShelfReadingState {
             }
             Ok(pending)
         })?;
+        if pending.is_empty() {
+            return Ok(false);
+        }
+        let (_, saved, client) = connection(pc, scope)?;
+        if !supports_mutations(pc, &client, &saved, scope).await? {
+            return Ok(false);
+        }
         let mut rewritten = false;
         for (work, write) in pending {
             let sent = send(pc, scope, &work, &write).await?;
@@ -376,9 +381,9 @@ async fn send(
         // 世代の食い違いは棚の入れ替わり（409）と同じ番号で返るので、本文で見分ける。
         StatusCode::CONFLICT if scope.matches(response.headers()) => {
             let bytes = bounded_response_bytes(response, MAX_IDENTITY_BYTES).await?;
-            let conflict: Conflict =
+            let conflict: MutationConflict<MobileReading> =
                 serde_json::from_slice(&bytes).map_err(|_| library_changed())?;
-            if conflict.error != "reading_conflict"
+            if conflict.code != ErrorCode::ReadingConflict
                 || conflict.current.work != work
                 || !valid_reading(&conflict.current)
             {
@@ -386,8 +391,14 @@ async fn send(
             }
             Sent::Conflict(conflict.current)
         }
-        StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND if scope.matches(response.headers()) => {
-            Sent::Refused
+        status @ (StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND)
+            if scope.matches(response.headers()) =>
+        {
+            match (status, response_code(response).await) {
+                (StatusCode::BAD_REQUEST, Some(ErrorCode::InvalidRequest))
+                | (StatusCode::NOT_FOUND, Some(ErrorCode::ResourceUnavailable)) => Sent::Refused,
+                _ => return Err(ClientError::remote()),
+            }
         }
         _ => {
             let bytes =
@@ -427,7 +438,11 @@ async fn fetch(
         .await
         .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
     if response.status() == StatusCode::BAD_REQUEST && scope.matches(response.headers()) {
-        return pc.with_connection(generation, || Ok(None));
+        return if response_code(response).await == Some(ErrorCode::ReadingCursorExpired) {
+            pc.with_connection(generation, || Ok(None))
+        } else {
+            Err(ClientError::remote())
+        };
     }
     let bytes = bounded_response_bytes(check_scope(response, scope)?, MAX_MANIFEST_BYTES).await?;
     let page: MobileReadingPage =

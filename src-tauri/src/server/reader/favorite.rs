@@ -6,7 +6,7 @@
 //!
 //! デスクトップ版は棚の持ち主の変更を `/api/admin/shelf/favorites` から取り込む。
 
-use super::{internal, invalid, not_found, ApiError, Context, Principal};
+use super::{internal, invalid, not_found, ApiError, Context, ErrorCode, Principal};
 use crate::library::protocol::Id;
 use crate::library::{LibraryId, UserState};
 use axum::{
@@ -15,7 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json,
 };
-use piep_mobile_api::MobileFavorite;
+use piep_mobile_api::{MobileFavorite, MutationConflict};
 use std::sync::Arc;
 
 pub(super) fn favorite_state(state: &UserState) -> MobileFavorite {
@@ -83,10 +83,10 @@ pub(super) async fn put(
                 let current = library.user_state(work, subject).map_err(|_| internal())?;
                 let mut response = (
                     StatusCode::CONFLICT,
-                    Json(serde_json::json!({
-                        "error": "favorite_conflict",
-                        "current": favorite_state(&current),
-                    })),
+                    Json(MutationConflict {
+                        code: ErrorCode::FavoriteConflict,
+                        current: favorite_state(&current),
+                    }),
                 )
                     .into_response();
                 response.headers_mut().insert(
@@ -96,7 +96,7 @@ pub(super) async fn put(
                 Ok(response)
             }
             Err(crate::library::Error::Busy) => {
-                Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "busy"))
+                Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Busy))
             }
             Err(error) => {
                 log::error!("棚のお気に入りを書けません: {error}");

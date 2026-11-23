@@ -212,7 +212,7 @@ fn save(library: &Library, input: Capture) -> crate::library::CaptureResult {
 }
 
 #[tokio::test]
-async fn identity_requires_bearer_and_offers_the_reader_bundle_but_no_mutation() {
+async fn identity_requires_bearer_and_offers_the_reader_bundle_and_mutations() {
     let server = Server::start().await;
     for path in ["/api/identity", "/api/identity?token=fixture"] {
         assert_eq!(
@@ -231,7 +231,7 @@ async fn identity_requires_bearer_and_offers_the_reader_bundle_but_no_mutation()
     let identity = protocol::LibraryIdentity::parse(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(identity.library_id.get(), server.library.id);
     assert_eq!(identity.subject_id, server.authority.subject);
-    assert!(identity.capabilities.reader_bundle && !identity.capabilities.mutations);
+    assert!(identity.capabilities.reader_bundle && identity.capabilities.mutations);
     assert_eq!(
         server
             .get("/api/identity")
@@ -768,6 +768,29 @@ async fn shelf_page(response: reqwest::Response) -> piep_mobile_api::MobileWorkP
 }
 
 #[tokio::test]
+async fn work_search_rejects_invalid_page_sizes_and_false_favorite_filter() {
+    let server = Server::start().await;
+    for request in [
+        json!({"limit": 500}),
+        json!({"limit": 0}),
+        json!({"favorite": false}),
+    ] {
+        let response = server.search(request.clone()).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{request}");
+    }
+}
+
+#[tokio::test]
+async fn unfinished_search_index_returns_a_code() {
+    let server = Server::start().await;
+    server.context.search_ready.store(false, Ordering::Release);
+    let response = server.search(json!({"text": "海"})).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "search_indexing");
+}
+
+#[tokio::test]
 async fn the_phone_list_sorts_filters_and_pages_the_shelf() {
     let server = Server::start().await;
     let north = save(&server.library, capture("north", None));
@@ -1069,7 +1092,7 @@ async fn a_favorite_from_the_phone_counts_once_and_refuses_a_stale_generation() 
         .unwrap();
     assert_eq!(stale.status(), StatusCode::CONFLICT);
     let conflict: serde_json::Value = stale.json().await.unwrap();
-    assert_eq!(conflict["error"], "favorite_conflict");
+    assert_eq!(conflict["code"], "favorite_conflict");
     assert_eq!(
         conflict["current"],
         json!({"favorite": true, "generation": "1"})
@@ -1848,7 +1871,7 @@ async fn reading_positions_are_written_once_refuse_stale_generations_and_come_ba
         .unwrap();
     assert_eq!(stale.status(), StatusCode::CONFLICT);
     let conflict: serde_json::Value = stale.json().await.unwrap();
-    assert_eq!(conflict["error"], "reading_conflict");
+    assert_eq!(conflict["code"], "reading_conflict");
     assert_eq!(conflict["current"]["generation"], "1");
     assert_eq!(conflict["current"]["location"]["page"], 1);
 

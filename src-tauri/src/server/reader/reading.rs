@@ -11,7 +11,7 @@
 //! 単独サーバーの棚は配る写しなので、携帯が書いた位置はデスクトップ版が管理の口から同じ一覧で
 //! 読み、自分の棚へ取り込む（`owner_reading`）。
 
-use super::{internal, invalid, not_found, read_permit, ApiError, Context, Principal};
+use super::{internal, invalid, not_found, read_permit, ApiError, Context, ErrorCode, Principal};
 use crate::library::protocol::Id;
 use crate::library::{
     server_device, Library, LibraryId, ReadingAnchor, ReadingLocation, ReadingPosition,
@@ -23,7 +23,7 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json,
 };
-use piep_mobile_api::{MobileReading, MobileReadingLocation, MobileReadingPage};
+use piep_mobile_api::{MobileReading, MobileReadingLocation, MobileReadingPage, MutationConflict};
 use std::sync::Arc;
 
 /// 一ページの既定と上限。
@@ -110,7 +110,10 @@ fn parse_cursor(value: &str, epoch: Id) -> Result<Cursor, ApiError> {
             Ok(Cursor::Since(decimal(since).ok_or_else(invalid)?))
         }
         // 別の写しの印（番号の意味が違う）や崩れた印。端末は空の印から取り直す。
-        _ => Err(ApiError(StatusCode::BAD_REQUEST, "reading_cursor_expired")),
+        _ => Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::ReadingCursorExpired,
+        )),
     }
 }
 
@@ -365,7 +368,10 @@ pub(super) struct WorkPath {
 fn conflict(current: MobileReading) -> Response {
     let mut response = (
         StatusCode::CONFLICT,
-        Json(serde_json::json!({ "error": "reading_conflict", "current": current })),
+        Json(MutationConflict {
+            code: ErrorCode::ReadingConflict,
+            current,
+        }),
     )
         .into_response();
     response.headers_mut().insert(
@@ -452,7 +458,7 @@ pub(super) async fn put(
                 }
             }
             Err(crate::library::Error::Busy) => {
-                Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "busy"))
+                Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Busy))
             }
             // その作品のものでない版・編集（引いても見つからない）。
             Err(crate::library::Error::ResourceUnavailable)

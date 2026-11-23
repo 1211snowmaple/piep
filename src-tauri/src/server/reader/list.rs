@@ -4,7 +4,8 @@
 //! `WorkListQuery`）にする。意味はデスクトップの一覧と同じ問い合わせになる。作品は棚の UUID で返す。
 
 use super::{
-    internal, invalid, library_error, not_found, read_permit, ApiError, Context, Principal,
+    internal, invalid, library_error, not_found, read_permit, ApiError, Context, ErrorCode,
+    Principal,
 };
 use crate::library::protocol::Id;
 use crate::library::{
@@ -148,7 +149,7 @@ fn decode_cursor(value: &str, epoch: Id, subject: Id) -> Result<WorkCursor, ApiE
         return Err(invalid());
     };
     if epoch.get().to_string() != *saved_epoch || subject.get().to_string() != *saved_subject {
-        return Err(ApiError(StatusCode::CONFLICT, "stale_cursor"));
+        return Err(ApiError(StatusCode::CONFLICT, ErrorCode::StaleCursor));
     }
     serde_json::from_str(cursor).map_err(|_| invalid())
 }
@@ -208,8 +209,7 @@ pub(super) fn shelf_request(
         .transpose()?;
     let limit = request
         .limit
-        .unwrap_or(if request.offset.is_some() { 20 } else { 30 })
-        .clamp(1, 50);
+        .unwrap_or(if request.offset.is_some() { 20 } else { 30 });
     let date = (request.date_from.is_some() || request.date_to.is_some()).then(|| DateRange {
         field: match request.date_field.unwrap_or_default() {
             MobileDateField::Saved => DateField::Saved,
@@ -222,7 +222,7 @@ pub(super) fn shelf_request(
     let filter = WorkFilter {
         provider: request.source.clone(),
         content_type: request.content_type.clone(),
-        favorite: request.favorite.filter(|favorite| *favorite),
+        favorite: request.favorite,
         edited: request
             .edit_filter
             .as_deref()
@@ -281,7 +281,10 @@ pub(super) async fn search(
     // 語の検索は索引が棚に追いつくまで答えない（古い索引の結果を返さない）。絞り込みだけなら読める。
     let words = !parse_query(&search.text).text.trim().is_empty();
     if words && !ctx.search_ready.load(Ordering::Acquire) {
-        return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "search_indexing"));
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ErrorCode::SearchIndexing,
+        ));
     }
     let permit = read_permit(&ctx, &principal.device).await?;
     let bytes = tokio::task::spawn_blocking(move || {
@@ -464,7 +467,10 @@ pub(super) fn shrunk_image(
     }
     let content = ctx.library.file(file).map_err(library_error)?;
     if content.length > MAX_COVER_SOURCE_BYTES {
-        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "asset_too_large"));
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ErrorCode::AssetTooLarge,
+        ));
     }
     let mut source = Vec::with_capacity(usize::try_from(content.length).unwrap_or(0));
     ctx.library
@@ -477,7 +483,10 @@ pub(super) fn shrunk_image(
         .into_dimensions()
         .map_err(|_| not_found())?;
     if u64::from(width) * u64::from(height) > MAX_COVER_PIXELS {
-        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "asset_too_large"));
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            ErrorCode::AssetTooLarge,
+        ));
     }
     let (bounds_w, bounds_h) = size.bounds();
     let options = crate::epub::intermediate::ImageCompressOptions {
