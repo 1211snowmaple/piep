@@ -471,6 +471,7 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
              ) STRICT;
              INSERT INTO outbox_v17 SELECT sequence,request_id,entity_id,operation,payload_json,created_at,saved_search_id,user_id FROM outbox;
              DROP TABLE outbox; ALTER TABLE outbox_v17 RENAME TO outbox;
+             DROP TABLE library_tasks;
              DELETE FROM schema_migrations WHERE version>=18; PRAGMA user_version=17;",
         )
         .unwrap();

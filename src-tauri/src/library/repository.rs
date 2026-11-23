@@ -322,6 +322,7 @@ impl Library {
             _process_lock: lock,
         };
         library.ensure_work_list()?;
+        library.run_library_tasks()?;
         Ok(library)
     }
 
@@ -381,6 +382,7 @@ impl Library {
             _process_lock: lock,
         };
         library.ensure_work_list()?;
+        library.run_library_tasks()?;
         Ok(library)
     }
 
@@ -920,12 +922,22 @@ impl Library {
                 states.insert(key.clone(), state.clone());
             }
         }
-        if previous.as_ref().is_some_and(|p| p.3.rule != 1) {
+        if previous
+            .as_ref()
+            .is_some_and(|p| !(1..=super::body::BODY_SEMANTIC_RULE).contains(&p.3.rule))
+        {
             return Err(Error::Unsupported(
                 "本文の比較規則に対応していません".into(),
             ));
         }
-        let previous_body = previous.as_ref().and_then(|p| p.3.semantic.as_deref());
+        // 前の版の本文は、記録した規則のまま書き換えず、今の規則にそろえてから比べる。
+        let previous_semantic = match &previous {
+            Some(p) if p.3.semantic.is_some() => {
+                self.body_semantic_now(&tx, entity, uuid(p.0.clone())?)?
+            }
+            _ => None,
+        };
+        let previous_body = previous_semantic.as_ref().map(|f| f.0.as_slice());
         let filling_pixiv_images = context
             .as_ref()
             .is_some_and(|c| c.pixiv_interpretation == Some(1))
@@ -978,7 +990,6 @@ impl Library {
             }
         }
         let body_id = body
-            .as_ref()
             .map(|b| b.file.id.0.to_vec())
             .or_else(|| previous.as_ref().and_then(|p| p.3.file.clone()));
         let body_format = body
@@ -987,6 +998,10 @@ impl Library {
         let body_semantic = body
             .map(|b| b.semantic.0.to_vec())
             .or_else(|| previous.as_ref().and_then(|p| p.3.semantic.clone()));
+        let body_rule = match (body, &previous) {
+            (None, Some(p)) => p.3.rule,
+            _ => super::body::BODY_SEMANTIC_RULE,
+        };
         if body_id.is_some() {
             states.insert("body".into(), "known".into());
         }
@@ -1134,7 +1149,7 @@ impl Library {
             [entity.as_bytes().as_slice()],
             |r| r.get(0),
         )?;
-        tx.execute("INSERT INTO revision_snapshots(id,entity_id,revision_id,metadata_json,field_states_json,body_file_id,interpretation_version,semantic_rule,semantic_hash,manifest_hash,created_at,sequence,body_format,body_semantic_hash) VALUES(?1,?2,?3,?4,?5,?6,1,1,?7,?8,?9,?10,?11,?12)",params![snapshot.as_bytes().as_slice(),entity.as_bytes().as_slice(),revision.as_bytes().as_slice(),serde_json::to_string(&merged)?,serde_json::to_string(&states)?,body_id,semantic.0.as_slice(),manifest.0.as_slice(),acquired_at,sequence,body_format,body_semantic])?;
+        tx.execute("INSERT INTO revision_snapshots(id,entity_id,revision_id,metadata_json,field_states_json,body_file_id,interpretation_version,semantic_rule,semantic_hash,manifest_hash,created_at,sequence,body_format,body_semantic_hash,body_semantic_rule) VALUES(?1,?2,?3,?4,?5,?6,1,1,?7,?8,?9,?10,?11,?12,?13)",params![snapshot.as_bytes().as_slice(),entity.as_bytes().as_slice(),revision.as_bytes().as_slice(),serde_json::to_string(&merged)?,serde_json::to_string(&states)?,body_id,semantic.0.as_slice(),manifest.0.as_slice(),acquired_at,sequence,body_format,body_semantic,body_rule])?;
         let observation = LibraryId::now_v7();
         let insert_observation = |result_snapshot: LibraryId| -> Result<()> {
             tx.execute("INSERT INTO acquisition_observations(id,entity_id,request_id,request_hash,acquired_at,recorded_at,route,status,raw_file_id,result_snapshot_id,created_revision,body_file_id,body_format) VALUES(?1,?2,?3,?4,?5,?6,?7,'available',?8,?9,?10,?11,?12)",params![observation.as_bytes().as_slice(),entity.as_bytes().as_slice(),capture.request_id.as_bytes().as_slice(),request_hash.0.as_slice(),acquired_at,now,capture.route,raw.id.0.as_slice(),result_snapshot.as_bytes().as_slice(),changed,input_body.as_ref().map(|b|b.file.id.0.to_vec()),input_body.as_ref().map(|b|b.format.name())])?;

@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 31;
+pub(crate) const VERSION: i64 = 32;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -36,6 +36,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_029_restore_snapshot_guards.sql"),
     include_str!("migration_030_acquisition_routes.sql"),
     include_str!("migration_031_restore_reader_guards.sql"),
+    include_str!("migration_032_library_tasks.sql"),
 ];
 /// これらの版の SQL を当てた直後に、触れた版の指紋を計算し直す。
 /// 28: 区分を指紋から外した。30: 移した取得の経路と画像の画質をそろえた。
