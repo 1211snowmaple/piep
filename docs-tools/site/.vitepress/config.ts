@@ -60,6 +60,7 @@ export default {
           { text: "品質の担保", link: "/policy/09-quality" },
           { text: "ドキュメントの作り", link: "/policy/10-documentation" },
           { text: "AI補助の方針", link: "/policy/11-assist" },
+          { text: "サーバーの方針", link: "/policy/12-server" },
         ],
       },
       {
@@ -77,8 +78,9 @@ export default {
         collapsed: true,
         items: [
           { text: "まとまりの発見", link: "/plan/collection-discovery" },
-          { text: "ライブラリ全体の可逆圧縮", link: "/plan/library-lossless-storage" },
-          { text: "ライブラリのデータモデル再設計", link: "/plan/library-data-model" },
+          { text: "サーバーの続き", link: "/plan/server-mode" },
+          { text: "サーバーの管理画面の続き", link: "/plan/server-admin" },
+          { text: "添付の中の本文の続き", link: "/plan/pdf-reading" },
         ],
       },
     ],

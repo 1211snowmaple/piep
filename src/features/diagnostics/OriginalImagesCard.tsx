@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Badge, Box, Button, Card, Group, Progress, Text, ThemeIcon } from "@mantine/core";
+import { Anchor, Badge, Box, Button, Card, Group, Progress, Text, ThemeIcon } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { DangerButton } from "@/components/DangerButton";
@@ -137,7 +137,20 @@ export function OriginalImagesCard({ runtime, disabled }: { runtime: boolean; di
       <Progress value={progress.total ? progress.completed / progress.total * 100 : 0} animated={running} />
       <Text size="xs" c="dimmed" mt={6}>原寸 {formatNumber(progress.upgraded)}枚 · 公開元に無し {formatNumber(progress.unavailable)}枚 · 失敗 {formatNumber(progress.failed)}枚</Text>
       {progress.error && <Text size="xs" c="red" mt={6}>{progress.error}</Text>}
-      {progress.failed > 0 && <Button size="xs" variant="subtle" mt={6} onClick={() => navigate("/operations")}>失敗の詳細</Button>}
+      {!running && (progress.misses?.length ?? 0) > 0 && <Box mt="sm">
+        <Text size="xs" fw={650} mb={4}>原寸にできなかった作品</Text>
+        <Box component="ul" className="original-image-misses">
+          {progress.misses.map((miss) => <li key={miss.workId}>
+            <Text size="xs" c={miss.failed ? "red" : "dimmed"} span style={{ flexShrink: 0 }}>{miss.failed ? "失敗" : "公開元に無し"}</Text>
+            <Box miw={0}>
+              <Anchor component="button" type="button" size="xs" className="line-clamp-1" title={miss.title} onClick={() => navigate(`/works/${miss.workId}`)}>
+                {miss.title || `${miss.provider} ${miss.externalKey}`}
+              </Anchor>
+              {miss.reason && <Text size="xs" c="dimmed">{miss.reason}</Text>}
+            </Box>
+          </li>)}
+        </Box>
+      </Box>}
     </Box>}
   </Card>;
 }

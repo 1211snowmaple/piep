@@ -18,11 +18,9 @@ vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
   ...health,
 }));
-const legacy = vi.hoisted(() => ({ getDashboardSummary: vi.fn(), getSearchIndexStatus: vi.fn() }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  ...legacy,
 }));
 vi.mock("@/services/authApi", () => ({ getConnectionStatus: vi.fn().mockResolvedValue({ pixiv: { name: "利用者", webSession: true }, fanbox: { name: "利用者" } }) }));
 
@@ -56,7 +54,7 @@ const card: ShelfCard = {
 } as unknown as ShelfCard;
 
 const summary: DashboardSummary = {
-  stats: { totalDownloads: 27, pixivCount: 20, fanboxCount: 7, totalAssets: 3, totalSizeBytes: 1024 },
+  stats: { totalWorks: 27, pixivCount: 20, fanboxCount: 7, totalAssets: 3, totalSizeBytes: 1024 },
   favoriteCount: 4,
   watchedCount: 0,
   updateTargetCount: 5,
@@ -64,9 +62,9 @@ const summary: DashboardSummary = {
   pendingIndexCount: 0,
   topTags: [{ name: "雨", count: 9, sources: [] }],
   topAuthors: [],
-  recentDownloads: [],
+  recentWorks: [],
   sourceBreakdown: [{ source: "pixiv", count: 20, totalSizeBytes: 1000 }],
-  monthlyDownloads: [],
+  monthlySaves: [],
 };
 
 describe("棚のホーム", () => {
@@ -74,7 +72,7 @@ describe("棚のホーム", () => {
     shelfApi.shelfStatus.mockResolvedValue({ state: "ready", path: "C:/shelf" });
     shelfApi.shelfSearch.mockResolvedValue({ page: { items: [], next: null, total: 1 }, intent: null, matches: [], cards: [card] });
     health.shelfDashboard.mockResolvedValue(summary);
-    health.shelfSearchIndexStatus.mockResolvedValue({ totalDownloads: 27, indexedDownloads: 27, pendingDownloads: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 0, semanticIndexedDownloads: 0, semanticPendingDownloads: 0, semanticEnabled: false, semanticModelReady: false, embeddingProvider: "cpu", gpuEnabled: false });
+    health.shelfSearchIndexStatus.mockResolvedValue({ totalWorks: 27, indexedWorks: 27, pendingWorks: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 0, semanticIndexedWorks: 0, semanticPendingWorks: 0, semanticEnabled: false, semanticModelReady: false, embeddingProvider: "cpu", gpuEnabled: false });
   });
   afterEach(() => {
     localStorage.clear();
@@ -95,7 +93,5 @@ describe("棚のホーム", () => {
     expect(screen.getByText("100%")).toBeTruthy();
     const [, query] = shelfApi.shelfSearch.mock.calls[0];
     expect(query).toMatchObject({ sort: "saved", descending: true, limit: 4 });
-    expect(legacy.getDashboardSummary).not.toHaveBeenCalled();
-    expect(legacy.getSearchIndexStatus).not.toHaveBeenCalled();
   });
 });

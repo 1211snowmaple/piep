@@ -30,7 +30,7 @@ use crate::auth::webview::{open_fanbox_login, open_pixiv_login};
 /// 通らなかったときは、取得の仕事がそれぞれ繋ぎ直しへ誘導する。
 #[tauri::command]
 pub fn connection_status() -> Result<ConnectionStatus, String> {
-    Vault::app().status()
+    Ok(Vault::app().status())
 }
 
 /// ログイン窓を開き、閉じるまで待って、持ち帰った接続を保存する。
@@ -49,7 +49,7 @@ pub async fn login_pixiv_webview(app: tauri::AppHandle) -> Result<ConnectionStat
         web_session: WebSession::pair(connection.cookie, connection.user_agent),
         user_name: connection.user.name,
     })?;
-    vault.status()
+    Ok(vault.status())
 }
 
 /// 手で貼られた更新用トークンを確かめ、通れば保存する。
@@ -70,7 +70,7 @@ pub async fn connect_pixiv_token(refresh_token: String) -> Result<ConnectionStat
         web_session: None,
         user_name: user.name,
     })?;
-    vault.status()
+    Ok(vault.status())
 }
 
 /// FANBOX のログイン窓を開き、閉じるまで待って、持ち帰った接続を保存する。
@@ -88,7 +88,7 @@ pub async fn login_fanbox_webview(app: tauri::AppHandle) -> Result<ConnectionSta
         user_agent,
         user_name: user.name,
     })?;
-    vault.status()
+    Ok(vault.status())
 }
 
 /// 手で貼られたセッション ID と UA の組を確かめ、通れば保存する。
@@ -114,7 +114,7 @@ pub async fn connect_fanbox_session(
         user_agent,
         user_name: user.name,
     })?;
-    vault.status()
+    Ok(vault.status())
 }
 
 /// 接続を解く。保存済みの作品には触れない。
@@ -122,5 +122,5 @@ pub async fn connect_fanbox_session(
 pub fn disconnect_account(source: String) -> Result<ConnectionStatus, String> {
     let vault = Vault::app();
     vault.forget(&source)?;
-    vault.status()
+    Ok(vault.status())
 }

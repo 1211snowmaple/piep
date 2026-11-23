@@ -48,13 +48,16 @@ impl Library {
         )?)
     }
 
-    /// 取得元から取り直せば補える見込みのある一部保存の pixiv 作品を `(作品 ID, 題名)` で返す。
-    /// 今の版でまだ試していないものだけ。
-    pub fn incomplete_save_repairs(&self, limit: usize) -> Result<Vec<(String, String)>> {
+    /// 取得元から取り直せば補える見込みのある一部保存の pixiv 作品を `(作品 ID, 題名, 今の版)` で
+    /// 返す。今の版でまだ試していないものだけ。試したという印は、ここで返した版に付ける。
+    pub fn incomplete_save_repairs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, String, LibraryId)>> {
         let limit = limit.clamp(1, MAX_INCOMPLETE_SAVE_REPAIRS) as i64;
         let conn = self.reader()?;
         let mut statement = conn.prepare(
-            "SELECT p.external_key,p.title FROM discovery_candidates c
+            "SELECT p.external_key,p.title,p.snapshot_id FROM discovery_candidates c
                JOIN work_current_projection p ON p.work_id=c.work_id
               WHERE p.provider='pixiv' AND c.decision='held' AND c.hold_kind='incomplete'
                 AND NOT EXISTS(SELECT 1 FROM incomplete_save_attempts a
@@ -62,23 +65,38 @@ impl Library {
               ORDER BY c.work_id
               LIMIT ?1",
         )?;
-        let rows = statement.query_map([limit], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+        let rows = statement.query_map([limit], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get::<_, Vec<u8>>(2)?))
+        })?;
+        rows.map(|row| {
+            let (key, title, snapshot) = row?;
+            let snapshot = LibraryId::from_slice(&snapshot)
+                .map_err(|_| Error::Integrity("保存版の ID が不正です".into()))?;
+            Ok((key, title, snapshot))
+        })
+        .collect()
     }
 
-    /// 補完の保存ジョブへ渡した pixiv 作品を、今の版で試したと記録する。結果がどうであれ、
-    /// 同じ版では繰り返さない。棚に無い作品は飛ばす。記録した件数を返す。
-    pub fn record_incomplete_save_attempts(&self, keys: &[String], at: i64) -> Result<usize> {
+    /// 補完の保存ジョブへ渡した pixiv 作品を、候補として返した版（`incomplete_save_repairs`）で
+    /// 試したと記録する。結果がどうであれ、同じ版では繰り返さない。印を付けるまでにジョブが
+    /// 新しい版を保存していても、その版には付けない（次の候補に残る）。棚に無い作品・その作品の
+    /// 版でないものは飛ばす。記録した件数を返す。
+    pub fn record_incomplete_save_attempts(
+        &self,
+        attempts: &[(String, LibraryId)],
+        at: i64,
+    ) -> Result<usize> {
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         let mut count = 0;
-        for key in keys {
+        for (key, snapshot) in attempts {
             count += tx.execute(
                 "INSERT INTO incomplete_save_attempts(work_id,snapshot_id,attempted_at)
-                 SELECT p.work_id,p.snapshot_id,?2 FROM work_current_projection p
+                 SELECT p.work_id,s.id,?3 FROM work_current_projection p
+                   JOIN revision_snapshots s ON s.entity_id=p.work_id AND s.id=?2
                   WHERE p.provider='pixiv' AND p.external_key=?1
                  ON CONFLICT(work_id) DO UPDATE SET snapshot_id=excluded.snapshot_id,attempted_at=excluded.attempted_at",
-                params![key, at],
+                params![key, snapshot.as_bytes().as_slice(), at],
             )?;
         }
         tx.commit()?;

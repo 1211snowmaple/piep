@@ -533,6 +533,22 @@ textarea { scrollbar-gutter: stable; }
 }
 
 .line-clamp-1 { -webkit-line-clamp: 1; }
+
+/* 原寸にできなかった作品の一覧。件数が多くてもカードの高さは決まった所で止める。 */
+.original-image-misses {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.original-image-misses li {
+  display: grid;
+  grid-template-columns: 6.5em minmax(0, 1fr);
+  gap: 8px;
+  padding: 3px 0;
+}
 .line-clamp-2 { -webkit-line-clamp: 2; }
 .line-clamp-3 { -webkit-line-clamp: 3; }
 

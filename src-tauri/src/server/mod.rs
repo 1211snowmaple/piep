@@ -1,8 +1,7 @@
 //! サーバーモード。棚を携帯端末へ出す HTTP 層と、デスクトップ版から単独サーバーへ棚を送る仕組み。
 //!
-//! 仕様は `docs/plan/server-mode.md`。デスクトップ版の内蔵サーバーと単独の
-//! `piep-server` は、ここの同じ部品で動く。違うのは「棚をどこから借りるか」と
-//! 「状態をどこに置くか」だけである。
+//! 決まりは `docs/policy/12-server.md`、携帯との口は `android/PROTOCOL.md`。単独の
+//! `piep-server` と、デスクトップ版の送る側・管理の画面が、ここの部品を使う。
 
 pub mod admin_assets;
 pub mod admin_store;

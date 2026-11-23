@@ -191,6 +191,76 @@ fn finishing_an_item_advances_the_counts_the_live_progress_reads() {
     assert_eq!(progress(&state), (2, 0, 1));
 }
 
+/// 止めた確認から、選んだ候補だけを保存に回すと、確かめていない作者は「確認済み」に数えない。
+/// 探すバーは確かめた所で止まり、確かめずに残した数は記録に出る。
+#[test]
+fn saving_selected_candidates_does_not_count_unchecked_targets_as_checked() {
+    let (_temp, state, _library) = fixture();
+    let job = id();
+    state
+        .jobs()
+        .create_update_job_if_idle(
+            &job,
+            &request(),
+            &[
+                item("1", "target", "queued"),
+                item("2", "target", "queued"),
+                item("3", "target", "queued"),
+            ],
+        )
+        .unwrap();
+    let first = state.jobs().next_update_job_item(&job).unwrap().unwrap();
+    state
+        .jobs()
+        .complete_update_job_item(first.id, "done", None)
+        .unwrap();
+    assert!(state
+        .jobs()
+        .insert_update_job_candidate(&job, &item("9", "candidate", "candidate"))
+        .unwrap());
+    state
+        .jobs()
+        .set_update_job_status(&job, "paused", None)
+        .unwrap();
+    let candidate = state.jobs().update_job_snapshot(&job).unwrap().candidates[0].id;
+    assert_eq!(
+        state
+            .jobs()
+            .queue_update_job_candidates(&job, &[candidate])
+            .unwrap(),
+        1
+    );
+    let checks = |summary: &UpdateJobSummary| (summary.check_processed, summary.check_total);
+    let snapshot = state.jobs().update_job_snapshot(&job).unwrap();
+    assert_eq!((snapshot.check_processed, snapshot.check_total), (1, 1));
+    assert_eq!(
+        checks(
+            &state
+                .jobs()
+                .update_job_progress_delta(&job, None)
+                .unwrap()
+                .summary
+        ),
+        (1, 1)
+    );
+    assert_eq!(checks(&state.jobs().list_update_jobs().unwrap()[0]), (1, 1));
+    assert!(snapshot
+        .logs
+        .iter()
+        .any(|log| log.message.contains("確かめていない2件")));
+    let unchecked = state
+        .jobs()
+        .list_update_job_item_states(&job)
+        .unwrap()
+        .into_iter()
+        // 要約の SQL に書いた印と同じ文字列であること（違えば上の数が合わない）。
+        .filter(|item| {
+            item.error.as_deref() == Some("選んだ候補の保存に移ったため、確かめていません")
+        })
+        .count();
+    assert_eq!(unchecked, 2);
+}
+
 #[test]
 fn results_belong_to_the_work_and_survive_backup() {
     let (temp, state, library) = fixture();

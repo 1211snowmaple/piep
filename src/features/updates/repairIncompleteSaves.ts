@@ -20,8 +20,9 @@ async function startRepair(shouldContinue: () => boolean): Promise<RepairResult>
   if (!(await getConnectionStatus()).pixiv?.webSession) return { waiting: true };
   const repairWorks = await listIncompleteSaveRepairWorksCommand(REPAIR_BATCH_SIZE);
   if (!repairWorks.length || !shouldContinue()) return { waiting: false };
-  const job = await startSaveJobCommand(repairWorks, false);
-  await recordIncompleteSaveRepairAttemptsCommand(repairWorks.map((work) => work.sourceId));
+  const job = await startSaveJobCommand(repairWorks.map(({ source, sourceId, title }) => ({ source, sourceId, title })), false);
+  // 印は候補にした版に付ける。ジョブが先に新しい版を保存していても、その版は次の候補に残る。
+  await recordIncompleteSaveRepairAttemptsCommand(repairWorks.map(({ sourceId, snapshot }) => ({ sourceId, snapshot })));
   return { waiting: false, job };
 }
 

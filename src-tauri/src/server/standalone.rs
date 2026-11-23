@@ -438,7 +438,7 @@ fn restore_trial(paths: &ServerPaths, error: &str) -> bool {
     restored
 }
 
-const CONFIG_TEMPLATE: &str = r#"# piep-server の設定。説明は docs/plan/server-mode.md
+const CONFIG_TEMPLATE: &str = r#"# piep-server の設定。説明は docs/guide/05-server.md
 
 listen = "127.0.0.1:38777"   # 読み手（携帯）。これ以外のアドレスには tls が要る
 # admin_listen = "127.0.0.1:38778"   # 管理者を別の口に分ける。外へ公開するなら分ける

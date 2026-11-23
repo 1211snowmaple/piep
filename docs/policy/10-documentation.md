@@ -123,7 +123,7 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 
 ```rust
 // 悪い例 — 型を読めば分かる
-/// ダウンロードIDを受け取り、DownloadEntry を返す。
+/// 作品の ID を受け取り、ShelfEntry を返す。
 
 // 良い例 — コードを見ても分からない
 /// これは認識のための指紋であって、アプリが作るテーブルの一覧ではない。
@@ -176,7 +176,7 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 
 | | 残り |
 |---|---:|
-| Rust の `///` `//!` | <!--stat:comments.rust.english-->336<!--/stat--> 行 |
+| Rust の `///` `//!` | <!--stat:comments.rust.english-->333<!--/stat--> 行 |
 | TS の JSDoc | <!--stat:comments.ts.english-->426<!--/stat--> 行 |
 
 この数は日本語の文字を含まない説明コメントの行数で、目安である（URL だけの行や
