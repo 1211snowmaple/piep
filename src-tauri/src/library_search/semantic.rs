@@ -154,6 +154,7 @@ impl Library {
                 scope.spawn(move || {
                     let run = || -> Result<()> {
                         let mut conn = None;
+                        let mut used = 0usize;
                         loop {
                             if stop.load(Ordering::Relaxed) {
                                 return Ok(());
@@ -163,14 +164,19 @@ impl Library {
                                 return Ok(());
                             };
                             // 読み取りの接続は数十件ごとに借り直す（長い読み取りは WAL を止める）。
-                            if index % 32 == 0 {
+                            // 数えるのはこの作り手が読んだ件数。全体の通し番号で数えると、
+                            // 番号の巡り合わせで一度も借り直さない作り手が出る。
+                            if used == 32 {
                                 conn = None;
                             }
                             if conn.is_none() {
                                 conn = Some(self.reader()?);
+                                used = 0;
                             }
+                            used += 1;
                             let built = self.semantic_entry(conn.as_ref().unwrap(), unit)?;
-                            if sender.send((*unit, built)).is_err() {
+                            // 埋め込みを待つあいだは読み取りを返しておく。
+                            if !super::index::send_released(&sender, (*unit, built), &mut conn) {
                                 return Ok(());
                             }
                         }
