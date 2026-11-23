@@ -92,17 +92,18 @@ pub(super) fn can_skip_listing(
     let context = library
         .work_source_state(card.id, card.snapshot_id)
         .map_err(|e| e.to_string())?;
-    let verified = context
+    // FANBOX の一覧には投稿の更新時刻が出て、作者が書き直せば変わる。日付が手元の版と同じなら
+    // 本文を開かない（何日経っていても）。pixiv の一覧の指紋は文字数の変わらない直しを拾えない
+    // ので、本文の突き合わせから DEEP_CHECK_INTERVAL_DAYS 以内のときだけ省く。
+    let recently_verified = context
         .last_deep_checked_at
-        .or_else(|| (card.provider == "fanbox").then_some(card.saved_at));
-    if !verified
         .and_then(chrono::DateTime::from_timestamp_millis)
         .is_some_and(|v| {
             let age = chrono::Utc::now().signed_duration_since(v);
             age >= chrono::Duration::zero()
                 && age < chrono::Duration::days(DEEP_CHECK_INTERVAL_DAYS)
-        })
-    {
+        });
+    if card.provider != "fanbox" && !recently_verified {
         return Ok(false);
     }
     let Some(original) = library
@@ -710,6 +711,13 @@ mod tests {
             true,
         );
         assert!(can_skip_listing(&library, &fanbox, "2026-11-01T09:00:00+09:00").unwrap());
+        // FANBOX は本文の突き合わせから日が経っていても、日付が同じなら本文を開かない。
+        // 日付が変われば開く。
+        library
+            .record_work_check(fanbox.id, fanbox.snapshot_id, expired, true)
+            .unwrap();
+        assert!(can_skip_listing(&library, &fanbox, "2026-11-01T09:00:00+09:00").unwrap());
+        assert!(!can_skip_listing(&library, &fanbox, "2026-11-02T09:00:00+09:00").unwrap());
     }
 
     #[test]

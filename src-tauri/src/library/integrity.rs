@@ -120,6 +120,42 @@ pub(super) fn snapshot_fingerprints(
     Ok((semantic, manifest))
 }
 
+/// 版の内容の指紋（`source-content-v1` と同じ組み立て）を、本文の指紋だけ差し替えて計算する。
+/// 本文の比較規則が違う二つの版を、同じ規則で比べるために使う。
+pub(super) fn source_content_with_body(
+    conn: &Connection,
+    snapshot: LibraryId,
+    body: Option<&[u8]>,
+) -> Result<Fingerprint> {
+    let id = snapshot.as_bytes().as_slice();
+    let metadata: String = conn.query_row(
+        "SELECT metadata_json FROM revision_snapshots WHERE id=?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    let metadata: BTreeMap<String, Value> = serde_json::from_str(&metadata)?;
+    let semantic_metadata: BTreeMap<_, _> = metadata
+        .iter()
+        .filter(|(key, _)| SOURCE_FIELDS_V1.contains(&key.as_str()))
+        .map(|(key, value)| (key, source_field_v1(key, value)))
+        .collect();
+    let identities: BTreeMap<String, Option<String>> = conn
+        .prepare("SELECT m.slot,s.source_key FROM snapshot_media m JOIN source_media s ON s.id=m.media_id WHERE m.snapshot_id=?1 ORDER BY m.slot")?
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let attachment_identity: BTreeMap<String, Vec<u8>> = conn
+        .prepare("SELECT slot,file_id FROM snapshot_files WHERE snapshot_id=?1 ORDER BY slot")?
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(Fingerprint::of(&serde_json::to_vec(&(
+        "source-content-v1",
+        semantic_metadata,
+        body.map(<[u8]>::to_vec),
+        identities,
+        attachment_identity,
+    ))?))
+}
+
 /// 区分の分からない移した版（`temp.unclassified_snapshots`）の構成の指紋を、今の規則で
 /// 計算し直す。内容の指紋は区分を含まないので変わらないはずで、変われば移行を止める。
 /// 読む形の見出しは構成の指紋を写しているので、一緒に書き換える。

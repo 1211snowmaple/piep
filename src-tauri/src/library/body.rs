@@ -129,7 +129,23 @@ impl SourceBody {
         }
     }
 
+    /// 今の比較規則での指紋。新しく保存する版はこの規則で記録する。
     pub(crate) fn semantic_fingerprint(&self) -> Result<Fingerprint> {
+        self.semantic_fingerprint_under(BODY_SEMANTIC_RULE)
+    }
+
+    /// 版に記録された規則での指紋。規則は版ごとに固定し、古い版を新しい規則で書き換えない。
+    /// 比べるときは、古い版の本文を読み直して同じ規則にそろえる。
+    ///
+    /// - 1: 記事の本文をそのまま（表示用 URL とアプリが注入したパスだけを除く）。
+    /// - 2: 1 から、埋め込みカードの揺れる値を除く。カードは**別の投稿・作者**を写したもので、
+    ///   いいね数や閲覧者ごとの状態は、この作品の作者が書いたものではない。
+    pub(crate) fn semantic_fingerprint_under(&self, rule: i64) -> Result<Fingerprint> {
+        if !(1..=BODY_SEMANTIC_RULE).contains(&rule) {
+            return Err(Error::Unsupported(
+                "本文の比較規則に対応していません".into(),
+            ));
+        }
         let value = match self {
             Self::PlainText(text) | Self::PixivText(text) => json!(text.replace("\r\n", "\n")),
             Self::FanboxBody(body) => {
@@ -156,6 +172,11 @@ impl SourceBody {
                         }
                     }
                 }
+                if rule >= 2 {
+                    if let Some(map) = body.get_mut("urlEmbedMap").and_then(Value::as_object_mut) {
+                        map.values_mut().for_each(drop_volatile_embed_fields);
+                    }
+                }
                 canonical(body)
             }
         };
@@ -164,6 +185,41 @@ impl SourceBody {
             self.format(),
             value,
         ))?))
+    }
+}
+
+/// 新しく保存する版の本文の比較規則（`revision_snapshots.body_semantic_rule`）。
+pub(crate) const BODY_SEMANTIC_RULE: i64 = 2;
+
+/// 埋め込みカードのうち、リンク先の作者が書いたもの（題・抜粋・タグ・表紙・価格・名前など）は
+/// 残し、数え・閲覧者ごとの状態・リンク先の更新時刻・アイコンの在り処を除く。
+/// リンク先が書き直されたことは題や抜粋の変化に表れるので、更新時刻までは見ない。
+fn drop_volatile_embed_fields(embed: &mut Value) {
+    const POST: &[&str] = &[
+        "likeCount",
+        "commentCount",
+        "isLiked",
+        "isRestricted",
+        "isCommentingRestricted",
+        "updatedDatetime",
+    ];
+    const CREATOR: &[&str] = &[
+        "isFollowed",
+        "isSupported",
+        "isAcceptingRequest",
+        "hasPublishedPost",
+        "hasBoothShop",
+        "isStopped",
+    ];
+    for (key, fields) in [("postInfo", POST), ("profile", CREATOR)] {
+        if let Some(info) = embed.get_mut(key).and_then(Value::as_object_mut) {
+            for field in fields {
+                info.remove(*field);
+            }
+            if let Some(user) = info.get_mut("user").and_then(Value::as_object_mut) {
+                user.remove("iconUrl");
+            }
+        }
     }
 }
 
@@ -204,6 +260,32 @@ impl Library {
         SourceBody::decode(format, &bytes)
     }
 
+    /// 保存した版の本文の指紋を、今の比較規則にそろえて返す。記録が今の規則ならそのまま、
+    /// 古い規則なら本文を読み直して計算する（記録は書き換えない）。
+    pub(crate) fn body_semantic_now(
+        &self,
+        conn: &rusqlite::Connection,
+        entity: LibraryId,
+        snapshot: LibraryId,
+    ) -> Result<Option<Fingerprint>> {
+        let (stored, rule): (Option<Vec<u8>>, i64) = conn.query_row(
+            "SELECT body_semantic_hash,body_semantic_rule FROM revision_snapshots WHERE entity_id=?1 AND id=?2",
+            rusqlite::params![entity.as_bytes().as_slice(), snapshot.as_bytes().as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let Some(stored) = stored else {
+            return Ok(None);
+        };
+        if rule == BODY_SEMANTIC_RULE {
+            return Ok(Some(Fingerprint(stored.try_into().map_err(|_| {
+                Error::Integrity("本文のハッシュが不正です".into())
+            })?)));
+        }
+        self.source_body_from_conn(conn, entity, snapshot)?
+            .map(|body| body.semantic_fingerprint())
+            .transpose()
+    }
+
     pub fn source_body(
         &self,
         entity: LibraryId,
@@ -242,11 +324,7 @@ impl Library {
         let mut stmt=conn.prepare("SELECT s.body_file_id,s.body_format,s.body_semantic_hash,s.body_semantic_rule,t.text_length FROM revision_snapshots s LEFT JOIN body_text_stats t ON t.file_id=s.body_file_id WHERE s.published=1 AND s.body_file_id IS NOT NULL")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
-            if row.get::<_, i64>(3)? != 1 {
-                return Err(Error::Unsupported(
-                    "本文の比較規則に対応していません".into(),
-                ));
-            }
+            let rule: i64 = row.get(3)?;
             let file: Vec<u8> = row.get(0)?;
             let format: String = row.get(1)?;
             let expected: Vec<u8> = row.get(2)?;
@@ -258,7 +336,7 @@ impl Library {
                 ),
                 BodyFormat::from_name(&format)?,
             )?;
-            if body.semantic_fingerprint()?.0.as_slice() != expected {
+            if body.semantic_fingerprint_under(rule)?.0.as_slice() != expected {
                 return Err(Error::Integrity("本文が比較用の指紋と一致しません".into()));
             }
             if let Some(length) = row.get::<_, Option<i64>>(4)? {
