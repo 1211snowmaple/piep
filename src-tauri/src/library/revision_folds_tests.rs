@@ -377,7 +377,10 @@ fn a_version_named_by_a_recorded_reading_request_is_not_folded() {
             expected: 0,
             location: Some(ReadingLocation::Source {
                 snapshot: second.snapshot_id,
-                anchor: ReadingAnchor::BodyBlock { index: 0, offset: 0 },
+                anchor: ReadingAnchor::BodyBlock {
+                    index: 0,
+                    offset: 0,
+                },
             }),
             finished: false,
         })

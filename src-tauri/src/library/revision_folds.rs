@@ -166,9 +166,6 @@ impl Library {
         let mut found = Vec::new();
         for (entity, current, revision, previous) in rows {
             let (entity, current, previous) = (id(entity)?, id(current)?, id(previous)?);
-            if keeps_what_folding_would_lose(tx, entity, current, previous)? {
-                continue;
-            }
             // 本文以外が違えば、本文を読むまでもなく別の版。
             if integrity::source_content_with_body(tx, current, None)?
                 != integrity::source_content_with_body(tx, previous, None)?
@@ -183,6 +180,9 @@ impl Library {
                     previous,
                     before.as_ref().map(|f| &f.0[..]),
                 )?
+                // 守りの確かめは取得・送信の台帳を引くので、内容が同じと分かった組にだけ行う
+                // （本文が違う、ふつうの改稿の作品にまで走らせない）。
+                && !keeps_what_folding_would_lose(tx, entity, current, previous)?
             {
                 found.push(Candidate {
                     entity,
