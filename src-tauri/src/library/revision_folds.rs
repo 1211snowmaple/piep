@@ -213,9 +213,9 @@ pub(super) fn keeps_what_folding_would_lose(
                         WHERE m.snapshot_id=?2)
              OR EXISTS(SELECT file_id FROM snapshot_files WHERE snapshot_id=?1 AND role<>'raw'
                        EXCEPT SELECT file_id FROM snapshot_files WHERE snapshot_id=?2 AND role<>'raw')
-             OR EXISTS(SELECT 1 FROM acquisition_reader_outputs o WHERE o.snapshot_id=?1
+             OR EXISTS(SELECT 1 FROM reader_binding_sets o WHERE o.snapshot_id=?1
                         AND (NOT EXISTS(SELECT 1 FROM reader_binding_sets b
-                                         WHERE b.snapshot_id=?2 AND b.recipe=o.recipe)
+                                         WHERE b.snapshot_id=?2 AND b.recipe=o.recipe AND b.sealed>=o.sealed)
                              OR EXISTS(SELECT reference_json,media_slot,file_slot,unavailable FROM reader_bindings
                                         WHERE snapshot_id=?1 AND recipe=o.recipe
                                        EXCEPT SELECT reference_json,media_slot,file_slot,unavailable FROM reader_bindings

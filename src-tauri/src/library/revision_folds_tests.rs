@@ -360,6 +360,46 @@ fn a_version_whose_reader_bindings_differ_from_the_one_before_is_not_folded() {
     assert!(!after);
 }
 
+/// 取得の記録を写さない古いアーカイブ（部分写し）でも、今の版に対応表があれば、前の版の
+/// 対応表が中身まで同じでなければ畳まない（畳むと戻し先の版が読めなくなる）。
+#[test]
+fn reader_bindings_are_compared_even_without_the_acquisition_records() {
+    let (_fixture, library) = library();
+    let readable = |data: &Value| {
+        library
+            .save_readable_work(
+                WorkSave {
+                    request: LibraryId::now_v7(),
+                    provider: "fanbox",
+                    key: "7",
+                    route: "save",
+                    data,
+                    assets: vec![],
+                },
+                None,
+            )
+            .unwrap()
+    };
+    let first = readable(&post("本文", "リンク先", 1));
+    let second = readable(&post("書き直した本文", "リンク先", 1));
+    split_by_rule_one(&library, &first, &second);
+    let (before, after) = candidate_after(&library, |tx| {
+        // アーカイブは取得の読む形の記録を写さない。
+        tx.execute_batch("DROP TRIGGER acquisition_reader_delete")
+            .unwrap();
+        tx.execute("DELETE FROM acquisition_reader_outputs", []).unwrap();
+        tx.execute_batch("DROP TRIGGER reader_binding_insert")
+            .unwrap();
+        tx.execute(
+            "INSERT INTO reader_bindings VALUES(?1,1,'{\"block\":99}',NULL,NULL,1)",
+            [second.snapshot_id.as_bytes().as_slice()],
+        )
+        .unwrap();
+    });
+    assert!(before, "書き換える前は畳む候補");
+    assert!(!after);
+}
+
 /// 送信台帳に今の版を名指しした読書位置の要求が残っていれば畳まない（同じ要求の再送が、
 /// 消した版を指して断られる）。
 #[test]
