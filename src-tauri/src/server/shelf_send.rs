@@ -4,11 +4,14 @@
 //! 台帳は写しのたびに保管と同じ分け方（4 MiB ずつ）で分けて実体と同じ口で送る。写しは頁の並びを保つので、
 //! 前に送ったときと同じ部分は送らない。
 
-use super::standalone::shipment::{Opened, ShipmentStatus, WireChunk, MAX_QUERY_CHUNKS};
+use super::standalone::shipment::{
+    Opened, PublicationState, PublishedShelf, Rejection, ShipmentResult, ShipmentStatus, WireChunk,
+    MAX_QUERY_CHUNKS,
+};
 use super::sync_send::{
     build_client, check_status, net_error, normalized_base, RemoteServer, SendHandle,
 };
-use crate::library::{FileChunk, Library, ObjectStore};
+use crate::library::{protocol::Id, FileChunk, Library, ObjectStore};
 use futures_util::{stream, StreamExt};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -19,16 +22,20 @@ use std::time::Duration;
 
 const PARALLEL_UPLOADS: usize = 4;
 const CHUNK_RETRIES: usize = 3;
-/// 組み終えるまで、この間を置いて進み具合を尋ねる。
+/// 棚が公開されるまで、この間を置いて進み具合を尋ねる。
 const STATUS_POLL: Duration = Duration::from_secs(2);
-/// 組み終えたあとの立ち上げ直しで返事が無い間、待つ回数（約 3 分）。
-const RESTART_WAIT_POLLS: usize = 90;
+/// 公開待ちや再起動を待つ時間。組み立てにかかる時間は含まない。
+const PUBLICATION_WAIT: Duration = Duration::from_secs(3 * 60);
+const RESULT_TIMEOUT: Duration = Duration::from_secs(15);
+const PUBLICATION_UNCONFIRMED: &str =
+    "この送信の公開を確認できませんでした。サーバーの状態を確認してください";
 
 /// 送り終えた結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShelfSent {
-    /// サーバーで組んだ棚の作品数（立ち上げ直しで聞き逃したら分からない）。
-    pub works: Option<u64>,
+    /// 公開した棚の作品数と、サーバーがその棚の同期に使う世代。
+    pub works: u64,
+    pub sync_epoch: Id,
     /// 送った実体と台帳の部分の数。
     pub sent: u64,
     /// 送った台帳の変更の記録の最後の番号。サーバーの棚はこの番号から続けて数える。
@@ -60,6 +67,26 @@ impl Shipper {
         .json()
         .await
         .map_err(net_error)
+    }
+
+    async fn result(&self, id: &str) -> Result<Option<ShipmentResult>, String> {
+        let response = self
+            .client
+            .get(self.url(&format!("/{id}")))
+            .timeout(RESULT_TIMEOUT)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(net_error)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        check_status(response)
+            .await?
+            .json()
+            .await
+            .map(Some)
+            .map_err(net_error)
     }
 
     async fn put_chunk(
@@ -119,17 +146,20 @@ fn wire(chunk: &FileChunk) -> WireChunk {
     }
 }
 
-/// 棚の写しを作って送り、サーバーが組み終えるまで待つ。`outgoing` は送り手の作業場所
-/// （中身は毎回作り直す）。
-/// サーバーがこの棚の台帳の版を扱えるか。版を返さないサーバーは、版を返すようになる前の
-/// もので、今の棚を組み立てられない。
+/// 棚の台帳の版を扱えて、送信 ID ごとに公開の結果を返すか。
 fn receivable(status: &ShipmentStatus) -> Result<(), String> {
-    match status.schema {
-        Some(schema) if schema >= crate::library::schema::VERSION => Ok(()),
-        _ => Err("サーバーがこの棚の形を扱えません。サーバーを更新してから送ってください".into()),
+    if status.publication_by_id
+        && status
+            .schema
+            .is_some_and(|schema| schema >= crate::library::schema::VERSION)
+    {
+        Ok(())
+    } else {
+        Err("サーバーがこの棚の送信に対応していません。サーバーを更新してから送ってください".into())
     }
 }
 
+/// 棚の写しを作って送り、その送信の棚が公開されるまで待つ。
 pub async fn send_shelf(
     remote: &RemoteServer,
     token: &str,
@@ -144,8 +174,7 @@ pub async fn send_shelf(
         handle: handle.clone(),
     });
     // 写しを作る前に、サーバーがこの棚の版を扱えるかを確かめる。
-    let before = shipper.status().await?;
-    receivable(&before)?;
+    receivable(&shipper.status().await?)?;
     handle.update(|progress| progress.phase = "snapshot".into());
     if outgoing.exists() {
         fs::remove_dir_all(outgoing).map_err(|error| format!("前の写しを消せません: {error}"))?;
@@ -303,54 +332,75 @@ pub async fn send_shelf(
     .await?;
     let _ = fs::remove_dir_all(outgoing);
 
-    // 組み終えるのを待つ。中止しても、サーバーは組み続けて次の起動で配る。
+    // 公開を待つ。中止しても、サーバーは組み続けて次の起動で配る。
     handle.update(|progress| progress.phase = "assemble".into());
     let sent = needed.len() as u64;
-    let mut silent = 0;
+    let mut waiting_since = tokio::time::Instant::now();
     loop {
         handle.check_cancel()?;
         tokio::time::sleep(STATUS_POLL).await;
-        let status = match shipper.status().await {
-            Ok(status) => status,
-            Err(error) => {
-                // 組み終えて立ち上げ直している間は返事が無い。
-                silent += 1;
-                if silent > RESTART_WAIT_POLLS {
-                    return Err(error);
+        match shipper.result(&shipment).await {
+            Ok(Some(status)) => {
+                let pending = match status.state {
+                    PublicationState::Pending { restarting } => Some(restarting),
+                    _ => None,
+                };
+                if let Some(published) = publication_result(status, &shipment)? {
+                    return Ok(ShelfSent {
+                        works: published.works,
+                        sync_epoch: published.sync_epoch,
+                        sent,
+                        shipped_sequence,
+                    });
                 }
-                continue;
+                if let Some(restarting) = pending {
+                    handle.update(|progress| {
+                        progress.message = Some(if restarting {
+                            "サーバーでの公開を待っています".into()
+                        } else {
+                            "サーバーを再起動してください".into()
+                        });
+                    });
+                } else {
+                    // 組み立ての進行中は、再起動や応答を待つ時間に数えない。
+                    waiting_since = tokio::time::Instant::now();
+                    continue;
+                }
             }
-        };
-        silent = 0;
-        match status.state.as_str() {
-            "assembling" => continue,
-            "ready" => {
-                return Ok(ShelfSent {
-                    works: status.works,
-                    sent,
-                    shipped_sequence,
-                })
-            }
-            "failed" => {
-                return Err(format!(
-                    "サーバーで棚を組めませんでした: {}",
-                    status.error.unwrap_or_default()
-                ))
-            }
-            // 立ち上げ直したあとは、配る世代が変わっていれば届いている。
-            _ if status.generation.is_some() && status.generation != before.generation => {
-                return Ok(ShelfSent {
-                    works: None,
-                    sent,
-                    shipped_sequence,
-                })
-            }
-            _ => {
-                return Err(
-                    "サーバーが棚を組み終える前に止まりました。もう一度送ってください".into(),
-                )
-            }
+            Ok(None) => return Err(PUBLICATION_UNCONFIRMED.into()),
+            // サーバーが再起動している間は応答が途切れる。
+            Err(_) => {}
         }
+        if waiting_since.elapsed() >= PUBLICATION_WAIT {
+            return Err(PUBLICATION_UNCONFIRMED.into());
+        }
+    }
+}
+
+fn publication_result(
+    result: ShipmentResult,
+    shipment: &str,
+) -> Result<Option<PublishedShelf>, String> {
+    if result.shipment_id != shipment {
+        return Err(PUBLICATION_UNCONFIRMED.into());
+    }
+    match result.state {
+        PublicationState::Assembling | PublicationState::Pending { .. } => Ok(None),
+        PublicationState::Published(shelf) => Ok(Some(shelf)),
+        PublicationState::Receiving => Err(PUBLICATION_UNCONFIRMED.into()),
+        PublicationState::Rejected { reason } => Err(match reason {
+            Rejection::AssemblyFailed => {
+                "サーバーで棚を組めませんでした。サーバーの記録を確認してください"
+            }
+            Rejection::Interrupted => {
+                "サーバーで棚の組み立てが中断されました。もう一度送ってください"
+            }
+            Rejection::Superseded => {
+                "サーバーで配信する棚が変わりました。サーバーの状態を確認してください"
+            }
+            Rejection::Canceled => "サーバーで棚の受け取りが中止されました。もう一度送ってください",
+        }
+        .into()),
     }
 }
 
@@ -358,11 +408,57 @@ pub async fn send_shelf(
 mod schema_tests {
     use super::*;
 
+    #[test]
+    fn another_shipment_publication_is_not_success() {
+        let result = ShipmentResult {
+            shipment_id: "previous".into(),
+            state: PublicationState::Published(PublishedShelf {
+                sync_epoch: Id::new(uuid::Uuid::now_v7()).unwrap(),
+                works: 7,
+            }),
+        };
+        assert!(publication_result(result, "current").is_err());
+    }
+
+    #[test]
+    fn only_publication_completes_the_requested_shipment() {
+        let result = |state| ShipmentResult {
+            shipment_id: "current".into(),
+            state,
+        };
+        assert_eq!(
+            publication_result(
+                result(PublicationState::Pending { restarting: false }),
+                "current"
+            ),
+            Ok(None)
+        );
+        assert!(publication_result(
+            result(PublicationState::Rejected {
+                reason: Rejection::AssemblyFailed
+            }),
+            "current"
+        )
+        .is_err());
+        let published = PublishedShelf {
+            sync_epoch: Id::new(uuid::Uuid::now_v7()).unwrap(),
+            works: 7,
+        };
+        assert_eq!(
+            publication_result(
+                result(PublicationState::Published(published.clone())),
+                "current"
+            ),
+            Ok(Some(published))
+        );
+    }
+
     /// 版を返さない古いサーバーや、版の古いサーバーには送らない。同じか新しければ送る。
     #[test]
     fn a_shelf_is_sent_only_to_a_server_that_can_assemble_it() {
         let status = |schema| ShipmentStatus {
             schema,
+            publication_by_id: true,
             ..Default::default()
         };
         let current = crate::library::schema::VERSION;
@@ -370,5 +466,10 @@ mod schema_tests {
         assert!(receivable(&status(Some(current - 1))).is_err());
         assert!(receivable(&status(Some(current))).is_ok());
         assert!(receivable(&status(Some(current + 1))).is_ok());
+        assert!(receivable(&ShipmentStatus {
+            publication_by_id: false,
+            ..status(Some(current))
+        })
+        .is_err());
     }
 }

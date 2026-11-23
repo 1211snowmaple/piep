@@ -8,7 +8,7 @@ use super::sync_send::{
     admin_get, admin_get_if_present, admin_post, admin_put, pair_admin, RemoteServer, SendHandle,
     SendProgress, CANCELED,
 };
-use crate::AppState;
+use crate::{library::protocol::Id, AppState};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,11 +52,8 @@ pub struct DesktopServerSettings {
     /// サーバーが配っている棚の写しの、変更の記録の最後の番号（0 は分からない）。これより後に
     /// この棚で変えた作品だけを、携帯の変更との食い違いとして扱う。
     pub shelf_shipped_sequence: i64,
-    /// 送ったがまだ配られていない写しの番号（0 は無い）。サーバーが別の写しを配り始めたら
-    /// （印の同期 epoch が `shelf_pending_from` から変わったら）`shelf_shipped_sequence` にする。
-    pub shelf_pending_sequence: i64,
-    /// 送ったときに配っていた写しの同期 epoch（配っていなければ空）。
-    pub shelf_pending_from: String,
+    /// 公開結果で受け取った同期の世代。この世代の印にだけ記録の番号を使う。
+    pub shelf_shipped_epoch: Option<Id>,
 }
 
 /// サーバーの棚のお気に入りの一ページ。
@@ -435,8 +432,7 @@ impl DesktopServer {
             settings.shelf_reading_cursor.clear();
             settings.shelf_favorites_cursor.clear();
             settings.shelf_shipped_sequence = 0;
-            settings.shelf_pending_sequence = 0;
-            settings.shelf_pending_from.clear();
+            settings.shelf_shipped_epoch = None;
         })
     }
 
@@ -453,8 +449,7 @@ impl DesktopServer {
             settings.shelf_reading_cursor.clear();
             settings.shelf_favorites_cursor.clear();
             settings.shelf_shipped_sequence = 0;
-            settings.shelf_pending_sequence = 0;
-            settings.shelf_pending_from.clear();
+            settings.shelf_shipped_epoch = None;
         })
     }
 
@@ -502,24 +497,17 @@ impl DesktopServer {
         Ok(applied)
     }
 
-    /// サーバーの印 `cursor` の写しに当てはまる、送った写しの番号。送った写しが配られ始めて
-    /// いれば（印の同期 epoch が送ったときと違えば）、それを配っている写しの番号にする。
-    fn shipped_for(&self, cursor: &str) -> Result<i64, String> {
-        let epoch = cursor.split('.').next().unwrap_or_default();
+    /// 公開を確認した写しの同期の世代と一致する印にだけ、送った写しの番号を使う。
+    fn shipped_for(&self, cursor: &str) -> i64 {
+        let epoch = cursor
+            .split_once('.')
+            .and_then(|(epoch, _)| uuid::Uuid::parse_str(epoch).ok());
         let settings = self.settings();
-        if settings.shelf_pending_sequence > 0
-            && !epoch.is_empty()
-            && epoch != settings.shelf_pending_from
-        {
-            let shipped = settings.shelf_pending_sequence;
-            self.change_settings(|settings| {
-                settings.shelf_shipped_sequence = shipped;
-                settings.shelf_pending_sequence = 0;
-                settings.shelf_pending_from.clear();
-            })?;
-            return Ok(shipped);
+        if epoch.is_some() && epoch == settings.shelf_shipped_epoch.map(Id::get) {
+            settings.shelf_shipped_sequence
+        } else {
+            0
         }
-        Ok(settings.shelf_shipped_sequence)
     }
 
     /// 単独サーバーの棚から、携帯が書いた読書位置を棚へ取り込む。
@@ -559,7 +547,7 @@ impl DesktopServer {
             }
             let shelf = Arc::clone(&library);
             let items = page.items;
-            let shipped = self.shipped_for(&page.cursor)?;
+            let shipped = self.shipped_for(&page.cursor);
             applied += tokio::task::spawn_blocking(move || {
                 let mut applied = 0;
                 for item in &items {
@@ -622,7 +610,7 @@ impl DesktopServer {
             }
             let shelf = Arc::clone(&library);
             let items = page.items;
-            let shipped = self.shipped_for(&page.cursor)?;
+            let shipped = self.shipped_for(&page.cursor);
             applied += tokio::task::spawn_blocking(move || {
                 let mut applied = 0;
                 for item in &items {
@@ -678,20 +666,17 @@ impl DesktopServer {
         let finished_at = Some(chrono::Utc::now().to_rfc3339());
         let result = {
             let outgoing = self.dir.join("outgoing").join("shelf");
-            // 送る前に読んだ印の写しが、送ったときに配っていた写し。
-            let from = self.settings().shelf_reading_cursor;
-            let from = from.split('.').next().unwrap_or_default().to_string();
             match super::shelf_send::send_shelf(&remote, &token, library, &outgoing, &self.send)
                 .await
             {
                 Ok(sent) => self
                     .change_settings(|settings| {
-                        settings.shelf_pending_sequence = sent.shipped_sequence;
-                        settings.shelf_pending_from = from.clone();
+                        settings.shelf_shipped_sequence = sent.shipped_sequence;
+                        settings.shelf_shipped_epoch = Some(sent.sync_epoch);
                     })
                     .map(|()| LastSend {
                         finished_at: finished_at.clone(),
-                        works: sent.works.map(|works| works as i64),
+                        works: Some(sent.works as i64),
                         files_added: Some(sent.sent as i64),
                         ..Default::default()
                     }),
@@ -822,30 +807,20 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_number_applies_once_the_server_serves_another_copy() {
+    fn the_shipped_number_applies_only_to_the_confirmed_sync_epoch() {
         let dir = std::env::temp_dir().join(format!("piep-desktop-{}", uuid::Uuid::now_v7()));
         let server = DesktopServer::new(&dir).unwrap();
+        let epoch = Id::new(uuid::Uuid::now_v7()).unwrap();
+        let other = uuid::Uuid::now_v7();
         server
             .change_settings(|settings| {
-                settings.shelf_shipped_sequence = 5;
-                settings.shelf_pending_sequence = 9;
-                settings.shelf_pending_from = "old".into();
+                settings.shelf_shipped_sequence = 9;
+                settings.shelf_shipped_epoch = Some(epoch);
             })
             .unwrap();
-        // 送ったときと同じ写しを配っている間は、前の番号のまま。
-        assert_eq!(server.shipped_for("old.s.3").unwrap(), 5);
-        assert_eq!(server.shipped_for("").unwrap(), 5);
-        // 別の写しを配り始めたら、送った番号にする。
-        assert_eq!(server.shipped_for("new.f.0").unwrap(), 9);
-        let settings = server.settings();
-        assert_eq!(
-            (
-                settings.shelf_shipped_sequence,
-                settings.shelf_pending_sequence
-            ),
-            (9, 0)
-        );
-        assert_eq!(server.shipped_for("newer.s.1").unwrap(), 9);
+        assert_eq!(server.shipped_for(&format!("{}.f.0", epoch.get())), 9);
+        assert_eq!(server.shipped_for(&format!("{other}.s.1")), 0);
+        assert_eq!(server.shipped_for(""), 0);
         drop(server);
         let _ = fs::remove_dir_all(&dir);
     }

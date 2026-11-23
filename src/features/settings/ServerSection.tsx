@@ -294,7 +294,7 @@ function ConnectedRemote(props: CardProps) {
   const fresh = data ? hasNewVersion(data) : false;
   const applying = update?.phase.state === "applying";
   const fraction = send.bytesTotal > 0 ? Math.min(100, Math.floor((send.bytesDone / send.bytesTotal) * 100)) : 0;
-  const sendTitle = send.phase === "upload" ? `送っています ${fraction}%` : SEND_PHASE[send.phase] ?? "送っています";
+  const sendTitle = send.phase === "upload" ? `送っています ${fraction}%` : send.message ?? SEND_PHASE[send.phase] ?? "送っています";
   const lastError = last.error && last.error !== connectionError ? last.error : null;
 
   const notes = [

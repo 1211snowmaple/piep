@@ -29,13 +29,12 @@ const INCOMING: &str = "shelf-incoming";
 const DATABASE_PARTS: &str = "shelf-database-parts";
 const CURRENT: &str = "current.json";
 const PENDING: &str = "shelf-pending.json";
+const RESULTS: &str = "shelf-shipment-results";
 const DATABASE: &str = "library.db";
 /// 一度に問い合わせる実体の数の上限。
 pub const MAX_QUERY_CHUNKS: usize = 4096;
 /// 台帳の写しの大きさの上限。
 const MAX_DATABASE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-/// 組み終えてから立ち上げ直すまでの間。
-const RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// 受け取りの失敗。HTTP の応答へは呼び手が写す。
 #[derive(Debug)]
@@ -72,9 +71,11 @@ struct Current {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Pending {
+    shipment_id: String,
     library_id: LibraryId,
     previous: ShelfSource,
     next_generation: Id,
+    works: u64,
 }
 
 /// 同じ棚の ID を持つ写しどうしを、配信する世代で区別する。
@@ -127,6 +128,47 @@ pub struct ShipmentStatus {
     /// 断られ、送った分が無駄になる）。
     #[serde(default)]
     pub schema: Option<i64>,
+    #[serde(default)]
+    pub publication_by_id: bool,
+}
+
+/// 送信 ID ごとの公開の状態。確定した結果は棚の世代を片付けても残る。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ShipmentResult {
+    pub shipment_id: String,
+    #[serde(flatten)]
+    pub state: PublicationState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "state",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PublicationState {
+    Receiving,
+    Assembling,
+    Pending { restarting: bool },
+    Published(PublishedShelf),
+    Rejected { reason: Rejection },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishedShelf {
+    pub sync_epoch: Id,
+    pub works: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum Rejection {
+    AssemblyFailed,
+    Interrupted,
+    Superseded,
+    Canceled,
 }
 
 /// 問い合わせる実体（識別子は 16 進）。
@@ -159,7 +201,7 @@ pub struct ShelfShipments {
     /// いま配っている棚（実体を共有し、送らずに済ませる）。
     served: Option<Arc<Library>>,
     /// 始める・台帳を書く・確定を一列に並べる。実体の受け取りは並べない。
-    write: Mutex<()>,
+    write: Arc<Mutex<()>>,
     status: Arc<Mutex<ShipmentStatus>>,
     restart: OnceLock<Restart>,
 }
@@ -178,20 +220,29 @@ fn valid_id(id: &str) -> bool {
 
 impl ShelfShipments {
     pub fn new(paths: ServerPaths, served: Option<Arc<Library>>) -> Self {
-        // いま配っている世代も返す。送り手は、組み終えた知らせを立ち上げ直しで聞き逃しても、
-        // 世代が変わったことで届いたと分かる。
         let generation = load_config(&paths)
             .ok()
             .and_then(|config| config.shelf)
             .and_then(|settings| settings.generation);
-        let status = match read_current(&paths) {
-            Some(current) => ShipmentStatus {
+        let current = read_current(&paths).filter(|current| {
+            read_result(&paths, &current.id).is_ok_and(|record| record.is_none())
+        });
+        let status = match (read_pending(&paths).ok().flatten(), current) {
+            (Some(pending), _) => ShipmentStatus {
+                state: "ready".into(),
+                shipment_id: Some(pending.shipment_id),
+                generation: Some(pending.next_generation),
+                works: Some(pending.works),
+                restarting: Some(false),
+                ..Default::default()
+            },
+            (None, Some(current)) => ShipmentStatus {
                 state: "receiving".into(),
                 shipment_id: Some(current.id),
                 generation,
                 ..Default::default()
             },
-            None => ShipmentStatus {
+            (None, None) => ShipmentStatus {
                 state: "idle".into(),
                 generation,
                 ..Default::default()
@@ -200,7 +251,7 @@ impl ShelfShipments {
         Self {
             paths,
             served,
-            write: Mutex::new(()),
+            write: Arc::new(Mutex::new(())),
             status: Arc::new(Mutex::new(status)),
             restart: OnceLock::new(),
         }
@@ -223,7 +274,53 @@ impl ShelfShipments {
             .map(|status| status.clone())
             .unwrap_or_default();
         status.schema = Some(crate::library::schema::VERSION);
+        status.publication_by_id = true;
         status
+    }
+
+    pub fn result(&self, id: &str) -> Result<ShipmentResult, ShipError> {
+        if !valid_id(id) {
+            return Err(ShipError::NotFound);
+        }
+        let _write = self
+            .write
+            .lock()
+            .map_err(|_| ShipError::Conflict("受け取りの途中です"))?;
+        let record = read_result(&self.paths, id)?;
+        let status = self.status();
+        let state = match record {
+            Some(state @ (PublicationState::Published(_) | PublicationState::Rejected { .. })) => {
+                state
+            }
+            _ if read_pending(&self.paths)
+                .map_err(ShipError::Internal)?
+                .is_some_and(|pending| pending.shipment_id == id) =>
+            {
+                PublicationState::Pending {
+                    restarting: status.shipment_id.as_deref() == Some(id)
+                        && status.restarting == Some(true),
+                }
+            }
+            Some(PublicationState::Assembling)
+                if status.shipment_id.as_deref() == Some(id) && status.state == "assembling" =>
+            {
+                PublicationState::Assembling
+            }
+            Some(PublicationState::Assembling) => {
+                // 起動時の復旧を完了できなかった。別の写しにこの番号を渡さない。
+                PublicationState::Rejected {
+                    reason: Rejection::Interrupted,
+                }
+            }
+            None if read_current(&self.paths).is_some_and(|current| current.id == id) => {
+                PublicationState::Receiving
+            }
+            _ => return Err(ShipError::NotFound),
+        };
+        Ok(ShipmentResult {
+            shipment_id: id.into(),
+            state,
+        })
     }
 
     /// 受け取りか組み立ての途中か。自己更新はこれが済むのを待つ。
@@ -245,7 +342,11 @@ impl ShelfShipments {
 
     fn require(&self, id: &str) -> Result<Current, ShipError> {
         match read_current(&self.paths) {
-            Some(current) if current.id == id && valid_id(id) => Ok(current),
+            Some(current)
+                if current.id == id && valid_id(id) && read_result(&self.paths, id)?.is_none() =>
+            {
+                Ok(current)
+            }
             _ => Err(ShipError::NotFound),
         }
     }
@@ -259,6 +360,14 @@ impl ShelfShipments {
         if self.assembling() {
             return Err(ShipError::Conflict("前に送られた棚を組んでいます"));
         }
+        if read_pending(&self.paths)
+            .map_err(ShipError::Internal)?
+            .is_some()
+        {
+            return Err(ShipError::Conflict(
+                "前に送られた棚の公開を待っています。サーバーの状態を確認してください",
+            ));
+        }
         let config = load_config(&self.paths).map_err(ShipError::Internal)?;
         if config
             .shelf
@@ -268,7 +377,11 @@ impl ShelfShipments {
             return Err(ShipError::Conflict("このサーバーは別の棚を配っています"));
         }
         if let Some(current) = read_current(&self.paths) {
-            if current.library_id == library_id && self.dir(&current.id).is_dir() {
+            let record = read_result(&self.paths, &current.id)?;
+            if record.is_none()
+                && current.library_id == library_id
+                && self.dir(&current.id).is_dir()
+            {
                 self.set_status(ShipmentStatus {
                     state: "receiving".into(),
                     shipment_id: Some(current.id.clone()),
@@ -278,6 +391,13 @@ impl ShelfShipments {
                     shipment_id: current.id,
                     resumed: true,
                 });
+            }
+            match record {
+                None => reject(&self.paths, &current.id, Rejection::Superseded)?,
+                Some(PublicationState::Assembling) => {
+                    reject(&self.paths, &current.id, Rejection::Interrupted)?;
+                }
+                _ => {}
             }
         }
         let root = incoming(&self.paths);
@@ -347,10 +467,13 @@ impl ShelfShipments {
             .write
             .lock()
             .map_err(|_| ShipError::Conflict("受け取りの途中です"))?;
-        let current = self.require(id)?;
         if self.assembling() {
             return Err(ShipError::Conflict("前に送られた棚を組んでいます"));
         }
+        if self.pending() {
+            return Err(ShipError::Conflict("前に送られた棚の公開を待っています"));
+        }
+        let current = self.require(id)?;
         if database.length > MAX_DATABASE_BYTES || database.validate_layout().is_err() {
             return Err(ShipError::Invalid("台帳の部分の並びが正しくありません"));
         }
@@ -397,19 +520,25 @@ impl ShelfShipments {
             shipment_id: Some(id.to_owned()),
             ..Default::default()
         };
+        // 確定を受けた ID は別の写しに使い回さない。
+        write_result(&self.paths, id, &PublicationState::Assembling)?;
         self.set_status(assembling.clone());
         let paths = self.paths.clone();
         let served = self.served.clone();
         let status = Arc::clone(&self.status);
+        let write = Arc::clone(&self.write);
         let restart_cb = self.restart.get().cloned();
         let restart = restart_cb.is_some();
         let shipment = id.to_owned();
-        let run = move || -> Result<(Id, u64), String> {
-            let parent = generations(&paths);
+        let assemble_paths = paths.clone();
+        let assemble_id = shipment.clone();
+        let run = move || -> Result<Pending, String> {
+            let paths = &assemble_paths;
+            let parent = generations(paths);
             fs::create_dir_all(&parent).map_err(|error| error.to_string())?;
             let generation = Id::new(uuid::Uuid::now_v7()).map_err(|error| error.to_string())?;
-            let destination = generation_path(&paths, generation)?;
-            let received = ObjectStore::open(&incoming(&paths).join(&shipment).join("objects"))
+            let destination = generation_path(paths, generation)?;
+            let received = ObjectStore::open(&incoming(paths).join(&assemble_id).join("objects"))
                 .map_err(|error| error.to_string())?;
             let works = Library::assemble_shipment(
                 &destination,
@@ -420,66 +549,85 @@ impl ShelfShipments {
             )
             .map_err(|error| error.to_string())?
             .works;
-            let pending = Pending {
+            Ok(Pending {
+                shipment_id: assemble_id,
                 library_id: current.library_id,
                 previous,
                 next_generation: generation,
-            };
-            write_atomic(
-                &paths.root.join(PENDING),
-                &serde_json::to_vec(&pending).map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
-            piep_storage::sync_directory(&paths.root).map_err(|error| error.to_string())?;
-            // 受け取ったものは組んだ棚へ共有した。置き場ごと片付ける。
-            let _ = fs::remove_dir_all(incoming(&paths));
-            // 台帳の部分は、いま組んだ台帳のものだけを残す。
-            if let Err(error) = prune_parts(&paths, &keep) {
-                log::warn!("前の台帳の部分を片付けられません: {error:?}");
-            }
-            Ok((generation, works))
+                works,
+            })
         };
-        let this_status = status;
-        std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("piep-shelf-assembly".into())
             .spawn(move || {
                 let result = run();
+                let Ok(_write) = write.lock() else {
+                    return;
+                };
+                let result = result.and_then(|pending| {
+                    let bytes = serde_json::to_vec(&pending).map_err(|error| error.to_string())?;
+                    write_atomic(&paths.root.join(PENDING), &bytes)
+                        .map_err(|error| error.to_string())?;
+                    if let Err(error) = piep_storage::sync_directory(&paths.root) {
+                        log::warn!("棚の切り替えの予約を同期できません: {error}");
+                    } else {
+                        // 予約が残ることを確かめてから受信の置き場を片付ける。
+                        let _ = fs::remove_dir_all(incoming(&paths));
+                    }
+                    if let Err(error) = prune_parts(&paths, &keep) {
+                        log::warn!("前の台帳の部分を片付けられません: {error:?}");
+                    }
+                    Ok(pending)
+                });
                 let next = match result {
-                    Ok((generation, works)) => {
+                    Ok(Pending {
+                        next_generation: generation,
+                        works,
+                        ..
+                    }) => {
                         log::info!("送られた棚を組みました（{works} 作品）。次の起動で配ります");
                         ShipmentStatus {
                             state: "ready".into(),
-                            shipment_id: None,
+                            shipment_id: Some(shipment),
                             generation: Some(generation),
                             works: Some(works),
                             restarting: Some(restart),
-                            error: None,
-                            schema: None,
+                            ..Default::default()
                         }
                     }
                     Err(error) => {
                         log::error!("送られた棚を組めません: {error}");
+                        if let Err(error) = reject(&paths, &shipment, Rejection::AssemblyFailed) {
+                            log::error!("送られた棚の結果を記録できません: {error:?}");
+                        }
                         ShipmentStatus {
                             state: "failed".into(),
-                            shipment_id: None,
-                            error: Some(error),
+                            shipment_id: Some(shipment),
+                            error: Some("サーバーで棚を組めませんでした".into()),
                             ..Default::default()
                         }
                     }
                 };
                 let ready = next.state == "ready";
-                if let Ok(mut status) = this_status.lock() {
+                if let Ok(mut status) = status.lock() {
                     *status = next;
                 }
+                drop(_write);
                 if ready {
                     if let Some(restart) = restart_cb {
-                        // 送り手が組み終えた知らせを読めるよう、少し待ってから立ち上げ直す。
-                        std::thread::sleep(RESTART_DELAY);
                         restart();
                     }
                 }
             })
-            .map_err(|error| ShipError::Internal(error.to_string()))?;
+        {
+            self.set_status(ShipmentStatus {
+                state: "failed".into(),
+                shipment_id: Some(id.into()),
+                ..Default::default()
+            });
+            reject(&self.paths, id, Rejection::AssemblyFailed)?;
+            return Err(ShipError::Internal(error.to_string()));
+        }
         Ok(assembling)
     }
 
@@ -489,10 +637,11 @@ impl ShelfShipments {
             .write
             .lock()
             .map_err(|_| ShipError::Conflict("受け取りの途中です"))?;
-        self.require(id)?;
         if self.assembling() {
             return Err(ShipError::Conflict("前に送られた棚を組んでいます"));
         }
+        self.require(id)?;
+        reject(&self.paths, id, Rejection::Canceled)?;
         fs::remove_dir_all(incoming(&self.paths))?;
         self.set_status(ShipmentStatus {
             state: "idle".into(),
@@ -510,7 +659,40 @@ impl ShelfShipments {
 
 fn read_current(paths: &ServerPaths) -> Option<Current> {
     let bytes = fs::read(incoming(paths).join(CURRENT)).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    let current: Current = serde_json::from_slice(&bytes).ok()?;
+    valid_id(&current.id).then_some(current)
+}
+
+fn result_path(paths: &ServerPaths, id: &str) -> PathBuf {
+    paths.root.join(RESULTS).join(format!("{id}.json"))
+}
+
+fn read_result(paths: &ServerPaths, id: &str) -> Result<Option<PublicationState>, ShipError> {
+    match fs::read(result_path(paths, id)) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| ShipError::Internal(error.to_string())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_result(paths: &ServerPaths, id: &str, state: &PublicationState) -> Result<(), ShipError> {
+    let path = result_path(paths, id);
+    let bytes =
+        serde_json::to_vec(state).map_err(|error| ShipError::Internal(error.to_string()))?;
+    write_atomic(&path, &bytes)?;
+    sync_results(paths)
+}
+
+fn sync_results(paths: &ServerPaths) -> Result<(), ShipError> {
+    piep_storage::sync_directory(&paths.root.join(RESULTS))?;
+    piep_storage::sync_directory(&paths.root)?;
+    Ok(())
+}
+
+fn reject(paths: &ServerPaths, id: &str, reason: Rejection) -> Result<(), ShipError> {
+    write_result(paths, id, &PublicationState::Rejected { reason })
 }
 
 fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
@@ -562,9 +744,14 @@ enum SwapStage {
 
 fn read_pending(paths: &ServerPaths) -> Result<Option<Pending>, String> {
     match fs::read(paths.root.join(PENDING)) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| format!("棚の切り替えの予約を読めません: {error}")),
+        Ok(bytes) => {
+            let pending: Pending = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("棚の切り替えの予約を読めません: {error}"))?;
+            if !valid_id(&pending.shipment_id) {
+                return Err("棚の切り替えの予約にある送信 ID が正しくありません".into());
+            }
+            Ok(Some(pending))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("棚の切り替えの予約を読めません: {error}")),
     }
@@ -584,9 +771,41 @@ fn apply_pending_with(
     paths: &ServerPaths,
     mut reached: impl FnMut(SwapStage),
 ) -> Result<(), String> {
+    let result_error = |error| format!("棚の公開結果を記録できません: {error:?}");
     let Some(pending) = read_pending(paths)? else {
+        if let Some(current) = read_current(paths) {
+            if read_result(paths, &current.id).map_err(result_error)?
+                == Some(PublicationState::Assembling)
+            {
+                reject(paths, &current.id, Rejection::Interrupted).map_err(result_error)?;
+            }
+        }
         return Ok(());
     };
+    let config = load_config(paths)?;
+    let current = ShelfSource::from_config(config.shelf.as_ref());
+    let target = ShelfSource::Generation(pending.next_generation);
+    let record = read_result(paths, &pending.shipment_id).map_err(result_error)?;
+    if matches!(record, Some(PublicationState::Rejected { .. })) {
+        sync_results(paths).map_err(result_error)?;
+        return clear_pending(paths);
+    }
+    if matches!(record, Some(PublicationState::Published(_))) {
+        sync_results(paths).map_err(result_error)?;
+        if current == target {
+            let previous = pending.previous.root(paths)?;
+            prune_generations(paths, pending.next_generation, previous.as_deref());
+        }
+        return clear_pending(paths);
+    }
+    if (current != target && current != pending.previous)
+        || config
+            .shelf
+            .is_some_and(|settings| settings.library_id.get() != pending.library_id)
+    {
+        reject(paths, &pending.shipment_id, Rejection::Superseded).map_err(result_error)?;
+        return clear_pending(paths);
+    }
     let previous = pending.previous.root(paths)?;
     activate_locked(paths, pending.next_generation, |settings, new| {
         if new.id != pending.library_id {
@@ -594,7 +813,7 @@ fn apply_pending_with(
         }
         let current = ShelfSource::from_config(settings);
         if current == ShelfSource::Generation(pending.next_generation) {
-            // 配信先を書く前に引き継いだので、あとは片付けだけでよい。
+            // 配信先を書く前に引き継いだので、公開結果の記録から続ける。
             return Ok(());
         }
         if current != pending.previous {
@@ -615,7 +834,27 @@ fn apply_pending_with(
         Ok(())
     })?;
     reached(SwapStage::AfterActivation);
+    let published = load_config(paths)?
+        .shelf
+        .filter(|settings| {
+            settings.generation == Some(pending.next_generation)
+                && settings.library_id.get() == pending.library_id
+        })
+        .ok_or("配信する棚の設定を確認できません")?;
+    write_result(
+        paths,
+        &pending.shipment_id,
+        &PublicationState::Published(PublishedShelf {
+            sync_epoch: published.sync_epoch,
+            works: pending.works,
+        }),
+    )
+    .map_err(result_error)?;
     prune_generations(paths, pending.next_generation, previous.as_deref());
+    clear_pending(paths)
+}
+
+fn clear_pending(paths: &ServerPaths) -> Result<(), String> {
     fs::remove_file(paths.root.join(PENDING))
         .map_err(|error| format!("棚の切り替えの予約を片付けられません: {error}"))
 }
