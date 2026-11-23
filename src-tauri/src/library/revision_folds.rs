@@ -9,9 +9,15 @@
 //! 指している版も触らない。読書位置・取得・確認の記録は前の版へ付け替える（本文は同じ）。
 //!
 //! 付け替えると記録の意味が変わるものがある版も触らない（`keeps_what_folding_would_lose`）。
-//! その版を基準に始めた取得（確定済みの入力の券が今の版を指す）、前の版に無い画像や添付の
-//! ファイル（原寸が取れたなど。畳むと今の版からも版の履歴からも選べなくなる）、前の版に
-//! 読書用の対応表が無いのに、取得の読む形の記録がある版。
+//! - その版を基準に始めた取得（確定済みの入力の券が今の版を指す）
+//! - 前の版と画像の枠・実体・画質・大きさのどれかが違う（原寸が取れたなど。同じバイト列でも
+//!   画質の記録が違えば別の選択肢になる。畳むと今の版からも版の履歴からも選べなくなる）、
+//!   前の版に無い添付のファイル
+//! - 取得の読む形の記録があるのに、前の版の同じ作り方の対応表が中身まで同じでない（確定済みの
+//!   入力の対応表と、付け替え先の対応表が食い違う）
+//! - 送信台帳に、その版を名指しした要求（読書位置など）が残っている（同じ要求の再送が、消した
+//!   版を指して断られる）。保存の結果（`capture`）は版ごとに必ずあり、券は確定で閉じていて同じ
+//!   要求が再び来ないので数えない
 
 use super::{integrity, Error, Library, LibraryId, Result};
 use rusqlite::{params, Connection};
@@ -160,7 +166,7 @@ impl Library {
         let mut found = Vec::new();
         for (entity, current, revision, previous) in rows {
             let (entity, current, previous) = (id(entity)?, id(current)?, id(previous)?);
-            if keeps_what_folding_would_lose(tx, current, previous)? {
+            if keeps_what_folding_would_lose(tx, entity, current, previous)? {
                 continue;
             }
             // 本文以外が違えば、本文を読むまでもなく別の版。
@@ -191,23 +197,41 @@ impl Library {
 }
 
 /// 畳むと失うもの・食い違うものを、今の版が持っているか。
-fn keeps_what_folding_would_lose(
+pub(super) fn keeps_what_folding_would_lose(
     tx: &Connection,
+    entity: LibraryId,
     current: LibraryId,
     previous: LibraryId,
 ) -> Result<bool> {
     Ok(tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM acquisition_attempts WHERE base_snapshot_id=?1)
-             OR EXISTS(SELECT r.file_id FROM snapshot_media m JOIN media_renditions r ON r.id=m.rendition_id
+             OR EXISTS(SELECT m.slot,m.role,m.media_id,r.file_id,r.mime_type,r.quality,r.width,r.height
+                        FROM snapshot_media m LEFT JOIN media_renditions r ON r.id=m.rendition_id
                         WHERE m.snapshot_id=?1
-                       EXCEPT SELECT r.file_id FROM snapshot_media m JOIN media_renditions r ON r.id=m.rendition_id
+                       EXCEPT SELECT m.slot,m.role,m.media_id,r.file_id,r.mime_type,r.quality,r.width,r.height
+                        FROM snapshot_media m LEFT JOIN media_renditions r ON r.id=m.rendition_id
                         WHERE m.snapshot_id=?2)
              OR EXISTS(SELECT file_id FROM snapshot_files WHERE snapshot_id=?1 AND role<>'raw'
                        EXCEPT SELECT file_id FROM snapshot_files WHERE snapshot_id=?2 AND role<>'raw')
              OR EXISTS(SELECT 1 FROM acquisition_reader_outputs o WHERE o.snapshot_id=?1
-                        AND NOT EXISTS(SELECT 1 FROM reader_binding_sets b
-                                        WHERE b.snapshot_id=?2 AND b.recipe=o.recipe))",
-        params![current.as_bytes().as_slice(), previous.as_bytes().as_slice()],
+                        AND (NOT EXISTS(SELECT 1 FROM reader_binding_sets b
+                                         WHERE b.snapshot_id=?2 AND b.recipe=o.recipe)
+                             OR EXISTS(SELECT reference_json,media_slot,file_slot,unavailable FROM reader_bindings
+                                        WHERE snapshot_id=?1 AND recipe=o.recipe
+                                       EXCEPT SELECT reference_json,media_slot,file_slot,unavailable FROM reader_bindings
+                                        WHERE snapshot_id=?2 AND recipe=o.recipe)
+                             OR EXISTS(SELECT reference_json,media_slot,file_slot,unavailable FROM reader_bindings
+                                        WHERE snapshot_id=?2 AND recipe=o.recipe
+                                       EXCEPT SELECT reference_json,media_slot,file_slot,unavailable FROM reader_bindings
+                                        WHERE snapshot_id=?1 AND recipe=o.recipe)))
+             OR EXISTS(SELECT 1 FROM outbox WHERE entity_id=?3 AND operation NOT IN ('capture','fold_revision')
+                        AND instr(payload_json,?4)>0)",
+        params![
+            current.as_bytes().as_slice(),
+            previous.as_bytes().as_slice(),
+            entity.as_bytes().as_slice(),
+            current.to_string()
+        ],
         |r| r.get(0),
     )?)
 }
