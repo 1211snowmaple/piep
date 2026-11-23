@@ -18,6 +18,7 @@ import { readerKeyDirection } from "./readerKeyboard";
 import { readShelfPosition, recordShelfReading, refreshReading, refreshReadingWithin, sendReading, shelfLocation, shelfReadingFor, shelfStart, type ReadingWrite, type RemoteStart } from "./readingSync";
 import { shelfImageUrl, shelfPage, openShelfWork, openShelfSnapshot, type OpenedShelfWork } from "./shelf";
 import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcMetadata, getPcWorkCollections, pcErrorMessage, saveOfflineWork, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
+import { READER_FONTS } from "@shared/readerType";
 import type { ReaderBehavior, ReaderFont, ReaderType } from "./readerPrefs";
 
 function offlineSnapshotChanged(error: unknown): boolean {
@@ -837,7 +838,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     }} onTouchStart={(event) => {
       touching.current = true;
       if (event.touches.length === 1) touchStart.current = { x: event.touches[0].clientX, y: event.touches[0].clientY };
-    }} onTouchMove={() => { if (!textSelection.selecting() && behavior.bars === "auto" && barsShown) setBarsShown(false); }} onTouchEnd={finishHorizontalSwipe}><article className={`reading-paper online-paper reader-font--${fontFamily}${!continuous && enterDirection ? ` reader-enter--${enterDirection}` : ""}`} style={{ maxWidth: `${readerWidth}px`, fontSize: `${fontSize}px`, lineHeight, userSelect: textSelection.enabled ? "text" : "none", WebkitUserSelect: textSelection.enabled ? "text" : "none" }}>
+    }} onTouchMove={() => { if (!textSelection.selecting() && behavior.bars === "auto" && barsShown) setBarsShown(false); }} onTouchEnd={finishHorizontalSwipe}><article className={`reading-paper online-paper${!continuous && enterDirection ? ` reader-enter--${enterDirection}` : ""}`} style={{ fontFamily: READER_FONTS[fontFamily].family, maxWidth: `${readerWidth}px`, fontSize: `${fontSize}px`, lineHeight, userSelect: textSelection.enabled ? "text" : "none", WebkitUserSelect: textSelection.enabled ? "text" : "none" }}>
       {continuous
         ? activeEditHash !== undefined && <ContinuousDocument key={`${positionKey}:${retry}`} viewportRef={scrollRef} load={loadSection} imageSource={imageSource} isSnapshotChange={(error) => offline && offlineSnapshotChanged(error)} onSnapshotChanged={() => setRetry((current) => current + 1)} start={continuousStart} target={continuousTarget} typeKey={`${fontSize}:${lineHeight}:${readerWidth}:${fontFamily}`} header={titleBlock} onInfo={continuousInfo} onPosition={continuousPosition} onCommit={continuousCommit} onLink={openContentLink} onStartRejected={rejectContinuousStart} flushRef={flushContinuous} />
         : <>

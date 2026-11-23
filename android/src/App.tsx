@@ -29,7 +29,8 @@ import { defaultPcSearch, getPcStatus, type OfflineWork, type PcConnectionStatus
 import { handleReaderKeyboard } from "./readerKeyboard";
 import { PullIndicator, usePullToRefresh } from "./pullToRefresh";
 import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
-import { defaultReaderBehavior, defaultReaderType, loadReaderBehavior, saveReaderBehavior, typeLimits, type ReaderBehavior, type ReaderFont, type ReaderTheme, type ReaderType } from "./readerPrefs";
+import { READER_FONTS, readerTypeFont, readerTypeNumber } from "@shared/readerType";
+import { defaultReaderBehavior, defaultReaderType, loadReaderBehavior, readerFonts, saveReaderBehavior, typeLimits, type ReaderBehavior, type ReaderTheme, type ReaderType } from "./readerPrefs";
 import { loadRememberedSort, loadSavedConditions, saveRememberedSort, saveSavedConditions, type FixedSort, type SavedCondition } from "./librarySort";
 
 type IconName = "computer" | "book" | "settings" | "menu";
@@ -70,6 +71,10 @@ type PagingMode = "auto" | "pages";
 function storedChoice<T extends string>(key: string, fallback: T, options: readonly T[]): T {
   try { const value = window.localStorage.getItem(key); return options.find((option) => option === value) ?? fallback; }
   catch { return fallback; }
+}
+
+function storedValue(key: string): string | null {
+  try { return window.localStorage.getItem(key); } catch { return null; }
 }
 
 function storedNumber(key: string, fallback: number, minimum: number, maximum: number) {
@@ -165,10 +170,10 @@ function App() {
   const [readerType, setReaderType] = useState<ReaderType>(() => {
     const defaults = defaultReaderType();
     return {
-      fontSize: storedNumber(fontKey, defaults.fontSize, typeLimits.fontSize.min, typeLimits.fontSize.max),
-      lineHeight: storedNumber(lineHeightKey, defaults.lineHeight, typeLimits.lineHeight.min, typeLimits.lineHeight.max),
-      readerWidth: storedNumber(readerWidthKey, defaults.readerWidth, typeLimits.readerWidth.min, typeLimits.readerWidth.max),
-      fontFamily: storedChoice<ReaderFont>(fontFamilyKey, defaults.fontFamily, ["serif", "sans"]),
+      fontSize: readerTypeNumber(storedValue(fontKey), typeLimits.fontSize, defaults.fontSize),
+      lineHeight: readerTypeNumber(storedValue(lineHeightKey), typeLimits.lineHeight, defaults.lineHeight),
+      readerWidth: readerTypeNumber(storedValue(readerWidthKey), typeLimits.readerWidth, defaults.readerWidth),
+      fontFamily: readerTypeFont(storedValue(fontFamilyKey), readerFonts, defaults.fontFamily),
       readerTheme: storedChoice<ReaderTheme>(readerThemeKey, defaults.readerTheme, ["white", "paper", "night"]),
     };
   });
@@ -571,7 +576,7 @@ function App() {
           <button className="reader-icon-button" onClick={() => changeReaderType({ fontSize: fontSize >= typeLimits.fontSize.max ? typeLimits.fontSize.min : fontSize + 2 })} aria-label="文字を大きくする"><Icons.add aria-hidden="true" /></button>
         </header>
         <main className="reader-scroll" key={page} ref={previewScrollRef} tabIndex={0} aria-label="表示サンプルの本文。Page Up、Page Down、左右矢印、Spaceで移動" onKeyDown={(event) => handleReaderKeyboard(event, page, preview.pages.length, (next, edge) => { previewKeyboardPageChange.current = true; previewKeyboardEnd.current = edge === "end"; setPage(next); })}>
-            <article className={`reading-paper reader-font--${fontFamily}`} style={{ maxWidth: `${readerWidth}px`, fontSize: `${fontSize}px`, lineHeight }}>
+            <article className="reading-paper" style={{ fontFamily: READER_FONTS[fontFamily].family, maxWidth: `${readerWidth}px`, fontSize: `${fontSize}px`, lineHeight }}>
             <div className="reader-eyebrow">PIEP · READING PREVIEW</div>
             {page === 0 && <><h1>{preview.title}</h1><p className="reader-author">{preview.author}</p><div className="reader-rule" /></>}
             <h2>{preview.pages[page].heading}</h2>

@@ -1,4 +1,8 @@
-export type ReaderFont = "serif" | "sans";
+import { READER_TYPE_DEFAULTS, READER_TYPE_LIMITS, type ReaderFont as SharedReaderFont } from "@shared/readerType";
+
+/** 携帯で選べる書体。UD 書体は Android に入っていないので、明朝とゴシックだけ。 */
+export type ReaderFont = Extract<SharedReaderFont, "serif" | "sans">;
+export const readerFonts: readonly ReaderFont[] = ["sans", "serif"];
 export type ReaderTheme = "white" | "paper" | "night";
 
 export interface ReaderType {
@@ -9,19 +13,26 @@ export interface ReaderType {
   readerTheme: ReaderTheme;
 }
 
+/** 範囲と刻みはデスクトップと共通（`@shared/readerType`）。 */
 export const typeLimits = {
-  fontSize: { min: 14, max: 36, step: 1 },
-  lineHeight: { min: 1.4, max: 2.4, step: 0.02 },
-  readerWidth: { min: 520, max: 900, step: 20 },
+  fontSize: READER_TYPE_LIMITS.fontSize,
+  lineHeight: READER_TYPE_LIMITS.lineHeight,
+  readerWidth: READER_TYPE_LIMITS.width,
 } as const;
 
 /** タブレットは携帯より離して持つので、何も選んでいないときの本文を少し大きくする。 */
 export function defaultFontSize(): number {
-  return window.matchMedia("(min-width: 600px)").matches ? 21 : 18;
+  return window.matchMedia("(min-width: 600px)").matches ? READER_TYPE_DEFAULTS.fontSize + 3 : READER_TYPE_DEFAULTS.fontSize;
 }
 
 export function defaultReaderType(): ReaderType {
-  return { fontSize: defaultFontSize(), lineHeight: 1.72, readerWidth: 680, fontFamily: "sans", readerTheme: "white" };
+  return {
+    fontSize: defaultFontSize(),
+    lineHeight: READER_TYPE_DEFAULTS.lineHeight,
+    readerWidth: READER_TYPE_DEFAULTS.width,
+    fontFamily: "sans" satisfies typeof READER_TYPE_DEFAULTS.font,
+    readerTheme: "white",
+  };
 }
 
 /** pages は転送ページごとに区切り、continuous は全ページを一続きにする。 */
