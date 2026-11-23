@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PcWork } from "./pcApi";
 
 // 端末の SQLite の代わり。コマンドの名前と引数は Rust 側と同じ。
-const db = vi.hoisted(() => ({ rows: new Map<string, Record<string, unknown>>(), failPut: false, calls: [] as string[] }));
+const db = vi.hoisted(() => ({ rows: new Map<string, Record<string, unknown>>(), failPut: false, failKeys: new Set<string>(), calls: [] as string[] }));
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
   invoke: vi.fn(async (command: string, args: Record<string, unknown>) => {
@@ -11,8 +11,8 @@ vi.mock("@tauri-apps/api/core", () => ({
     switch (command) {
       case "reading_local_get": return db.rows.get(`${args.source}:${args.sourceId}`) ?? null;
       case "reading_local_put": {
-        if (db.failPut) throw { code: "device_records" };
         const row = args.reading as Record<string, unknown>;
+        if (db.failPut || db.failKeys.has(keyOf(row))) throw { code: "device_records" };
         db.rows.set(keyOf(row), structuredClone(row));
         return null;
       }
@@ -40,6 +40,7 @@ async function fresh() {
 beforeEach(() => {
   db.rows.clear();
   db.failPut = false;
+  db.failKeys.clear();
   db.calls.length = 0;
   window.localStorage.clear();
 });
@@ -99,6 +100,25 @@ describe("端末の読書の記録", () => {
     db.failPut = false;
     await store.flushLocalReading();
     expect(db.rows.get("pixiv:100")).toMatchObject({ page: 3 });
+  });
+
+  it("一件書けなくても、同じまとまりのほかの記録は捨てない", async () => {
+    const store = await fresh();
+    const [first, second, third] = ["100", "200", "300"].map((sourceId, i) => ({ ...work, id: `w${i}`, sourceId }) as PcWork);
+    for (const item of [first, second, third]) await store.loadLocalReading(item);
+    db.failKeys.add("pixiv:200");
+    // 一件目を送っているあいだに、二件目と三件目が同じまとまりに溜まる。
+    store.saveLocalPosition(first, null, position);
+    store.saveLocalPosition(second, null, position);
+    store.saveLocalPosition(third, null, position);
+    await store.flushLocalReading();
+    expect(db.rows.has("pixiv:100")).toBe(true);
+    expect(db.rows.has("pixiv:300")).toBe(true);
+    expect(db.rows.has("pixiv:200")).toBe(false);
+    // 書けなかった一件は残っていて、次に送る。
+    db.failKeys.clear();
+    await store.flushLocalReading();
+    expect(db.rows.get("pixiv:200")).toMatchObject({ page: 3 });
   });
 
   it("読めなかったときも画面は開ける", async () => {
