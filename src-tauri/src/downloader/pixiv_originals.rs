@@ -109,13 +109,22 @@ pub(crate) fn is_reduced_fanbox_cover(url: &str) -> bool {
     fanbox_original_cover(url).is_some()
 }
 
-/// 表紙の原寸の候補（良い順）。もう在り処が書き足されているときと、縮小版でないときは空。
+/// 原寸の在り処がもう決まっているか。切り抜いていない縮小版（master）が入っているだけなら、
+/// 原寸はまだ探す（そのとき公開元に無かっただけかもしれない）。
+fn is_original_url(url: Option<&Value>) -> bool {
+    url.and_then(Value::as_str)
+        .is_some_and(|url| !url.is_empty() && !is_master(url))
+}
+
+/// 切り抜いていない縮小版（master）の URL か。棚が画質を分ける印
+/// （`library::work_capture::quality` の `-master/`）と同じ。
+fn is_master(url: &str) -> bool {
+    !url.contains("/c/") && url.contains("-master/")
+}
+
+/// 表紙の原寸の候補（良い順）。もう原寸の在り処が書き足されているときと、縮小版でないときは空。
 pub(crate) fn cover_original_candidates(data: &Value, provider: &str) -> Vec<String> {
-    if data
-        .get(COVER_ORIGINAL_FIELD)
-        .and_then(Value::as_str)
-        .is_some_and(|url| !url.is_empty())
-    {
+    if is_original_url(data.get(COVER_ORIGINAL_FIELD)) {
         return Vec::new();
     }
     match provider {
@@ -170,8 +179,11 @@ pub(crate) fn cdn_client() -> Result<reqwest::Client, String> {
 /// 候補を一つずつ `HEAD` で確かめた結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OriginalLookup {
-    /// 在った。良い順で最初のもの。
+    /// 原寸が在った。良い順で最初のもの。
     Found(String),
+    /// 原寸はどれも無く、切り抜いていない縮小版（master）だけが在った。切り抜いた版よりは
+    /// 良いので使うが、原寸に取り直したとは数えず、原寸はあとでまた探す。
+    MasterOnly(String),
     /// どの候補も 404 などで無かった。公開元で消えている。
     Unavailable,
 }
@@ -216,7 +228,11 @@ async fn find_first_existing(
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.starts_with("image/"));
         if status.is_success() && is_image {
-            return Ok(OriginalLookup::Found(candidate));
+            return Ok(if is_master(&candidate) {
+                OriginalLookup::MasterOnly(candidate)
+            } else {
+                OriginalLookup::Found(candidate)
+            });
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
             return Err(format!("画像サーバーが {status} を返しました"));
@@ -237,7 +253,7 @@ async fn find_first_existing(
 pub(crate) async fn add_original_urls(client: &reqwest::Client, data: &mut Value) {
     add_original_urls_with(data, |url| async move {
         match find_original(client, &url).await {
-            Ok(OriginalLookup::Found(found)) => Some(found),
+            Ok(OriginalLookup::Found(found) | OriginalLookup::MasterOnly(found)) => Some(found),
             Ok(OriginalLookup::Unavailable) => None,
             Err(error) => {
                 log::warn!("原寸の画像を確認できません（縮小版で保存します）: {url}: {error}");
@@ -253,7 +269,7 @@ pub(crate) async fn add_original_urls(client: &reqwest::Client, data: &mut Value
 pub(crate) async fn add_fanbox_original_cover(client: &reqwest::Client, data: &mut Value) {
     add_fanbox_original_cover_with(data, |url| async move {
         match find_fanbox_original_cover(client, &url).await {
-            Ok(OriginalLookup::Found(found)) => Some(found),
+            Ok(OriginalLookup::Found(found) | OriginalLookup::MasterOnly(found)) => Some(found),
             Ok(OriginalLookup::Unavailable) => None,
             Err(error) => {
                 log::warn!(
@@ -272,11 +288,7 @@ where
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = Option<String>>,
 {
-    if data
-        .get(COVER_ORIGINAL_FIELD)
-        .and_then(Value::as_str)
-        .is_some_and(|url| !url.is_empty())
-    {
+    if is_original_url(data.get(COVER_ORIGINAL_FIELD)) {
         return;
     }
     let Some(cover) = data
@@ -298,11 +310,7 @@ where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = Option<String>>,
 {
-    if data
-        .get(COVER_ORIGINAL_FIELD)
-        .and_then(Value::as_str)
-        .is_none_or(str::is_empty)
-    {
+    if !is_original_url(data.get(COVER_ORIGINAL_FIELD)) {
         let cover = data
             .get("cover_url")
             .and_then(Value::as_str)
@@ -325,10 +333,7 @@ where
             .and_then(|illust| illust.get_mut("images"))
             .and_then(Value::as_object_mut)
         {
-            let has_original = images
-                .get("original")
-                .and_then(Value::as_str)
-                .is_some_and(|url| !url.is_empty());
+            let has_original = is_original_url(images.get("original"));
             if !has_original {
                 let reduced = ["medium", "small"]
                     .iter()
@@ -557,6 +562,61 @@ mod tests {
             panic!("jpg の原寸が見つかるはず");
         };
         assert!(found.ends_with("ci23413112_bbb0c381096512a7d02ab80ef9ec4d6b.jpg"));
+    }
+
+    /// 原寸がどれも無く master だけが在れば、原寸が見つかったとは言わない。
+    #[tokio::test]
+    async fn only_the_uncropped_master_is_not_an_original() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 2048];
+                let count = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..count]).to_string();
+                let path = request.split_whitespace().nth(1).unwrap().to_string();
+                let response = if path.contains("-master/") {
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let candidates: Vec<String> = original_candidates(COVER_240)
+            .into_iter()
+            .map(|url| url.replacen("https://i.pximg.net", &format!("http://{address}"), 1))
+            .collect();
+        let found = find_first_existing(&cdn_client().unwrap(), candidates, PIXIV_REFERER)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let OriginalLookup::MasterOnly(master) = found else {
+            panic!("master だけが在る: {found:?}");
+        };
+        assert!(master.ends_with("_master1200.jpg"));
+    }
+
+    /// 在り処に master が入っているだけなら、次も原寸を探す。原寸が入っていれば探さない。
+    #[tokio::test]
+    async fn a_master_in_place_of_the_original_is_looked_up_again() {
+        let master = "https://i.pximg.net/novel-cover-master/img/2024/11/15/19/39/13/ci23413112_bbb0c381096512a7d02ab80ef9ec4d6b_master1200.jpg";
+        let mut data = json!({"cover_url": COVER_240, COVER_ORIGINAL_FIELD: master, "illusts": {}});
+        assert!(!cover_original_candidates(&data, "pixiv").is_empty());
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        add_original_urls_with(&mut data, |url| {
+            asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async move { original_candidates(&url).into_iter().nth(1) }
+        })
+        .await;
+        assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(data[COVER_ORIGINAL_FIELD]
+            .as_str()
+            .unwrap()
+            .contains("novel-cover-original/"));
+        assert!(cover_original_candidates(&data, "pixiv").is_empty());
     }
 
     #[tokio::test]

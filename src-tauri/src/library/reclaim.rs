@@ -5,9 +5,9 @@
 //! ある列すべて」で数える（表を足しても数え漏れない）。作品を棚から外しても、作品の識別と
 //! 保存版は残るので、その実体は回収されない。
 //!
-//! 保存は実体を置いて（使い回して）から台帳に確定する。その間の実体を未参照と見て退けないよう、
-//! 実体領域は使い回すたびに更新時刻を今にし、回収は最後に使われてから `grace` が過ぎた実体
-//! だけを退ける。退けた実体が後で参照されていれば、次の回収で戻す。参照されている実体が
+//! 保存の実体書き込み・再利用から台帳確定までは、回収の参照確認・隔離と重ならない。
+//! 回収は最後に使われてから `grace` が過ぎた実体だけを退ける。退けた実体が後で
+//! 参照されていれば、次の回収で戻す。参照されている実体が
 //! 実体領域にも隔離にもなければ、何も回収せずに失敗する。
 
 use super::{repository::Library, Error, Fingerprint, LibraryId, Result};
@@ -77,6 +77,15 @@ impl Library {
         options: ReclaimOptions,
         now: SystemTime,
     ) -> Result<ReclaimReport> {
+        self.reclaim_with(options, now, || {})
+    }
+
+    fn reclaim_with(
+        &self,
+        options: ReclaimOptions,
+        now: SystemTime,
+        before_quarantine: impl FnOnce(),
+    ) -> Result<ReclaimReport> {
         let _turn = self.storage_gate.lock().map_err(|_| Error::Busy)?;
         let operation = LibraryId::now_v7();
         {
@@ -86,7 +95,7 @@ impl Library {
                 params![operation.as_bytes().as_slice(), millis(now)],
             )?;
         }
-        let result = self.reclaim_inner(options, now);
+        let result = self.reclaim_inner(options, now, before_quarantine);
         let (state, payload) = match &result {
             Ok(report) => ("complete", serde_json::to_string(report)?),
             Err(error) => (
@@ -102,7 +111,12 @@ impl Library {
         result
     }
 
-    fn reclaim_inner(&self, options: ReclaimOptions, now: SystemTime) -> Result<ReclaimReport> {
+    fn reclaim_inner(
+        &self,
+        options: ReclaimOptions,
+        now: SystemTime,
+        before_quarantine: impl FnOnce(),
+    ) -> Result<ReclaimReport> {
         let mut report = ReclaimReport::default();
         let listing = self.objects.listing()?;
         let mut objects = HashSet::new();
@@ -119,11 +133,17 @@ impl Library {
             }
         }
 
+        // ディスクの走査中も保存できる。参照を読む前に排他を取り、隔離を終えるまで持つ。
+        let _sweeping = self.object_writes.write();
         // 台帳の側：参照されないファイルを外し、残る部分実体を数える。参照されている部分
         // 実体が実体領域にも隔離にもなければ、外す前に失敗する（何も回収しない）。
-        let referenced: HashSet<Fingerprint> = {
+        let mut referenced: HashSet<Fingerprint> = {
             let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
             let tx = conn.transaction()?;
+            tx.execute(
+                "DELETE FROM pending_edit_images WHERE expires_at<=?1",
+                [millis(now)],
+            )?;
             let mut columns = Vec::new();
             {
                 let mut tables = tx.prepare(
@@ -200,6 +220,18 @@ impl Library {
             tx.commit()?;
             kept
         };
+        // 送信中の写しは、現在の台帳から外れた実体も送ることがある。
+        self.shipments
+            .lock()
+            .map_err(|_| Error::Busy)?
+            .retain(|pin| {
+                if let Some(chunks) = pin.upgrade() {
+                    referenced.extend(chunks.iter().map(|chunk| chunk.id));
+                    true
+                } else {
+                    false
+                }
+            });
 
         // 参照されているのに隔離していたものを戻す。
         for (id, items) in &quarantined {
@@ -212,6 +244,7 @@ impl Library {
             }
         }
 
+        before_quarantine();
         // 実体の側：参照されない実体を隔離し、隔離や壊れから日数の過ぎたものを消す。
         let unused_since = now.checked_sub(options.grace).unwrap_or(UNIX_EPOCH);
         let expired = now.checked_sub(options.hold).unwrap_or(UNIX_EPOCH);
@@ -228,17 +261,16 @@ impl Library {
                 StoredEntry::Quarantined { id, at_ms }
                     if !referenced.contains(&id) && at_ms <= millis(expired) =>
                 {
-                    self.objects.remove_listed(item)?;
-                    report.deleted_chunks += 1;
-                    report.deleted_bytes += item.bytes;
+                    if self.objects.remove_listed(item)? {
+                        report.deleted_chunks += 1;
+                        report.deleted_bytes += item.bytes;
+                    }
                 }
                 StoredEntry::Part if item.modified <= unused_since => {
-                    self.objects.remove_listed(item)?;
-                    report.removed_parts += 1;
+                    report.removed_parts += usize::from(self.objects.remove_listed(item)?);
                 }
                 StoredEntry::Damaged if item.modified <= expired => {
-                    self.objects.remove_listed(item)?;
-                    report.removed_damaged += 1;
+                    report.removed_damaged += usize::from(self.objects.remove_listed(item)?);
                 }
                 _ => {}
             }
@@ -284,6 +316,34 @@ mod tests {
             .unwrap()
             .query_row("SELECT count(*) FROM content_files", [], |r| r.get(0))
             .unwrap()
+    }
+
+    #[test]
+    fn capture_reusing_an_old_object_cannot_commit_before_it_is_quarantined() {
+        let temp = Temp(std::env::temp_dir().join(format!("piep-reclaim-{}", LibraryId::now_v7())));
+        let library = Library::create(&temp.0).unwrap();
+        let bytes = b"body stored before a crash";
+        library.objects.put(&bytes[..]).unwrap();
+        // 時刻も固定し、再利用による更新時刻が隔離候補の判定を変えないようにする。
+        let now = SystemTime::now() + Duration::from_secs(2 * 24 * 60 * 60);
+        std::thread::scope(|scope| {
+            let mut writer = None;
+            let report = library
+                .reclaim_with(ReclaimOptions::default(), now, || {
+                    assert!(library.object_writes.try_read().is_none());
+                    writer = Some(scope.spawn(|| {
+                        library.capture_prepared_with(
+                            capture("1", std::str::from_utf8(bytes).unwrap()),
+                            None,
+                            || assert!(library.object_writes.try_write().is_none()),
+                        )
+                    }));
+                })
+                .unwrap();
+            assert_eq!(report.quarantined_chunks, 1);
+            writer.unwrap().join().unwrap().unwrap();
+        });
+        library.verify().unwrap();
     }
 
     #[test]

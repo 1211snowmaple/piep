@@ -7,6 +7,7 @@ import { WorkCover } from "@/components/WorkCover";
 import { errorMessage } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { openSingleDialog } from "@/services/dialogApi";
+import type { ShelfEditorMedia } from "@/services/shelfApi";
 import type { CollectionCoverMode, WorkCollection, WorkCollectionInput } from "@/types/collections";
 
 /** 作り方と、それが何をするか。順番は「自動で足りる」から「自分で決める」へ。 */
@@ -38,17 +39,18 @@ export function CollectionCoverModal({
   collection: WorkCollection;
   busy: boolean;
   /**
-   * 選んだ画像を棚へ取り込み、ファイルの識別子を返す。渡さなければ画像の場所を
+   * 選んだ画像を棚へ取り込み、ファイルの識別子と保留を返す。渡さなければ画像の場所を
    * そのまま保存する。取り込んでから見本に出すので、見本も保存後と同じ画像になる。
    */
-  importImage?: (path: string) => Promise<string>;
+  importImage?: (path: string) => Promise<Pick<ShelfEditorMedia, "file" | "selection">>;
   /** `coverWork` は「1作を選ぶ」で選んだ作品（取得元と作品の番号）。 */
-  onSave: (input: WorkCollectionInput, coverWork: { source: string; sourceId: string } | null) => void;
+  onSave: (input: WorkCollectionInput, coverWork: { source: string; sourceId: string } | null, selection?: string) => void;
 }) {
   const [mode, setMode] = useState<CollectionCoverMode>("mosaic");
   // 表紙の作品は取得元と取得元の作品の番号で選ぶ。
   const [coverKey, setCoverKey] = useState<string | null>(null);
-  const [imagePath, setImagePath] = useState<string | null>(null);
+  const [image, setImage] = useState<{ path: string; selection?: string } | null>(null);
+  const imagePath = image?.path ?? null;
   const [importing, setImporting] = useState(false);
 
   useEffect(() => {
@@ -59,7 +61,7 @@ export function CollectionCoverModal({
       ? collection.members.find((member) => member.coverPath === collection.coverPath)
       : undefined;
     setCoverKey(current ? memberKey(current) : null);
-    setImagePath(collection.coverImagePath);
+    setImage(collection.coverImagePath ? { path: collection.coverImagePath } : null);
   }, [collection.coverImagePath, collection.coverMode, collection.coverPath, collection.members, opened]);
 
   const pickImage = async () => {
@@ -71,9 +73,10 @@ export function CollectionCoverModal({
       if (!path) return;
       if (importImage) {
         setImporting(true);
-        setImagePath(await importImage(path));
+        const imported = await importImage(path);
+        setImage({ path: imported.file, selection: imported.selection });
       } else {
-        setImagePath(path);
+        setImage({ path });
       }
       setMode("file");
     } catch (error) {
@@ -156,7 +159,7 @@ export function CollectionCoverModal({
                 collectionKind: collection.collectionKind,
                 coverMode: mode,
                 coverImagePath: imagePath,
-              }, coverMember ? { source: coverMember.source, sourceId: coverMember.sourceId } : null)
+              }, coverMember ? { source: coverMember.source, sourceId: coverMember.sourceId } : null, image?.selection)
             }
           >
             この表紙にする

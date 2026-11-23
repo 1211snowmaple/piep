@@ -479,6 +479,14 @@ impl Library {
 
     /// 編集は固定した snapshot に対して保存する。別作品の基準は FK が拒否する。
     pub fn save_edit(&self, request: EditRequest<'_>) -> Result<LibraryId> {
+        self.save_edit_with_selections(request, &[])
+    }
+
+    pub(crate) fn save_edit_with_selections(
+        &self,
+        request: EditRequest<'_>,
+        selections: &[(LibraryId, Fingerprint)],
+    ) -> Result<LibraryId> {
         let EditRequest {
             request_id,
             work,
@@ -492,7 +500,9 @@ impl Library {
         if expected < 0 {
             return Err(Error::Integrity("更新世代が不正です".into()));
         }
-        let prepared = self.store_bytes(&content.encode()?)?;
+        let bytes = content.encode()?;
+        let _writing = self.object_writes.read();
+        let prepared = self.store_bytes(&bytes)?;
         let file = prepared.file.clone();
         let media = content
             .media
@@ -545,6 +555,9 @@ impl Library {
             content,
             &prepared,
         )?;
+        for &(selection, file) in selections {
+            Self::consume_image_selection(&tx, selection, file)?;
+        }
         tx.execute("INSERT INTO edit_documents(work_id,user_id,generation) VALUES(?1,?2,0) ON CONFLICT(work_id,user_id) DO NOTHING",params![work.as_bytes().as_slice(),user.as_bytes().as_slice()])?;
         let column = if activate { "active_id" } else { "draft_id" };
         tx.execute(&format!("UPDATE edit_documents SET {column}=?3,generation=generation+1 WHERE work_id=?1 AND user_id=?2"),params![work.as_bytes().as_slice(),user.as_bytes().as_slice(),edit.as_bytes().as_slice()])?;

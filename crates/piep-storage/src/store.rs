@@ -882,7 +882,12 @@ impl ObjectStore {
                     },
                     _ => continue,
                 };
-                let meta = regular_file(&path)?;
+                let meta = match regular_file(&path) {
+                    Ok(meta) => meta,
+                    // 走査中に保存が一時ファイルを公開したり、壊れた実体を退けたりする。
+                    Err(error) if missing(&error) => continue,
+                    Err(error) => return Err(error),
+                };
                 found.push(StoredListing {
                     entry,
                     modified: meta.modified()?,
@@ -969,19 +974,23 @@ impl ObjectStore {
         Ok(restored)
     }
 
-    /// 一覧で見つけた、実体でないファイル（隔離・壊れ・一時）を消す。公開済みの実体は消さない。
-    pub fn remove_listed(&self, listing: &StoredListing) -> Result<()> {
+    /// 一覧で見つけた、実体でないファイル（隔離・壊れ・一時）を消す。消したら true。
+    pub fn remove_listed(&self, listing: &StoredListing) -> Result<bool> {
         if matches!(listing.entry, StoredEntry::Object(_)) {
             return Err(Error::Integrity(
                 "公開済みの実体は隔離してから消します".into(),
             ));
         }
-        regular_file(&listing.path)?;
         if !listing.path.starts_with(&self.root) {
             return Err(Error::UnsafePath(listing.path.clone()));
         }
+        match regular_file(&listing.path) {
+            Ok(_) => {}
+            Err(error) if missing(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        }
         fs::remove_file(&listing.path)?;
-        Ok(())
+        Ok(true)
     }
 
     /// 実体の個数と容量を、各実体のヘッダーだけを読んで数える。
@@ -1041,6 +1050,22 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn removing_a_listed_part_succeeds_if_its_writer_has_finished() {
+        let temp = Temp::new();
+        let root = temp.0.join("objects");
+        let store = ObjectStore::open(&root).unwrap();
+        let dir = root.join("00");
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("chunk.write.part");
+        fs::write(&path, b"part").unwrap();
+        let listing = store.listing().unwrap();
+        assert_eq!(listing.len(), 1);
+        assert!(matches!(listing[0].entry, StoredEntry::Part));
+        fs::remove_file(&path).unwrap();
+        assert!(!store.remove_listed(&listing[0]).unwrap());
     }
 
     #[test]

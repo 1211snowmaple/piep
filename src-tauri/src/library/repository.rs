@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 pub(super) const SOURCE_FIELDS_V1: &[&str] = &[
     "title",
@@ -176,6 +176,11 @@ pub struct Library {
     readers: Mutex<Vec<Connection>>,
     /// 実体の回収と、台帳の全ファイルを読む処理（検証・バックアップ）を同時に走らせない。
     pub(crate) storage_gate: Mutex<()>,
+    /// 回収の参照確認と隔離に対し、実体の保存・再利用から台帳確定までを守る。
+    /// 両方を取る処理では storage_gate が先で、台帳の書き込み接続は最後に取る。
+    pub(crate) object_writes: parking_lot::RwLock<()>,
+    /// 台帳の写しが送信側にある間だけ、その実体を回収対象から外す。
+    pub(super) shipments: Mutex<Vec<Weak<[super::FileChunk]>>>,
     _process_lock: File,
 }
 
@@ -332,6 +337,8 @@ impl Library {
             conn,
             readers: Mutex::new(Vec::new()),
             storage_gate: Mutex::new(()),
+            object_writes: parking_lot::RwLock::new(()),
+            shipments: Mutex::new(Vec::new()),
             _process_lock: lock,
         };
         library.ensure_work_list()?;
@@ -394,6 +401,8 @@ impl Library {
             conn,
             readers: Mutex::new(Vec::new()),
             storage_gate: Mutex::new(()),
+            object_writes: parking_lot::RwLock::new(()),
+            shipments: Mutex::new(Vec::new()),
             _process_lock: lock,
         };
         library.ensure_work_list()?;
@@ -591,14 +600,54 @@ impl Library {
         Self::file_from_conn(&conn, id)
     }
 
-    /// 編集時に追加する画像等を、元バイト列のまま保管する。
+    /// 画像を選ぶたびに、保存までの保留を一つ作る。同じ画像を別の画面で選んだ場合も独立する。
+    pub fn store_pending_image(&self, source: &CaptureSource) -> Result<(ContentFile, LibraryId)> {
+        let selection = LibraryId::now_v7();
+        let file = self.store_original_with_selection(source, Some(selection))?;
+        Ok((file, selection))
+    }
+
+    #[cfg(test)]
     pub fn store_original(&self, source: &CaptureSource) -> Result<ContentFile> {
+        self.store_original_with_selection(source, None)
+    }
+
+    fn store_original_with_selection(
+        &self,
+        source: &CaptureSource,
+        selection: Option<LibraryId>,
+    ) -> Result<ContentFile> {
+        let _writing = self.object_writes.read();
         let prepared = source.store(&self.objects)?;
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         Self::register_file(&tx, &prepared)?;
+        if let Some(selection) = selection {
+            let expires_at = (chrono::Utc::now() + chrono::TimeDelta::days(1)).timestamp_millis();
+            tx.execute(
+                "INSERT INTO pending_edit_images(id,file_id,expires_at) VALUES(?1,?2,?3)",
+                params![
+                    selection.as_bytes().as_slice(),
+                    prepared.file.id.0.as_slice(),
+                    expires_at
+                ],
+            )?;
+        }
         tx.commit()?;
         Ok(prepared.file)
+    }
+
+    /// 正式な参照ができたトランザクションで、対応する選択だけを外す。
+    pub(crate) fn consume_image_selection(
+        tx: &Connection,
+        selection: LibraryId,
+        file: Fingerprint,
+    ) -> Result<()> {
+        tx.execute(
+            "DELETE FROM pending_edit_images WHERE id=?1 AND file_id=?2",
+            params![selection.as_bytes().as_slice(), file.0.as_slice()],
+        )?;
+        Ok(())
     }
 
     /// オフライン入力の取り込み用。ネットワーク取得は開始記録を作ってから完了する。
@@ -609,8 +658,17 @@ impl Library {
 
     pub(super) fn capture_prepared(
         &self,
+        capture: Capture,
+        context: Option<super::acquisitions::CompletionContext>,
+    ) -> Result<CaptureResult> {
+        self.capture_prepared_with(capture, context, || {})
+    }
+
+    pub(super) fn capture_prepared_with(
+        &self,
         mut capture: Capture,
         context: Option<super::acquisitions::CompletionContext>,
+        before_commit: impl FnOnce(),
     ) -> Result<CaptureResult> {
         if capture
             .acquired_at
@@ -671,6 +729,7 @@ impl Library {
             let conn = self.conn.lock().map_err(|_| Error::Busy)?;
             conn.query_row("SELECT c.snapshot_id FROM entity_current c JOIN external_identities e ON e.entity_id=c.entity_id WHERE e.provider=?1 AND e.kind=?2 AND e.external_key=?3",params![capture.provider,capture.kind.name(),capture.external_key],|r|r.get::<_,Vec<u8>>(0)).optional()?
         };
+        let _writing = self.object_writes.read();
         // 保管の中で読み戻して確かめた結果を集め、登録前にもう一度読むことを避ける。
         let raw_prepared = capture.raw.store(&self.objects)?;
         let raw = raw_prepared.file.clone();
@@ -768,6 +827,7 @@ impl Library {
         // 復元検査・ファイル読み込みは DB の書き込みトランザクションより前に済ませてある。
         let mut prepared = vec![raw_prepared, request_prepared];
         prepared.extend(stored);
+        before_commit();
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
         let tx = conn.transaction()?;
         let receipt = tx.query_row("SELECT entity_id,result_snapshot_id,created_revision,request_hash FROM acquisition_observations WHERE request_id=?1",[capture.request_id.as_bytes().as_slice()],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,bool>(2)?,r.get::<_,Vec<u8>>(3)?))).optional()?;

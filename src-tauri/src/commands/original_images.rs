@@ -117,7 +117,10 @@ pub fn cancel_original_image_upgrade() -> bool {
 /// 一作品ぶんの、原寸を探した結果。
 #[derive(Default)]
 struct Lookups {
+    /// 原寸が見つかった画像。
     found: usize,
+    /// 原寸は無かったが、切り抜いていない縮小版に替えられた画像（`unavailable` にも数える）。
+    improved: usize,
     unavailable: usize,
     failed: usize,
     last_error: Option<String>,
@@ -196,7 +199,9 @@ fn merge_misses(
 ) {
     for (url, lookup) in known {
         match lookup {
-            OriginalLookup::Unavailable => {
+            // master しか無かった画像も、原寸は公開元に無かったものとして控える（しばらくは
+            // 確かめ直さない）。
+            OriginalLookup::Unavailable | OriginalLookup::MasterOnly(_) => {
                 misses.entry(url.clone()).or_insert(now);
             }
             OriginalLookup::Found(_) => {
@@ -297,6 +302,11 @@ where
                 lookups.found += 1;
                 Some(found)
             }
+            Ok(OriginalLookup::MasterOnly(found)) => {
+                lookups.improved += 1;
+                lookups.unavailable += 1;
+                Some(found)
+            }
             Ok(OriginalLookup::Unavailable) => {
                 lookups.unavailable += 1;
                 None
@@ -324,7 +334,7 @@ where
     if cover_from_shelf {
         lookups.found += 1;
     }
-    if lookups.found == 0 {
+    if lookups.found == 0 && lookups.improved == 0 {
         return Ok(lookups);
     }
     match crate::commands::downloader::shelf::save_originals_to_shelf(
@@ -342,8 +352,10 @@ where
         Ok(None) => return Ok(Lookups::default()),
         Err(error) => {
             // 見つけた原寸は保存できていない。縮小版のまま残る。
-            lookups.failed += lookups.found;
+            lookups.failed += lookups.found + lookups.improved;
+            lookups.unavailable -= lookups.improved;
             lookups.found = 0;
+            lookups.improved = 0;
             lookups.last_error = Some(error);
         }
     }
@@ -527,7 +539,7 @@ pub async fn shelf_upgrade_images_to_original(
         }
         // 画像サーバーに一度も問い合わせず、何も保存しなかった作品（無かった画像だけが残る）は
         // 間を空けない。
-        if asked.load(Ordering::Relaxed) != asked_before || lookups.found > 0 {
+        if asked.load(Ordering::Relaxed) != asked_before || lookups.found + lookups.improved > 0 {
             tokio::time::sleep(PACE).await;
         }
     }

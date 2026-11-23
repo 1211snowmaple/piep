@@ -370,6 +370,7 @@ impl Library {
                 ));
             }
         }
+        let _writing = self.object_writes.read();
         let prepared = source.store(&self.objects)?;
         let file = prepared.file.clone();
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;

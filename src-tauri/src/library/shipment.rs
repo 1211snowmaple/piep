@@ -16,6 +16,7 @@ use rusqlite::{Connection, OpenFlags};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 /// 組んだ棚の数え。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,8 +39,10 @@ impl Library {
     }
 
     /// 送る写しの台帳を `database`（まだ無いファイル）へ書き、その台帳が指す実体を返す
-    /// （重ねずに識別子の順）。読み取りの接続から写すので、保存を止めない。
-    pub fn ship_snapshot(&self, database: &Path) -> Result<Vec<FileChunk>> {
+    /// （重ねずに識別子の順）。返した一覧が生きている間、回収からその実体を守る。
+    /// 読み取りの接続から写すので、ふつうの保存を止めない。
+    pub fn ship_snapshot(&self, database: &Path) -> Result<Arc<[FileChunk]>> {
+        let _turn = self.storage_gate.lock().map_err(|_| Error::Busy)?;
         if database.try_exists()? {
             return Err(Error::UnsafePath(database.into()));
         }
@@ -53,7 +56,11 @@ impl Library {
             target.execute_batch("PRAGMA journal_mode=DELETE;")?;
         }
         let conn = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        chunks_of(&conn)
+        let chunks: Arc<[_]> = chunks_of(&conn)?.into();
+        let mut shipments = self.shipments.lock().map_err(|_| Error::Busy)?;
+        shipments.retain(|pin| pin.strong_count() != 0);
+        shipments.push(Arc::downgrade(&chunks));
+        Ok(chunks)
     }
 
     /// 受け取った台帳と実体から、検証済みの棚を `destination`（まだ無い場所）に組む。

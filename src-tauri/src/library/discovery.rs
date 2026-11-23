@@ -134,6 +134,7 @@ impl Library {
         }) {
             return Ok(());
         }
+        let _writing = self.object_writes.read();
         let prepared = finding
             .map(|(_, value)| -> Result<super::repository::PreparedFile> {
                 let bytes = serde_json::to_vec(value)?;
@@ -329,6 +330,7 @@ impl Library {
             .get("holdKind")
             .and_then(Value::as_str)
             .filter(|v| !v.is_empty());
+        let _writing = self.object_writes.read();
         let stored = self.objects.put_stored(input.payload.as_bytes())?;
         let prepared: super::repository::PreparedFile = stored.into();
         let change = json!({"kind":"observe","provider":input.provider,"key":input.key,"candidate_kind":kind,"title":input.title,"file":prepared.file.id,"target_type":input.target_type,"held":held,"release":release});

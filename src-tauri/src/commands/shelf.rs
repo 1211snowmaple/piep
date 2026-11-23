@@ -1280,6 +1280,7 @@ pub enum CollectionChangeInput {
         cover_mode: Option<String>,
         #[serde(default)]
         cover_image: Option<String>,
+        cover_selection: Option<LibraryId>,
     },
     Add {
         works: Vec<WorkKeyInput>,
@@ -1335,9 +1336,11 @@ fn collection_change(
             cover_work,
             cover_mode,
             cover_image,
+            cover_selection,
         } => CollectionEdit::Look {
             cover_work: cover_work.map(one).transpose()?,
             cover_mode,
+            cover_selection,
             cover_image: Some(
                 cover_image
                     .map(|file| crate::library::Fingerprint::parse(&file))
@@ -1519,14 +1522,15 @@ pub async fn shelf_import_edit_image(
             Some("avif") => Some("image/avif"),
             _ => return Err("画像（png・jpg・webp・gif・avif）を選んでください".to_string()),
         };
-        let file = library
-            .store_original(&crate::library::CaptureSource::File(path))
+        let (file, selection) = library
+            .store_pending_image(&crate::library::CaptureSource::File(path))
             .map_err(|e| e.to_string())?;
         Ok(crate::library_work_edit::EditorMedia {
             id: 0,
             file: file.id.to_string(),
             name,
             mime_type: mime.map(str::to_owned),
+            selection: Some(selection),
         })
     })
     .await
