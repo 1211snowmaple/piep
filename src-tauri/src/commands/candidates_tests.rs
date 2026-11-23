@@ -78,6 +78,37 @@ fn candidates_drive_display_blocking_and_user_choices() {
     );
 }
 
+/// 要約の無い候補が一件あっても、一覧は失敗せず、その一件は元の記録から表示する。
+#[test]
+fn a_candidate_without_a_summary_does_not_break_the_list() {
+    let (_temp, state, library) = fixture();
+    save(&library, "11");
+    save(&library, "12");
+    let ledger = state.candidates();
+    ledger.hold(&candidate("11", "incomplete")).unwrap();
+    ledger.hold(&candidate("12", "incomplete")).unwrap();
+    library
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM discovery_summaries WHERE candidate_id=(SELECT c.id FROM discovery_candidates c
+                JOIN external_identities x ON x.entity_id=c.work_id AND x.kind='work' WHERE x.external_key='11')",
+            [],
+        )
+        .unwrap();
+    let rows = ledger.list_deferred_update_candidate_summaries(-1).unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(
+            row.metadata.author_name.as_deref(),
+            Some("試験の作者"),
+            "{}",
+            row.source_id
+        );
+    }
+}
+
 #[test]
 fn unavailable_holds_and_execution_rows_live_on_the_shelf() {
     let (_temp, state, library) = fixture();
