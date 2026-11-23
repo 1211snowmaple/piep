@@ -11,8 +11,8 @@ import { imageRecentlyFailed, savedCoverUrl, SmoothImage, workCoverUrl } from ".
  * - 詳細は画像本来の比率で見せる。読み込むまでは一覧と同じ枠で場所を取っておく。
  * - 表紙のない作品は、作者の色と作品ごとの紋で見分けられるようにする。
  */
-export function WorkThumbnail({ work, offline = false, snapshotGeneration, variant = "card" }: { work: PcWork; offline?: boolean; snapshotGeneration?: number; variant?: "card" | "detail" }) {
-  const src = !work.hasCover ? null : offline ? savedCoverUrl(work.id, snapshotGeneration ?? 0) : workCoverUrl(work, variant === "detail");
+export function WorkThumbnail({ work, hasCover = work.hasCover, offline = false, snapshotGeneration, variant = "card" }: { work: PcWork; hasCover?: boolean; offline?: boolean; snapshotGeneration?: number; variant?: "card" | "detail" }) {
+  const src = !hasCover ? null : offline ? savedCoverUrl(work.id, snapshotGeneration ?? 0) : workCoverUrl(work, variant === "detail");
   const [failed, setFailed] = useState(() => imageRecentlyFailed(src));
   const [shape, setShape] = useState<string | null>(null);
   const sigil = useMemo(() => coverSigil(work), [work.source, work.sourceId, work.authorName]);

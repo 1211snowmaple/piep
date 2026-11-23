@@ -274,14 +274,13 @@ fn parse_route(path: &str) -> Option<Route> {
     let decoded = percent_decode(path.trim_start_matches('/'))?;
     let parts: Vec<&str> = decoded.split('/').collect();
     match parts.as_slice() {
-        // 棚の作品の表紙。版の UUID は端末の覚えの鍵で、版が変わると取り直す。
+        // 棚の作品の表紙。端末の覚えとサーバーへの要求は同じ版を指す。
         ["shelf", library, work, snapshot, rest @ ..] if rest.is_empty() || rest == ["large"] => {
             let library = uuid::Uuid::parse_str(library).ok()?;
             let work = uuid::Uuid::parse_str(work).ok()?;
-            uuid::Uuid::parse_str(snapshot).ok()?;
-            let size = if rest.is_empty() { "" } else { "?size=large" };
+            let snapshot = uuid::Uuid::parse_str(snapshot).ok()?;
             Some(Route::Remote {
-                endpoint: format!("/api/libraries/{library}/works/{work}/cover{size}"),
+                endpoint: super::shelf::cover_endpoint(library, work, snapshot, !rest.is_empty()),
                 refreshes: false,
             })
         }
@@ -458,7 +457,8 @@ async fn serve_remote<R: Runtime>(
     let Ok((generation, Some(saved))) = state.connection_snapshot() else {
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let file = cache_path(&cache.dir, &saved.url, path);
+    // 要求先も鍵に含め、版を指定する前に覚えた表紙を使い回さない。
+    let file = cache_path(&cache.dir, &saved.url, &format!("{path}\0{endpoint}"));
     let Ok(cached) = state.with_connection(generation, || Ok(read_cached(&file))) else {
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn routes_only_accept_known_shapes() {
+    fn shelf_cover_routes_request_the_snapshot_from_the_path() {
         let (library, work, snapshot) = (
             "01a1eeaa-0000-7000-8000-000000000001",
             "01a1eeaa-0000-7000-8000-000000000002",
@@ -700,16 +700,29 @@ mod tests {
         assert_eq!(
             parse_route(&format!("/shelf%2F{library}%2F{work}%2F{snapshot}")),
             Some(Route::Remote {
-                endpoint: format!("/api/libraries/{library}/works/{work}/cover"),
+                endpoint: format!(
+                    "/api/libraries/{library}/works/{work}/cover?snapshot={snapshot}"
+                ),
                 refreshes: false
             })
         );
         assert_eq!(
             parse_route(&format!("/shelf%2F{library}%2F{work}%2F{snapshot}%2Flarge")),
             Some(Route::Remote {
-                endpoint: format!("/api/libraries/{library}/works/{work}/cover?size=large"),
+                endpoint: format!(
+                    "/api/libraries/{library}/works/{work}/cover?snapshot={snapshot}&size=large"
+                ),
                 refreshes: false
             })
+        );
+    }
+
+    #[test]
+    fn routes_only_accept_known_shapes() {
+        let (library, work, snapshot) = (
+            "01a1eeaa-0000-7000-8000-000000000001",
+            "01a1eeaa-0000-7000-8000-000000000002",
+            "01a1eeaa-0000-7000-8000-000000000003",
         );
         assert_eq!(
             parse_route(&format!(

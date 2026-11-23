@@ -45,6 +45,10 @@ export function ReaderInfoSheet({ versions, selectedVersion, latestEdited, onVer
   const percent = readingPercent(progress, pageCount);
   const hasOutline = outline.length > 0;
   const activeTab = hasOutline ? tab : "info";
+  // 版を選んだときは、その版の UUID が分かってから表紙の有無をサーバーへ問い合わせる。
+  const hasCover = selectedVersion === null
+    ? work.hasCover
+    : versions.some((version) => version.version === selectedVersion && version.snapshotId === work.snapshotId);
 
   useLayoutEffect(() => {
     if (!descriptionOpen && descriptionRef.current) setDescriptionLong(descriptionRef.current.scrollHeight > descriptionRef.current.clientHeight + 1);
@@ -74,7 +78,7 @@ export function ReaderInfoSheet({ versions, selectedVersion, latestEdited, onVer
         </ol> : <>
           {/* 作品の詳細と同じ組み立て。ラベル、シリーズ、題名、作者、事実の一行。 */}
           <div className="reader-info-hero">
-            <span className="reader-info-cover"><WorkThumbnail work={work} offline={offline} snapshotGeneration={snapshotGeneration} variant="detail" /></span>
+            <span className="reader-info-cover"><WorkThumbnail work={work} hasCover={hasCover} offline={offline} snapshotGeneration={snapshotGeneration} variant="detail" /></span>
             <div className="reader-info-heading">
               <div className="reader-info-labels"><ProviderMark source={work.source} /><span>{CONTENT_TYPE_LABELS[work.contentType] ?? "作品"}</span>{isEdited && <span><Icons.edit aria-hidden="true" />編集版</span>}{offline && <span>端末に保存</span>}</div>
               {work.seriesTitle && (navigation.canBrowseServer && work.seriesId
