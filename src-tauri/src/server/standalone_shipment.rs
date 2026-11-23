@@ -94,6 +94,10 @@ pub struct ShipmentStatus {
     /// 組み終えて、立ち上げ直しを頼んだか（偽なら手で立ち上げ直すと切り替わる）。
     pub restarting: Option<bool>,
     pub error: Option<String>,
+    /// このサーバーが扱える棚の台帳の版。送り手はこれより新しい棚を送らない（組み立てで
+    /// 断られ、送った分が無駄になる）。
+    #[serde(default)]
+    pub schema: Option<i64>,
 }
 
 /// 問い合わせる実体（識別子は 16 進）。
@@ -184,10 +188,13 @@ impl ShelfShipments {
     }
 
     pub fn status(&self) -> ShipmentStatus {
-        self.status
+        let mut status = self
+            .status
             .lock()
             .map(|status| status.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        status.schema = Some(crate::library::schema::VERSION);
+        status
     }
 
     /// 受け取りか組み立ての途中か。自己更新はこれが済むのを待つ。
@@ -410,6 +417,7 @@ impl ShelfShipments {
                             works: Some(works),
                             restarting: Some(restart),
                             error: None,
+                            schema: None,
                         }
                     }
                     Err(error) => {

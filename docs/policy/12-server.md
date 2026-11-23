@@ -123,7 +123,7 @@ UUID・同期の世代・作品数（十進の文字列）を返す。管理の�
 
 | 口 | 用途 |
 | --- | --- |
-| `GET /api/admin/shelf/shipments` | 受け取りの状態（`idle`・`receiving`・`assembling`・`ready`・`failed`）と、いま配っている世代 |
+| `GET /api/admin/shelf/shipments` | 受け取りの状態（`idle`・`receiving`・`assembling`・`ready`・`failed`）と、いま配っている世代、このサーバーが扱える棚の台帳の版（`schema`）。デスクトップ版は写しを作る前にこれを見て、版が古い（返さない）サーバーには送らず、サーバーの更新を頼む |
 | `POST /api/admin/shelf/shipments` | `{libraryId}` で受け取りを始める。同じ棚の受け取りが残っていれば続ける。別の棚を配っていれば 409 |
 | `POST …/shipments/{id}/needed` | `{chunks:[{id,length}]}`（一度に 4096 まで）のうち、まだ持っていない実体を返す |
 | `PUT …/shipments/{id}/chunks/{chunk}?length=` | 実体を一つ、保管の形のまま受け取り、識別子と照らす |
