@@ -6,12 +6,12 @@
 //! 切れても同じ棚の受け取りなら続きから受ける。揃ったら、受け取った実体といま配っている棚の
 //! 実体（ハードリンクで共有）から検証済みの棚を別の世代に組み、次の起動でその世代を選ぶ
 //! （見張り役のいるサーバーは自分で立ち上げ直す）。起動のときは、送ったあとに携帯が前の世代に
-//! 書いた読書位置を新しい世代へ写してから配る。
+//! 書いた読書位置とお気に入りを新しい世代へ写してから配る。
 //!
 //! 携帯が棚を読む許可（`shelf.readers`）は、管理者が端末ごとに付け外しする。
 
 use super::generations::{activate_locked, generation_path, generations, write_config};
-use super::{load_config, ServerConfig, ServerPaths};
+use super::{load_config, ReaderShelfConfig, ServerConfig, ServerPaths};
 use crate::library::{
     protocol::Id, ContentFile, FileChunk, Fingerprint, Library, LibraryId, ObjectStore,
 };
@@ -72,7 +72,36 @@ struct Current {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Pending {
-    generation: Id,
+    library_id: LibraryId,
+    previous: ShelfSource,
+    next_generation: Id,
+}
+
+/// 同じ棚の ID を持つ写しどうしを、配信する世代で区別する。
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ShelfSource {
+    Absent,
+    Local,
+    Generation(Id),
+}
+
+impl ShelfSource {
+    fn from_config(shelf: Option<&ReaderShelfConfig>) -> Self {
+        match shelf.map(|settings| settings.generation) {
+            None => Self::Absent,
+            Some(None) => Self::Local,
+            Some(Some(generation)) => Self::Generation(generation),
+        }
+    }
+
+    fn root(&self, paths: &ServerPaths) -> Result<Option<PathBuf>, String> {
+        match *self {
+            Self::Absent => Ok(None),
+            Self::Local => Ok(Some(paths.shelf())),
+            Self::Generation(generation) => generation_path(paths, generation).map(Some),
+        }
+    }
 }
 
 /// 受け取りを始めた（続けた）ときの答え。
@@ -318,6 +347,8 @@ impl ShelfShipments {
         if database.length > MAX_DATABASE_BYTES || database.validate_layout().is_err() {
             return Err(ShipError::Invalid("台帳の部分の並びが正しくありません"));
         }
+        let config = load_config(&self.paths).map_err(ShipError::Internal)?;
+        let previous = ShelfSource::from_config(config.shelf.as_ref());
         // 台帳の部分を、次の受け取りでも使えるよう台帳の部分の置き場へ移してから組み立てる。
         let context = |step: &'static str| {
             move |error: piep_storage::Error| ShipError::Internal(format!("{step}: {error}"))
@@ -382,11 +413,17 @@ impl ShelfShipments {
             )
             .map_err(|error| error.to_string())?
             .works;
+            let pending = Pending {
+                library_id: current.library_id,
+                previous,
+                next_generation: generation,
+            };
             write_atomic(
                 &paths.root.join(PENDING),
-                &serde_json::to_vec(&Pending { generation }).map_err(|error| error.to_string())?,
+                &serde_json::to_vec(&pending).map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.to_string())?;
+            piep_storage::sync_directory(&paths.root).map_err(|error| error.to_string())?;
             // 受け取ったものは組んだ棚へ共有した。置き場ごと片付ける。
             let _ = fs::remove_dir_all(incoming(&paths));
             // 台帳の部分は、いま組んだ台帳のものだけを残す。
@@ -501,55 +538,78 @@ fn prune_parts(paths: &ServerPaths, keep: &HashSet<Fingerprint>) -> Result<(), S
     Ok(())
 }
 
-/// 起動のとき（置き場の錠を持ったまま、棚を開く前に）呼ぶ。組み終えた世代があれば配る棚に
-/// 選び、送ったあとに携帯が前の世代へ書いた読書位置を写し、古い世代を片付ける。選べなければ
-/// 前の棚のまま起動する。
+/// 起動のとき、置き場の錠を持ったまま呼ぶ。引き継ぎを済ませてから棚と同期の世代を切り替える。
 pub fn apply_pending(paths: &ServerPaths) {
-    let pending_path = paths.root.join(PENDING);
-    let Ok(bytes) = fs::read(&pending_path) else {
-        return;
-    };
-    let result = (|| -> Result<(), String> {
-        let pending: Pending = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-        let before = load_config(paths)?.shelf;
-        let previous = match &before {
-            Some(settings) => Some(match settings.generation {
-                Some(generation) => generation_path(paths, generation)?,
-                None => paths.shelf(),
-            }),
-            None => None,
-        };
-        activate_locked(paths, pending.generation, false)?;
-        let next = generation_path(paths, pending.generation)?;
-        // ここからは切り替えたあと。読書位置を写せなくても棚で起動する（前の世代は残る）。
-        if let (Some(previous), Some(settings)) = (&previous, &before) {
-            if previous != &next && previous.is_dir() {
-                let moved = (|| -> Result<(usize, usize), String> {
-                    let old = Library::open_matching(previous, settings.library_id.get())
-                        .map_err(|error| format!("前の棚を開けません: {error}"))?;
-                    let new = Library::open_matching(&next, settings.library_id.get())
-                        .map_err(|error| format!("棚を開けません: {error}"))?;
-                    new.adopt_from_previous(&old)
-                        .map_err(|error| format!("読書位置とお気に入りを写せません: {error}"))
-                })();
-                match moved {
-                    Ok((positions, favorites)) => log::info!(
-                        "前の棚から読書位置を {positions} 件、お気に入りを {favorites} 件写しました"
-                    ),
-                    Err(error) => log::error!(
-                        "送られた棚に切り替えましたが、前の棚の読書位置を写せませんでした: {error}"
-                    ),
-                }
-            }
-        }
-        prune_generations(paths, pending.generation, previous.as_deref());
-        Ok(())
-    })();
-    if let Err(error) = result {
-        log::error!("送られた棚に切り替えられません。前の棚のまま起動します: {error}");
+    if let Err(error) = apply_pending_with(paths, |_| {}) {
+        log::error!("送られた棚の切り替え処理を完了できません。予約を残します: {error}");
     }
-    // 成否によらず一度きり（失敗した世代を起動のたびに試さない）。
-    let _ = fs::remove_file(pending_path);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SwapStage {
+    BeforeAdoption,
+    AfterAdoption,
+    AfterActivation,
+}
+
+fn read_pending(paths: &ServerPaths) -> Result<Option<Pending>, String> {
+    match fs::read(paths.root.join(PENDING)) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| format!("棚の切り替えの予約を読めません: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("棚の切り替えの予約を読めません: {error}")),
+    }
+}
+
+/// 予約した世代は、携帯の変更を引き継ぐ起動時の処理で選ぶ。
+pub(super) fn check_manual_activation(paths: &ServerPaths, generation: Id) -> Result<(), String> {
+    if read_pending(paths)?.is_some_and(|pending| pending.next_generation == generation) {
+        return Err(
+            "受け取った棚の切り替えが予約されています。サーバーを起動して切り替えてください".into(),
+        );
+    }
+    Ok(())
+}
+
+fn apply_pending_with(
+    paths: &ServerPaths,
+    mut reached: impl FnMut(SwapStage),
+) -> Result<(), String> {
+    let Some(pending) = read_pending(paths)? else {
+        return Ok(());
+    };
+    let previous = pending.previous.root(paths)?;
+    activate_locked(paths, pending.next_generation, |settings, new| {
+        if new.id != pending.library_id {
+            return Err("予約した棚の ID が一致しません".into());
+        }
+        let current = ShelfSource::from_config(settings);
+        if current == ShelfSource::Generation(pending.next_generation) {
+            // 配信先を書く前に引き継いだので、あとは片付けだけでよい。
+            return Ok(());
+        }
+        if current != pending.previous {
+            return Err("予約した引き継ぎ元と配信中の棚が一致しません".into());
+        }
+        reached(SwapStage::BeforeAdoption);
+        if let Some(previous) = &previous {
+            let old = Library::open_matching(previous, pending.library_id)
+                .map_err(|error| format!("前の棚を開けません: {error}"))?;
+            let (positions, favorites) = new
+                .adopt_from_previous(&old)
+                .map_err(|error| format!("読書位置とお気に入りを写せません: {error}"))?;
+            log::info!(
+                "前の棚から読書位置を {positions} 件、お気に入りを {favorites} 件写しました"
+            );
+        }
+        reached(SwapStage::AfterAdoption);
+        Ok(())
+    })?;
+    reached(SwapStage::AfterActivation);
+    prune_generations(paths, pending.next_generation, previous.as_deref());
+    fs::remove_file(paths.root.join(PENDING))
+        .map_err(|error| format!("棚の切り替えの予約を片付けられません: {error}"))
 }
 
 /// 今の世代と一つ前の世代だけを残す（実体はハードリンクで共有しているので、消えるのは
