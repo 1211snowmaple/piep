@@ -58,7 +58,7 @@ export function useFavoriteNotice(): string | null {
 
 /**
  * 作品のお気に入りの今の値と、押せるときの切り替え口。
- * サーバーが `favorite-write` を持ち、つながっているときだけ `onToggle` を返す。
+ * サーバーの棚に届いているときだけ `onToggle` を返す。
  */
 export function useFavorite(work: PcWork): { favorite: boolean; busy: boolean; onToggle?: (next: boolean) => void } {
   useSyncExternalStore(subscribe, () => version);

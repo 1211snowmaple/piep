@@ -80,6 +80,18 @@ export interface OriginalImageProgress {
   failed: number;
   activeLabel: string | null;
   error: string | null;
+  /** 原寸にできなかった作品（公開元に無い・失敗）。 */
+  misses: OriginalImageMiss[];
+}
+
+export interface OriginalImageMiss {
+  workId: string;
+  title: string;
+  provider: string;
+  externalKey: string;
+  unavailable: number;
+  failed: number;
+  reason: string | null;
 }
 
 export interface OriginalImageResult {

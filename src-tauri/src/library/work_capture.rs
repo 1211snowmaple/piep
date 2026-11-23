@@ -306,7 +306,8 @@ pub struct WorkSave<'a> {
 impl Library {
     /// 取得を始めた記録を作ってから、応答と手元の画像・添付を保存する。中身が今の版と同じなら
     /// 版を増やさない（`created_revision` が偽）。
-    /// 旧入力の照合用の形式を保つ。アプリの新規保存には読書の対応も確定する `save_readable_work` を使う。
+    /// 作者・シリーズの記録、更新確認、手元の画像の取り込みが使う。作品の新規保存には読書の対応も
+    /// 確定する `save_readable_work` を使う。
     pub fn save_work(&self, save: WorkSave<'_>) -> Result<CaptureResult> {
         self.save_work_inner(save, None, false)
     }

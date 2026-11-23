@@ -46,10 +46,10 @@ export function quickSaveSource(value: string): QuickSaveSource | null {
 
 /** 索引の状態を、ホームの一行で言うときの言葉。 */
 export interface SearchIndexNoteInput {
-  pendingDownloads: number;
+  pendingWorks: number;
   isComplete: boolean;
   semanticIndexedChunks: number;
-  semanticPendingDownloads: number;
+  semanticPendingWorks: number;
 }
 
 /**
@@ -66,10 +66,10 @@ export interface SearchIndexNoteInput {
  */
 export function searchIndexNote(status: SearchIndexNoteInput | undefined): string {
   if (!status) return "";
-  if (!status.isComplete) return `${formatNumber(status.pendingDownloads)}件を処理中`;
+  if (!status.isComplete) return `${formatNumber(status.pendingWorks)}件を処理中`;
   if (status.semanticIndexedChunks === 0) return "全文検索は最新です";
-  if (status.semanticPendingDownloads > 0) {
-    return `全文検索は最新です · 意味検索は${formatNumber(status.semanticPendingDownloads)}件が未反映`;
+  if (status.semanticPendingWorks > 0) {
+    return `全文検索は最新です · 意味検索は${formatNumber(status.semanticPendingWorks)}件が未反映`;
   }
   return "全文・意味検索は最新です";
 }
@@ -91,20 +91,20 @@ export default function DashboardPage() {
         shelfDashboard(),
         searchShelf({ sortBy: "saved", sortOrder: "desc", limit: 4 }),
       ]);
-      return { ...counts, recentDownloads: recent.items };
+      return { ...counts, recentWorks: recent.items };
     },
   });
   const index = useQuery({
     queryKey: ["search-index-status"],
     queryFn: () => runtime ? shelfSearchIndexStatus() : Promise.resolve({
-      totalDownloads: demoDashboard.stats.totalDownloads,
-      indexedDownloads: demoDashboard.stats.totalDownloads,
-      pendingDownloads: 0,
+      totalWorks: demoDashboard.stats.totalWorks,
+      indexedWorks: demoDashboard.stats.totalWorks,
+      pendingWorks: 0,
       isComplete: true,
       phase: "ready",
       semanticIndexedChunks: 4192,
-      semanticIndexedDownloads: demoDashboard.stats.totalDownloads,
-      semanticPendingDownloads: 0,
+      semanticIndexedWorks: demoDashboard.stats.totalWorks,
+      semanticPendingWorks: 0,
       semanticModelReady: true,
       embeddingProvider: "preview",
       gpuEnabled: true,
@@ -123,12 +123,12 @@ export default function DashboardPage() {
     initialValues: { url: "" },
     validate: { url: (value) => quickSaveSource(value) ? null : "pixiv.netまたはfanbox.ccのURLを入力してください" },
   });
-  const chartData = useMemo(() => buildTrend(summary.data?.monthlyDownloads ?? []), [summary.data]);
+  const chartData = useMemo(() => buildTrend(summary.data?.monthlySaves ?? []), [summary.data]);
 
   if (summary.isLoading) return <div className="page"><LoadingState label="ホームを準備しています" /></div>;
   if (summary.error || !summary.data) return <div className="page"><ErrorState error={summary.error} retry={() => summary.refetch()} /></div>;
   const data = summary.data;
-  const indexProgress = index.data?.totalDownloads ? Math.round(index.data.indexedDownloads / index.data.totalDownloads * 100) : 100;
+  const indexProgress = index.data?.totalWorks ? Math.round(index.data.indexedWorks / index.data.totalWorks * 100) : 100;
 
   return (
     <div className="page page--contained dashboard-page">
@@ -158,7 +158,7 @@ export default function DashboardPage() {
         {/* Each tile opens the library already filtered to what it counts, so
             the number and its destination agree. */}
         <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
-          <StatCard icon={Icons.database} label="保存作品" value={formatNumber(data.stats.totalDownloads)} hint={`pixiv ${formatNumber(data.stats.pixivCount)} · FANBOX ${formatNumber(data.stats.fanboxCount)}`} color="#0d86f4" onClick={() => navigate("/library")} />
+          <StatCard icon={Icons.database} label="保存作品" value={formatNumber(data.stats.totalWorks)} hint={`pixiv ${formatNumber(data.stats.pixivCount)} · FANBOX ${formatNumber(data.stats.fanboxCount)}`} color="#0d86f4" onClick={() => navigate("/library")} />
           <StatCard icon={Icons.storage} label="使用容量" value={formatBytes(data.stats.totalSizeBytes)} hint={`${formatNumber(data.stats.totalAssets)}件の画像・添付`} color="#31b497" onClick={() => navigate("/library?sort=size")} />
           <StatCard icon={Icons.favorite} label="お気に入り" value={formatNumber(data.favoriteCount)} hint="すぐ読み返せる作品" color="#ef5b78" onClick={() => navigate("/library?favorite=1")} />
           {/* Watching is done per author and series, not per work, so the
@@ -181,7 +181,7 @@ export default function DashboardPage() {
                 </Box>
                 <Group gap="md"><TrendLegend color="#0096fa" label="pixiv" /><TrendLegend color="#d1a900" label="FANBOX" /></Group>
               </Group>
-              <SourceTrend months={chartData} breakdown={data.sourceBreakdown} total={data.stats.totalDownloads} />
+              <SourceTrend months={chartData} breakdown={data.sourceBreakdown} total={data.stats.totalWorks} />
             </Card>
           </Grid.Col>
           <Grid.Col span={{ base: 12, md: 6, lg: 5 }}>
@@ -202,7 +202,7 @@ export default function DashboardPage() {
 
         <Box>
           <Group justify="space-between" mb="md"><Box><Title order={2}>最近の保存</Title><Text size="sm" c="dimmed">続きから読む、整理する</Text></Box><Button variant="subtle" rightSection={<Icons.forward size={IconSize.menu} />} onClick={() => navigate("/library")}>すべて表示</Button></Group>
-          {data.recentDownloads.length ? <div className="work-grid">{data.recentDownloads.slice(0, 4).map((work) => <WorkCard key={work.id} work={work} />)}</div> : <EmptyState icon={Icons.database} title="まだ作品がありません" description="Webから最初の作品を保存すると、ここからすぐに読み返せます。" action={<Button leftSection={<Icons.collect size={IconSize.menu} />} onClick={() => navigate("/save/pixiv")}>作品を保存する</Button>} />}
+          {data.recentWorks.length ? <div className="work-grid">{data.recentWorks.slice(0, 4).map((work) => <WorkCard key={work.id} work={work} />)}</div> : <EmptyState icon={Icons.database} title="まだ作品がありません" description="Webから最初の作品を保存すると、ここからすぐに読み返せます。" action={<Button leftSection={<Icons.collect size={IconSize.menu} />} onClick={() => navigate("/save/pixiv")}>作品を保存する</Button>} />}
         </Box>
       </Stack>
     </div>

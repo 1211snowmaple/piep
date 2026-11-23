@@ -217,14 +217,7 @@ impl FanboxAPI {
         Ok(())
     }
 
-    /// 2. クリエイター情報取得
-    pub async fn get_creator(&self, creator_id: &str) -> Result<FanboxCreator, FanboxError> {
-        let raw = self.get_creator_raw(creator_id).await?;
-        let resp: FanboxResponse<FanboxCreator> =
-            serde_json::from_str(&raw).map_err(|error| FanboxError::Serde { error })?;
-        Ok(resp.body)
-    }
-
+    /// 2. クリエイター情報取得（解釈は保存の側が生の JSON から行う）
     pub async fn get_creator_raw(&self, creator_id: &str) -> Result<String, FanboxError> {
         let mut url =
             reqwest::Url::parse("https://api.fanbox.cc/creator.get").expect("fixed API URL");

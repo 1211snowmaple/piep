@@ -68,14 +68,18 @@ pub async fn login_with_refresh_token(
         .send()
         .await?;
 
-    if res.status().is_success() {
+    let status = res.status();
+    if status.is_success() {
         parse_auth_response(&bounded_response_text(res).await?)
     } else {
-        // 取得元が返した本文は記録にだけ残す。何が返るかは向こう次第で、
-        // 利用者が読んでも次にできることは増えない（`PixivError` の他の
-        // 変種と同じ方針）。
+        // 取得元が返した本文は、記録にも中身を残さない（大きさだけ）。認証の応答は
+        // 鍵を含みうるうえ、何が返るかは向こう次第である。利用者が読んでも次に
+        // できることは増えない（`PixivError` の他の変種と同じ方針）。
         let err_text = bounded_response_text(res).await?;
-        log::error!("Pixiv API Error Response: {}", err_text);
+        crate::pixiv_api::error::log_response_body(
+            &format!("pixiv のログインが失敗しました（{status}）"),
+            &err_text,
+        );
         Err("pixivとの接続に失敗しました。トークンを取り直してから、もう一度お試しください".into())
     }
 }
@@ -108,14 +112,18 @@ pub async fn login_with_code(
         .send()
         .await?;
 
-    if res.status().is_success() {
+    let status = res.status();
+    if status.is_success() {
         parse_auth_response(&bounded_response_text(res).await?)
     } else {
-        // 取得元が返した本文は記録にだけ残す。何が返るかは向こう次第で、
-        // 利用者が読んでも次にできることは増えない（`PixivError` の他の
-        // 変種と同じ方針）。
+        // 取得元が返した本文は、記録にも中身を残さない（大きさだけ）。認証の応答は
+        // 鍵を含みうるうえ、何が返るかは向こう次第である。利用者が読んでも次に
+        // できることは増えない（`PixivError` の他の変種と同じ方針）。
         let err_text = bounded_response_text(res).await?;
-        log::error!("Pixiv API Error Response: {}", err_text);
+        crate::pixiv_api::error::log_response_body(
+            &format!("pixiv のログインが失敗しました（{status}）"),
+            &err_text,
+        );
         Err("pixivとの接続に失敗しました。トークンを取り直してから、もう一度お試しください".into())
     }
 }

@@ -112,7 +112,7 @@ export function trackedRebuildJobId(): string | null {
 function forwardToTracked(progress: SearchRebuildProgress) {
   const run = tracked;
   if (!run || progress.jobId !== run.jobId) return;
-  run.operation.progress(progress.processed ?? progress.indexedDownloads, progress.processedTotal ?? progress.totalDownloads);
+  run.operation.progress(progress.processed ?? progress.indexedWorks, progress.processedTotal ?? progress.totalWorks);
   if (progress.status === "running") return;
   tracked = null;
   const note = progress.status === "failed"

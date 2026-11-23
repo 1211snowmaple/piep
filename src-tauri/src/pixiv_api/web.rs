@@ -355,7 +355,20 @@ pub fn parse_user_novels(
         .ok_or_else(|| PixivError::UnintelligibleResponse {
             body: "一覧の本体が入っていません".to_string(),
         })?;
-    let body = body.get("works").and_then(Value::as_object).unwrap_or(body);
+    // 一つも返せないとき、pixiv は `works` を空の配列で返す。本体そのものには `works`・
+    // `zoneConfig`・`extraData` などが並ぶので、本体を一覧と読み違えてはいけない（3件を
+    // 聞いて本体の3つの鍵を「3件返った」と数え、ID が合わずに一時停止していた）。
+    let no_works = serde_json::Map::new();
+    let body = match body.get("works") {
+        Some(Value::Object(works)) => works,
+        Some(Value::Array(works)) if works.is_empty() => &no_works,
+        Some(_) => {
+            return Err(PixivError::UnintelligibleResponse {
+                body: "一覧の works が読めない形です".to_string(),
+            })
+        }
+        None => body,
+    };
 
     if body.len() != requested {
         return Err(PixivError::PartialListing {
@@ -922,6 +935,23 @@ mod tests {
             ),
             "{error:?}"
         );
+    }
+
+    /// 一つも返せないとき、pixiv は `works` を空の配列にし、本体には広告の枠なども並ぶ。
+    /// 聞いた数と本体の鍵の数がたまたま同じでも、本体を一覧と読まない（0件返ったと読む）。
+    #[test]
+    fn an_empty_works_array_is_zero_works_not_the_body_itself() {
+        let payload = serde_json::json!({ "error": false, "message": "", "body": {
+            "works": [], "zoneConfig": {"header": {"url": "x"}}, "extraData": {"meta": {}}
+        }});
+        assert!(matches!(
+            parse_user_novels(&payload, 3).unwrap_err(),
+            PixivError::PartialListing {
+                requested: 3,
+                returned: 0
+            }
+        ));
+        assert!(parse_user_novels(&payload, 0).unwrap().is_empty());
     }
 
     /// 多く返ってきたときも、頼んだものと違う返事であることに変わりはない。
