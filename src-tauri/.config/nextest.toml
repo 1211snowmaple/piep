@@ -7,3 +7,13 @@ fail-fast = false
 # 長い試験に気づけるように印を付けるが、止めはしない。
 slow-timeout = { period = "60s" }
 failure-output = "immediate-final"
+
+# Windows の資格情報マネージャーは、別々のプロセスから同時に書くと更新を取りこぼす
+# （書けたと返った直後に読むと「無い」になる。16 プロセスで約 3,500 回試して数十回）。
+# 本物に触る試験はここだけにして、一つずつ走らせる。
+[test-groups]
+credential-manager = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/^credential_manager::/)'
+test-group = 'credential-manager'

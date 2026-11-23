@@ -25,9 +25,9 @@
 - 閉じる操作と保留で候補を削除しない。同じ画面を開き直す間は編集途中の選択・順序・名前を保持する。アプリ終了をまたぐ下書きと保留状態の保存は未実装。
 - 採用は送信された配列順で保存し、次の候補を確認できる。走査候補の部分却下は選択された作品同士だけに否定を記録する。
 
-実装の入口は [走査](../../src-tauri/src/database/queries/collection_sweep.rs)、
-[題名解析](../../src-tauri/src/database/collection_sequence.rs)、
-[採否の保存](../../src-tauri/src/database/queries/collections.rs)、
+実装の入口は [走査](../../src-tauri/src/analysis/collection_sweep.rs)、
+[題名解析](../../src-tauri/src/analysis/collection_sequence.rs)、
+[採否の保存](../../src-tauri/src/library_suggestions.rs)、
 [候補の確認](../../src/features/collections/SuggestionInbox.tsx)。
 
 ### まだ確定できないこと

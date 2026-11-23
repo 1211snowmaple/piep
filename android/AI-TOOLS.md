@@ -1,6 +1,6 @@
 # AI 開発支援の入口（Android 版）
 
-Android 版は Tauri 2 / Rust / React 19 / Vite 8 の別アプリ。現在 Mantine は使っていない。製品の実装順は `PLAN.md`、エミュレーターの操作は `SETUP.md`、PC との契約は `PROTOCOL.md` を参照する。
+Android 版は Tauri 2 / Rust / React 19 / Vite 8 のアプリで、デスクトップ版と同じリポジトリにある。現在 Mantine は使っていない。エミュレーターの操作は `SETUP.md`、サーバーとの契約は `PROTOCOL.md` を参照する。
 
 Codex の全プロジェクト設定に `mantine`、`playwright`、`openaiDeveloperDocs` MCP を登録済み。各サーバーの MCP 初期化応答も確認した。`mantine` は主にデスクトップ版用。`playwright` はブラウザー画面の検証に使え、Android WebView 自体の検証は `npx tauri android dev` とエミュレーターで行う。`openaiDeveloperDocs` は Codex や OpenAI 製品/API の資料用。各設定は `codex mcp get <名前>` で確認できる。新しいツールは Codex の新しいチャットで利用可能性を確認する。
 
