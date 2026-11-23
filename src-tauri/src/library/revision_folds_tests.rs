@@ -71,34 +71,13 @@ fn current(library: &Library, entity: LibraryId) -> Vec<u8> {
         .unwrap()
 }
 
-#[test]
-fn a_linked_posts_counts_do_not_make_a_version_but_its_title_does() {
-    let (_fixture, library) = library();
-    let first = save(&library, &post("本文", "リンク先", 1));
-    let liked = save(&library, &post("本文", "リンク先", 5));
-    assert!(!liked.created_revision);
-    assert_eq!(revisions(&library, first.entity_id), 1);
-    let renamed = save(&library, &post("本文", "書き直したリンク先", 5));
-    assert!(renamed.created_revision);
-    assert_eq!(revisions(&library, first.entity_id), 2);
-    library.verify().unwrap();
-}
-
-#[test]
-fn a_version_split_only_by_volatile_values_is_folded_into_the_one_before() {
-    let (_fixture, library) = library();
-    let first = save(&library, &post("本文", "リンク先", 1));
-    let second = save(&library, &post("書き直した本文", "リンク先", 1));
-    assert!(second.created_revision);
-    // 作者が本文を書き直した版は畳まない。
-    {
-        let mut conn = library.conn.lock().unwrap();
-        let tx = conn.transaction().unwrap();
-        assert_eq!(library.fold_volatile_revisions(&tx).unwrap(), 0);
-    }
-    assert_eq!(revisions(&library, first.entity_id), 2);
-
-    // 規則 1 のころにできた版を写す：二つ目の版の本文を一つ目と同じ本文にし、指紋を規則 1 で記録する。
+/// 規則 1 のころにできた版を写す：二つ目の版の本文を一つ目と同じ本文にし、指紋を規則 1 で
+/// 記録し、畳む手入れを予約する。
+fn split_by_rule_one(
+    library: &Library,
+    first: &crate::library::CaptureResult,
+    second: &crate::library::CaptureResult,
+) {
     {
         let conn = library.conn.lock().unwrap();
         conn.execute_batch(
@@ -139,6 +118,37 @@ fn a_version_split_only_by_volatile_values_is_folded_into_the_one_before() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn a_linked_posts_counts_do_not_make_a_version_but_its_title_does() {
+    let (_fixture, library) = library();
+    let first = save(&library, &post("本文", "リンク先", 1));
+    let liked = save(&library, &post("本文", "リンク先", 5));
+    assert!(!liked.created_revision);
+    assert_eq!(revisions(&library, first.entity_id), 1);
+    let renamed = save(&library, &post("本文", "書き直したリンク先", 5));
+    assert!(renamed.created_revision);
+    assert_eq!(revisions(&library, first.entity_id), 2);
+    library.verify().unwrap();
+}
+
+#[test]
+fn a_version_split_only_by_volatile_values_is_folded_into_the_one_before() {
+    let (_fixture, library) = library();
+    let first = save(&library, &post("本文", "リンク先", 1));
+    let second = save(&library, &post("書き直した本文", "リンク先", 1));
+    assert!(second.created_revision);
+    // 作者が本文を書き直した版は畳まない。
+    {
+        let mut conn = library.conn.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        assert_eq!(library.fold_volatile_revisions(&tx).unwrap(), 0);
+    }
+    assert_eq!(revisions(&library, first.entity_id), 2);
+
+    // 規則 1 のころにできた版を写す：二つ目の版の本文を一つ目と同じ本文にし、指紋を規則 1 で記録する。
+    split_by_rule_one(&library, &first, &second);
     {
         let mut conn = library.conn.lock().unwrap();
         let tx = conn.transaction().unwrap();
@@ -168,6 +178,81 @@ fn a_version_split_only_by_volatile_values_is_folded_into_the_one_before() {
     assert!(!again.created_revision);
     assert_eq!(revisions(&library, first.entity_id), 1);
     library.verify().unwrap();
+}
+
+fn cover(fixture: &Fixture, name: &str, bytes: &[u8]) -> crate::library::StagedAsset {
+    let path = fixture.0.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    crate::library::StagedAsset {
+        role: "cover".into(),
+        name: name.into(),
+        path,
+        url: Some(COVER.into()),
+        mime_type: Some("image/jpeg".into()),
+    }
+}
+const COVER: &str = "https://downloads.fanbox.cc/images/post/7/cover/a.jpeg";
+
+/// 新しい版でだけ取れた画像（原寸など）があれば畳まない。畳むと今の版からも版の履歴からも
+/// 選べなくなる。
+#[test]
+fn a_version_that_holds_an_image_the_one_before_lacks_is_not_folded() {
+    let (fixture, library) = library();
+    let mut data = post("本文", "リンク先", 1);
+    data["coverImageUrl"] = json!(COVER);
+    let save = |data: &Value, asset| {
+        library
+            .save_work(WorkSave {
+                request: LibraryId::now_v7(),
+                provider: "fanbox",
+                key: "7",
+                route: "save",
+                data,
+                assets: vec![asset],
+            })
+            .unwrap()
+    };
+    let first = save(&data, cover(&fixture, "small.jpeg", b"small cover"));
+    let mut rewritten = post("書き直した本文", "リンク先", 1);
+    rewritten["coverImageUrl"] = json!(COVER);
+    let second = save(&rewritten, cover(&fixture, "large.jpeg", b"large cover"));
+    assert!(second.created_revision);
+    split_by_rule_one(&library, &first, &second);
+    {
+        let mut conn = library.conn.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        assert!(library.volatile_revisions(&tx).unwrap().is_empty());
+    }
+    library.run_library_tasks().unwrap();
+    assert_eq!(
+        current(&library, first.entity_id),
+        second.snapshot_id.as_bytes().to_vec()
+    );
+    assert_eq!(revisions(&library, first.entity_id), 2);
+    // 完全検査はしない。規則 1 の版を写す仕込みは本文だけを手で差し替えるので、畳まないままだと
+    // 構成の指紋が合わない（実際の棚の版は保存で作られ、指紋は合っている）。
+}
+
+/// その版を基準に始めた取得があれば畳まない。確定済みの取得の入力（券）は今の版を指して
+/// いて、付け替えると台帳と食い違い、棚の検査が通らなくなる。
+#[test]
+fn a_version_that_an_acquisition_started_from_is_not_folded() {
+    let (_fixture, library) = library();
+    let first = save(&library, &post("本文", "リンク先", 1));
+    let second = save(&library, &post("書き直した本文", "リンク先", 1));
+    // 二つ目の版を基準に、内容の変わらない取得がもう一度あった。
+    let again = save(&library, &post("書き直した本文", "リンク先", 3));
+    assert!(!again.created_revision);
+    split_by_rule_one(&library, &first, &second);
+    {
+        let mut conn = library.conn.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        assert!(library.volatile_revisions(&tx).unwrap().is_empty());
+    }
+    library.run_library_tasks().unwrap();
+    assert_eq!(revisions(&library, first.entity_id), 2);
+    // 完全検査はしない。規則 1 の版を写す仕込みは本文だけを手で差し替えるので、畳まないままだと
+    // 構成の指紋が合わない（実際の棚の版は保存で作られ、指紋は合っている）。
 }
 
 /// 実際の棚の写しで畳みを確かめる（手で回す）。`PIEP_FOLD_SHELF` に写しの置き場を渡す。

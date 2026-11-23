@@ -7,6 +7,11 @@
 //! 畳むのは、作品の**今の版**が、その改稿のただ一つの版であるときだけ。途中の版や、補完で版が
 //! 重なった改稿は触らない（後の版の比較の基準や補完を失わないため）。下書き・保存の途中の記録が
 //! 指している版も触らない。読書位置・取得・確認の記録は前の版へ付け替える（本文は同じ）。
+//!
+//! 付け替えると記録の意味が変わるものがある版も触らない（`keeps_what_folding_would_lose`）。
+//! その版を基準に始めた取得（確定済みの入力の券が今の版を指す）、前の版に無い画像や添付の
+//! ファイル（原寸が取れたなど。畳むと今の版からも版の履歴からも選べなくなる）、前の版に
+//! 読書用の対応表が無いのに、取得の読む形の記録がある版。
 
 use super::{integrity, Error, Library, LibraryId, Result};
 use rusqlite::{params, Connection};
@@ -155,6 +160,9 @@ impl Library {
         let mut found = Vec::new();
         for (entity, current, revision, previous) in rows {
             let (entity, current, previous) = (id(entity)?, id(current)?, id(previous)?);
+            if keeps_what_folding_would_lose(tx, current, previous)? {
+                continue;
+            }
             // 本文以外が違えば、本文を読むまでもなく別の版。
             if integrity::source_content_with_body(tx, current, None)?
                 != integrity::source_content_with_body(tx, previous, None)?
@@ -180,6 +188,28 @@ impl Library {
         }
         Ok(found)
     }
+}
+
+/// 畳むと失うもの・食い違うものを、今の版が持っているか。
+fn keeps_what_folding_would_lose(
+    tx: &Connection,
+    current: LibraryId,
+    previous: LibraryId,
+) -> Result<bool> {
+    Ok(tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM acquisition_attempts WHERE base_snapshot_id=?1)
+             OR EXISTS(SELECT r.file_id FROM snapshot_media m JOIN media_renditions r ON r.id=m.rendition_id
+                        WHERE m.snapshot_id=?1
+                       EXCEPT SELECT r.file_id FROM snapshot_media m JOIN media_renditions r ON r.id=m.rendition_id
+                        WHERE m.snapshot_id=?2)
+             OR EXISTS(SELECT file_id FROM snapshot_files WHERE snapshot_id=?1 AND role<>'raw'
+                       EXCEPT SELECT file_id FROM snapshot_files WHERE snapshot_id=?2 AND role<>'raw')
+             OR EXISTS(SELECT 1 FROM acquisition_reader_outputs o WHERE o.snapshot_id=?1
+                        AND NOT EXISTS(SELECT 1 FROM reader_binding_sets b
+                                        WHERE b.snapshot_id=?2 AND b.recipe=o.recipe))",
+        params![current.as_bytes().as_slice(), previous.as_bytes().as_slice()],
+        |r| r.get(0),
+    )?)
 }
 
 /// 一つの版を消して、作品を前の版へ戻す。
