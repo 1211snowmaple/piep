@@ -1,12 +1,18 @@
 //! 保存フォルダーの再取り込みを棚で行う。
 //!
-//! 保存フォルダー（`<取得元>/<作品の番号>/v<版>/`）に残った作品のうち、棚にまだ一度も入っていない
-//! ものを、取り寄せずにフォルダーの中身のまま棚へ保存する。版は番号の順に保存するので、棚の版の
-//! 記録も同じ順に並ぶ。棚にある作品・棚から外した作品には触れない（外した作品を勝手に戻さない）。
+//! 保存フォルダー（`<取得元>/<作品の番号>/v<版>/`）に残った作品のうち、棚にまだ版の無いものを、
+//! 取り寄せずにフォルダーの中身のまま棚へ保存する。版は番号の順に保存するので、棚の版の記録も
+//! 同じ順に並ぶ。識別だけが先にできた作品（取得元の一覧や関係から作られ、保存が一度も確定して
+//! いない）も版が無いので入れる。棚から外した作品には触れない（外した作品を勝手に戻さない）。
+//!
+//! 前の再取り込みが途中の版で止まった作品は、続きから入れる。どの版まで入ったかは、取得の入力に
+//! 記録した応答の指紋で照らし合わせ、棚の最後の取得がその続きの手前の版の再取り込みであるとき
+//! だけ続ける（あとで別の経路で保存した作品に、古い版を積まない）。版が読めない・保存できない
+//! ときは、その作品の残りの版を止める（後ろの版を先に積むと、版の順が入れ替わる）。
 //! 保存フォルダーを手で組んで戻す使い方（削除された作品を EPUB から戻すなど）も同じ道を通る。
 
 use crate::commands::shelf::Shelf;
-use crate::library::{EntityKind, Library};
+use crate::library::{Fingerprint, Library, ReimportState};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -187,12 +193,40 @@ pub(crate) fn version_data(source: &str, version: &Path) -> Result<serde_json::V
     }
 }
 
-/// 棚にまだ一度も入っていない作品か。外した作品も棚には記録が残るので、ここでは対象にしない。
-fn never_on_shelf(library: &Library, work: &FolderWork) -> Result<bool, String> {
-    Ok(library
-        .entity_by_key(EntityKind::Work, &work.source, &work.key)
-        .map_err(|e| e.to_string())?
-        .is_none())
+/// その作品の何番目の版から入れるか。入れないなら `None`。
+fn first_version_to_import(library: &Library, work: &FolderWork) -> Result<Option<usize>, String> {
+    let state = library
+        .reimport_state(&work.source, &work.key)
+        .map_err(|e| e.to_string())?;
+    let acquisitions = match state {
+        ReimportState::NeverSaved => return Ok(Some(0)),
+        ReimportState::Removed => return Ok(None),
+        ReimportState::OnShelf { acquisitions } => acquisitions,
+    };
+    // 棚の最後の取得が再取り込みでなければ、そのあと別の経路で保存している。続けない。
+    let Some(Some(last)) = acquisitions.last().copied() else {
+        return Ok(None);
+    };
+    let imported: std::collections::HashSet<Fingerprint> =
+        acquisitions.iter().flatten().copied().collect();
+    // 頭から順に、入った版を数える。
+    let mut done = 0;
+    let mut last_at = None;
+    for version in &work.versions {
+        let Ok(data) = version_data(&work.source, version) else {
+            break;
+        };
+        let input = Fingerprint::of(&crate::commands::downloader::shelf::folder_input(&data)?);
+        if !imported.contains(&input) {
+            break;
+        }
+        done += 1;
+        if input == last {
+            last_at = Some(done);
+        }
+    }
+    // 最後の取得が、入った版の最後のものであるときだけ続ける。
+    Ok((last_at == Some(done) && done < work.versions.len()).then_some(done))
 }
 
 /// 保存フォルダーに残った作品のうち、棚にまだ無いものを棚へ保存する。
@@ -205,8 +239,9 @@ pub(crate) async fn reimport_into_shelf(
         tokio::task::spawn_blocking(move || {
             let works = folder_works(&storage)?;
             let mut missing = Vec::new();
-            for work in works {
-                if never_on_shelf(&library, &work)? {
+            for mut work in works {
+                if let Some(first) = first_version_to_import(&library, &work)? {
+                    work.versions.drain(..first);
                     missing.push(work);
                 }
             }
@@ -227,7 +262,7 @@ pub(crate) async fn reimport_into_shelf(
                 Ok(data) => data,
                 Err(error) => {
                     failure = Some(format!("{}: {error}", version.display()));
-                    continue;
+                    break;
                 }
             };
             match crate::commands::downloader::shelf::save_folder_to_shelf(
@@ -240,7 +275,10 @@ pub(crate) async fn reimport_into_shelf(
             .await
             {
                 Ok(_) => saved += 1,
-                Err(error) => failure = Some(format!("{}: {error}", version.display())),
+                Err(error) => {
+                    failure = Some(format!("{}: {error}", version.display()));
+                    break;
+                }
             }
         }
         if saved > 0 {

@@ -85,9 +85,9 @@ pub use transfer::reader_may_read;
 pub use watching::{WatchEdit, WatchGroup, WatchResult, WatchTarget};
 pub use work_capture::{asset_reference, StagedAsset, WorkSave};
 pub use work_list::{
-    AcquisitionFilter, CountRange, DateField, DateRange, MediaFilter, NeighborKind, RevisionFilter,
-    SortValue, TextMatches, WorkCard, WorkCursor, WorkFilter, WorkListPage, WorkListQuery,
-    WorkNeighbors, WorkSort,
+    AcquisitionFilter, CountRange, DateField, DateRange, MediaFilter, NeighborKind, ReimportState,
+    RevisionFilter, SortValue, TextMatches, WorkCard, WorkCursor, WorkFilter, WorkListPage,
+    WorkListQuery, WorkNeighbors, WorkSort, REIMPORT_INPUT,
 };
 
 use std::path::PathBuf;

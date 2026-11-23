@@ -83,3 +83,115 @@ async fn folders_never_on_the_shelf_come_in_with_their_versions_and_others_are_l
         .unwrap();
     assert_eq!(again.imported, 0);
 }
+
+fn card_version(library: &Library, key: &str) -> u64 {
+    let work = library.work_by_key("pixiv", key).unwrap().unwrap();
+    library.work_card(work).unwrap().version_number
+}
+
+/// 識別だけが先にできた作品（保存が一度も確定していない）は、棚に版が無いので入れる。
+#[tokio::test]
+async fn a_work_known_only_by_its_identity_comes_in() {
+    let temp = Temp(std::env::temp_dir().join(format!("piep-reimport-{}", LibraryId::now_v7())));
+    let storage = temp.0.join("downloads");
+    let library = Arc::new(Library::create(&temp.0.join("shelf")).unwrap());
+    version(&storage, "5", 1, "本文");
+    // 取得を始めたが確定しないまま閉じた。識別だけが残る。
+    let request = LibraryId::now_v7();
+    library
+        .begin_acquisition(
+            request,
+            "pixiv",
+            crate::library::EntityKind::Work,
+            "5",
+            "save",
+        )
+        .unwrap();
+    library.cancel_acquisition(request).unwrap();
+    assert!(library
+        .entity_by_key(crate::library::EntityKind::Work, "pixiv", "5")
+        .unwrap()
+        .is_some());
+    assert_eq!(library.saved_work_by_key("pixiv", "5").unwrap(), None);
+
+    let outcome = reimport_into_shelf(Arc::clone(&library), storage)
+        .await
+        .unwrap();
+    assert_eq!(outcome.imported, 1, "{:?}", outcome.skipped);
+    assert_eq!(card_version(&library, "5"), 1);
+    library.verify().unwrap();
+}
+
+/// 途中の版が読めずに止まった作品は、直したあとの再取り込みで続きから入る。止まった版の
+/// 後ろの版を先に積まない。
+#[tokio::test]
+async fn a_work_stopped_at_a_broken_version_continues_from_there_once_fixed() {
+    let temp = Temp(std::env::temp_dir().join(format!("piep-reimport-{}", LibraryId::now_v7())));
+    let storage = temp.0.join("downloads");
+    let library = Arc::new(Library::create(&temp.0.join("shelf")).unwrap());
+    version(&storage, "6", 1, "最初の本文");
+    let broken = version(&storage, "6", 2, "直した本文");
+    version(&storage, "6", 3, "もう一度直した本文");
+    let good = std::fs::read(broken.join("data.json")).unwrap();
+    std::fs::write(broken.join("data.json"), b"{").unwrap();
+
+    let first = reimport_into_shelf(Arc::clone(&library), storage.clone())
+        .await
+        .unwrap();
+    assert_eq!(first.imported, 1);
+    assert_eq!(first.skipped.len(), 1);
+    assert!(first.skipped[0].starts_with("pixiv/6"));
+    assert_eq!(
+        card_version(&library, "6"),
+        1,
+        "壊れた版の後ろを先に積まない"
+    );
+
+    std::fs::write(broken.join("data.json"), good).unwrap();
+    let second = reimport_into_shelf(Arc::clone(&library), storage.clone())
+        .await
+        .unwrap();
+    assert_eq!(second.imported, 1, "{:?}", second.skipped);
+    assert!(second.skipped.is_empty());
+    assert_eq!(card_version(&library, "6"), 3);
+    library.verify().unwrap();
+
+    let third = reimport_into_shelf(Arc::clone(&library), storage)
+        .await
+        .unwrap();
+    assert_eq!(third.imported, 0);
+}
+
+/// 再取り込みのあとに別の経路で保存した作品には、フォルダーの古い版を積まない。
+#[tokio::test]
+async fn a_work_saved_another_way_after_the_reimport_is_left_alone() {
+    let temp = Temp(std::env::temp_dir().join(format!("piep-reimport-{}", LibraryId::now_v7())));
+    let storage = temp.0.join("downloads");
+    let library = Arc::new(Library::create(&temp.0.join("shelf")).unwrap());
+    version(&storage, "7", 1, "最初の本文");
+    let outcome = reimport_into_shelf(Arc::clone(&library), storage.clone())
+        .await
+        .unwrap();
+    assert_eq!(outcome.imported, 1);
+    // アプリから新しい版を保存した。
+    let data = json!({"detail":{"title":"題 7", "caption":"説明", "tags":["タグ"],
+        "user":{"id":"9","name":"作者"}}, "text":"アプリで取った本文"});
+    library
+        .save_work(crate::library::WorkSave {
+            request: LibraryId::now_v7(),
+            provider: "pixiv",
+            key: "7",
+            route: "save",
+            data: &data,
+            assets: vec![],
+        })
+        .unwrap();
+    assert_eq!(card_version(&library, "7"), 2);
+    // フォルダーに古い版が見つかった。
+    version(&storage, "7", 2, "フォルダーにだけ残っていた本文");
+    let again = reimport_into_shelf(Arc::clone(&library), storage)
+        .await
+        .unwrap();
+    assert_eq!(again.imported, 0);
+    assert_eq!(card_version(&library, "7"), 2);
+}
