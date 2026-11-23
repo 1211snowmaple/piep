@@ -613,6 +613,7 @@ export interface ShelfEditorMedia {
   file: string;
   name: string;
   mimeType: string | null;
+  selection?: string;
 }
 
 /** 編集の版の一つ（下書きか反映中）。 */
@@ -698,7 +699,7 @@ export interface ShelfWorkKey {
 export type ShelfCollectionChange =
   | { kind: "create"; title: string; description: string | null; ordered: boolean; works: ShelfWorkKey[] }
   | { kind: "describe"; title: string; description: string | null; ordered: boolean; name_source: string | null }
-  | { kind: "look"; cover_work: ShelfWorkKey | null; cover_mode: string | null; cover_image: string | null }
+  | { kind: "look"; cover_work: ShelfWorkKey | null; cover_mode: string | null; cover_image: string | null; cover_selection?: string }
   | { kind: "add"; works: ShelfWorkKey[] }
   | { kind: "remove"; works: ShelfWorkKey[] }
   | { kind: "reorder"; works: ShelfWorkKey[] }

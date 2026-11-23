@@ -40,7 +40,7 @@ describe("the editor on the new shelf", () => {
     api.shelfWork.mockResolvedValue({ title: "見えている題", provider: "pixiv", version_number: 3, series_title: null, author_name: "作者" });
     api.shelfSaveEditor.mockResolvedValue({ active: null, draft: "d2", generation: 4 });
     api.shelfEditPointer.mockResolvedValue({ active: null, draft: null, generation: 5 });
-    api.shelfImportEditImage.mockResolvedValue({ id: 0, file: "cd".repeat(32), name: "新.png", mimeType: "image/png" });
+    api.shelfImportEditImage.mockResolvedValue({ id: 0, file: "cd".repeat(32), name: "新.png", mimeType: "image/png", selection: "selection-id" });
   });
 
   it("opens the shelf, saves with the generation it last saw, and imports images by file", async () => {
@@ -62,7 +62,11 @@ describe("the editor on the new shelf", () => {
     expect(api.shelfSaveEditor).toHaveBeenLastCalledWith(WORK, expect.objectContaining({ expected: 4, title: "題", publish: true }));
 
     const image = await source.importImage(doc, "C:/絵/新.png");
-    expect(image).toMatchObject({ id: 2, shelfFile: "cd".repeat(32), filename: "新.png" });
+    expect(image).toMatchObject({ id: 2, shelfFile: "cd".repeat(32), filename: "新.png", imageSelection: "selection-id" });
+    await source.saveDraft({ ...doc, assets: [...doc.assets, image] }, null, [{ blockType: "image", assetId: image.id }]);
+    expect(api.shelfSaveEditor).toHaveBeenLastCalledWith(WORK, expect.objectContaining({
+      media: expect.arrayContaining([expect.objectContaining({ id: 2, selection: "selection-id" })]),
+    }));
 
     // 画面を作り直しても（同じ作品なら）最後に見た世代で続ける。
     await shelfEditorSource(WORK).discard();

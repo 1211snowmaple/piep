@@ -294,7 +294,8 @@ fn settle_migrated_acquisitions(stale_bindings: bool) {
         conn.execute_batch(&super::super::schema::guards_for_tests())
             .unwrap();
         conn.execute_batch(
-            "DROP TABLE library_tasks; DELETE FROM schema_migrations WHERE version>=30; PRAGMA user_version=29;",
+            "DROP TABLE pending_edit_images; DROP TABLE library_tasks;
+             DELETE FROM schema_migrations WHERE version>=30; PRAGMA user_version=29;",
         )
         .unwrap();
     }

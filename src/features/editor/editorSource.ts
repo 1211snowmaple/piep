@@ -19,7 +19,7 @@ import type { AssetEntry, EditorDocument, WorkBlock, WorkBlockInput, WorkEditRev
  */
 
 /** 編集画面の画像。棚の画像は `shelfFile`（ファイルの識別子）で引く。 */
-export type EditorAsset = AssetEntry & { shelfFile?: string };
+export type EditorAsset = AssetEntry & { shelfFile?: string; imageSelection?: string };
 
 /** 編集画面の画像の URL。棚の画像はファイルの識別子から、見本は埋め込みの URL から。 */
 export function editorAssetUrl(asset: EditorAsset): string | null {
@@ -105,6 +105,7 @@ function shelfAsset(media: ShelfEditorMedia): EditorAsset {
     mimeType: media.mimeType,
     fileSizeBytes: 0,
     shelfFile: media.file,
+    imageSelection: media.selection,
   };
 }
 
@@ -123,7 +124,13 @@ export function shelfEditorSource(work: string): EditorSource {
   };
   const media = (doc: EditorDoc): ShelfEditorMedia[] => doc.assets
     .filter((asset) => asset.shelfFile)
-    .map((asset) => ({ id: asset.id, file: asset.shelfFile!, name: asset.filename, mimeType: asset.mimeType }));
+    .map((asset) => ({
+      id: asset.id,
+      file: asset.shelfFile!,
+      name: asset.filename,
+      mimeType: asset.mimeType,
+      selection: asset.imageSelection,
+    }));
   const load = async (): Promise<EditorDoc> => {
     const [view, head] = await Promise.all([shelfEditor(work), shelfWork(work)]);
     remember({ base: view.base, generation: view.generation });

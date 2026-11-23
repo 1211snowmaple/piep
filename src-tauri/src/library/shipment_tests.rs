@@ -59,6 +59,27 @@ fn store(path: &Path) -> ObjectStore {
 }
 
 #[test]
+fn reclaim_cannot_quarantine_objects_in_a_shipment_snapshot() {
+    let temp = Temp::new();
+    let source = Library::create(&temp.0.join("source")).unwrap();
+    let orphan = source
+        .store_original(&b"unreferenced file".to_vec().into())
+        .unwrap();
+    let chunks = source.ship_snapshot(&temp.0.join("shipment.db")).unwrap();
+    let chunk = &orphan.chunks[0];
+    assert!(chunks.contains(chunk));
+
+    let options = super::super::ReclaimOptions::default();
+    let now = std::time::SystemTime::now() + options.grace * 2;
+    source.reclaim_at(options, now).unwrap();
+    source.objects.export_chunk(chunk, &mut Vec::new()).unwrap();
+    drop(chunks);
+
+    source.reclaim_at(options, now).unwrap();
+    assert!(!source.objects.has_object(chunk.id).unwrap());
+}
+
+#[test]
 fn a_shipment_becomes_a_verified_shelf_and_the_next_one_only_carries_new_objects() {
     let temp = Temp::new();
     let source = Library::create(&temp.0.join("desktop")).unwrap();
