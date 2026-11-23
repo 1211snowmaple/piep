@@ -1018,6 +1018,15 @@ impl Server {
         body: serde_json::Value,
         token: &str,
     ) -> reqwest::RequestBuilder {
+        self.with_write_scope(self.favorite_request(work, body, token), token)
+    }
+
+    fn favorite_request(
+        &self,
+        work: uuid::Uuid,
+        body: serde_json::Value,
+        token: &str,
+    ) -> reqwest::RequestBuilder {
         self.client
             .put(format!(
                 "{}/api/libraries/{}/works/{work}/favorite",
@@ -1025,6 +1034,53 @@ impl Server {
             ))
             .bearer_auth(token)
             .json(&body)
+    }
+}
+
+#[tokio::test]
+async fn favorite_write_from_another_scope_cannot_change_the_shelf() {
+    let server = Server::start().await;
+    let work = save(&server.library, capture("stale-favorite", None));
+    let body = json!({"requestId": uuid::Uuid::now_v7(), "expected": "0", "favorite": true});
+    let subject = server.authority.subject.get().to_string();
+    let epoch = server.context.sync_epoch.get().to_string();
+    let previous_epoch = uuid::Uuid::now_v7().to_string();
+    let other_subject = server.authority.other_subject.get().to_string();
+
+    // 同じ棚に作品があり、お気に入りの更新世代も合う要求を送る。
+    for (name, subjects, epochs) in [
+        ("古い同期世代", vec![&subject], vec![&previous_epoch]),
+        ("別の利用者", vec![&other_subject], vec![&epoch]),
+        ("同期世代なし", vec![&subject], vec![]),
+        ("利用者なし", vec![], vec![&epoch]),
+        ("同期世代の重複", vec![&subject], vec![&epoch, &epoch]),
+        ("利用者の重複", vec![&subject, &subject], vec![&epoch]),
+    ] {
+        let mut request = server.favorite_request(work.entity_id, body.clone(), "fixture");
+        for value in subjects {
+            request = request.header("x-piep-subject-id", value.as_str());
+        }
+        for value in epochs {
+            request = request.header("x-piep-sync-epoch", value.as_str());
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.headers()["x-piep-sync-epoch"], epoch.as_str());
+        let status = response.status();
+        let payload: serde_json::Value = response.json().await.unwrap();
+        let state = server
+            .library
+            .user_state(work.entity_id, server.authority.subject.get())
+            .unwrap();
+        assert_eq!(
+            (status, payload, state.favorite, state.generation),
+            (
+                StatusCode::CONFLICT,
+                json!({"error": "library_changed"}),
+                false,
+                0
+            ),
+            "{name}"
+        );
     }
 }
 
@@ -1751,12 +1807,20 @@ impl Server {
         body: serde_json::Value,
         token: &str,
     ) -> reqwest::RequestBuilder {
+        self.with_write_scope(self.reading_request(work, body, token), token)
+    }
+
+    fn with_write_scope(
+        &self,
+        request: reqwest::RequestBuilder,
+        token: &str,
+    ) -> reqwest::RequestBuilder {
         let subject = if token == "second" {
             self.authority.other_subject
         } else {
             self.authority.subject
         };
-        self.reading_request(work, body, token)
+        request
             .header("x-piep-subject-id", subject.get().to_string())
             .header(
                 "x-piep-sync-epoch",

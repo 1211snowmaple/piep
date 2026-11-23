@@ -342,16 +342,7 @@ pub async fn pc_set_favorite(
         expected,
         favorite,
     };
-    let response = client
-        .put(format!(
-            "{}/api/libraries/{}/works/{}/favorite",
-            saved.url,
-            library.library_id.get(),
-            work.get()
-        ))
-        .bearer_auth(&saved.token)
-        .timeout(REQUEST_TIMEOUT)
-        .json(&body)
+    let response = favorite_request(&client, &saved, library, work, &body)
         .send()
         .await
         .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
@@ -359,12 +350,33 @@ pub async fn pc_set_favorite(
     state.with_connection(generation, || Ok(result))
 }
 
+fn favorite_request(
+    client: &reqwest::Client,
+    saved: &SavedConnection,
+    library: ShelfScope,
+    work: Id,
+    body: &MobileFavoriteUpdate,
+) -> reqwest::RequestBuilder {
+    client
+        .put(format!(
+            "{}/api/libraries/{}/works/{}/favorite",
+            saved.url,
+            library.library_id.get(),
+            work.get()
+        ))
+        .bearer_auth(&saved.token)
+        .header("x-piep-subject-id", library.subject_id().get().to_string())
+        .header("x-piep-sync-epoch", library.sync_epoch().get().to_string())
+        .timeout(REQUEST_TIMEOUT)
+        .json(body)
+}
+
 async fn favorite_response(
     response: Response,
     scope: ShelfScope,
 ) -> Result<ShelfFavorite, ClientError> {
     match response.status() {
-        // 世代の食い違いは棚の入れ替わり（409）と同じ番号で返るので、本文で見分ける。
+        // 同じ棚・利用者・同期世代の応答で、本文が favorite_conflict なら今の値を使う。
         StatusCode::CONFLICT if scope.matches(response.headers()) => {
             let bytes = bounded_response_bytes(response, MAX_IDENTITY_BYTES).await?;
             parse_favorite(&bytes, true).map_err(|_| library_changed())
@@ -977,6 +989,38 @@ mod tests {
     }
 
     #[test]
+    fn favorite_put_sends_the_open_shelf_subject_and_sync_epoch() {
+        let shelf = identity();
+        let scope = ShelfScope::for_tests(shelf.library_id, shelf.subject_id, shelf.sync_epoch, 1);
+        let saved = SavedConnection {
+            url: "https://example.test".into(),
+            fingerprint: None,
+            certificate_der: None,
+            token: "fixture".into(),
+            device_id: String::new(),
+            device_name: String::new(),
+            capabilities: Vec::new(),
+        };
+        let body = MobileFavoriteUpdate {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            expected: "0".into(),
+            favorite: true,
+        };
+        let work = Id::new(uuid::Uuid::new_v4()).unwrap();
+        let request = favorite_request(&reqwest::Client::new(), &saved, scope, work, &body)
+            .build()
+            .unwrap();
+        for (name, id) in [
+            ("x-piep-subject-id", shelf.subject_id),
+            ("x-piep-sync-epoch", shelf.sync_epoch),
+        ] {
+            let values: Vec<_> = request.headers().get_all(name).iter().collect();
+            assert_eq!(values.len(), 1, "{name}");
+            assert_eq!(values[0], id.get().to_string().as_str());
+        }
+    }
+
+    #[test]
     fn a_favorite_conflict_returns_the_current_value_and_a_changed_shelf_stays_a_change() {
         tauri::async_runtime::block_on(async {
             let shelf = identity();
@@ -1035,6 +1079,12 @@ mod tests {
                 (
                     "409 Conflict",
                     wire.clone(),
+                    r#"{"error":"library_changed"}"#,
+                    "library_changed",
+                ),
+                (
+                    "409 Conflict",
+                    other.clone(),
                     r#"{"error":"library_changed"}"#,
                     "library_changed",
                 ),

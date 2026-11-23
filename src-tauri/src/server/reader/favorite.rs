@@ -1,17 +1,18 @@
 //! 携帯からお気に入りを付け外しする。
 //!
-//! 端末は要求 UUID と手元の更新世代を添えて送る。棚はその要求の結果を受領として残すので、
-//! 同じ要求を送り直しても一度だけ効く。世代が違えば（別の端末やデスクトップで変わっていれば）
-//! 409 と今の値を返し、端末の時刻で勝者を決めない。
+//! 端末は開いている棚の利用者と同期世代をヘッダーに付け、要求 UUID と更新世代を本文に入れる。
+//! 利用者か同期世代が食い違えば書かずに library_changed を返す。
+//! 棚は要求の結果を受領として残すので、同じ要求を送り直しても一度だけ効く。
+//! お気に入りの更新世代が違えば favorite_conflict と今の値を返す。
 //!
 //! デスクトップ版は棚の持ち主の変更を `/api/admin/shelf/favorites` から取り込む。
 
-use super::{internal, invalid, not_found, ApiError, Context, Principal};
+use super::{check_write_scope, internal, invalid, not_found, ApiError, Context, Principal};
 use crate::library::protocol::Id;
 use crate::library::{LibraryId, UserState};
 use axum::{
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
@@ -44,6 +45,7 @@ pub(super) async fn put(
     State(ctx): State<Arc<Context>>,
     Extension(principal): Extension<Principal>,
     path: Result<Path<FavoriteLocation>, axum::extract::rejection::PathRejection>,
+    headers: HeaderMap,
     body: Result<Json<FavoriteBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Path(location) = path.map_err(|_| invalid())?;
@@ -51,6 +53,7 @@ pub(super) async fn put(
     if location.library != ctx.library_id {
         return Err(not_found());
     }
+    check_write_scope(&headers, &principal, &ctx)?;
     let request = uuid::Uuid::parse_str(&update.request_id).map_err(|_| invalid())?;
     // 十進の数字だけ（符号・空白・先頭の 0 の重ねを受け付けない）。
     let canonical = update
