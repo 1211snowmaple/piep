@@ -13,8 +13,9 @@ use crate::library::{
     asset_reference, EntityKind, Library, LibraryId, ResourceReference, ResourceScope, StagedAsset,
     WorkSave,
 };
+use serde_json::value::{to_raw_value, RawValue};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -37,9 +38,19 @@ pub struct ShelfSaved {
     pub missing_references: Vec<String>,
 }
 
-enum ShelfSaveError {
+pub(super) enum ShelfSaveError {
     Superseded,
     Failed(String),
+}
+
+impl ShelfSaveError {
+    /// 画面やジョブへ返す文言。基準の版が変わったときも、そうと分かる文言にする。
+    pub(super) fn into_message(self) -> String {
+        match self {
+            Self::Superseded => crate::library::Error::Superseded.to_string(),
+            Self::Failed(error) => error,
+        }
+    }
 }
 
 impl From<String> for ShelfSaveError {
@@ -56,6 +67,9 @@ impl From<crate::library::Error> for ShelfSaveError {
         }
     }
 }
+
+pub(in crate::commands) const JOB_ACQUISITION_REQUEST: &str = "acquisitionRequest";
+pub(in crate::commands) const JOB_ACQUISITION_RETRY: &str = "acquisitionRetryRequired";
 
 pub(super) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, String> + Send + 'static,
@@ -97,7 +111,7 @@ fn missing_references<'a>(
     crate::analysis::pixiv_missing_references_for_filenames(data, names)
 }
 
-async fn references_left_by_edit(
+pub(in crate::commands) async fn references_left_by_edit(
     library: Arc<Library>,
     work: LibraryId,
     snapshot: LibraryId,
@@ -280,6 +294,12 @@ fn staged_from(dir: &Path, data: &Value, source: &str) -> Result<Vec<StagedAsset
         .collect())
 }
 
+/// 保存フォルダーの一つの版の応答を、取得の入力として記録する形にする。再取り込みは、
+/// どの版まで入ったかをこの形の指紋で照らし合わせる。
+pub(crate) fn folder_input(data: &Value) -> Result<Vec<u8>, String> {
+    serde_json::to_vec_pretty(data).map_err(|e| e.to_string())
+}
+
 /// 保存フォルダーの一つの版（応答の JSON と `data_assets/`）を、取り寄せずに棚へ保存する。
 /// 保存フォルダーの再取り込みに使う。画像・添付はフォルダーにあるものだけを使う。
 pub(crate) async fn save_folder_to_shelf(
@@ -300,11 +320,11 @@ pub(crate) async fn save_folder_to_shelf(
             .begin_acquisition(request, &source, EntityKind::Work, &key, "reimport")
             .map_err(|e| e.to_string())?;
         let saved = (|| {
-            let input = serde_json::to_vec_pretty(&data).map_err(|e| e.to_string())?;
+            let input = folder_input(&data)?;
             library
                 .record_acquisition_payload(
                     request,
-                    "work-save-input",
+                    crate::library::REIMPORT_INPUT,
                     &crate::library::CaptureSource::Bytes(input),
                 )
                 .map_err(|e| e.to_string())?;
@@ -335,6 +355,7 @@ pub(crate) async fn save_folder_to_shelf(
 }
 
 /// 取り寄せた応答を棚へ保存する。
+#[cfg(test)]
 pub(super) async fn save_to_shelf(
     shelf: Arc<Shelf>,
     library: Arc<Library>,
@@ -345,13 +366,10 @@ pub(super) async fn save_to_shelf(
     user_agent: Option<String>,
 ) -> Result<ShelfSaved, String> {
     save_to_shelf_as(
-        shelf, library, data, source, source_id, cookie, user_agent, None,
+        shelf, library, data, source, source_id, cookie, user_agent, None, None,
     )
     .await
-    .map_err(|error| match error {
-        ShelfSaveError::Superseded => crate::library::Error::Superseded.to_string(),
-        ShelfSaveError::Failed(error) => error,
-    })
+    .map_err(ShelfSaveError::into_message)
 }
 
 /// 保存済みの応答（pixiv・FANBOX）に原寸の在り処を足したものを、保存し直す（縮小版の画像の取り直し）。
@@ -377,6 +395,7 @@ pub(crate) async fn save_originals_to_shelf(
         None,
         None,
         Some(base_snapshot),
+        None,
     )
     .await
     {
@@ -387,7 +406,7 @@ pub(crate) async fn save_originals_to_shelf(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn save_to_shelf_as(
+pub(super) async fn save_to_shelf_as(
     shelf: Arc<Shelf>,
     library: Arc<Library>,
     data: Value,
@@ -396,6 +415,7 @@ async fn save_to_shelf_as(
     cookie: Option<String>,
     user_agent: Option<String>,
     base_snapshot: Option<LibraryId>,
+    job: Option<(&crate::AppState, &crate::models::UpdateJobItem)>,
 ) -> Result<ShelfSaved, ShelfSaveError> {
     let mut data = data;
     let upgrade_images = base_snapshot.is_some();
@@ -525,6 +545,22 @@ async fn save_to_shelf_as(
         false
     };
     let request = LibraryId::now_v7();
+    // 取り直した応答は前回と異なり得るため、未完了分の再試行には新しい要求 ID を割り当てる。
+    let mut job_payload = if let Some((state, item)) = job {
+        // 原入力の本文や数値の字句はそのままに、再開用の値だけを差し替える。
+        let mut payload: BTreeMap<String, Box<RawValue>> =
+            serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
+        payload.insert(
+            JOB_ACQUISITION_REQUEST.into(),
+            to_raw_value(&request).map_err(|e| e.to_string())?,
+        );
+        payload.remove(JOB_ACQUISITION_RETRY);
+        let json = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+        state.jobs().set_update_job_item_payload(item.id, &json)?;
+        Some((state, item.id, payload))
+    } else {
+        None
+    };
     let route = if reader_only {
         "prepare-reader"
     } else if upgrade_images {
@@ -592,6 +628,17 @@ async fn save_to_shelf_as(
             .await
         };
         let asset_failure = repairs::download_result(download, repair)?;
+        // FANBOX の補完では通信に失敗しても保存と試行回数を確定する。再開時にも再試行を続ける。
+        if let Some((state, item_id, payload)) = job_payload.as_mut() {
+            if asset_failure.is_some() {
+                payload.insert(
+                    JOB_ACQUISITION_RETRY.into(),
+                    to_raw_value(&true).map_err(|e| e.to_string())?,
+                );
+                let json = serde_json::to_string(payload).map_err(|e| e.to_string())?;
+                state.jobs().set_update_job_item_payload(*item_id, &json)?;
+            }
+        }
         let mut assets = {
             let (dir, data, source) = (staging.join("data_assets"), data.clone(), source.clone());
             blocking(move || staged_from(&dir, &data, &source)).await?

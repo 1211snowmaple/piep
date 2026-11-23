@@ -116,11 +116,15 @@ fn reader_output(conn: &Connection, id: LibraryId) -> Result<Option<AcquisitionR
 }
 
 pub(super) fn load_info(conn: &Connection, id: LibraryId) -> Result<AcquisitionInfo> {
+    find_info(conn, id)?.ok_or_else(|| Error::Integrity("取得開始の記録がありません".into()))
+}
+
+fn find_info(conn: &Connection, id: LibraryId) -> Result<Option<AcquisitionInfo>> {
     let mut statement=conn.prepare("SELECT a.id,a.entity_id,a.provider,a.kind,a.external_key,a.route,a.epoch,a.base_snapshot_id,a.base_generation,a.started_at,a.state,a.input_manifest_file_id,a.result_snapshot_id,o.created_revision FROM acquisition_attempts a LEFT JOIN acquisition_observations o ON o.id=a.observation_id WHERE a.id=?1")?;
     let mut rows = statement.query([id.as_bytes().as_slice()])?;
-    let row = rows
-        .next()?
-        .ok_or_else(|| Error::Integrity("取得開始の記録がありません".into()))?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
     let kind = match row.get::<_, String>(3)?.as_str() {
         "work" => EntityKind::Work,
         "person" => EntityKind::Person,
@@ -135,7 +139,7 @@ pub(super) fn load_info(conn: &Connection, id: LibraryId) -> Result<AcquisitionI
         _ => return Err(Error::Integrity("取得処理の状態が不正です".into())),
     };
     let entity = sql_id(row, 1)?;
-    Ok(AcquisitionInfo {
+    Ok(Some(AcquisitionInfo {
         ticket: AcquisitionTicket {
             id: sql_id(row, 0)?,
             entity,
@@ -166,7 +170,7 @@ pub(super) fn load_info(conn: &Connection, id: LibraryId) -> Result<AcquisitionI
             .transpose()?,
         payloads: raw_parts(conn, id)?,
         reader: reader_output(conn, id)?,
-    })
+    }))
 }
 
 pub(super) fn raw_parts(conn: &Connection, id: LibraryId) -> Result<Vec<RawPart>> {
@@ -348,6 +352,12 @@ impl Library {
     pub fn acquisition_status(&self, id: LibraryId) -> Result<AcquisitionInfo> {
         let conn = self.reader()?;
         load_info(&conn, id)
+    }
+
+    /// 実行項目に要求 ID を記録したあと、取得の開始前に止まることがある。
+    pub fn find_acquisition(&self, id: LibraryId) -> Result<Option<AcquisitionInfo>> {
+        let conn = self.reader()?;
+        find_info(&conn, id)
     }
 
     /// 受信した原本を解釈より前に保管する。閉じた処理へ新しい原本を追加しない。
