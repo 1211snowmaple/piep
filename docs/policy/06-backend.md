@@ -18,8 +18,8 @@ pub async fn list_saved_searches(app: tauri::AppHandle) -> Result<Vec<SavedSearc
 | 決めごと | 理由 |
 |---|---|
 | 戻りは `Result<T, String>` で統一 | IPC は JSON を渡す。型の付いたエラーを送っても向こうでは文字列になる |
-| 中身は `library/` `library_search/` `epub/` `downloader/` に置く | コマンドが薄いと、同じ処理をテストから直接呼べる |
-| DB 作業は `spawn_blocking` へ | SQLite の操作は同期的で、async の中で走らせると WebView の応答が止まる |
+| 中身は `library/` `epub/` `downloader/` などに置く | コマンドが薄いと、同じ処理をテストから直接呼べる |
+| DB 作業は `run_db_blocking` へ | SQLite の操作は同期的で、async の中で走らせると WebView の応答が止まる |
 | 引数は snake_case のまま書く | Tauri 2 がフロント側で camelCase に変換する（`source_id` → `sourceId`） |
 
 新しいコマンドを足したら **`generate_handler!` への登録を忘れないこと。**
@@ -46,11 +46,8 @@ let _ = app.emit("update-job-progress", snapshot);
 
 ### 接続
 
-棚の台帳（`library.db`）は `rusqlite` で開く。書き込みは `Mutex` で守る一本の接続に集める。
-`Library::reader` は読み取り専用の接続を貸し出し、返却時に読み取りトランザクションを閉じる。
-WAL を使うので、一覧や読書が保存の確定を待たずに読める。
-
-起動時に棚を開き、まだ無ければ空の棚を作る。一つのプロセスが助言ロックを取って棚を排他的に持つ。
+書き込みは `Mutex<Connection>` の一本だけが行い、読み取りは読み取り専用の接続を借りる
+（`Library::reader`）。ライブラリは一つのプロセスが排他的に持ち、起動時に助言ロックを取る。
 
 ロックファイルは**終了後もディスクに残す**。消してしまうと、既存のプロセスが
 古い inode のロックを持ったまま、別のプロセスが別の inode を作ってロックできて

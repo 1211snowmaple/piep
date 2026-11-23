@@ -87,7 +87,7 @@ export const demoWorks: ShelfEntry[] = [
 ];
 
 export const demoDashboard: DashboardSummary = {
-  stats: { totalDownloads: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 },
+  stats: { totalWorks: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 },
   favoriteCount: 86,
   watchedCount: 214,
   updateTargetCount: 43,
@@ -106,12 +106,12 @@ export const demoDashboard: DashboardSummary = {
   topAuthors: [
     { name: "青葉しおり", count: 48, sources: ["pixiv", "fanbox"] }, { name: "遠野つむぎ", count: 37, sources: ["pixiv"] }, { name: "mizu atelier", count: 31, sources: ["fanbox"] }, { name: "白鳥ケイ", count: 24, sources: ["pixiv"] }, { name: "こはるデザイン室", count: 19, sources: ["fanbox"] },
   ],
-  recentDownloads: demoWorks,
+  recentWorks: demoWorks,
   sourceBreakdown: [
     { source: "pixiv", count: 936, totalSizeBytes: 7_920_000_000 },
     { source: "fanbox", count: 348, totalSizeBytes: 6_760_000_000 },
   ],
-  monthlyDownloads: [
+  monthlySaves: [
     { bucket: "2026-03", count: 72, pixivCount: 51, fanboxCount: 21, totalSizeBytes: 912_000_000 },
     { bucket: "2026-04", count: 96, pixivCount: 68, fanboxCount: 28, totalSizeBytes: 1_084_000_000 },
     { bucket: "2026-05", count: 81, pixivCount: 59, fanboxCount: 22, totalSizeBytes: 806_000_000 },

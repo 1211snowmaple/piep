@@ -60,6 +60,9 @@ pub struct FanboxAccount {
 pub struct ConnectionStatus {
     pub pixiv: Option<PixivStatus>,
     pub fanbox: Option<FanboxStatus>,
+    /// 保存された接続を読めなかった取得元（`pixiv`・`fanbox`）。繋がっていないものとして
+    /// 扱い、ほかの取得元の様子やログインの結果は巻き込まない。
+    pub unreadable: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -178,16 +181,33 @@ impl Vault {
         }
     }
 
-    pub fn status(&self) -> Result<ConnectionStatus, String> {
-        Ok(ConnectionStatus {
-            pixiv: self.pixiv()?.map(|account| PixivStatus {
+    /// 取得元ごとの接続の様子。片方の保存された接続が読めなくても、もう片方の様子は返す
+    /// （読めなかった方は `unreadable` に載せる）。
+    pub fn status(&self) -> ConnectionStatus {
+        fn readable<T>(
+            source: &'static str,
+            read: Result<Option<T>, String>,
+            unreadable: &mut Vec<&'static str>,
+        ) -> Option<T> {
+            read.unwrap_or_else(|error| {
+                log::warn!("{source} の保存された接続を読めません: {error}");
+                unreadable.push(source);
+                None
+            })
+        }
+        let mut unreadable = Vec::new();
+        let pixiv = readable("pixiv", self.pixiv(), &mut unreadable);
+        let fanbox = readable("fanbox", self.fanbox(), &mut unreadable);
+        ConnectionStatus {
+            pixiv: pixiv.map(|account| PixivStatus {
                 name: account.user_name,
                 web_session: account.web_session.is_some(),
             }),
-            fanbox: self.fanbox()?.map(|account| FanboxStatus {
+            fanbox: fanbox.map(|account| FanboxStatus {
                 name: account.user_name,
             }),
-        })
+            unreadable,
+        }
     }
 
     /// 画面から始まる取得に使う pixiv の更新用トークン。無ければ繋ぐよう言う。
@@ -274,7 +294,7 @@ mod tests {
         assert_eq!(credentials.fanbox_cookie.as_deref(), Some("fanbox-session"));
         assert_eq!(credentials.fanbox_user_agent.as_deref(), Some("UA/2"));
         assert_eq!(
-            vault.status().unwrap(),
+            vault.status(),
             ConnectionStatus {
                 pixiv: Some(PixivStatus {
                     name: "ぴくし".into(),
@@ -283,6 +303,7 @@ mod tests {
                 fanbox: Some(FanboxStatus {
                     name: "ふぁん".into()
                 }),
+                unreadable: Vec::new(),
             }
         );
     }
@@ -302,7 +323,7 @@ mod tests {
         assert_eq!(credentials.pixiv_refresh_token.as_deref(), Some("t"));
         assert_eq!(credentials.pixiv_cookie, None);
         assert_eq!(credentials.pixiv_user_agent, None);
-        assert!(!vault.status().unwrap().pixiv.unwrap().web_session);
+        assert!(!vault.status().pixiv.unwrap().web_session);
     }
 
     #[test]
@@ -315,8 +336,31 @@ mod tests {
             credentials.fanbox_user_agent.as_deref(),
             Some(DEFAULT_USER_AGENT)
         );
-        assert_eq!(vault.status().unwrap(), ConnectionStatus::default());
+        assert_eq!(vault.status(), ConnectionStatus::default());
         vault.forget("pixiv").unwrap();
         assert!(vault.forget("other").is_err());
+    }
+
+    /// 片方の保存された接続が壊れていても、もう片方の様子と、その取得元へのログインの
+    /// 結果は巻き込まない。
+    #[test]
+    fn a_broken_connection_does_not_spoil_the_other_source() {
+        let vault = Vault::app();
+        vault.store(&vault.name("fanbox"), b"{").unwrap();
+        vault
+            .set_pixiv(&PixivAccount {
+                refresh_token: "t".into(),
+                web_session: None,
+                user_name: "ぴくし".into(),
+            })
+            .unwrap();
+        let status = vault.status();
+        assert_eq!(status.pixiv.unwrap().name, "ぴくし");
+        assert_eq!(status.fanbox, None);
+        assert_eq!(status.unreadable, vec!["fanbox"]);
+        // 仕事に渡す鍵も、読めた方は渡す。
+        let credentials = vault.update_credentials();
+        assert_eq!(credentials.pixiv_refresh_token.as_deref(), Some("t"));
+        assert_eq!(credentials.fanbox_cookie, None);
     }
 }

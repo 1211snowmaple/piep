@@ -9,9 +9,9 @@ use crate::library::{
     WorkListQuery,
 };
 use crate::models::{
-    DashboardSummary, DashboardTrendPoint, DbStats, EntityProfileRepairStatus, FacetCount,
+    DashboardSummary, DashboardTrendPoint, EntityProfileRepairStatus, FacetCount,
     IncompleteEntityProfile, LibraryMaintenanceResult, LibraryShelfCounts,
-    SearchIndexOptimizationResult, SearchIndexStatus, SourceBreakdown,
+    SearchIndexOptimizationResult, SearchIndexStatus, ShelfStats, SourceBreakdown,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -93,7 +93,7 @@ impl Library {
     }
 
     /// 保存の数（ホーム・設定の統計）。
-    pub fn shelf_stats(&self) -> Result<DbStats> {
+    pub fn shelf_stats(&self) -> Result<ShelfStats> {
         let conn = self.reader()?;
         let (total, pixiv, fanbox, media, size): (i64, i64, i64, i64, i64) = conn.query_row(
             "SELECT count(*),coalesce(sum(provider='pixiv'),0),coalesce(sum(provider='fanbox'),0),
@@ -102,8 +102,8 @@ impl Library {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
-        Ok(DbStats {
-            total_downloads: total,
+        Ok(ShelfStats {
+            total_works: total,
             pixiv_count: pixiv,
             fanbox_count: fanbox,
             total_assets: media,
@@ -162,7 +162,7 @@ impl Library {
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let mut monthly_downloads = {
+        let mut monthly_saves = {
             let mut statement = conn.prepare(&format!(
                 "SELECT {MONTH_SQL} AS bucket,count(*),coalesce(sum(p.provider='pixiv'),0),
                         coalesce(sum(p.provider='fanbox'),0),coalesce(sum(p.logical_size),0)
@@ -179,19 +179,18 @@ impl Library {
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        monthly_downloads.reverse();
+        monthly_saves.reverse();
         Ok(DashboardSummary {
             stats,
             favorite_count: favorite,
             watched_count: watched,
             update_target_count: targets,
-            indexed_count: index.indexed_downloads,
-            pending_index_count: index.pending_downloads,
+            indexed_count: index.indexed_works,
+            pending_index_count: index.pending_works,
             top_tags,
             top_authors,
-            recent_downloads: Vec::new(),
             source_breakdown,
-            monthly_downloads,
+            monthly_saves,
         })
     }
 
@@ -212,15 +211,15 @@ impl Library {
         let indexed = total.saturating_sub(pending);
         let semantic_indexed = semantic.map_or(0, |s| s.indexed);
         Ok(SearchIndexStatus {
-            total_downloads: total as i64,
-            indexed_downloads: indexed as i64,
-            pending_downloads: pending as i64,
+            total_works: total as i64,
+            indexed_works: indexed as i64,
+            pending_works: pending as i64,
             is_complete: pending == 0,
             phase: if pending == 0 { "ready" } else { "pending" }.into(),
             // 画面は「意味ベクトルが一つもない」を塊の数で見る。棚は作品ごとに数える。
             semantic_indexed_chunks: semantic_indexed as i64,
-            semantic_indexed_downloads: semantic_indexed as i64,
-            semantic_pending_downloads: semantic.map_or(0, |s| s.works.saturating_sub(s.indexed))
+            semantic_indexed_works: semantic_indexed as i64,
+            semantic_pending_works: semantic.map_or(0, |s| s.works.saturating_sub(s.indexed))
                 as i64,
             semantic_enabled,
             semantic_model_ready: model.model_ready,

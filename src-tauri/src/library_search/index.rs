@@ -267,10 +267,16 @@ impl Library {
                             let Some(batch) = batches.get(index) else {
                                 return Ok(());
                             };
-                            let conn = self.reader()?;
+                            // 読み取りは束ごとに借りる。受け手が詰まって待つときは返してから
+                            // 待つ（借りたまま待つと、待つあいだ WAL を書き戻せない）。
+                            let mut conn = None;
                             for unit in batch.iter() {
                                 let key = keys[&unit.id];
-                                let item = match self.search_entry(&conn, space, *unit)? {
+                                if conn.is_none() {
+                                    conn = Some(self.reader()?);
+                                }
+                                let reader = conn.as_ref().expect("借りた");
+                                let item = match self.search_entry(reader, space, *unit)? {
                                     Some((stamp, doc)) => {
                                         let prepared = tantivy_index::prepare_document(
                                             storage,
@@ -281,7 +287,7 @@ impl Library {
                                     }
                                     None => None,
                                 };
-                                if sender.send(item).is_err() {
+                                if !send_released(&sender, item, &mut conn) {
                                     return Ok(());
                                 }
                             }
@@ -618,5 +624,43 @@ fn index_document(key: i64, doc: &SearchDocument) -> TantivyIndexDocument {
         watch_updates: false,
         asset_kinds: crate::search_engine::text::normalize_search_text(&doc.asset_kinds.join(" ")),
         text_length: doc.text_length,
+    }
+}
+
+/// 作り手が受け手へ渡す。受け手の列が満杯なら、借りている読み取りを返してから待つ。
+/// 受け手がもういなければ偽。
+pub(super) fn send_released<T, R>(
+    sender: &mpsc::SyncSender<T>,
+    item: T,
+    reader: &mut Option<R>,
+) -> bool {
+    match sender.try_send(item) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(item)) => {
+            *reader = None;
+            sender.send(item).is_ok()
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => false,
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_queue_gives_the_reader_back_before_waiting() {
+        let (sender, receiver) = mpsc::sync_channel::<u8>(1);
+        let mut reader = Some("借りた読み取り");
+        assert!(send_released(&sender, 1, &mut reader));
+        assert!(reader.is_some(), "空きがあれば借りたまま渡す");
+        let taker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            receiver.iter().take(2).collect::<Vec<_>>()
+        });
+        assert!(send_released(&sender, 2, &mut reader));
+        assert!(reader.is_none(), "満杯なら返してから待つ");
+        assert_eq!(taker.join().unwrap(), vec![1, 2]);
+        assert!(!send_released(&sender, 3, &mut reader));
     }
 }
