@@ -1,4 +1,4 @@
-import { adoptLocalPosition, flushLocalReading, hasLocalPosition, localPage, localPosition, localReadingTime, markLocalReading, rememberReading, saveLocalPage, saveLocalPosition, type SavedPosition } from "./localReading";
+import { adoptLocalPosition, flushLocalReading, localPage, localPosition, localReadingKey, localReadingTime, markLocalReading, rememberReading, saveLocalPage, saveLocalPosition, type SavedPosition } from "./localReading";
 import { progressLabel } from "./workText";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { followContentLink } from "./contentLinks";
@@ -16,8 +16,8 @@ import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
 import { fillDocumentImages, safePageHtml } from "./readerDocument";
 import { readerKeyDirection } from "./readerKeyboard";
 import { readShelfPosition, recordShelfReading, refreshReading, refreshReadingWithin, sendReading, shelfLocation, shelfReadingFor, shelfStart, type ReadingWrite, type RemoteStart } from "./readingSync";
-import { shelfImageUrl, shelfPage, openShelfWork, openShelfSnapshot, type OpenedShelfWork } from "./shelf";
-import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcMetadata, getPcWorkCollections, pcErrorMessage, saveOfflineWork, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
+import { connectedShelf, NO_SHELF, shelfImageUrl, shelfPage, openShelfWork, openShelfSnapshot, type OpenedShelfWork } from "./shelf";
+import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcMetadata, getPcWorkCollections, pcErrorMessage, sameReadingScope, sameWork, saveOfflineWork, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
 import { READER_FONTS } from "@shared/readerType";
 import type { ReaderBehavior, ReaderFont, ReaderType } from "./readerPrefs";
 
@@ -26,11 +26,15 @@ function offlineSnapshotChanged(error: unknown): boolean {
 }
 
 /** 読書位置を書く本文の識別。作業中の値が変わったら、位置を書き直す合図にする。 */
-function readingKey(work: PcWork, editHash: string | null): string {
-  return `${work.source}:${work.sourceId}.${work.currentVersion}.${editHash ?? "original"}`;
+function readingKey(work: PcWork): string {
+  return `${localReadingKey(work)}/${work.snapshotId}/${work.editId ?? ""}`;
 }
 
-const savedPage = localPage;
+function matchesText(work: PcWork, document: OpenedShelfWork): boolean {
+  return work.id === document.entityId && (work.editId
+    ? document.view.kind === "edit" && document.view.id === work.editId
+    : document.view.kind === "snapshot" && document.view.id === work.snapshotId);
+}
 
 // サーバーの位置を待つのは開くときの一瞬だけ。遅ければ手元の位置で開き、あとで案内する。
 // 同期を待つのは短く。間に合わなければ手元の位置で開き、本文を先に出す。
@@ -38,15 +42,11 @@ const SYNC_WAIT_MS = 600;
 const WRITE_DELAY_MS = 3000;
 
 /** 開始位置にする棚の位置。棚から開いた本だけが持つ。 */
-async function remoteStartFor(work: PcWork, editHash: string | null, document: OpenedShelfWork | null): Promise<RemoteStart | null> {
+async function remoteStartFor(work: PcWork, document: OpenedShelfWork | null): Promise<RemoteStart | null> {
+  if (!sameReadingScope(work.readingScope, connectedShelf())) return null;
   const shelf = shelfReadingFor(document);
-  return shelf ? shelfStart(await readShelfPosition(shelf.entityId), localReadingTime(work, editHash), shelf) : null;
+  return shelf ? shelfStart(await readShelfPosition(shelf.entityId), localReadingTime(work), shelf) : null;
 }
-
-const readSavedPosition = localPosition;
-
-/** 詳細画面の「続きから読む」のため。開いただけのものは続きとして扱わない。 */
-export const hasReadingPosition = hasLocalPosition;
 
 function positionFromRemote(start: RemoteStart, fontFamily: ReaderFont): SavedPosition {
   // 別の端末とは文字の大きさが違うので、割合で戻す。先頭から順に画像が埋まるのを待つよう top は末尾にする。
@@ -61,14 +61,14 @@ function stepHeight(viewport: HTMLElement): number {
   return Math.max(1, viewport.clientHeight - keep);
 }
 
-export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBehaviorChange, backLabel = "作品一覧に戻る", onSaved, offline = false, offlineCollections, offlineAuthorCover = false, offlineEditHash = null, snapshotGeneration, startPage, selectedVersion = null }: { work: PcWork; type: ReaderType; behavior: ReaderBehavior; onBack: () => void; onTypeChange: (patch: Partial<ReaderType>) => void; onBehaviorChange: (patch: Partial<ReaderBehavior>) => void; backLabel?: string; onSaved?: () => void; offline?: boolean; offlineCollections?: PcCollection[]; offlineAuthorCover?: boolean; offlineEditHash?: string | null; snapshotGeneration?: number; /** 本文検索から開くときのページ。保存した作品だけ。 */ startPage?: number; selectedVersion?: number | null }) {
+export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBehaviorChange, backLabel = "作品一覧に戻る", onSaved, offline = false, offlineCollections, offlineAuthorCover = false, snapshotGeneration, startPage, selectedVersion = null }: { work: PcWork; type: ReaderType; behavior: ReaderBehavior; onBack: () => void; onTypeChange: (patch: Partial<ReaderType>) => void; onBehaviorChange: (patch: Partial<ReaderBehavior>) => void; backLabel?: string; onSaved?: () => void; offline?: boolean; offlineCollections?: PcCollection[]; offlineAuthorCover?: boolean; snapshotGeneration?: number; /** 本文検索から開くときのページ。保存した作品だけ。 */ startPage?: number; selectedVersion?: number | null }) {
   const navigation = useAppNavigation();
   const textSelection = useReaderSelection();
   const [sourceMetadata, setSourceMetadata] = useState<PcMetadata | null>(null);
   const { fontSize, lineHeight, readerWidth, fontFamily, readerTheme } = type;
   const continuous = behavior.layout === "continuous";
-  const [activeEditHash, setActiveEditHash] = useState<string | null | undefined>(offline ? offlineEditHash : undefined);
-  const [pageIndex, setPageIndex] = useState(() => offline ? startPage ?? savedPage(work, offlineEditHash) : 0);
+  const [metadataFailed, setMetadataFailed] = useState(false);
+  const [pageIndex, setPageIndex] = useState(() => offline ? startPage ?? localPage(work) : 0);
   const [page, setPage] = useState<PcPage | null>(null);
   const [html, setHtml] = useState("");
   const [loading, setLoading] = useState(true);
@@ -112,7 +112,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   const flushContinuous = useRef<(() => void) | null>(null);
   const targetNonce = useRef(0);
   // 検索から開いたときは、そのページの頭から。前に読んだ位置へは戻さない。
-  const pendingRestore = useRef<SavedPosition | null>(offline && startPage === undefined ? readSavedPosition(work, offlineEditHash) : null);
+  const pendingRestore = useRef<SavedPosition | null>(offline && startPage === undefined ? localPosition(work) : null);
   const pendingOutline = useRef<{ page: number; index: number } | null>(null);
   const [remoteOffer, setRemoteOffer] = useState<RemoteStart | null>(null);
   // 最初に開いたページは読み進めた印ではないので、送らない。
@@ -128,7 +128,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   // 以前の版を開いたときの、その版の写しの ID（開き直すときに使う）。
   const openedSnapshot = useRef<string | null>(null);
   const readingWork = detailWork ?? work;
-  const positionKey = activeEditHash === undefined ? null : readingKey(readingWork, activeEditHash);
+  const textReady = offline || detailWork !== null || metadataFailed;
+  const positionKey = offline || detailWork ? readingKey(readingWork) : null;
 
   useLayoutEffect(() => {
     if (!keyboardPageChange.current) return;
@@ -150,10 +151,11 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       return await shelfPage(opened, target);
     } catch {
       // 端末で組んだものは数冊ぶんしか覚えていない。消えていたら開き直す。
+      if (!sameReadingScope(readingWork.readingScope, connectedShelf())) throw NO_SHELF;
       const again = openedSnapshot.current
         ? await openShelfSnapshot(work.id, openedSnapshot.current, true)
         : await openShelfWork(readingWork, true);
-      if (!again) throw new Error("本文を読み込めませんでした。もう一度読み込んでください");
+      if (!again || !matchesText(readingWork, again)) throw new Error("本文を読み込めませんでした。もう一度読み込んでください");
       openedWork.current = again;
       return shelfPage(again, target);
     }
@@ -169,6 +171,10 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   useEffect(() => {
     if (offline) return;
     let alive = true;
+    if (!sameReadingScope(work.readingScope, connectedShelf())) {
+      setMetadataFailed(true);
+      return;
+    }
     void Promise.all([
       getPcMetadata(work.id),
       selectedVersion === null ? refreshReadingWithin(SYNC_WAIT_MS) : Promise.resolve(),
@@ -176,12 +182,16 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       selectedVersion === null ? openShelfWork(work) : Promise.resolve(null),
     ]).then(async ([original, , current]) => {
       const metadata = readerMetadataForVersion(original, selectedVersion);
+      if (!alive || !sameWork(work, metadata.work) || !sameReadingScope(work.readingScope, connectedShelf())) throw NO_SHELF;
       // 以前の版は、その版の写しを棚から開く。
       const snapshot = selectedVersion === null ? null : readerVersions(original).find((entry) => entry.version === selectedVersion)?.snapshotId ?? null;
-      const opened = snapshot ? await openShelfSnapshot(work.id, snapshot) : current;
-      openedSnapshot.current = opened && snapshot ? snapshot : null;
-      const start = selectedVersion === null ? await remoteStartFor(metadata.work, metadata.activeEditHash, opened) : null;
+      let opened = snapshot ? await openShelfSnapshot(work.id, snapshot) : current;
+      // 端末で組んだ本文が前の版のものなら取り直す。
+      if (!snapshot && opened && !matchesText(metadata.work, opened)) opened = await openShelfWork(metadata.work, true);
+      if (opened && !matchesText(metadata.work, opened)) throw new Error("本文が変わりました。作品を開き直してください");
+      const start = selectedVersion === null ? await remoteStartFor(metadata.work, opened) : null;
       if (!alive) return;
+      openedSnapshot.current = opened && snapshot ? snapshot : null;
       openedWork.current = opened;
       setSourceMetadata(original);
       setDetailWork(metadata.work);
@@ -189,19 +199,17 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       if (start) {
         // 時刻だけ新しくなると、次に開いたとき古い位置を「最新」と扱ってしまう。位置も同時に書く。
         const adopted = positionFromRemote(start, fontFamily);
-        adoptLocalPosition(metadata.work, metadata.activeEditHash, { ...adopted, top: 0 }, start.deviceTime);
+        adoptLocalPosition(metadata.work, { ...adopted, top: 0 }, start.deviceTime);
         guidedPage.current = start.guide;
         pendingRestore.current = start.guide ? null : adopted;
         setPageIndex(start.page);
       } else {
-        pendingRestore.current = selectedVersion === null ? readSavedPosition(metadata.work, metadata.activeEditHash) : null;
-        setPageIndex(selectedVersion === null ? savedPage(metadata.work, metadata.activeEditHash) : 0);
+        pendingRestore.current = selectedVersion === null ? localPosition(metadata.work) : null;
+        setPageIndex(selectedVersion === null ? localPage(metadata.work) : 0);
       }
-      setActiveEditHash(metadata.activeEditHash);
     }).catch(() => {
       if (!alive) return;
-      // 本文が取得できる場合は読書を続ける。未知の編集状態で古い位置は流用しない。
-      setActiveEditHash("unknown");
+      setMetadataFailed(true);
     });
     return () => { alive = false; };
   }, [offline, work.id]);
@@ -241,7 +249,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     writeTimer.current = null;
     const write = queuedWrite.current;
     queuedWrite.current = null;
-    if (!write) return;
+    if (!write || !sameReadingScope(work.readingScope, connectedShelf())) return;
     // 棚の作品の位置として書く（開いた版の写しか編集に結ぶ）。
     const shelf = shelfReadingFor(openedWork.current);
     if (!shelf) return;
@@ -249,27 +257,22 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   const queueReadingWrite = (pageNumber: number, ratio: number, pageCount: number) => {
-    if (selectedVersion !== null || !positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    if (selectedVersion !== null || !positionKey) return;
     const time = Date.now();
-    markLocalReading(readingWork, activeEditHash, time);
+    markLocalReading(readingWork, time);
     setRemoteOffer(null);
     queuedWrite.current = {
-      source: readingWork.source,
-      sourceId: readingWork.sourceId,
-      version: readingWork.currentVersion,
-      editHash: activeEditHash,
       page: pageNumber,
       position: Math.min(1, Math.max(0, ratio)),
       finished: pageNumber === pageCount - 1 && ratio >= 0.98,
-      deviceTime: time,
     };
     if (writeTimer.current === null) writeTimer.current = window.setTimeout(sendQueuedWrite, WRITE_DELAY_MS);
-    rememberReading(readingWork, activeEditHash, pageCount > 0 ? (pageNumber + Math.min(1, Math.max(0, ratio))) / pageCount : 0, pageNumber === pageCount - 1 && ratio >= 0.98);
+    rememberReading(readingWork, pageCount > 0 ? (pageNumber + Math.min(1, Math.max(0, ratio))) / pageCount : 0, pageNumber === pageCount - 1 && ratio >= 0.98);
   };
 
   const acceptRemote = () => {
-    if (!remoteOffer || !positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
-    markLocalReading(readingWork, activeEditHash, remoteOffer.deviceTime);
+    if (!remoteOffer || !positionKey) return;
+    markLocalReading(readingWork, remoteOffer.deviceTime);
     syncedPage.current = remoteOffer.page;
     guidedPage.current = remoteOffer.guide;
     if (continuous) {
@@ -290,10 +293,10 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   useEffect(() => {
-    if (selectedVersion !== null || !positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    if (selectedVersion !== null || !positionKey) return;
     let alive = true;
     const check = () => {
-      void refreshReading().then(() => remoteStartFor(readingWork, activeEditHash, openedWork.current)).then((start) => {
+      void refreshReading().then(() => remoteStartFor(readingWork, openedWork.current)).then((start) => {
         if (!alive || !start || start.deviceTime <= dismissedRemote.current) return;
         const ratio = latestPosition.current?.page === currentPage.current ? latestPosition.current.ratio : 0;
         if (start.page === currentPage.current && Math.abs(start.ratio - ratio) < 0.02) return;
@@ -398,8 +401,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
 
   useEffect(() => {
     // 版が分からないあいだの位置は、どの本文のものか決まらないので残さない。
-    if (selectedVersion !== null || !positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
-    saveLocalPage(readingWork, activeEditHash, pageIndex);
+    if (selectedVersion !== null || !positionKey) return;
+    saveLocalPage(readingWork, pageIndex);
   }, [positionKey, pageIndex]);
 
   useEffect(() => {
@@ -442,7 +445,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     const flush = () => {
       if (!changed || !restored || !latest) return;
       changed = false;
-      if (selectedVersion === null && activeEditHash !== undefined && activeEditHash !== "unknown") saveLocalPosition(readingWork, activeEditHash, latest);
+      if (selectedVersion === null) saveLocalPosition(readingWork, latest);
       // 位置を戻しただけのスクロールは、読み進めた印ではない。
       if (restoredTop === null || Math.abs(latest.top - restoredTop) > 2) queueReadingWrite(pageIndex, latest.ratio, pageCount);
     };
@@ -516,7 +519,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   }, [continuous, page, html, pageIndex, infoOpen, loading, assetsReady]);
 
   useEffect(() => {
-    if (!offline && activeEditHash === undefined) return;
+    if (!textReady) return;
     if (offline && !offlineGeneration) return;
     let alive = true;
     void (async () => {
@@ -535,7 +538,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       }
     })();
     return () => { alive = false; };
-  }, [offline, work.id, positionKey, infoOpen, offlineGeneration]);
+  }, [offline, work.id, textReady, positionKey, infoOpen, offlineGeneration]);
 
   useEffect(() => {
     if (!infoOpen || offline) return;
@@ -545,7 +548,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   }, [infoOpen, offline, work.id]);
 
   useEffect(() => {
-    if (activeEditHash === undefined || continuous) return;
+    if (!textReady || continuous) return;
     let cancelled = false;
     setLoading(true);
     setProblem(null);
@@ -556,7 +559,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     setAssetsReady(false);
     void (async () => {
       try {
-        const next = await (offline ? getOfflinePage(work.id, pageIndex) : readPage(pageIndex));
+        const next = await (offline ? getOfflinePage(work, pageIndex) : readPage(pageIndex));
         if (cancelled || !next) return;
         if (guidedPage.current) {
           guidedPage.current = false;
@@ -613,7 +616,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       }
     })();
     return () => { cancelled = true; };
-  }, [work.id, pageIndex, retry, offline, positionKey, continuous]);
+  }, [work.id, pageIndex, retry, offline, textReady, positionKey, continuous]);
 
   const goToPage = (next: number, edge: "start" | "end" = "start") => {
     if (!page || !Number.isSafeInteger(next)) return;
@@ -760,7 +763,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   const loadSection = async (target: number): Promise<LoadedSection | null> => {
-    const next = await (offline ? getOfflinePage(work.id, target) : readPage(target));
+    const next = await (offline ? getOfflinePage(work, target) : readPage(target));
     if (!next) return null;
     const generation = "generation" in next && typeof next.generation === "string" ? next.generation : null;
     if (offline && !generation) throw new Error("保存済み作品の版を確認できませんでした。もう一度読み込んでください");
@@ -784,9 +787,9 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   const continuousCommit = (position: LivePosition) => {
-    if (selectedVersion !== null || !positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    if (selectedVersion !== null || !positionKey) return;
     const saved: SavedPosition = { page: position.page, top: position.top, ratio: position.ratio, fontSize, lineHeight, readerWidth, fontFamily, layout: "continuous" };
-    saveLocalPosition(readingWork, activeEditHash, saved);
+    saveLocalPosition(readingWork, saved);
     queueReadingWrite(position.page, position.ratio, position.pageCount);
   };
 
@@ -840,7 +843,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       if (event.touches.length === 1) touchStart.current = { x: event.touches[0].clientX, y: event.touches[0].clientY };
     }} onTouchMove={() => { if (!textSelection.selecting() && behavior.bars === "auto" && barsShown) setBarsShown(false); }} onTouchEnd={finishHorizontalSwipe}><article className={`reading-paper online-paper${!continuous && enterDirection ? ` reader-enter--${enterDirection}` : ""}`} style={{ fontFamily: READER_FONTS[fontFamily].family, maxWidth: `${readerWidth}px`, fontSize: `${fontSize}px`, lineHeight, userSelect: textSelection.enabled ? "text" : "none", WebkitUserSelect: textSelection.enabled ? "text" : "none" }}>
       {continuous
-        ? activeEditHash !== undefined && <ContinuousDocument key={`${positionKey}:${retry}`} viewportRef={scrollRef} load={loadSection} imageSource={imageSource} isSnapshotChange={(error) => offline && offlineSnapshotChanged(error)} onSnapshotChanged={() => setRetry((current) => current + 1)} start={continuousStart} target={continuousTarget} typeKey={`${fontSize}:${lineHeight}:${readerWidth}:${fontFamily}`} header={titleBlock} onInfo={continuousInfo} onPosition={continuousPosition} onCommit={continuousCommit} onLink={openContentLink} onStartRejected={rejectContinuousStart} flushRef={flushContinuous} />
+        ? textReady && <ContinuousDocument key={`${positionKey}:${retry}`} viewportRef={scrollRef} load={loadSection} imageSource={imageSource} isSnapshotChange={(error) => offline && offlineSnapshotChanged(error)} onSnapshotChanged={() => setRetry((current) => current + 1)} start={continuousStart} target={continuousTarget} typeKey={`${fontSize}:${lineHeight}:${readerWidth}:${fontFamily}`} header={titleBlock} onInfo={continuousInfo} onPosition={continuousPosition} onCommit={continuousCommit} onLink={openContentLink} onStartRejected={rejectContinuousStart} flushRef={flushContinuous} />
         : <>
           {pageIndex === 0 && titleBlock}
           {loading ? <p>本文を読み込んでいます…</p> : problem ? <div className="reader-error" role="alert"><p>{problem}</p><button onClick={() => setRetry((current) => current + 1)}>もう一度読み込む</button><small>下へ引いても読み込み直せます</small></div> : <div className="online-document" onClick={openContentLink} dangerouslySetInnerHTML={{ __html: html }} />}

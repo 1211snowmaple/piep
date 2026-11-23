@@ -23,11 +23,12 @@ function render(element: ReactElement) {
 
 function saved(id: number, title: string): OfflineWork {
   const work: PcWork = {
+    readingScope: { libraryId: "l1", subjectId: "u1" },
     id: `w${id}`, source: "pixiv", sourceId: String(id), title, authorName: "作者", authorId: "1", contentType: "novel",
     tags: [], excerpt: null, textLength: 100, assetCount: 0, hasCover: false, favorite: false, seriesTitle: null, seriesId: null,
     currentVersion: 1, snapshotId: "s1", edited: false, editId: null, favoriteGeneration: "0", sourceCreatedAt: null, savedAt: "2026-11-01T00:00:00Z",
   };
-  return { work, savedAtMs: id, shelfLibrary: "l1", savedVersion: 1, savedEditHash: null, pageCount: 5 };
+  return { work, savedAtMs: id, pageCount: 5 };
 }
 
 afterEach(cleanup);
@@ -51,7 +52,7 @@ describe("保存した作品の本文検索", () => {
     expect(hit.textContent).toContain("4 ページ目ほか 1 ページ");
     expect(within(hit).getByText("灯台守").tagName).toBe("MARK");
     fireEvent.click(hit);
-    expect(open).toHaveBeenCalledWith(expect.objectContaining({ work: expect.objectContaining({ id: "w2" }) }), 3);
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ work: expect.objectContaining({ id: "w2", readingScope: { libraryId: "l1", subjectId: "u1" } }) }), 3);
   });
 
   it("本文を探せなかったときも、題名などでは探せる", async () => {
