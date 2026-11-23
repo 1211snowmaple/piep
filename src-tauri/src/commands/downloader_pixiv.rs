@@ -746,4 +746,109 @@ mod tests {
         }
         library.verify().unwrap();
     }
+
+    /// 支援していない FANBOX の投稿を表紙と説明だけで持っているときも、その表紙を原寸に替えられる。
+    /// 取り直しが渡すのは棚の応答そのものなので、中身の無い取得を断る守りに掛けない。
+    #[tokio::test]
+    async fn a_restricted_fanbox_post_kept_as_its_cover_can_have_the_cover_upgraded() {
+        let mut served = std::io::Cursor::new(Vec::new());
+        image::RgbImage::from_pixel(4, 4, image::Rgb([30, 60, 200]))
+            .write_to(&mut served, image::ImageFormat::Png)
+            .unwrap();
+        let served = served.into_inner();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = served.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0u8; 4096];
+                if socket.read(&mut bytes).await.unwrap() == 0 {
+                    continue;
+                }
+                let mut response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                response.extend_from_slice(&body);
+                let _ = socket.write_all(&response).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        let temp = Temp(
+            std::env::temp_dir().join(format!("piep-fanbox-restricted-{}", LibraryId::now_v7())),
+        );
+        let library = Arc::new(Library::create(&temp.0.join("shelf")).unwrap());
+        let shelf = Arc::new(Shelf::with_test_library(Arc::clone(&library)));
+        let remade = format!("http://{address}/c/1200x630/cover/abc.jpeg");
+        let post = json!({
+            "id": "9", "title": "支援者限定", "type": "article", "creatorId": "c",
+            "user": {"userId": "1", "name": "作者"}, "feeRequired": 1000, "isRestricted": true,
+            "publishedDatetime": "2026-01-01T00:00:00+09:00", "updatedDatetime": "2026-01-01T00:00:00+09:00",
+            "coverImageUrl": remade, "body": null,
+        });
+        let path = temp.0.join("abc.jpeg");
+        std::fs::create_dir_all(&temp.0).unwrap();
+        image::RgbImage::from_pixel(1, 1, image::Rgb([1, 2, 3]))
+            .save_with_format(&path, image::ImageFormat::Png)
+            .unwrap();
+        // 棚にある本物の2件と同じく、本文の無い保存（読む形を作らない道）で入れておく。
+        let first = library
+            .save_work(WorkSave {
+                request: LibraryId::now_v7(),
+                provider: "fanbox",
+                key: "9",
+                route: "save",
+                data: &post,
+                assets: vec![StagedAsset {
+                    role: "cover".into(),
+                    name: "abc.jpeg".into(),
+                    path,
+                    url: Some(remade.clone()),
+                    mime_type: Some("image/png".into()),
+                }],
+            })
+            .unwrap();
+        let mut upgraded = post.clone();
+        upgraded[crate::downloader::pixiv_originals::COVER_ORIGINAL_FIELD] =
+            json!(format!("http://{address}/cover/abc.jpeg"));
+        let saved = save_originals_to_shelf(
+            Arc::clone(&shelf),
+            Arc::clone(&library),
+            upgraded,
+            "fanbox".into(),
+            "9".into(),
+            first.snapshot_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(saved.work, first.entity_id);
+        let snapshot = library.current_snapshot(first.entity_id).unwrap();
+        assert_eq!(
+            library
+                .media_file(first.entity_id, snapshot, "cover")
+                .unwrap()
+                .id,
+            Fingerprint::of(&served)
+        );
+        assert_eq!(
+            library.work_card(first.entity_id).unwrap().version_number,
+            1
+        );
+        // 普段の保存は、同じ中身の無い応答を今までどおり断る。
+        let refused = save_to_shelf(
+            Arc::clone(&shelf),
+            Arc::clone(&library),
+            post,
+            "fanbox".into(),
+            "9".into(),
+            None,
+            None,
+        )
+        .await;
+        assert!(refused.is_err());
+        library.verify().unwrap();
+    }
 }

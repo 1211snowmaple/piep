@@ -118,6 +118,59 @@ fn a_reduced_cover_is_found_and_the_original_replaces_it_without_a_new_version()
     library.verify().unwrap();
 }
 
+/// うごイラの止め絵（ページ番号の無い master 版）には原寸の止め絵が無いので、縮小版に数えない。
+/// ページ番号のあるイラストは数える。
+#[test]
+fn an_ugoira_still_is_not_counted_as_a_reduced_illustration() {
+    let root = std::env::temp_dir().join(format!("piep-originals-{}", LibraryId::now_v7()));
+    let _temp = Temp(root.clone());
+    let library = Library::create(&root.join("shelf")).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let saved = |key: &str, url: &str| {
+        let path = root.join(format!("{key}.png"));
+        png(&path, 3);
+        let mut data = data();
+        data["text"] = json!("本文[pixivimage:1]");
+        library
+            .save_readable_work(
+                WorkSave {
+                    request: LibraryId::now_v7(),
+                    provider: "pixiv",
+                    key,
+                    route: "save",
+                    data: &data,
+                    assets: vec![StagedAsset {
+                        role: "illustration".into(),
+                        name: "1.png".into(),
+                        path,
+                        url: Some(url.into()),
+                        mime_type: Some("image/png".into()),
+                    }],
+                },
+                None,
+            )
+            .unwrap()
+            .entity_id
+    };
+    saved(
+        "1",
+        "https://i.pximg.net/img-master/img/2020/06/26/20/07/13/82576470_master1200.jpg",
+    );
+    let paged = saved(
+        "2",
+        "https://i.pximg.net/img-master/img/2020/06/26/20/07/13/82576471_p0_master1200.jpg",
+    );
+    let reduced = library.reduced_works().unwrap();
+    assert_eq!(
+        reduced
+            .iter()
+            .filter(|work| work.illustrations > 0)
+            .map(|work| work.work)
+            .collect::<Vec<_>>(),
+        vec![paged]
+    );
+}
+
 const FANBOX_REMADE: &str =
     "https://pixiv.pximg.net/c/1200x630_90_a2_g5/fanbox/public/images/post/9/cover/abc.jpeg";
 const FANBOX_ORIGINAL: &str = "https://pixiv.pximg.net/fanbox/public/images/post/9/cover/abc.jpeg";

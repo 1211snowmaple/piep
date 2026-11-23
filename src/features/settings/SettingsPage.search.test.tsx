@@ -19,7 +19,7 @@ const db = vi.hoisted(() => ({ getSearchIndexStatus: vi.fn(), startSearchRebuild
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  getStats: vi.fn().mockResolvedValue({ totalDownloads: 12, totalAssets: 1, totalSizeBytes: 1 }),
+  getStats: vi.fn().mockResolvedValue({ totalWorks: 12, totalAssets: 1, totalSizeBytes: 1 }),
   getSearchIndexStatus: db.getSearchIndexStatus,
   scanAndReimportDownloads: vi.fn().mockResolvedValue({ imported: 0, skipped: [] }),
 }));
@@ -55,15 +55,15 @@ import SettingsPage from "./SettingsPage";
 
 function status(overrides: Record<string, unknown> = {}) {
   return {
-    totalDownloads: 9370,
-    indexedDownloads: 9370,
-    pendingDownloads: 0,
+    totalWorks: 9370,
+    indexedWorks: 9370,
+    pendingWorks: 0,
     isComplete: true,
     phase: "ready",
     semanticEnabled: true,
     semanticIndexedChunks: 30_000,
-    semanticIndexedDownloads: 9364,
-    semanticPendingDownloads: 6,
+    semanticIndexedWorks: 9364,
+    semanticPendingWorks: 6,
     semanticModelReady: true,
     embeddingProvider: "DirectML",
     gpuEnabled: true,

@@ -45,6 +45,22 @@ pub struct OriginalImageProgress {
     failed: usize,
     active_label: Option<String>,
     error: Option<String>,
+    /// 原寸にできなかった作品（公開元に無い・失敗）。合計だけでは、どの作品か分からない。
+    misses: Vec<OriginalImageMiss>,
+}
+
+/// 原寸にできなかった一作品。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginalImageMiss {
+    work_id: String,
+    title: String,
+    provider: String,
+    external_key: String,
+    unavailable: usize,
+    failed: usize,
+    /// 失敗の理由（失敗があるときだけ）。
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -217,13 +233,22 @@ where
     result
 }
 
+/// 取り直した作品の見分け方（画面に失敗の作品を出すため）。
+#[derive(Default)]
+struct WorkLabel {
+    title: String,
+    provider: String,
+    external_key: String,
+}
+
 /// 一作品の縮小版を原寸に取り直す。原寸が一枚も見つからなければ保存しない。
 async fn upgrade_shelf_work<F, Fut>(
     shelf: &Arc<crate::commands::shelf::Shelf>,
     library: &Arc<crate::library::Library>,
     work: crate::library::LibraryId,
     find: F,
-) -> Result<(Lookups, String), String>
+    label: &mut WorkLabel,
+) -> Result<Lookups, String>
 where
     F: Fn(&str, String) -> Fut,
     Fut: std::future::Future<Output = Result<OriginalLookup, String>>,
@@ -240,8 +265,13 @@ where
         .await
         .map_err(|error| format!("棚の読み込みが途中で止まりました: {error}"))??
     };
+    *label = WorkLabel {
+        title: card.title.clone(),
+        provider: card.provider.clone(),
+        external_key: card.external_key.clone(),
+    };
     if !matches!(card.provider.as_str(), "pixiv" | "fanbox") {
-        return Ok((Lookups::default(), card.title));
+        return Ok(Lookups::default());
     }
     let raw = raw.ok_or("取得元の応答が残っていないため、原寸を探せません")?;
     let data: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
@@ -295,7 +325,7 @@ where
         lookups.found += 1;
     }
     if lookups.found == 0 {
-        return Ok((lookups, card.title));
+        return Ok(lookups);
     }
     match crate::commands::downloader::shelf::save_originals_to_shelf(
         Arc::clone(shelf),
@@ -309,7 +339,7 @@ where
     {
         Ok(Some(_)) => {}
         // 次回の実行で、現在の保存版に残っている縮小版を選び直す。
-        Ok(None) => return Ok((Lookups::default(), card.title)),
+        Ok(None) => return Ok(Lookups::default()),
         Err(error) => {
             // 見つけた原寸は保存できていない。縮小版のまま残る。
             lookups.failed += lookups.found;
@@ -317,7 +347,7 @@ where
             lookups.last_error = Some(error);
         }
     }
-    Ok((lookups, card.title))
+    Ok(lookups)
 }
 
 /// 棚で、縮小版で保存された表紙・イラストを原寸に取り直す。
@@ -379,6 +409,7 @@ pub async fn shelf_upgrade_images_to_original(
         .map(|work| work.covers + work.illustrations)
         .sum();
     let (mut completed, mut upgraded, mut unavailable, mut failed) = (0, 0, 0, 0);
+    let mut missed_works: Vec<OriginalImageMiss> = Vec::new();
     let mut consecutive_failures = 0usize;
     let mut stopped_reason = None;
     let progress = |phase: &str,
@@ -387,7 +418,8 @@ pub async fn shelf_upgrade_images_to_original(
                     unavailable,
                     failed,
                     active_label: Option<String>,
-                    error: Option<String>| OriginalImageProgress {
+                    error: Option<String>,
+                    missed_works: &[OriginalImageMiss]| OriginalImageProgress {
         phase: phase.to_string(),
         completed,
         total,
@@ -396,8 +428,9 @@ pub async fn shelf_upgrade_images_to_original(
         failed,
         active_label,
         error,
+        misses: missed_works.to_vec(),
     };
-    emit_progress(&app, progress("running", 0, 0, 0, 0, None, None));
+    emit_progress(&app, progress("running", 0, 0, 0, 0, None, None, &[]));
 
     'works: for reduced in &works {
         // 作品の保存や更新が走っている間は待つ（同じ作品を同時に書き換えない）。
@@ -424,33 +457,49 @@ pub async fn shelf_upgrade_images_to_original(
                 failed,
                 None,
                 None,
+                &missed_works,
             ),
         );
         let images = reduced.covers + reduced.illustrations;
         let asked_before = asked.load(Ordering::Relaxed);
-        let (lookups, title) = match upgrade_shelf_work(&shelf, &library, reduced.work, find).await
-        {
-            Ok(result) => result,
-            Err(error) => (
-                Lookups {
+        let mut label = WorkLabel::default();
+        let lookups =
+            match upgrade_shelf_work(&shelf, &library, reduced.work, &find, &mut label).await {
+                Ok(result) => result,
+                Err(error) => Lookups {
                     failed: images,
                     last_error: Some(error),
                     ..Lookups::default()
                 },
-                String::new(),
-            ),
-        };
+            };
         completed += images;
         upgraded += lookups.found;
         unavailable += lookups.unavailable;
         failed += lookups.failed;
+        if lookups.failed > 0 || lookups.unavailable > 0 {
+            if lookups.failed > 0 {
+                log::warn!(
+                    "画像を原寸に取り直せません（作品 {} {}:{}）: {}",
+                    reduced.work,
+                    label.provider,
+                    label.external_key,
+                    lookups.last_error.as_deref().unwrap_or_default()
+                );
+            }
+            missed_works.push(OriginalImageMiss {
+                work_id: reduced.work.to_string(),
+                title: label.title.clone(),
+                provider: label.provider.clone(),
+                external_key: label.external_key.clone(),
+                unavailable: lookups.unavailable,
+                failed: lookups.failed,
+                reason: (lookups.failed > 0)
+                    .then(|| lookups.last_error.clone())
+                    .flatten(),
+            });
+        }
         if lookups.failed > 0 && lookups.found == 0 && lookups.unavailable == 0 {
             consecutive_failures += 1;
-            log::warn!(
-                "画像を原寸に取り直せません（作品 {}）: {}",
-                reduced.work,
-                lookups.last_error.as_deref().unwrap_or_default()
-            );
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                 stopped_reason = Some(format!(
                     "画像サーバーへの接続が{MAX_CONSECUTIVE_FAILURES}回続けて失敗したので一時停止しました。取り直した分はそのまま残っています。{}",
@@ -468,8 +517,9 @@ pub async fn shelf_upgrade_images_to_original(
                 upgraded,
                 unavailable,
                 failed,
-                (!title.is_empty()).then_some(title),
+                (!label.title.is_empty()).then_some(label.title),
                 lookups.last_error,
+                &missed_works,
             ),
         );
         if stopped_reason.is_some() {
@@ -520,6 +570,7 @@ pub async fn shelf_upgrade_images_to_original(
             failed,
             None,
             stopped_reason.clone(),
+            &missed_works,
         ),
     );
     log::info!(
@@ -592,8 +643,11 @@ mod tests {
         };
         let first = save("最初の本文", REDUCED, "1_master1200.png");
         let newer = std::cell::OnceCell::new();
-        let (lookups, _) =
-            upgrade_shelf_work(&shelf, &library, first.entity_id, |provider, url| {
+        let lookups = upgrade_shelf_work(
+            &shelf,
+            &library,
+            first.entity_id,
+            |provider: &str, url: String| {
                 assert_eq!(provider, "pixiv");
                 assert_eq!(url, REDUCED);
                 let newer = &newer;
@@ -605,9 +659,11 @@ mod tests {
                     assert!(newer.set(saved.snapshot_id).is_ok());
                     Ok(OriginalLookup::Found(ORIGINAL.into()))
                 }
-            })
-            .await
-            .unwrap();
+            },
+            &mut WorkLabel::default(),
+        )
+        .await
+        .unwrap();
 
         let newer = newer.into_inner().unwrap();
         assert_eq!(library.current_snapshot(first.entity_id).unwrap(), newer);

@@ -23,27 +23,25 @@ vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
   ...health,
 }));
-const legacy = vi.hoisted(() => ({
-  scanFanboxAssetGaps: vi.fn(),
-  getLibraryDiagnostics: vi.fn(),
+const db = vi.hoisted(() => ({
   getEntityProfileRepairStatus: vi.fn(),
   getOriginalImageStatus: vi.fn(),
 }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  ...legacy,
+  ...db,
 }));
 
 const index: SearchIndexStatus = {
-  totalDownloads: 3,
-  indexedDownloads: 3,
-  pendingDownloads: 0,
+  totalWorks: 3,
+  indexedWorks: 3,
+  pendingWorks: 0,
   isComplete: true,
   phase: "ready",
   semanticIndexedChunks: 0,
-  semanticIndexedDownloads: 0,
-  semanticPendingDownloads: 0,
+  semanticIndexedWorks: 0,
+  semanticPendingWorks: 0,
   semanticEnabled: false,
   semanticModelReady: false,
   embeddingProvider: "cpu",
@@ -67,8 +65,8 @@ describe("棚の診断", () => {
   beforeEach(() => {
     status.shelfStatus.mockResolvedValue({ state: "ready", path: "C:/shelf" });
     status.shelfSearch.mockResolvedValue({ page: { items: [], next: null, total: 2 }, intent: null, matches: [], cards: [] });
-    legacy.getOriginalImageStatus.mockResolvedValue({ covers: 0, illustrations: 0, running: false, progress: null });
-    legacy.getEntityProfileRepairStatus.mockResolvedValue({ personCount: 0, seriesCount: 0, totalCount: 0, running: false, progress: null });
+    db.getOriginalImageStatus.mockResolvedValue({ covers: 0, illustrations: 0, running: false, progress: null });
+    db.getEntityProfileRepairStatus.mockResolvedValue({ personCount: 0, seriesCount: 0, totalCount: 0, running: false, progress: null });
     health.shelfDiagnostics.mockResolvedValue({
       measuredAt: "2026-11-20T00:00:00Z", works: 3, versions: 4, textLength: 120, media: 2, files: 9,
       logicalBytes: 9_000, storedBytes: 4_000, databaseBytes: 100_000, walBytes: 0, liveDatabaseBytes: 90_000,
@@ -90,8 +88,6 @@ describe("棚の診断", () => {
     expect(screen.getByText("3セグメント")).toBeTruthy();
     // 一部しか保存できていない作品は、一覧の絞り込みへ案内する。
     expect(await screen.findByText("2作品")).toBeTruthy();
-    expect(legacy.scanFanboxAssetGaps).not.toHaveBeenCalled();
-    expect(legacy.getLibraryDiagnostics).not.toHaveBeenCalled();
     expect(screen.queryByText("保存フォルダーから再取り込み")).toBeNull();
   });
 

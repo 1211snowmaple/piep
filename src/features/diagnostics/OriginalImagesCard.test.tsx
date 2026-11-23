@@ -41,9 +41,23 @@ it("counts the reduced images and starts the upgrade", async () => {
   await waitFor(() => expect(api.upgrade).toHaveBeenCalledOnce());
 });
 
+it("names the works that stayed reduced, with the reason for a failure", async () => {
+  api.status.mockResolvedValue({ covers: 2, illustrations: 0, running: false,
+    progress: { phase: "complete", completed: 10, total: 10, upgraded: 8, unavailable: 1, failed: 1, activeLabel: null, error: null, misses: [
+      { workId: "w1", title: "消えた投稿", provider: "fanbox", externalKey: "1", unavailable: 1, failed: 0, reason: null },
+      { workId: "w2", title: "落ちた投稿", provider: "fanbox", externalKey: "2", unavailable: 0, failed: 1, reason: "保存できませんでした" },
+    ] } });
+  renderCard();
+  expect(await screen.findByText("原寸にできなかった作品")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "消えた投稿" })).toBeInTheDocument();
+  expect(screen.getByText("公開元に無し")).toBeInTheDocument();
+  expect(screen.getByText("保存できませんでした")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "失敗の詳細" })).not.toBeInTheDocument();
+});
+
 it("shows a running upgrade with a cancel button instead of a second start", async () => {
   api.status.mockResolvedValue({ covers: 20, illustrations: 0, running: true,
-    progress: { phase: "running", completed: 5, total: 25, upgraded: 4, unavailable: 1, failed: 0, activeLabel: "いま取り直している作品", error: null } });
+    progress: { phase: "running", completed: 5, total: 25, upgraded: 4, unavailable: 1, failed: 0, activeLabel: "いま取り直している作品", error: null, misses: [] } });
   renderCard();
   expect(await screen.findByText("確認中: いま取り直している作品")).toBeInTheDocument();
   expect(screen.getByText("5 / 25")).toBeInTheDocument();

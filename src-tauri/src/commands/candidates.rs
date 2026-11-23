@@ -98,16 +98,14 @@ impl Candidates<'_> {
     }
     fn convert(&self, entry: Discovery, display: bool) -> Result<UpdateCandidateRow, String> {
         let library = self.library()?;
-        let payload = if display {
-            entry
-                .summary
-                .as_ref()
-                .ok_or("候補の表示情報を準備できません")?
-                .to_string()
-        } else {
-            library
+        // 表示には要約を使う。要約の無い候補（候補を書く経路はどれも要約を一緒に書くので、
+        // 古い棚から移したものだけ）は、その一件だけ元の記録から読む。一件の欠けで一覧
+        // 全体を失敗にしない。
+        let payload = match entry.summary.as_ref().filter(|_| display) {
+            Some(summary) => summary.to_string(),
+            None => library
                 .discovery_payload(entry.id)
-                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?,
         };
         let value: serde_json::Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
         let mut metadata = UpdateWorkMetadata::from_payload(&value);
@@ -281,10 +279,6 @@ impl Candidates<'_> {
         limit: i64,
         display: bool,
     ) -> Result<Vec<UpdateCandidateRow>, String> {
-        let library = self.library()?;
-        library
-            .prepare_discovery_summaries()
-            .map_err(|e| e.to_string())?;
         let mut rows = self.all(Some(status))?;
         rows.sort_by_key(|row| std::cmp::Reverse((row.updated_at, row.id)));
         if limit >= 0 {

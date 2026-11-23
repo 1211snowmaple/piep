@@ -1519,8 +1519,8 @@ export default function LibraryPage() {
     enabled: Boolean(semanticCapability.data?.semanticEnabled),
     unavailableReason: "作品単位の意味検索を有効にすると使えます",
     onSelect: searchAssist.open,
-    badge: semanticCapability.data?.semanticPendingDownloads
-      ? `${formatNumber(semanticCapability.data.semanticPendingDownloads)}件未反映`
+    badge: semanticCapability.data?.semanticPendingWorks
+      ? `${formatNumber(semanticCapability.data.semanticPendingWorks)}件未反映`
       : undefined,
   }] : [], tab === "works");
 
@@ -1695,7 +1695,7 @@ export default function LibraryPage() {
             <Alert color="yellow" title="意味検索の索引を作成中です" role="status" mb="md">
               まだ作品の一部だけが対象です。
               {semanticCapability.data
-                ? `${formatNumber(semanticCapability.data.semanticIndexedDownloads)} / ${formatNumber(semanticCapability.data.totalDownloads)}作品まで進んでいます。`
+                ? `${formatNumber(semanticCapability.data.semanticIndexedWorks)} / ${formatNumber(semanticCapability.data.totalWorks)}作品まで進んでいます。`
                 : ""}
               設定の「作品単位の意味検索」で構築状況を確認できます。
             </Alert>

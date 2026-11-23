@@ -10,6 +10,9 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use std::sync::Mutex;
 const UPDATE_SNAPSHOT_CANDIDATE_PAGE_SIZE: i64 = 200;
 const UPDATE_SNAPSHOT_LOG_PAGE_SIZE: i64 = 300;
+/// 選んだ候補の保存に移ったため、確かめずに残した作者・作品の印（項目の `error` に入れる）。
+/// 探す段階の進み具合はこれを数えない（要約の SQL に同じ文字列がある。試験で突き合わせる）。
+const UNCHECKED_BEFORE_SAVE: &str = "選んだ候補の保存に移ったため、確かめていません";
 fn job_bytes(value: impl AsRef<str>) -> Result<Vec<u8>, String> {
     value
         .as_ref()
@@ -206,8 +209,8 @@ impl Queue<'_> {
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
                         saved_count, error_count, active_label, started_at, updated_at, finished_at,
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.status='held' AND i.known_hold=0),
-                        (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type IN ('work','target')),
-                        (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type IN ('work','target') AND i.status NOT IN ('queued','running')),
+                        (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type IN ('work','target') AND i.error IS NOT '選んだ候補の保存に移ったため、確かめていません'),
+                        (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type IN ('work','target') AND i.error IS NOT '選んだ候補の保存に移ったため、確かめていません' AND i.status NOT IN ('queued','running')),
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.status='held' AND i.known_hold=1),
@@ -267,8 +270,8 @@ impl Queue<'_> {
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
                         saved_count, error_count, active_label, started_at, updated_at, finished_at,
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.status='held' AND i.known_hold=0),
-                        (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type IN ('work','target')),
-                        (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type IN ('work','target') AND i.status NOT IN ('queued','running')),
+                        (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type IN ('work','target') AND i.error IS NOT '選んだ候補の保存に移ったため、確かめていません'),
+                        (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type IN ('work','target') AND i.error IS NOT '選んだ候補の保存に移ったため、確かめていません' AND i.status NOT IN ('queued','running')),
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.status='held' AND i.known_hold=1),
@@ -656,8 +659,10 @@ impl Queue<'_> {
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
                         saved_count, error_count, active_label, started_at, updated_at, finished_at,
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.status='held' AND i.known_hold=0),
-                        totals - (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
-                        processed - (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
+                        totals - (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type='candidate' AND i.status != 'candidate')
+                               - (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type != 'candidate' AND i.error IS '選んだ候補の保存に移ったため、確かめていません'),
+                        processed - (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running'))
+                                  - (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type != 'candidate' AND i.error IS '選んだ候補の保存に移ったため、確かめていません'),
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
                         (SELECT COUNT(*) FROM execution_items i WHERE i.job_id=execution_jobs.id AND i.status='held' AND i.known_hold=1),
@@ -829,15 +834,33 @@ impl Queue<'_> {
                     .map_err(|e| format!("Failed to finish empty candidate queue: {e}"))?;
                 return Ok(0);
             }
+            // 確かめずに残した作者は「確認済み」ではない。印を付けて、探す段階の進み具合から外し
+            // （探すバーが満ちたように見せない）、記録にも残す。
+            let unchecked = tx
+                .execute(
+                    "UPDATE execution_items
+                     SET status = 'skipped', error = ?2, updated_at = CURRENT_TIMESTAMP
+                     WHERE job_id = ?1 AND item_type != 'candidate' AND status IN ('queued', 'running')",
+                    params![job_bytes(job_id)?, UNCHECKED_BEFORE_SAVE],
+                )
+                .map_err(|e| format!("Failed to abandon canceled update items: {e}"))?;
             tx.execute(
                 "UPDATE execution_items
-                 SET status = CASE WHEN item_type = 'candidate' THEN 'candidate' ELSE 'skipped' END,
-                     error = NULL,
-                     updated_at = CURRENT_TIMESTAMP
-                 WHERE job_id = ?1 AND status IN ('queued', 'running')",
+                 SET status = 'candidate', error = NULL, updated_at = CURRENT_TIMESTAMP
+                 WHERE job_id = ?1 AND item_type = 'candidate' AND status IN ('queued', 'running')",
                 params![job_bytes(job_id)?],
             )
             .map_err(|e| format!("Failed to abandon canceled update items: {e}"))?;
+            if unchecked > 0 {
+                tx.execute(
+                    "INSERT INTO execution_logs (job_id, log_type, message) VALUES (?1, 'warn', ?2)",
+                    params![
+                        job_bytes(job_id)?,
+                        format!("確かめていない{unchecked}件を残して、選んだ候補の保存に移りました。残りは次の確認で調べます")
+                    ],
+                )
+                .map_err(|e| format!("Failed to append update job log: {e}"))?;
+            }
         }
 
         let mut changed = 0i64;
@@ -854,6 +877,10 @@ impl Queue<'_> {
         }
         tx.commit()
             .map_err(|e| format!("Failed to commit update candidate queue: {e}"))?;
+        drop(conn);
+        // 待機列に入れた候補と確かめずに残した項目の数を、画面が読む数え直しにすぐ映す
+        // （次の一件が終わるまで、前の数のまま止まって見えないように）。
+        self.sync_update_job_counters(job_id)?;
         Ok(changed)
     }
 
