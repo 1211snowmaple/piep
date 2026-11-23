@@ -206,7 +206,7 @@ impl Library {
     }
 
     /// 保存済みの応答から始める取得は、その応答の版を基準として確定まで引き継ぐ。
-    pub(crate) fn begin_work_acquisition_from_snapshot(
+    pub fn begin_work_acquisition_from_snapshot(
         &self,
         id: LibraryId,
         provider: &str,
