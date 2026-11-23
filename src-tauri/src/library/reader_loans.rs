@@ -12,11 +12,17 @@
 //! いま借りられている読み取りを全部ログに出す。
 //!
 //! - 書き戻せない分が溜まったまま、書き戻し済みの数が進まない（古い時点を読み続けている）。
-//! - WAL が大きいまま頭から使い直されない（書き戻しは進むが、読み取りが途切れない）。
+//! - 同じ WAL（ヘッダーの salt が同じ）が大きいまま伸び続ける（書き戻しは進むが、読み取りが
+//!   途切れず頭から使い直せない）。
+//!
+//! ログは一覧のロックを放してから書く（ログの書き込みが詰まっても、借りる・返す・棚を閉じる
+//! 側を待たせない）。
 
 use rusqlite::Connection;
 use std::collections::HashMap;
+use std::io::Read;
 use std::panic::Location;
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread::Thread;
 use std::time::{Duration, Instant};
@@ -60,8 +66,20 @@ pub(crate) struct WalWatch {
     checked: Option<Instant>,
     frames: i64,
     checkpointed: i64,
+    generation: Option<u64>,
     stalled_since: Option<Instant>,
     reported: bool,
+}
+
+/// 一度に読んだ WAL の様子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WalState {
+    /// WAL のフレーム数。
+    pub(crate) frames: i64,
+    /// そのうち書き戻し済みの数。
+    pub(crate) checkpointed: i64,
+    /// WAL を頭から使い直すたびに変わる値（ヘッダーの salt）。読めなければ無い。
+    pub(crate) generation: Option<u64>,
 }
 
 /// 書き戻しの見張りが伝えること。
@@ -84,22 +102,26 @@ impl WalWatch {
             .is_none_or(|checked| now.duration_since(checked) >= WAL_EVERY)
     }
 
-    /// `wal_checkpoint` の答え（WAL のフレーム数と、書き戻し済みのフレーム数）を受け取る。
-    pub(crate) fn observe(
-        &mut self,
-        now: Instant,
-        frames: i64,
-        checkpointed: i64,
-    ) -> Option<WalEvent> {
+    /// 読んだ WAL の様子を受け取る。
+    pub(crate) fn observe(&mut self, now: Instant, state: WalState) -> Option<WalEvent> {
+        let WalState {
+            frames,
+            checkpointed,
+            generation,
+        } = state;
         self.checked = Some(now);
         let backlog = frames - checkpointed;
-        // 書き手が WAL を頭から使い直すと、フレーム数も書き戻し済みの数も小さくなる。
-        let restarted = frames < self.frames;
         let progressed = checkpointed != self.checkpointed;
+        // 伸び続けているかは、同じ WAL（使い直していない）と確かめられたときだけ言う。
+        // 見ていない間に使い直して前より伸びたものや、書き戻し終えて止まっているだけの
+        // 大きな WAL は、伸び続けているとは言わない。
+        let grew_in_place =
+            generation.is_some() && generation == self.generation && frames > self.frames;
         self.frames = frames;
         self.checkpointed = checkpointed;
+        self.generation = generation;
         let pinned = backlog >= WAL_BACKLOG && !progressed;
-        let unbounded = frames >= WAL_LARGE && !restarted;
+        let unbounded = frames >= WAL_LARGE && grew_in_place;
         if !pinned && !unbounded {
             self.stalled_since = None;
             return std::mem::take(&mut self.reported).then_some(WalEvent::Recovered);
@@ -118,21 +140,37 @@ impl WalWatch {
     }
 }
 
-/// 書き手の接続で WAL の様子を読む。WAL のフレーム数と書き戻し済みの数を返す。
-/// 書き戻しはしない（NOOP）ので一瞬で終わる。書き手が使用中なら読まない（保存を待たせない）。
-fn wal_state(writer: &Mutex<Connection>) -> Option<(i64, i64)> {
-    let conn = writer.try_lock().ok()?;
-    match conn.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| {
+/// 書き手の接続で WAL の様子を読む。書き戻しはしない（NOOP）ので一瞬で終わる。
+/// 書き手が使用中なら読まない（保存を待たせない）。WAL でなければ読まない。
+fn wal_state(writer: &Mutex<Connection>) -> Result<Option<WalState>, rusqlite::Error> {
+    let Ok(conn) = writer.try_lock() else {
+        return Ok(None);
+    };
+    let (frames, checkpointed) = conn.query_row("PRAGMA wal_checkpoint(NOOP)", [], |r| {
         Ok((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
-    }) {
-        // WAL でない（-1）ときは見張らない。
-        Ok((frames, checkpointed)) if frames >= 0 => Some((frames, checkpointed)),
-        Ok(_) => None,
-        Err(error) => {
-            log::warn!("台帳の WAL の様子を読めません: {error}");
-            None
-        }
+    })?;
+    // WAL でない（-1）ときは見張らない。
+    if frames < 0 {
+        return Ok(None);
     }
+    // 書き手のロックを持っているあいだは、この処理の中で WAL を使い直す書き込みは起きない。
+    let generation = conn
+        .path()
+        .and_then(|path| wal_generation(Path::new(&format!("{path}-wal"))));
+    Ok(Some(WalState {
+        frames,
+        checkpointed,
+        generation,
+    }))
+}
+
+/// WAL のヘッダーの salt（16〜24 バイト目）。使い直すたびに書き換わる。
+fn wal_generation(path: &Path) -> Option<u64> {
+    let mut header = [0u8; 24];
+    std::fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .ok()?;
+    Some(u64::from_be_bytes(header[16..24].try_into().ok()?))
 }
 
 /// 長く借りたままの読み取り一本の様子。
@@ -286,27 +324,40 @@ fn watch(table: Weak<Mutex<Table>>) {
 
 /// WAL の様子を読み、止まっていれば、いま借りられている読み取りを全部ログに出す。
 fn watch_wal(table: &Mutex<Table>) {
-    // 一覧のロックを持ったまま書き手の接続を使い、使い終えてから放す。棚を閉じる側
-    // （`Loans::close`）はこのロックを待つので、閉じたあとまで接続を生かさない。
-    // NOOP は一瞬で終わり、書き手は try_lock なので、借りる・返す側を長く待たせない。
-    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
-    if !table.wal.due(Instant::now()) {
-        return;
+    if let Some(message) = wal_report(table) {
+        log::warn!("{message}");
     }
-    let Some(writer) = table.writer.upgrade() else {
-        return;
-    };
+}
+
+/// WAL の様子を読み、ログに出すことがあれば文言を返す。
+///
+/// 一覧のロックを持ったまま書き手の接続を使い、使い終えてから放す。棚を閉じる側
+/// （`Loans::close`）はこのロックを待つので、閉じたあとまで接続を生かさない。
+/// NOOP は一瞬で終わり、書き手は try_lock なので、借りる・返す側を長く待たせない。
+/// ログはロックを放してから書く（呼び出し元）。
+fn wal_report(table: &Mutex<Table>) -> Option<String> {
+    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if !table.wal.due(now) {
+        return None;
+    }
+    let writer = table.writer.upgrade()?;
     let state = wal_state(&writer);
     drop(writer);
-    let Some((frames, checkpointed)) = state else {
-        return;
+    let state = match state {
+        Ok(state) => state?,
+        Err(error) => {
+            // 次の間隔まで出さない。
+            table.wal.checked = Some(now);
+            return Some(format!("台帳の WAL の様子を読めません: {error}"));
+        }
     };
-    match table.wal.observe(Instant::now(), frames, checkpointed) {
-        Some(WalEvent::Stalled {
+    match table.wal.observe(now, state)? {
+        WalEvent::Stalled {
             frames,
             backlog,
             minutes,
-        }) => {
+        } => {
             let loans: Vec<String> = table
                 .open
                 .values()
@@ -317,12 +368,11 @@ fn watch_wal(table: &Mutex<Table>) {
             } else {
                 loans.join("、")
             };
-            log::warn!(
+            Some(format!(
                 "台帳の WAL が {minutes} 分のあいだ書き戻しも使い直しもされていません（{frames} フレーム、未書き戻し {backlog}）。いま借りられている読み取り: {holders}"
-            );
+            ))
         }
-        Some(WalEvent::Recovered) => log::warn!("台帳の WAL の書き戻しが戻りました"),
-        None => {}
+        WalEvent::Recovered => Some("台帳の WAL の書き戻しが戻りました".to_owned()),
     }
 }
 
@@ -334,27 +384,40 @@ mod tests {
         start + Duration::from_secs(minutes * 60)
     }
 
+    /// 使い直していない、同じ WAL の様子。
+    fn same(frames: i64, checkpointed: i64) -> WalState {
+        reused(frames, checkpointed, 1)
+    }
+
+    fn reused(frames: i64, checkpointed: i64, generation: u64) -> WalState {
+        WalState {
+            frames,
+            checkpointed,
+            generation: Some(generation),
+        }
+    }
+
     #[test]
     fn a_backlog_that_does_not_move_is_reported_once_and_its_recovery_too() {
         let start = Instant::now();
         let mut watch = WalWatch::default();
-        assert_eq!(watch.observe(at(start, 0), 100_000, 4), None);
-        assert_eq!(watch.observe(at(start, 5), 120_000, 4), None);
+        assert_eq!(watch.observe(at(start, 0), same(100_000, 4)), None);
+        assert_eq!(watch.observe(at(start, 5), same(120_000, 4)), None);
         assert_eq!(
-            watch.observe(at(start, 15), 150_000, 4),
+            watch.observe(at(start, 15), same(150_000, 4)),
             Some(WalEvent::Stalled {
                 frames: 150_000,
                 backlog: 149_996,
                 minutes: 10
             })
         );
-        assert_eq!(watch.observe(at(start, 20), 160_000, 4), None);
+        assert_eq!(watch.observe(at(start, 20), same(160_000, 4)), None);
         // 書き戻しが追いつき、書き手が WAL を頭から使い直した。
         assert_eq!(
-            watch.observe(at(start, 25), 200, 200),
+            watch.observe(at(start, 25), reused(200, 200, 2)),
             Some(WalEvent::Recovered)
         );
-        assert_eq!(watch.observe(at(start, 30), 300, 300), None);
+        assert_eq!(watch.observe(at(start, 30), reused(300, 300, 2)), None);
     }
 
     #[test]
@@ -364,7 +427,7 @@ mod tests {
         for step in 0..10u64 {
             let checkpointed = 1_000 * (step as i64 + 1);
             assert_eq!(
-                watch.observe(at(start, 5 * step), 200_000, checkpointed),
+                watch.observe(at(start, 5 * step), same(200_000, checkpointed)),
                 None
             );
         }
@@ -376,16 +439,16 @@ mod tests {
         let start = Instant::now();
         let mut watch = WalWatch::default();
         let mut frames = 0;
-        for step in 0..2u64 {
+        for step in 0..3u64 {
             frames = 300_000 + 10_000 * step as i64;
             assert_eq!(
-                watch.observe(at(start, 5 * step), frames, frames - 10),
+                watch.observe(at(start, 5 * step), same(frames, frames - 10)),
                 None
             );
         }
         frames += 10_000;
         assert_eq!(
-            watch.observe(at(start, 10), frames, frames - 10),
+            watch.observe(at(start, 15), same(frames, frames - 10)),
             Some(WalEvent::Stalled {
                 frames,
                 backlog: 10,
@@ -394,19 +457,51 @@ mod tests {
         );
         // 使い直された。
         assert_eq!(
-            watch.observe(at(start, 20), 500, 500),
+            watch.observe(at(start, 20), reused(500, 500, 2)),
             Some(WalEvent::Recovered)
         );
     }
 
-    /// 大きな取り込みで一度だけ伸びた WAL は、使い直されれば何も出さない。
+    /// 見ていない間に使い直し、前より伸びた WAL は、伸び続けているとは言わない。
     #[test]
-    fn a_large_wal_that_is_reused_is_not_a_stall() {
+    fn a_large_wal_that_is_reused_between_looks_is_not_a_stall() {
         let start = Instant::now();
         let mut watch = WalWatch::default();
         for step in 0..10u64 {
-            let frames = if step % 2 == 0 { 400_000 } else { 300_000 };
-            assert_eq!(watch.observe(at(start, 5 * step), frames, frames), None);
+            let frames = 300_000 + 10_000 * step as i64;
+            assert_eq!(
+                watch.observe(at(start, 5 * step), reused(frames, frames, step)),
+                None
+            );
+        }
+    }
+
+    /// 書き戻し終えて書き込みが止まっただけの大きな WAL は、止まっているとは言わない。
+    #[test]
+    fn a_large_wal_that_is_fully_written_back_and_idle_is_not_a_stall() {
+        let start = Instant::now();
+        let mut watch = WalWatch::default();
+        for step in 0..10u64 {
+            assert_eq!(
+                watch.observe(at(start, 5 * step), same(400_000, 400_000)),
+                None
+            );
+        }
+    }
+
+    /// 使い直したかを確かめられないときは、伸び続けているとは言わない。
+    #[test]
+    fn growth_is_not_reported_when_the_wal_cannot_be_told_apart() {
+        let start = Instant::now();
+        let mut watch = WalWatch::default();
+        for step in 0..10u64 {
+            let frames = 300_000 + 10_000 * step as i64;
+            let state = WalState {
+                frames,
+                checkpointed: frames,
+                generation: None,
+            };
+            assert_eq!(watch.observe(at(start, 5 * step), state), None);
         }
     }
 
@@ -438,15 +533,27 @@ mod tests {
                 .unwrap()
         };
         let writer = Mutex::new(writer);
+        let look = |writer: &Mutex<Connection>| wal_state(writer).unwrap().unwrap();
         passive(&writer);
-        let (frames, pinned) = wal_state(&writer).unwrap();
-        assert!(frames - pinned >= 50, "{frames} {pinned}");
+        let pinned = look(&writer);
+        assert!(pinned.frames - pinned.checkpointed >= 50, "{pinned:?}");
+        assert!(pinned.generation.is_some());
         reader.execute_batch("ROLLBACK").unwrap();
         // 見るだけで、書き戻しはしない。
-        assert_eq!(wal_state(&writer).unwrap(), (frames, pinned));
+        assert_eq!(look(&writer), pinned);
         passive(&writer);
-        let (frames, checkpointed) = wal_state(&writer).unwrap();
-        assert_eq!(frames, checkpointed);
+        let drained = look(&writer);
+        assert_eq!(drained.frames, drained.checkpointed);
+        assert_eq!(drained.generation, pinned.generation);
+        // 書き戻し終えたあとの書き込みは WAL を頭から使い直し、ヘッダーの salt が変わる。
+        writer
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO t VALUES(zeroblob(8))", [])
+            .unwrap();
+        let restarted = look(&writer);
+        assert!(restarted.frames < drained.frames, "{restarted:?}");
+        assert_ne!(restarted.generation, drained.generation);
         drop(reader);
         drop(writer);
         let _ = std::fs::remove_dir_all(&dir);
