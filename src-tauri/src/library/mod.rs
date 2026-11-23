@@ -21,6 +21,7 @@ mod profile_capture;
 pub use profile_capture::{ProfileSave, PROFILE_REFRESH_ROUTE};
 mod reader;
 mod reader_catalogue;
+mod reader_loans;
 mod reader_references;
 mod reading;
 mod reclaim;
