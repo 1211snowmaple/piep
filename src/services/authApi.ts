@@ -10,6 +10,8 @@ import { invoke } from "@tauri-apps/api/core";
 export interface ConnectionStatus {
   pixiv: { name: string; webSession: boolean } | null;
   fanbox: { name: string } | null;
+  /** 保存された接続を読めなかった取得元。繋がっていないものとして扱い、繋ぎ直してもらう。 */
+  unreadable?: Array<"pixiv" | "fanbox">;
 }
 
 export function getConnectionStatus(): Promise<ConnectionStatus> {

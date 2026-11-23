@@ -18,7 +18,7 @@ const authApi = vi.hoisted(() => ({
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  getSearchIndexStatus: vi.fn().mockResolvedValue({ totalDownloads: 12, indexedDownloads: 12, pendingDownloads: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 0, semanticIndexedDownloads: 0, semanticPendingDownloads: 12, semanticModelReady: false, embeddingProvider: "CPU", gpuEnabled: false, throughputPerSec: null }),
+  getSearchIndexStatus: vi.fn().mockResolvedValue({ totalWorks: 12, indexedWorks: 12, pendingWorks: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 0, semanticIndexedWorks: 0, semanticPendingWorks: 12, semanticModelReady: false, embeddingProvider: "CPU", gpuEnabled: false, throughputPerSec: null }),
 }));
 vi.mock("@/services/shelfApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfApi")>()),
@@ -26,7 +26,7 @@ vi.mock("@/services/shelfApi", async (importOriginal) => ({
 }));
 vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
-  shelfDashboard: vi.fn().mockResolvedValue({ stats: { totalDownloads: 12, pixivCount: 12, fanboxCount: 0, totalAssets: 108, totalSizeBytes: 32_000_000 } }),
+  shelfDashboard: vi.fn().mockResolvedValue({ stats: { totalWorks: 12, pixivCount: 12, fanboxCount: 0, totalAssets: 108, totalSizeBytes: 32_000_000 } }),
 }));
 vi.mock("@/services/authApi", () => authApi);
 vi.mock("@/features/search/searchIndexProgress", () => ({ useSearchIndexProgress: () => null }));
@@ -62,6 +62,14 @@ describe("SettingsPage connection flow", () => {
 
     await waitFor(() => expect(authApi.disconnectAccount).toHaveBeenCalledWith("fanbox"));
     await waitFor(() => expect(screen.queryByRole("button", { name: "接続解除" })).not.toBeInTheDocument());
+  });
+
+  it("says which saved connection could not be read, and keeps the other one", async () => {
+    authApi.getConnectionStatus.mockResolvedValue({ pixiv: { name: "pixiv利用者", webSession: true }, fanbox: null, unreadable: ["fanbox"] });
+    renderConnectionSettings();
+
+    expect(await screen.findByText("pixiv利用者")).toBeInTheDocument();
+    expect(screen.getByText("保存された接続を読み取れませんでした。接続し直してください")).toBeInTheDocument();
   });
 
   it("offers a browser reconnect when the pixiv connection lacks a web session", async () => {

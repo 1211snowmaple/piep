@@ -23,11 +23,9 @@ vi.mock("@/services/shelfHealthApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfHealthApi")>()),
   ...health,
 }));
-const legacy = vi.hoisted(() => ({ getFilterFacets: vi.fn(), setFlagsForIds: vi.fn(), deleteDownloads: vi.fn() }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
-  ...legacy,
 }));
 vi.mock("@/store", () => ({ store: { get: vi.fn().mockResolvedValue(null) } }));
 
@@ -109,7 +107,6 @@ describe("棚の一覧の操作", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "お気に入りに追加" }));
     await waitFor(() => expect(shelfApi.shelfSetUserState).toHaveBeenCalledTimes(2));
     expect(shelfApi.shelfSetUserState).toHaveBeenCalledWith(card(1).id, { favorite: true });
-    expect(legacy.setFlagsForIds).not.toHaveBeenCalled();
   });
 
   it("選んだ作品を確かめてから棚から外す", async () => {
@@ -121,7 +118,6 @@ describe("棚の一覧の操作", () => {
     const dialog = await screen.findByRole("dialog", { name: "選択した作品を棚から外しますか？" });
     fireEvent.click(within(dialog).getByRole("button", { name: "外す" }));
     await waitFor(() => expect(shelfApi.shelfRemoveWork).toHaveBeenCalledWith(card(2).id));
-    expect(legacy.deleteDownloads).not.toHaveBeenCalled();
   });
 
 
@@ -129,6 +125,5 @@ describe("棚の一覧の操作", () => {
     view();
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     await waitFor(() => expect(health.shelfFilterFacets).toHaveBeenCalled());
-    expect(legacy.getFilterFacets).not.toHaveBeenCalled();
   });
 });

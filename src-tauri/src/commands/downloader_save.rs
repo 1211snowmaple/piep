@@ -359,7 +359,13 @@ async fn save_to_shelf_as(
     let mut data = data;
     let work_lock = work_save_mutex(&source, &source_id);
     let _work_guard = work_lock.lock().await;
-    if source == "fanbox" && data.get("isRestricted").and_then(Value::as_bool) == Some(true) {
+    // 原寸の取り直しが渡すのは、棚がもう持っている応答そのもの（原寸の在り処を足しただけ）。
+    // 中身の無い取得で手元の版を上書きしないための守りは、ここでは要らない。支援していない
+    // 投稿を表紙と説明だけで持っているときも、その表紙を原寸に替えられるようにする。
+    if !upgrade_images
+        && source == "fanbox"
+        && data.get("isRestricted").and_then(Value::as_bool) == Some(true)
+    {
         return Err(fanbox_missing_material_error(&data));
     }
     // 一覧や関係で識別だけ先にできた作品（版が無い）は、初めての保存として扱う。
@@ -372,8 +378,11 @@ async fn save_to_shelf_as(
         })
         .await?
     };
+    // 本文の無い作品（支援していない投稿を表紙と説明だけで持っているもの）の表紙を取り直すときは、
+    // 読む形を作らずに保存する。読む本文が無いので、読む形を作る保存は受け付けない。
+    let bodyless_upgrade = upgrade_images && !fetched_has_material_content(&data, &source);
     // 空の応答は保存しない（初めてなら棚に入れない、あれば手元の版を守る）。
-    if !fetched_has_material_content(&data, &source) {
+    if !upgrade_images && !fetched_has_material_content(&data, &source) {
         return Err(match (existing.is_some(), source.as_str()) {
             (_, "fanbox") => fanbox_missing_material_error(&data),
             (false, _) => {
@@ -580,9 +589,12 @@ async fn save_to_shelf_as(
                 data: &data,
                 assets,
             };
-            library
-                .save_readable_work(save, observation)
-                .map_err(|e| e.to_string())
+            if bodyless_upgrade {
+                library.save_work(save)
+            } else {
+                library.save_readable_work(save, observation)
+            }
+            .map_err(|e| e.to_string())
         })
         .await?;
         Ok::<_, String>((result, missing, asset_failure))

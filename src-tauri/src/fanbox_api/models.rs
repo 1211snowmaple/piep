@@ -16,22 +16,6 @@ pub struct FanboxUser {
     pub icon_url: Option<String>,
 }
 
-// --- クリエイタープロフィール詳細 ---
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FanboxCreator {
-    pub creator_id: String,
-    pub description: String,
-    pub cover_image_url: Option<String>,
-    pub has_adult_content: bool,
-    pub is_followed: bool,
-    pub is_stopped: bool,
-    pub is_supported: bool,
-    pub user: FanboxUser,
-    pub profile_links: Vec<String>,
-    pub profile_items: serde_json::Value, // さまざまなプロフィールのアイテム（動的）
-}
-
 // --- 支援プラン ---
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
