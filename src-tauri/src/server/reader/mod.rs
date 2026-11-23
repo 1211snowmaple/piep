@@ -291,6 +291,15 @@ fn authorize_reader_view(
     entity: uuid::Uuid,
     scope: ResourceScope,
 ) -> Result<(), ApiError> {
+    // 棚から外しても保存版・編集・資産は台帳に残る。配る前に掲載を毎回確かめる。
+    if ctx
+        .library
+        .library_item_generation(entity)
+        .map_err(library_error)?
+        .is_none()
+    {
+        return Err(not_found());
+    }
     let ResourceScope::Edit(edit) = scope else {
         return Ok(());
     };
