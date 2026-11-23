@@ -210,8 +210,8 @@ mod tests {
             "tantivy::directory::mmap_directory"
         ));
         assert!(!allowed(log::Level::Trace, "rustls::client::hs"));
-        assert!(allowed(log::Level::Debug, "piep::commands::database"));
-        assert!(allowed(log::Level::Trace, "piep_lib::database"));
+        assert!(allowed(log::Level::Debug, "piep::commands::library"));
+        assert!(allowed(log::Level::Trace, "piep_lib::library"));
         // 外から来たものでも、警告と誤りは落とさない。
         assert!(allowed(log::Level::Warn, "tantivy::indexer"));
         assert!(allowed(log::Level::Info, "tauri_plugin_updater::updater"));

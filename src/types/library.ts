@@ -18,7 +18,7 @@ export interface ShelfEntry {
   coverUrl: string | null;
   assetCount: number;
   fileSizeBytes: number;
-  downloadedAt: string;
+  savedAt: string;
   sourceCreatedAt: string | null;
   sourceUpdatedAt: string | null;
   currentVersion: number;
@@ -65,7 +65,7 @@ export interface SearchHighlightSegment {
 
 export interface AssetEntry {
   id: number;
-  downloadId: number;
+  workId: number;
   assetType: string;
   filename: string;
   localPath: string;
@@ -76,7 +76,7 @@ export interface AssetEntry {
 
 export interface DownloadVersion {
   id: number;
-  downloadId: number;
+  workId: number;
   version: number;
   contentHash: string | null;
   textLength: number;
@@ -91,7 +91,7 @@ export interface DownloadVersion {
 
 export interface WorkEditRevision {
   id: number;
-  downloadId: number;
+  workId: number;
   baseVersion: number;
   status: "draft" | "active" | "archived" | string;
   title: string | null;
@@ -302,7 +302,7 @@ export interface EntityFacet {
   coverPath: string | null;
   description?: string | null;
   updatedAt?: string | null;
-  latestDownloadedAt?: string | null;
+  latestSavedAt?: string | null;
   /** 配下の作品のうち、取得元でいちばん新しいものの時刻。 */
   latestSourceUpdatedAt?: string | null;
   sampleTitle?: string | null;

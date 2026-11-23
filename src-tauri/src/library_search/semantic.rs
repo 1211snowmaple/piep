@@ -1,4 +1,4 @@
-//! 意味検索。意味検索の索引（`crate::database::semantic_index`、作品ごとに説明と本文の
+//! 意味検索。意味検索の索引（`crate::search_engine::semantic_index`、作品ごとに説明と本文の
 //! ベクトルを一つずつ持つ）を使い、`<棚>/derived/search/semantic-v2/` に置く。
 //!
 //! 埋め込みは遅い（本文まるごとで 1 秒に 1.5 作品ほど、全棚で 5 時間）。そこで作り直すときは、
@@ -6,8 +6,8 @@
 //! 説明の一断片だけを埋め込む）。
 
 use super::document::SearchDocument;
-use crate::database::semantic_index::{self, ReusableVectors, SemanticIndexDocument};
 use crate::library::{Error, Library, LibraryId, Result};
+use crate::search_engine::semantic_index::{self, ReusableVectors, SemanticIndexDocument};
 use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

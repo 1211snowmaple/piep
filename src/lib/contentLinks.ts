@@ -18,7 +18,7 @@ import { openExternalUrl } from "@/services/openerApi";
  */
 /** 手元にあると分かったもの。作品だけは、行き先が画面によって変わる。 */
 type ResolvedLink =
-  | { kind: "work"; downloadId: string; title: string }
+  | { kind: "work"; workId: string; title: string }
   | { kind: "path"; path: string }
   | null;
 
@@ -30,7 +30,7 @@ async function resolveTarget(target: ContentLinkTarget): Promise<ResolvedLink> {
   try {
     if (target.kind === "work") {
       const found = await shelfFindWork(target.source, target.sourceId);
-      return found ? { kind: "work", downloadId: found.id, title: found.title } : null;
+      return found ? { kind: "work", workId: found.id, title: found.title } : null;
     }
     const head = await shelfEntity(target.kind, target.source, target.sourceKey);
     const route = target.kind === "person" ? "people" : "series";
@@ -75,7 +75,7 @@ export function forgetContentLinkResolutions(): void {
 async function resolveInApp(target: ContentLinkTarget, workRoute: (id: number | string) => string): Promise<string | null> {
   const resolved = await cachedResolve(target);
   if (!resolved) return null;
-  return resolved.kind === "work" ? workRoute(resolved.downloadId) : resolved.path;
+  return resolved.kind === "work" ? workRoute(resolved.workId) : resolved.path;
 }
 
 /**

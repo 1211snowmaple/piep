@@ -17,7 +17,7 @@ function entity(index: number): EntityFacet {
     coverPath: null,
     description: null,
     updatedAt: null,
-    latestDownloadedAt: null,
+    latestSavedAt: null,
     sampleTitle: null,
     iconPath: null,
     bannerPath: null,

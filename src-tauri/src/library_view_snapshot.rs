@@ -1,5 +1,5 @@
 //! 選んだ保存状態だけから、作品情報・本文・画像と添付を比較する入力を作る。
-use crate::database::queries::{revision_metadata, RevisionAsset, RevisionMetadata};
+use crate::analysis::{revision_metadata, RevisionAsset, RevisionMetadata};
 use crate::library::{
     BodyAssetReference, Error, Library, LibraryId, ResourceInfo, ResourceReference, ResourceScope,
     Result, SourceBody,

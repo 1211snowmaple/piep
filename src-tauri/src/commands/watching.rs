@@ -1,9 +1,9 @@
 //! 監視の画面とジョブが使う口。監視は棚に持つ。
 
-use crate::database::{UpdateTarget, WatchGroup};
 use crate::library::{
     EntityKind, Library, LibraryId, ResourceReference, ResourceScope, WatchEdit, WatchResult,
 };
+use crate::models::{UpdateTarget, WatchGroup};
 use std::sync::Arc;
 use tauri::Manager;
 

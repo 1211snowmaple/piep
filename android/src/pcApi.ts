@@ -47,7 +47,7 @@ export function pcConnectionIssue(status: PcConnectionStatus): string | null {
 
 type Older<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>;
 
-export type PcWork = Omit<Older<MobileWork, "sourceCreatedAt" | "downloadedAt">, "id"> & {
+export type PcWork = Omit<Older<MobileWork, "sourceCreatedAt" | "savedAt">, "id"> & {
   /** 棚の作品の UUID。 */
   id: string;
   /** 棚の版と編集。`favoriteGeneration` はお気に入りの更新世代（十進の文字列）。 */

@@ -338,9 +338,9 @@ async fn one_bundle_describes_every_readable_file_and_each_chunk_comes_back_thro
             protocol::ResourceReference::Media { slot } => ("media", format!("?slot={slot}")),
             _ => unreachable!(),
         };
-        let native = item.file.to_native();
+        let file = item.file.to_content_file();
         let mut restored = Vec::new();
-        for (ordinal, chunk) in native.chunks.iter().enumerate() {
+        for (ordinal, chunk) in file.chunks.iter().enumerate() {
             let url = format!(
                 "{view}/resources/{kind}/files/{}/chunks/{ordinal}{query}",
                 item.file.id.get()
@@ -355,7 +355,7 @@ async fn one_bundle_describes_every_readable_file_and_each_chunk_comes_back_thro
                 .unwrap();
             restored.extend(piep_storage::decode_chunk(&encoded, chunk).unwrap());
         }
-        assert_eq!(crate::library::Fingerprint::of(&restored), native.id);
+        assert_eq!(crate::library::Fingerprint::of(&restored), file.id);
         if kind == "media" {
             assert_eq!(restored, original);
         }
@@ -677,7 +677,7 @@ async fn shelf_page(response: reqwest::Response) -> piep_mobile_api::MobileShelf
 }
 
 #[tokio::test]
-async fn the_phone_list_sorts_filters_and_pages_the_shelf_with_the_v1_conditions() {
+async fn the_phone_list_sorts_filters_and_pages_the_shelf() {
     let server = Server::start().await;
     let north = save(&server.library, capture("north", None));
     let south = save(&server.library, capture("south", None));
@@ -687,7 +687,7 @@ async fn the_phone_list_sorts_filters_and_pages_the_shelf_with_the_v1_conditions
         .remove_work(uuid::Uuid::now_v7(), removed.entity_id, 1)
         .unwrap();
 
-    // 題の順に一件ずつ。旧 API と同じ条件の形で、作品は棚の UUID で返る。
+    // 題の順に一件ずつ。作品は棚の UUID で返る。
     let first = shelf_page(
         server
             .search(json!({"text": "", "limit": 1, "sortBy": "title", "sortOrder": "asc"}))
@@ -773,7 +773,7 @@ async fn the_phone_list_sorts_filters_and_pages_the_shelf_with_the_v1_conditions
     .await;
     assert!(unknown_person.items.is_empty());
 
-    // 旧 API で断る条件は、ここでも断る（黙って外さない）。
+    // 誤った条件は断る（黙って外さない）。
     for body in [
         json!({"sortBy": "relevance"}),
         json!({"source": "elsewhere"}),
@@ -1272,7 +1272,7 @@ impl Server {
 }
 
 #[tokio::test]
-async fn people_series_and_collections_come_from_the_shelf_in_the_v1_shapes() {
+async fn people_series_and_collections_come_from_the_shelf() {
     let server = Server::start().await;
     let works = grouped_shelf(&server.library);
     let collection = uuid::Uuid::now_v7();
@@ -1486,7 +1486,7 @@ async fn people_series_and_collections_come_from_the_shelf_in_the_v1_shapes() {
 }
 
 #[tokio::test]
-async fn search_suggestions_come_from_the_shelf_in_the_v1_shape() {
+async fn search_suggestions_come_from_the_shelf() {
     let server = Server::start().await;
     let works = grouped_shelf(&server.library);
 
@@ -1630,7 +1630,7 @@ async fn reading_positions_are_written_once_refuse_stale_generations_and_come_ba
             })
         );
     }
-    // 棚に書いた端末は、旧 API の位置を移すときと同じ識別子。
+    // 棚に書いた端末は、サーバーの端末の識別子で記録される。
     let position = server
         .library
         .reading_position(north.entity_id, server.library.id)

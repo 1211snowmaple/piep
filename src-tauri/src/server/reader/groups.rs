@@ -25,13 +25,13 @@ use serde::Deserialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-/// 一覧の一ページの既定と上限（旧 API と同じ）。
+/// 一覧の一ページの既定と上限。
 const PAGE: usize = 30;
 const MAX_PAGE: usize = 50;
-/// 名前の絞り込みの長さの上限（旧 API と同じ）。
+/// 名前の絞り込みの長さの上限。
 const MAX_TEXT_CHARS: usize = 200;
 const MAX_OFFSET: usize = 1_000_000;
-/// 作者・シリーズの画面のタグの数（旧 API と同じ）。
+/// 作者・シリーズの画面のタグの数。
 const TAGS: usize = 60;
 /// 覚えておく一覧の集計の数。ページをめくるたびに集め直さない。
 const REMEMBERED_ROWS: usize = 8;
@@ -71,7 +71,7 @@ fn text(value: Option<String>) -> Result<String, ApiError> {
     Ok(value)
 }
 
-/// 並べる鍵と向き。語彙は旧 API と同じ。向きを省くと鍵ごとの既定（名前だけ昇順）。
+/// 並べる鍵と向き。向きを省くと鍵ごとの既定（名前だけ昇順）。
 fn sort(sort: Option<&str>, order: Option<&str>) -> Result<(SeriesSort, bool), ApiError> {
     let sort = match sort {
         None => SeriesSort::WorkCount,
@@ -261,7 +261,7 @@ pub(super) struct KeyQuery {
     key: String,
 }
 
-/// プロフィールのリンク。外へ開くものだけを渡す（旧 API と同じ）。
+/// プロフィールのリンク。外へ開くものだけを渡す。
 fn profile_links(links: Vec<String>) -> Vec<String> {
     links
         .into_iter()

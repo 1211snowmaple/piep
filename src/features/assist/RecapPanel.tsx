@@ -67,7 +67,7 @@ function RecapForPair({
       needsBody
       bodyAllowed={body}
       busy={run.isPending}
-      busyDetail={<AssistProgressLine feature="reader_recap" downloadId={currentId} active={run.isPending} />}
+      busyDetail={<AssistProgressLine feature="reader_recap" workId={currentId} active={run.isPending} />}
       actionLabel={note.data ? "作り直す" : "前の話を思い出す"}
       onRun={() => run.mutate()}
     >

@@ -1,11 +1,11 @@
 //! ジョブの実行キュー。棚の `jobs` 表に持つ。
-use crate::database::*;
 use crate::library::{Library, LibraryId};
+use crate::models::*;
 use crate::AppState;
 use std::sync::Arc;
-#[path = "job_queue_native.rs"]
-mod native;
-use native::NativeQueue;
+#[path = "job_queue_store.rs"]
+mod store;
+use store::Queue;
 pub(crate) struct Jobs {
     library: Option<Arc<Library>>,
 }
@@ -17,12 +17,12 @@ impl AppState {
     }
 }
 impl Jobs {
-    fn queue(&self) -> Result<NativeQueue<'_>, String> {
+    fn queue(&self) -> Result<Queue<'_>, String> {
         let library = self
             .library
             .as_ref()
             .ok_or_else(|| "棚は開いていません".to_string())?;
-        Ok(NativeQueue {
+        Ok(Queue {
             library,
             conn: &library.conn,
         })

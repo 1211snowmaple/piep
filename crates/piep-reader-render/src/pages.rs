@@ -30,8 +30,8 @@ pub const READER_PAGE_TARGET_BYTES: usize = 128 * 1024;
 /// 転送用のページの大きさとして数える長さ。画像・添付の置き場（`data-local-path` の値）は数えない。
 ///
 /// 置き場の長さは本文と関係がない（保存先のフォルダーを含むパスのことも、ファイルの
-/// 識別子のこともある）。数えていたころは、同じ本文でも保存先を移したり棚を替えたりするだけでページの
-/// 切れ目が動き、「何ページ目の何行目」で憶えた読書位置としおりが別の行を指していた。
+/// 識別子のこともある）。数えると、同じ本文でも保存先や棚が替わるだけでページの切れ目が動き、
+/// 「何ページ目の何行目」で憶えた読書位置としおりが別の行を指す。
 pub fn transport_len(html: &str) -> usize {
     static PLACE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
         Regex::new(r#"data-local-path="[^"]*""#).expect("valid local path regex")

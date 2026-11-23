@@ -400,8 +400,8 @@ fn a_pdf_attachment_opens_its_original_by_its_file() {
 }
 
 #[test]
-fn the_reader_gets_pages_outline_search_and_length_like_the_old_shelf() {
-    use crate::database::queries::{reader_outline, search_reader_pages};
+fn the_reader_gets_pages_outline_search_and_length() {
+    use crate::analysis::{reader_outline, search_reader_pages};
     let dir = temp("reader");
     let library = Library::create(&dir.0).unwrap();
     let body = SourceBody::PixivText("[chapter:一章]雨の朝[newpage][chapter:二章]カサの話".into());
@@ -595,7 +595,7 @@ fn probe_a_real_shelf() {
                 .unwrap();
             let took = timer.elapsed();
             let html = rendered.pages.join("");
-            headings += crate::database::queries::reader_outline(&rendered.pages).len();
+            headings += crate::analysis::reader_outline(&rendered.pages).len();
             let starts = &rendered.source_page_starts;
             let pixiv = card.provider.eq_ignore_ascii_case("pixiv");
             if pixiv
@@ -615,7 +615,7 @@ fn probe_a_real_shelf() {
                 ));
             }
             let timer = std::time::Instant::now();
-            let _ = crate::database::queries::search_reader_pages(&rendered.pages, "の", 50);
+            let _ = crate::analysis::search_reader_pages(&rendered.pages, "の", 50);
             let searched = timer.elapsed();
             if searched > slowest_search.0 {
                 slowest_search = (
@@ -748,9 +748,9 @@ fn an_edit_knows_the_version_it_was_made_on() {
 }
 
 #[test]
-fn an_edit_is_laid_out_line_for_line_like_the_old_shelf() {
-    use crate::database::models::WorkBlock;
+fn an_edit_is_laid_out_line_for_line() {
     use crate::library::{EditBlock, EditMedia};
+    use crate::models::WorkBlock;
     let picture = Fingerprint::of(b"picture");
     let blocks = [
         ("paragraph", Some("一\n二"), json!(null), None),
@@ -822,7 +822,7 @@ fn an_edit_is_laid_out_line_for_line_like_the_old_shelf() {
     // 画像 8 のファイルが無い（残っていない画像は渡さない）。
     let old_assets = [AssetEntry {
         id: 7,
-        download_id: 1,
+        work_id: 1,
         asset_type: "illustration".into(),
         filename: "saved.png".into(),
         local_path: picture.to_string(),

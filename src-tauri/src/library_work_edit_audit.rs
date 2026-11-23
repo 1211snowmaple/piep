@@ -67,7 +67,7 @@ impl Library {
             reasons.push(format!("挿絵参照を表示できません: {}", missing.join(", ")));
         }
         if !masked.is_empty() {
-            let label = crate::database::queries::masked_metadata_label(&masked);
+            let label = crate::analysis::masked_metadata_label(&masked);
             reasons.push(format!("作品情報（{label}）が取得元で伏せられた状態です"));
         }
         payload["holdReason"] = json!(format!(

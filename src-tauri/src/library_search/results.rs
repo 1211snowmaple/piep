@@ -1,14 +1,16 @@
 //! 本文の検索の一覧に付けるもの：作者やシリーズそのものを指す問い合わせの解釈と、
-//! 一致した箇所の抜粋・理由。どちらも `crate::database` の判定と抜粋の関数を使う。
+//! 一致した箇所の抜粋・理由。どちらも `crate::models` の判定と抜粋の関数を使う。
 
 use super::index::Space;
 use super::query::parse_query;
 use super::semantic::SemanticEvidence;
-use crate::database::models::{ScoreReason, SearchHighlight, SearchHighlightSegment};
-use crate::database::search::{make_match_highlights, match_fields_and_score, parse_search_query};
-use crate::database::tantivy_index;
 use crate::library::{
     Error, Library, LibraryId, Result, TextMatches, WorkListPage, WorkListQuery, WorkSort,
+};
+use crate::models::{ScoreReason, SearchHighlight, SearchHighlightSegment};
+use crate::search_engine::tantivy_index;
+use crate::search_engine::text::{
+    make_match_highlights, match_fields_and_score, parse_search_query,
 };
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};

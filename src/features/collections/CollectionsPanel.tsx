@@ -17,7 +17,7 @@ import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode } from "@/components/ListPager";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
-import { generateShelfCollectionSuggestion, listCollectionSuggestions } from "@/services/collectionApi";
+import { generateCollectionSuggestion, listCollectionSuggestions } from "@/services/collectionApi";
 import { isTauriRuntime } from "@/services/dbApi";
 import { SHELF_WORK_ID as SHELF_WORK } from "@/services/shelfApi";
 import { demoSuggestions } from "@/mocks/demoData";
@@ -80,7 +80,7 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
     onError: (error) => notifications.show({ color: "red", title: "コレクションを保存できません", message: errorMessage(error) }),
   });
   const suggestionMutation = useMutation({
-    mutationFn: (seed: string) => generateShelfCollectionSuggestion([seed]),
+    mutationFn: (seed: string) => generateCollectionSuggestion([seed]),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["collection-suggestions"] }); notifications.show({ color: "green", message: "関連作品のひな型を作成しました" }); },
     onError: (error) => notifications.show({ color: "red", title: "ひな型を作成できません", message: errorMessage(error) }),
   });

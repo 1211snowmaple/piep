@@ -1,10 +1,11 @@
+/// 保存した応答の解釈・索引・提案の計算。棚のコードから使う（外へは出さない）。
+pub(crate) mod analysis;
 /// 実データで挙動を確かめる example から触れるように公開している。
 pub mod assist;
+pub(crate) mod attachment;
 mod auth;
 pub mod commands;
 mod credential_manager;
-/// 保存した応答の解釈・索引・提案の計算。棚のコードから使う（外へは出さない）。
-pub(crate) mod database;
 mod downloader;
 pub mod epub;
 pub mod fanbox_api;
@@ -26,9 +27,12 @@ pub mod library_suggestions;
 pub mod library_view;
 pub mod library_work_edit;
 mod logging;
+pub(crate) mod models;
 /// 棚の実物で取り出しを確かめる example から触れるように公開している。
 pub mod pdf;
 pub mod pixiv_api;
+pub(crate) mod resource_budget;
+pub(crate) mod search_engine;
 pub mod search_suggest;
 /// 単独サーバー `piep-server` からも使うので公開している。
 pub mod server;
@@ -41,8 +45,7 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
 const LIBRARY_LOCK_FILENAME: &str = ".piep-library.lock";
-/// 移行や後始末を走らせるスレッドの余裕。既定の 2MB では、メインスレッドで
-/// 動いていた頃より狭くなる。
+/// 起動時の準備（台帳の更新・後始末）を走らせるスレッドの余裕。既定の 2MB では足りない。
 const STARTUP_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 /// Process-wide ownership of one library directory.
@@ -132,7 +135,7 @@ fn prepare_library(
 ) -> Result<(), String> {
     // 埋め込みモデルの置き場は、開く前に決めておく。既定は起動した場所
     // なので、決めないと起動場所ごとに 465MB を落として置き去りにする。
-    database::semantic_index::set_model_cache_dir(app_data);
+    search_engine::semantic_index::set_model_cache_dir(app_data);
 
     // 添付 PDF を読むための pdfium。配布物では実行ファイルの隣に配られる
     // （`tauri.conf.json` の `bundle.resources`）。見つからなくても起動は
@@ -242,17 +245,6 @@ pub fn run() -> tauri::Result<()> {
             // 記録の行き先を、他の何よりも先に決める。ここから下の初期化は
             // どれも失敗しうるのに、失敗したことがどこにも残らなかった。
             logging::install(&app_data);
-
-            // 前の版が設定のファイルに平文で置いた鍵を、資格情報マネージャーへ移す。
-            // 画面が設定のファイルを開く前（窓を作る前）でないと、古い中身を書き戻される。
-            match auth::saved::move_from_settings(
-                &auth::saved::Vault::app(),
-                &app_data.join("settings.json"),
-            ) {
-                Ok(true) => log::info!("取得用の接続を資格情報マネージャーへ移しました"),
-                Ok(false) => {}
-                Err(error) => log::error!("取得用の接続を移せません: {error}"),
-            }
 
             // Claim the whole library before SQLite, restore recovery, search
             // sidecars, or downloaded files can be opened by this process.
@@ -391,18 +383,18 @@ pub fn run() -> tauri::Result<()> {
             commands::downloader::fetch_pixiv_user_novels,
             commands::downloader::fetch_fanbox_post,
             commands::downloader::fetch_fanbox_creator_posts,
-            // DB検索・閲覧 (commands::database)
-            commands::database::search_rebuild_index,
-            commands::database::search_set_semantic_enabled,
-            commands::database::search_cancel_rebuild_index,
-            commands::database::db_list_saved_searches,
-            commands::database::db_upsert_saved_search,
-            commands::database::db_delete_saved_search,
-            commands::database::db_sweep_collection_candidates,
-            commands::database::db_suggest_collection_additions,
-            commands::database::db_dismiss_swept_suggestions,
-            commands::database::db_propose_collection_names,
-            commands::database::db_name_collection_with_model,
+            // DB検索・閲覧 (commands::library)
+            commands::library::search_rebuild_index,
+            commands::library::search_set_semantic_enabled,
+            commands::library::search_cancel_rebuild_index,
+            commands::library::list_saved_searches,
+            commands::library::upsert_saved_search,
+            commands::library::delete_saved_search,
+            commands::library::sweep_collection_candidates,
+            commands::library::suggest_collection_additions,
+            commands::library::dismiss_swept_suggestions,
+            commands::library::propose_collection_names,
+            commands::library::name_collection_with_model,
             // モデルに手伝ってもらう仕事。どれも押したときだけ動く。
             commands::assist::assist_discover_engines,
             commands::assist::assist_runtime_profile,
@@ -421,38 +413,38 @@ pub fn run() -> tauri::Result<()> {
             commands::assist::shelf_assist_recap_previous,
             commands::assist::shelf_assist_load_note,
             commands::assist::shelf_assist_delete_note,
-            commands::database::db_try_naming_engine,
-            commands::database::db_name_collection_suggestion,
-            commands::database::db_generate_collection_suggestion,
-            commands::database::db_list_collection_suggestions,
-            commands::database::db_accept_collection_suggestion,
-            commands::database::db_reject_collection_suggestion,
-            commands::database::db_dismiss_collection_suggestion,
-            commands::database::db_get_search_index_status,
-            // バージョン管理・更新監視 (commands::database)
-            commands::database::db_upsert_update_target,
-            commands::database::db_get_update_target,
-            commands::database::db_list_update_targets,
-            commands::database::db_set_update_target_enabled,
-            commands::database::db_delete_update_target,
-            commands::database::db_list_watch_groups,
-            commands::database::db_create_watch_group,
-            commands::database::db_rename_watch_group,
-            commands::database::db_delete_watch_group,
-            commands::database::db_set_watch_group_members,
-            commands::database::refresh_entity_profile,
-            commands::database::db_get_entity_profile_repair_status,
-            commands::database::repair_incomplete_entity_profiles,
-            commands::database::cancel_entity_profile_repair,
+            commands::library::try_naming_engine,
+            commands::library::name_collection_suggestion,
+            commands::library::generate_collection_suggestion,
+            commands::library::list_collection_suggestions,
+            commands::library::accept_collection_suggestion,
+            commands::library::reject_collection_suggestion,
+            commands::library::dismiss_collection_suggestion,
+            commands::library::get_search_index_status,
+            // バージョン管理・更新監視 (commands::library)
+            commands::library::upsert_update_target,
+            commands::library::get_update_target,
+            commands::library::list_update_targets,
+            commands::library::set_update_target_enabled,
+            commands::library::delete_update_target,
+            commands::library::list_watch_groups,
+            commands::library::create_watch_group,
+            commands::library::rename_watch_group,
+            commands::library::delete_watch_group,
+            commands::library::set_watch_group_members,
+            commands::library::refresh_entity_profile,
+            commands::library::get_entity_profile_repair_status,
+            commands::library::repair_incomplete_entity_profiles,
+            commands::library::cancel_entity_profile_repair,
             commands::original_images::shelf_original_image_status,
-            commands::backup_shelf::shelf_backup,
-            commands::backup_shelf::shelf_export_entity_archive,
-            commands::backup_shelf::shelf_import_archive,
-            commands::reimport_shelf::shelf_reimport_folders,
-            commands::backup_shelf::shelf_inspect_backup,
-            commands::backup_shelf::shelf_schedule_restore,
-            commands::backup_shelf::shelf_restore_state,
-            commands::backup_shelf::shelf_cancel_restore,
+            commands::backup::shelf_backup,
+            commands::backup::shelf_export_entity_archive,
+            commands::backup::shelf_import_archive,
+            commands::reimport::shelf_reimport_folders,
+            commands::backup::shelf_inspect_backup,
+            commands::backup::shelf_schedule_restore,
+            commands::backup::shelf_restore_state,
+            commands::backup::shelf_cancel_restore,
             commands::original_images::shelf_upgrade_images_to_original,
             commands::original_images::cancel_original_image_upgrade,
             // 更新ジョブ (commands::update_jobs)

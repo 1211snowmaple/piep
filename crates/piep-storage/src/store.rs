@@ -1,11 +1,10 @@
 use crate::{Error, Fingerprint, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 const MAGIC: &[u8; 8] = b"PIEPOB01";
 pub const OBJECT_HEADER_BYTES: u64 = 57;
@@ -78,8 +77,7 @@ pub struct ChunkEncoding {
 }
 
 /// 保管して検証を終えたファイル。`put_stored` と `inspect` だけが作る。
-/// 全部分の展開結果と元ハッシュをディスクから読んで確かめてある。確かめたのは受け取った
-/// 時点か、`verified_session` の間ならその中で最初に保管・再利用した時点。
+/// 全部分の展開結果と元ハッシュを、受け取った時点でディスクから読んで確かめてある。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredFile {
     pub file: ContentFile,
@@ -99,18 +97,6 @@ pub struct StorageStats {
 #[derive(Clone)]
 pub struct ObjectStore {
     root: PathBuf,
-    session: Verified,
-}
-
-type Verified = Arc<Mutex<Option<HashMap<Fingerprint, ChunkEncoding>>>>;
-
-/// `ObjectStore::verified_session` が返す。手放すと、覚えた検証結果を捨てる。
-pub struct VerifiedSession(Verified);
-
-impl Drop for VerifiedSession {
-    fn drop(&mut self) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = None;
-    }
 }
 
 struct Pending(PathBuf);
@@ -332,8 +318,8 @@ fn decode_object(source: impl Read, encoded_length: u64, expected: &FileChunk) -
 /// 書き終えた一時ファイルを、開き直さずに頭から読み戻して復元する。
 ///
 /// 書いた直後のファイルを開き直すと、Windows では開くたびに数ミリ秒待たされる
-/// （常駐の検査が新しいファイルを開くところで走る）。全棚の移行は実体が 13 万個あり、
-/// 実測では保管の時間の 6 割がこの開き直しだった（`examples/put_cost.rs`）。
+/// （常駐の検査が新しいファイルを開くところで走る）。棚全体（実体 13 万個）を保管したときの
+/// 実測では、保管の時間の 6 割がこの開き直しだった（`examples/put_cost.rs`）。
 /// 確定（`sync_all`）の後に同じ手で読むので、確かめている中身は開き直した場合と同じ。
 fn read_back(mut file: File, expected: &FileChunk) -> Result<Vec<u8>> {
     let length = file.metadata()?.len();
@@ -473,40 +459,7 @@ impl ObjectStore {
         regular_directory(root)?;
         Ok(Self {
             root: root.canonicalize()?,
-            session: Verified::default(),
         })
-    }
-
-    /// 返した値を持っている間、この棚で一度読んで確かめた実体を覚え、同じ中身を
-    /// もう一度保管するときに読み直さない。
-    ///
-    /// 同じファイルを何度も保管し、最後に全件を `verify` する一括処理（移行）のためのもの。
-    /// 覚えた後に壊れた実体は、その間は再利用されて置き換わらない。`verify`・`inspect`・
-    /// 読み出しは常にディスクを読むので、壊れた実体が成功として返ることはない。
-    /// 一度に持てるのは一つ。
-    pub fn verified_session(&self) -> VerifiedSession {
-        *self.session.lock().unwrap_or_else(PoisonError::into_inner) = Some(HashMap::new());
-        VerifiedSession(self.session.clone())
-    }
-
-    fn remembered(&self, id: Fingerprint) -> Option<ChunkEncoding> {
-        self.session
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()?
-            .get(&id)
-            .copied()
-    }
-
-    fn remember(&self, id: Fingerprint, encoding: ChunkEncoding) {
-        if let Some(seen) = self
-            .session
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_mut()
-        {
-            seen.insert(id, encoding);
-        }
     }
 
     fn chunk_path(&self, id: Fingerprint, create: bool) -> Result<PathBuf> {
@@ -570,15 +523,11 @@ impl ObjectStore {
             id,
             length: original.len() as u64,
         };
-        if let Some(encoding) = self.remembered(id) {
-            return Ok((result, encoding));
-        }
         let dest = self.chunk_path(id, true)?;
         // 壊れた既存の実体は再利用しない。下で検証した中身と置き換える。
         match self.load(&dest, &result) {
             Ok((_, encoding)) => {
                 freshen(&dest);
-                self.remember(id, encoding);
                 return Ok((result, encoding));
             }
             Err(error) if missing(&error) || damaged(&error) => (),
@@ -616,7 +565,6 @@ impl ObjectStore {
             // 同時に保管した別の書き手の実体が残った。表現が違うことがあるので読んで確かめる。
             self.load(&dest, &result)?.1
         };
-        self.remember(id, encoding);
         Ok((result, encoding))
     }
 
@@ -1214,30 +1162,6 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .filter(|path| path.extension().is_some_and(|ext| ext == extension))
             .collect()
-    }
-
-    #[test]
-    fn a_verified_session_skips_rereading_and_never_hides_damage_from_verify() {
-        let root = Temp::new();
-        let store = ObjectStore::open(&root.0).unwrap();
-        let input = b"session ".repeat(4096);
-        let session = store.verified_session();
-        let first = store.put_stored(&input[..]).unwrap();
-        assert_eq!(store.put_stored(&input[..]).unwrap(), first);
-        // 覚えた後に壊れた実体は、その間は読み直さないので再利用される。
-        let path = files_with_extension(&root.0, "obj").remove(0);
-        let mut bytes = fs::read(&path).unwrap();
-        *bytes.last_mut().unwrap() ^= 1;
-        fs::write(&path, &bytes).unwrap();
-        assert_eq!(store.put_stored(&input[..]).unwrap(), first);
-        // 検証と読み出しは覚えた結果を使わない。
-        assert!(store.verify(&first.file).is_err());
-        assert!(store.export(&first.file, std::io::sink()).is_err());
-        // 手放した後は、いつもどおり読んで確かめ、壊れた実体を置き換える。
-        drop(session);
-        assert_eq!(store.put_stored(&input[..]).unwrap(), first);
-        store.verify(&first.file).unwrap();
-        assert_eq!(files_with_extension(&root.0, "damaged").len(), 1);
     }
 
     #[test]

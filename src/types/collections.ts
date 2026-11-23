@@ -116,10 +116,10 @@ export interface WorkLink {
   id: number;
   fromSource: string;
   fromSourceId: string;
-  fromDownloadId: number | null;
+  fromWorkId: number | null;
   toSource: string;
   toSourceId: string;
-  toDownloadId: number | null;
+  toWorkId: number | null;
   relationType: string;
   evidenceType: string;
   anchorText: string | null;

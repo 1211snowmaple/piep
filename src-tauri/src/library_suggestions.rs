@@ -1,25 +1,25 @@
 //! コレクションの提案を、棚で作る・読む・採る・断る（評価文書 4.1 の 4）。
 //!
-//! 提案の計算は `database::queries` のものを使う（`library_suggestion_corpus` が棚から作業用の表を組む）。
+//! 提案の計算は `analysis` のものを使う（`library_suggestion_corpus` が棚から作業用の表を組む）。
 //! ここは計算の結果を棚の表（`collection_suggestions`・`collection_suggestion_seeds`・
 //! `collection_suggestion_members`・`collection_pair_feedback`）へ書き、画面の形で返す。
 //!
-//! 画面へ返す形は `database::CollectionSuggestion`。候補の ID は UUID、作品は
+//! 画面へ返す形は `models::CollectionSuggestion`。候補の ID は UUID、作品は
 //! `work`（作品 UUID）で指す。作業用の表の番号（`corpus_key`）は画面へ出さない。
 
-use crate::database::queries::{
+use crate::analysis::{
     accepted_suggestion_name_source, collection_additions, name_proposals_in, naming_works_in,
     sample_bundle_like_ids_in, seed_suggestion_plan, sweep_identity, sweep_plan, PreparedSweep,
     COLLECTION_SUGGEST_RULE_VERSION,
 };
-use crate::database::{
+use crate::library::{Library, LibraryId};
+use crate::library_collection_edit::CollectionEdit;
+use crate::library_suggestion_corpus::ShelfSuggestions;
+use crate::models::{
     AcceptCollectionSuggestionInput, CollectionAdditionResult, CollectionNameCandidate,
     CollectionSuggestion, CollectionSuggestionEvidence, CollectionSuggestionMember,
     CollectionSweepResult, WorkKey,
 };
-use crate::library::{Library, LibraryId};
-use crate::library_collection_edit::CollectionEdit;
-use crate::library_suggestion_corpus::ShelfSuggestions;
 use rusqlite::{params, OptionalExtension, Transaction};
 use std::collections::HashSet;
 
@@ -875,11 +875,8 @@ impl Library {
             text.push('\n');
             text.push_str(part);
         }
-        let found = crate::database::queries::extract_work_link_evidence(
-            &text,
-            &doc.provider,
-            &doc.external_key,
-        );
+        let found =
+            crate::analysis::extract_work_link_evidence(&text, &doc.provider, &doc.external_key);
         let now = chrono::Utc::now().timestamp_millis();
         let mut conn = self.conn.lock().map_err(|_| "棚が使用中です".to_string())?;
         let tx = conn.transaction().map_err(err)?;
@@ -982,10 +979,8 @@ impl Library {
     }
 }
 
-fn corpus_conn<'a>(
-    corpus: &'a ShelfSuggestions<'_>,
-) -> Result<crate::database::queries::Corpus<'a>> {
-    use crate::database::queries::SuggestionSource;
+fn corpus_conn<'a>(corpus: &'a ShelfSuggestions<'_>) -> Result<crate::analysis::Corpus<'a>> {
+    use crate::analysis::SuggestionSource;
     corpus.corpus()
 }
 
@@ -993,8 +988,8 @@ fn collection_member_ids(corpus: &ShelfSuggestions<'_>, collection: LibraryId) -
     let conn = corpus_conn(corpus)?;
     let mut stmt = conn
         .prepare(
-            "SELECT download_id FROM work_collection_members
-             WHERE collection_id=?1 AND download_id IS NOT NULL ORDER BY position",
+            "SELECT work_id FROM collection_members
+             WHERE collection_id=?1 AND work_id IS NOT NULL ORDER BY position",
         )
         .map_err(err)?;
     let rows = stmt

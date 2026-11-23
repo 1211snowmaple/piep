@@ -1,17 +1,17 @@
 //! 棚の作品を、作品の画面と読む画面が出す形にする（本文の HTML・画像・版）。
 //!
-//! 本文の HTML は取得元の応答の変換（`database::parser`）で組む。変換は本文の中の
+//! 本文の HTML は取得元の応答の変換（`piep_reader_render::parser`）で組む。変換は本文の中の
 //! 画像の指定を保存名で探すので、棚の「指定 → 画像」の対応（reader bindings）から、
 //! 保存名の形をした仮の添付の一覧を作って渡す。置き場には保存名ではなく
 //! ファイルの識別子（中身の SHA-256）を入れ、画面が `piep-library` の URI にする。
 //! 指定と画像の結び付けは棚の対応が決め、変換の名前の推測には頼らない
 //! （仮の名前は、変換がその指定に対して探す名前そのもの）。
 
-use crate::database::models::AssetEntry;
 use crate::library::{
     ContentFile, EditContent, Fingerprint, Library, LibraryId, ReaderBody, ReaderDocument,
     ResourceReference, ResourceScope, Result, WorkCard,
 };
+use crate::models::AssetEntry;
 use piep_reader_render::document::ReaderView;
 use rusqlite::OptionalExtension;
 use serde::Serialize;
@@ -307,7 +307,7 @@ impl Library {
             let mut post = json!({ "body": std::mem::take(body) });
             let conn = self.reader()?;
             self.insert_attachment_bodies(&conn, snapshot, provider, &mut post)?;
-            inserted_text = Some(crate::database::search::extract_search_body(
+            inserted_text = Some(crate::search_engine::text::extract_search_body(
                 &post, "fanbox",
             ));
             *body = post["body"].take();

@@ -10,7 +10,7 @@
 //!
 //! 携帯が棚を読む許可（`shelf.readers`）は、管理者が端末ごとに付け外しする。
 
-use super::native::{activate_locked, generation_path, generations, write_config};
+use super::generations::{activate_locked, generation_path, generations, write_config};
 use super::{load_config, ServerConfig, ServerPaths};
 use crate::library::{
     protocol::Id, ContentFile, FileChunk, Fingerprint, Library, LibraryId, ObjectStore,

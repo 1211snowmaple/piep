@@ -17,14 +17,15 @@ describe("collectionApi", () => {
 
   it("sends suggestion seeds and the user's final member selection separately", async () => {
     invoke.mockResolvedValue({ id: "suggestion-1", members: [] });
-    await generateCollectionSuggestion([4, 8], 40);
-    expect(invoke).toHaveBeenLastCalledWith("db_generate_collection_suggestion", {
-      request: { seedDownloadIds: [4, 8], limit: 40 },
+    const seeds = ["01a1db13-0000-7000-8000-000000000004", "01a1db13-0000-7000-8000-000000000008"];
+    await generateCollectionSuggestion(seeds, 40);
+    expect(invoke).toHaveBeenLastCalledWith("generate_collection_suggestion", {
+      request: { seedWorks: seeds, limit: 40 },
     });
 
     const memberKeys = [{ source: "pixiv", sourceId: "4" }];
     await acceptCollectionSuggestion({ suggestionId: "suggestion-1", memberKeys });
-    expect(invoke).toHaveBeenLastCalledWith("db_accept_collection_suggestion", {
+    expect(invoke).toHaveBeenLastCalledWith("accept_collection_suggestion", {
       input: { suggestionId: "suggestion-1", memberKeys },
     });
   });
@@ -40,13 +41,13 @@ describe("collectionApi", () => {
     invoke.mockResolvedValue(true);
     const memberKeys = [{ source: "pixiv", sourceId: "7" }];
     await rejectCollectionSuggestion("suggestion-1", memberKeys);
-    expect(invoke).toHaveBeenLastCalledWith("db_reject_collection_suggestion", {
+    expect(invoke).toHaveBeenLastCalledWith("reject_collection_suggestion", {
       suggestionId: "suggestion-1",
       memberKeys,
     });
 
     await rejectCollectionSuggestion("suggestion-2");
-    expect(invoke).toHaveBeenLastCalledWith("db_reject_collection_suggestion", {
+    expect(invoke).toHaveBeenLastCalledWith("reject_collection_suggestion", {
       suggestionId: "suggestion-2",
       memberKeys: null,
     });

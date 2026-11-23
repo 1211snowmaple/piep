@@ -33,7 +33,7 @@ pub struct QueryParts {
 /// `series:` の値。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SeriesRef {
-    /// `series:pixiv:123`（と旧い候補の `pixiv:123`）。取得元のシリーズの ID。
+    /// `series:pixiv:123`。取得元のシリーズの ID。
     Key { provider: String, key: String },
     /// `series:123` や `series:"題"`。取得元のシリーズの ID か題のどちらか。
     KeyOrTitle(String),
@@ -166,11 +166,6 @@ pub fn parse_query(query: &str) -> QueryParts {
                     _ => SeriesRef::KeyOrTitle(value.to_owned()),
                 })
             }
-            // 0.3 より前の検索の候補が `pixiv:<シリーズの ID>` を作っていた。保存した検索に残る。
-            ("pixiv" | "fanbox", false) => parts.series.push(SeriesRef::Key {
-                provider: field.clone(),
-                key: value.to_owned(),
-            }),
             ("title" | "series_title", _) => text.push(if excluded {
                 format!("-{value}")
             } else {

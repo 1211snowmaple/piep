@@ -12,6 +12,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{Emitter, State};
 
+use crate::analysis::{AiNote, RelatedTagCandidate, TaggedName};
 use crate::assist::{
     self, AssistEngine, AssistNote, AssistRuntimeProfile, BundleSplit, DiscoveredEngine,
     GeneratedAssist, ProofreadSegment, ProofreadSuggestion, SearchIntent, TagProposal,
@@ -20,7 +21,6 @@ use crate::assist::{
     FEATURE_WORK_SYNOPSIS,
 };
 use crate::commands::shelf::{collection_target, Shelf};
-use crate::database::queries::{AiNote, RelatedTagCandidate, TaggedName};
 use crate::library::{Library, LibraryId, TagProvenance};
 
 async fn blocking<T, F>(state: &State<'_, Arc<Shelf>>, f: F) -> Result<T, String>
@@ -352,7 +352,7 @@ pub async fn shelf_assist_propose_splits(
 #[serde(rename_all = "camelCase")]
 struct ShelfProgressEvent {
     feature: &'static str,
-    download_id: String,
+    work_id: String,
     #[serde(flatten)]
     progress: assist::AssistProgress,
 }
@@ -363,13 +363,13 @@ fn progress_sink(
     work: LibraryId,
 ) -> impl Fn(assist::AssistProgress) + Send + Sync {
     let app = app.clone();
-    let download_id = work.to_string();
+    let work_id = work.to_string();
     move |progress| {
         let _ = app.emit(
             "assist-progress",
             ShelfProgressEvent {
                 feature,
-                download_id: download_id.clone(),
+                work_id: work_id.clone(),
                 progress,
             },
         );

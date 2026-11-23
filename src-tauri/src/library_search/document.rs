@@ -1,10 +1,10 @@
 //! 本文の検索の文書。全文索引の材料を、棚の保存状態から作る。
 //!
-//! 索引は派生物で、関連度の重みと字句解析は `crate::database::tantivy_index` が持つ。
+//! 索引は派生物で、関連度の重みと字句解析は `crate::search_engine::tantivy_index` が持つ。
 //! ここは「何を索引に入れるか」だけを決める。
 
-use crate::database::models::AssetEntry;
 use crate::library::{Error, Fingerprint, Library, LibraryId, Result, SourceBody};
+use crate::models::AssetEntry;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::json;
 use std::path::PathBuf;
@@ -263,7 +263,7 @@ impl Library {
         };
         let mut post = json!({ "body": body });
         self.insert_attachment_bodies(conn, snapshot, provider, &mut post)?;
-        Ok(crate::database::search::extract_search_body(
+        Ok(crate::search_engine::text::extract_search_body(
             &post, "fanbox",
         ))
     }
@@ -284,7 +284,7 @@ impl Library {
         if texts.files.is_empty() {
             return Ok(());
         }
-        crate::database::attachment::apply_attachment_text(post, provider, &texts.files);
+        crate::attachment::apply_attachment_text(post, provider, &texts.files);
         // 差し込んだ印の `localPath`（「原本を見る」）は一時に書き出したファイルを指していて、
         // ここを出ると消える。添付のファイルの識別子に置き換え、原本はそれで開く
         // （`shelf_render_pdf_page`）。知らない場所を指す印は外す（押しても開けない）。
@@ -294,7 +294,7 @@ impl Library {
         {
             for block in blocks {
                 if block.get("type").and_then(serde_json::Value::as_str)
-                    != Some(crate::database::attachment::NOTICE_BLOCK_TYPE)
+                    != Some(crate::attachment::NOTICE_BLOCK_TYPE)
                 {
                     continue;
                 }
@@ -368,7 +368,7 @@ impl Library {
             self.objects.export(&content, &mut output)?;
             texts.files.push(AssetEntry {
                 id: index as i64,
-                download_id: 0,
+                work_id: 0,
                 asset_type: "file".into(),
                 filename: name,
                 local_path: path.to_string_lossy().into_owned(),

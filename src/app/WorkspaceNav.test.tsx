@@ -301,7 +301,7 @@ describe("library sidebar", () => {
   });
 
   it("shows real bounded library candidates and opens the chosen work", async () => {
-    librarySearch.mockResolvedValueOnce({ items: [{ id: "w-123", source:"pixiv",title: "長い作品の題名", authorName: "省略しない長い作者名",downloadedAt:"2026-10-30T00:00:00Z",textLength:1234,currentVersion:1 }] });
+    librarySearch.mockResolvedValueOnce({ items: [{ id: "w-123", source:"pixiv",title: "長い作品の題名", authorName: "省略しない長い作者名",savedAt:"2026-10-30T00:00:00Z",textLength:1234,currentVersion:1 }] });
     const user = userEvent.setup();
     renderApp("#/library");
     await user.click(await screen.findByRole("button", { name: "検索または移動" }));

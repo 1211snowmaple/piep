@@ -38,7 +38,7 @@ fn id() -> String {
 
 #[test]
 #[ignore = "開発版で実行キューの表示を確かめるための棚を残す"]
-fn native_queue_fixture() {
+fn queue_fixture() {
     let (temp, state, library) = fixture();
     let work = save(&library, "1");
     let job = id();
@@ -64,9 +64,9 @@ fn native_queue_fixture() {
         .append_update_job_log(&job, "warn", "確認用の中断記録。次の作品から続けられます")
         .unwrap();
     library.verify().unwrap();
-    println!("QUEUE_NATIVE_ROOT={}", temp.0.display());
-    println!("QUEUE_NATIVE_FIXTURE={}", library.root().display());
-    println!("QUEUE_NATIVE_JOB={job}");
+    println!("QUEUE_ROOT={}", temp.0.display());
+    println!("QUEUE_FIXTURE={}", library.root().display());
+    println!("QUEUE_JOB={job}");
     std::mem::forget(temp);
 }
 fn save(library: &Library, key: &str) -> LibraryId {
@@ -74,7 +74,7 @@ fn save(library: &Library, key: &str) -> LibraryId {
 }
 
 #[test]
-fn native_queue_preserves_exact_inputs_stop_resume_and_recovery() {
+fn queue_preserves_exact_inputs_stop_resume_and_recovery() {
     let (_temp, state, library) = fixture();
     let job = id();
     let input = item("1", "work", "queued");
@@ -156,7 +156,7 @@ fn native_queue_preserves_exact_inputs_stop_resume_and_recovery() {
 }
 
 #[test]
-fn results_belong_to_the_work_and_survive_backup_without_numeric_legacy_ids() {
+fn results_belong_to_the_work_and_survive_backup() {
     let (temp, state, library) = fixture();
     let work = save(&library, "1");
     let wrong = save(&library, "2");
@@ -198,7 +198,7 @@ fn results_belong_to_the_work_and_survive_backup_without_numeric_legacy_ids() {
     );
     library.backup(&temp.0.join("backup")).unwrap();
     let copy = Library::open(&temp.0.join("backup")).unwrap();
-    let queue = NativeQueue {
+    let queue = Queue {
         library: &copy,
         conn: &copy.conn,
     };

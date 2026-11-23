@@ -183,9 +183,8 @@ impl TemplateManager {
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             // 組み込みは利用者が編集できないので、版が上がったら常に書き戻す。
             // 派生テンプレートは複製なので、この上書きに巻き込まれない。
-            // 派生元が default のファイルも含め、組み込み一式を毎回更新する。
-            // 以前は pixiv / fanbox 固有の2ファイルしか上書きせず、旧版で作成済み
-            // の content.opf や nav が永遠に残り続けていた。
+            // 派生元が default のファイルも含め、組み込み一式を毎回更新する。一部だけを
+            // 書き戻すと、古い content.opf や nav が残り続ける。
             for filename in TEMPLATE_FILES {
                 let content = builtin_file_content(name, filename)
                     .ok_or_else(|| format!("組み込みファイル '{}' がありません", filename))?;

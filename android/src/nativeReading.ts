@@ -136,7 +136,7 @@ export function shelfWork(work: MobileShelfWork): PcWork {
     seriesTitle: work.seriesTitle,
     seriesId: work.seriesId,
     sourceCreatedAt: work.sourceCreatedAt,
-    downloadedAt: work.downloadedAt,
+    savedAt: work.savedAt,
   };
 }
 

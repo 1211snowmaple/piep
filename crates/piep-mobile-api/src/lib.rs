@@ -33,7 +33,7 @@ pub struct MobileWork {
     #[serde(default)]
     pub source_created_at: Option<String>,
     #[serde(default)]
-    pub downloaded_at: String,
+    pub saved_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,7 +262,7 @@ pub struct MobileShelfWork {
     /// 公開日（ISO 8601）。
     pub source_created_at: Option<String>,
     /// 保存日（ISO 8601）。
-    pub downloaded_at: String,
+    pub saved_at: String,
 }
 
 /// 棚の作品のお気に入りを付け外しする。`request_id` は端末が作る UUID で、送り直しても
@@ -365,7 +365,7 @@ pub struct MobileShelfWorkDetail {
     pub edit_base_version: Option<i64>,
 }
 
-/// 棚の検索欄の候補（旧 API の `search/suggest` の一件と同じ形）。作者・シリーズは
+/// 棚の検索欄の候補の一件。作者・シリーズは
 /// `source`・`source_key` が取得元と ID、題は `value` が取得元の ID で `source_key` が棚の
 /// 作品の ID、タグは `value` がタグ。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

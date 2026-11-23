@@ -30,11 +30,11 @@ export function assistStageText(progress: AssistProgressEvent | null): string {
  */
 export function AssistProgressLine({
   feature,
-  downloadId,
+  workId,
   active,
 }: {
   feature: AssistFeatureId;
-  downloadId: AssistWork;
+  workId: AssistWork;
   active: boolean;
 }) {
   const [progress, setProgress] = useState<AssistProgressEvent | null>(null);
@@ -47,14 +47,14 @@ export function AssistProgressLine({
     setStartedAt(Date.now());
     setNow(Date.now());
     const unlisten = subscribeTauriEvent<AssistProgressEvent>("assist-progress", ({ payload }) => {
-      if (payload.feature === feature && payload.downloadId === downloadId) setProgress(payload);
+      if (payload.feature === feature && payload.workId === workId) setProgress(payload);
     });
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => {
       unlisten();
       window.clearInterval(timer);
     };
-  }, [active, feature, downloadId]);
+  }, [active, feature, workId]);
 
   if (!active) return null;
   const elapsed = startedAt === null ? 0 : Math.max(0, (now - startedAt) / 1000);

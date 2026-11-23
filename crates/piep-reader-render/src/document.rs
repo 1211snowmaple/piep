@@ -325,7 +325,7 @@ pub fn bound_assets(document: &ReaderView) -> (Vec<AssetEntry>, Marks) {
         };
         assets.push(AssetEntry {
             id: assets.len() as i64,
-            download_id: 0,
+            work_id: 0,
             asset_type: asset_type.into(),
             filename,
             local_path: path,
@@ -373,7 +373,7 @@ fn edit_html(content: &ViewEdit, document: &ReaderView) -> String {
                     let id = assets.len() as i64 + 1;
                     assets.push(AssetEntry {
                         id,
-                        download_id: 0,
+                        work_id: 0,
                         asset_type: "illustration".into(),
                         filename: name.clone(),
                         local_path: file.clone(),

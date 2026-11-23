@@ -8,15 +8,9 @@ import type {
   WorkKey,
 } from "@/types/collections";
 
-export function generateCollectionSuggestion(seedDownloadIds: number[], limit = 60): Promise<CollectionSuggestion> {
-  return invoke<CollectionSuggestion>("db_generate_collection_suggestion", {
-    request: { seedDownloadIds, limit },
-  });
-}
-
-/** 棚の作品（UUID）を種に候補を作る。 */
-export function generateShelfCollectionSuggestion(seedWorks: string[], limit = 60): Promise<CollectionSuggestion> {
-  return invoke<CollectionSuggestion>("db_generate_collection_suggestion", {
+/** 作品（UUID）を種に候補を作る。 */
+export function generateCollectionSuggestion(seedWorks: string[], limit = 60): Promise<CollectionSuggestion> {
+  return invoke<CollectionSuggestion>("generate_collection_suggestion", {
     request: { seedWorks, limit },
   });
 }
@@ -28,7 +22,7 @@ export function generateShelfCollectionSuggestion(seedWorks: string[], limit = 6
  * 共通部分も変わる。作ったときの名前に縛られる理由は無い。保存はしない。
  */
 export function proposeCollectionNames(collectionId: string): Promise<CollectionNameCandidate[]> {
-  return invoke<CollectionNameCandidate[]>("db_propose_collection_names", { collectionId });
+  return invoke<CollectionNameCandidate[]>("propose_collection_names", { collectionId });
 }
 
 /**
@@ -38,7 +32,7 @@ export function proposeCollectionNames(collectionId: string): Promise<Collection
  * 利用者が「探す」と言ったときだけ動かす。
  */
 export function sweepCollectionCandidates(): Promise<CollectionSweepResult> {
-  return invoke<CollectionSweepResult>("db_sweep_collection_candidates");
+  return invoke<CollectionSweepResult>("sweep_collection_candidates");
 }
 
 /**
@@ -49,7 +43,7 @@ export function sweepCollectionCandidates(): Promise<CollectionSweepResult> {
  * 決める。
  */
 export function suggestCollectionAdditions(collectionId: string): Promise<CollectionAdditionResult> {
-  return invoke<CollectionAdditionResult>("db_suggest_collection_additions", { collectionId });
+  return invoke<CollectionAdditionResult>("suggest_collection_additions", { collectionId });
 }
 
 /**
@@ -60,11 +54,11 @@ export function suggestCollectionAdditions(collectionId: string): Promise<Collec
  * いなかったので、その道ごとやめた。
  */
 export function dismissSweptSuggestions(): Promise<number> {
-  return invoke<number>("db_dismiss_swept_suggestions");
+  return invoke<number>("dismiss_swept_suggestions");
 }
 
 export function listCollectionSuggestions(stateFilter: "pending" | "accepted" | "rejected" | "all" = "pending"): Promise<CollectionSuggestion[]> {
-  return invoke<CollectionSuggestion[]>("db_list_collection_suggestions", { stateFilter });
+  return invoke<CollectionSuggestion[]>("list_collection_suggestions", { stateFilter });
 }
 
 export function acceptCollectionSuggestion(input: {
@@ -73,7 +67,7 @@ export function acceptCollectionSuggestion(input: {
   collectionKind?: CollectionKind | null;
   memberKeys?: WorkKey[] | null;
 }): Promise<AcceptedCollection> {
-  return invoke<AcceptedCollection>("db_accept_collection_suggestion", { input });
+  return invoke<AcceptedCollection>("accept_collection_suggestion", { input });
 }
 
 /** 候補を採って作ったコレクション。棚では ID が UUID。 */
@@ -91,11 +85,11 @@ export function suggestionNameOverride(proposedName: string, selectedName: strin
 /** `memberKeys` limits the negative feedback to the works the reader left
  *  ticked, so unticking the ones that do belong keeps them eligible later. */
 export function rejectCollectionSuggestion(suggestionId: string, memberKeys?: WorkKey[]): Promise<boolean> {
-  return invoke<boolean>("db_reject_collection_suggestion", { suggestionId, memberKeys: memberKeys ?? null });
+  return invoke<boolean>("reject_collection_suggestion", { suggestionId, memberKeys: memberKeys ?? null });
 }
 
 /** Removes the draft from the inbox without recording negative feedback, so
  *  the same works can be suggested again later. */
 export function dismissCollectionSuggestion(suggestionId: string): Promise<boolean> {
-  return invoke<boolean>("db_dismiss_collection_suggestion", { suggestionId });
+  return invoke<boolean>("dismiss_collection_suggestion", { suggestionId });
 }

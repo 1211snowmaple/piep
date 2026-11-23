@@ -1171,7 +1171,7 @@ mod tests {
         });
         let asset = AssetEntry {
             id: 1,
-            download_id: 1,
+            work_id: 1,
             asset_type: "illustration".to_string(),
             filename: "other-image.jpg".to_string(),
             local_path: "C:/library/other-image.jpg".to_string(),
@@ -1188,7 +1188,7 @@ mod tests {
     fn pixiv_page_references_select_the_exact_saved_page() {
         let asset = |filename: &str| AssetEntry {
             id: 1,
-            download_id: 1,
+            work_id: 1,
             asset_type: "illustration".into(),
             filename: filename.into(),
             local_path: format!("C:/library/{filename}"),
@@ -1526,7 +1526,7 @@ mod tests {
         let assets = vec![
             AssetEntry {
                 id: 1,
-                download_id: 1,
+                work_id: 1,
                 asset_type: "illustration".to_string(),
                 filename: "image-1.jpg".to_string(),
                 local_path: "C:/library/image-1.jpg".to_string(),
@@ -1536,7 +1536,7 @@ mod tests {
             },
             AssetEntry {
                 id: 2,
-                download_id: 1,
+                work_id: 1,
                 asset_type: "file".to_string(),
                 filename: "資料.zip".to_string(),
                 local_path: "C:/library/資料.zip".to_string(),

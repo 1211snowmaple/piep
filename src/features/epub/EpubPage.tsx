@@ -145,7 +145,7 @@ export default function EpubPage() {
       try {
         return await exportEpubBatch<ExportBatchResult>({
           operationId: operation.id,
-          downloadIds: works.map((work) => work.id),
+          workIds: works.map((work) => work.id),
           templateName: values.templateName,
           outputDir: values.outputDir,
           writingMode: values.writingMode,

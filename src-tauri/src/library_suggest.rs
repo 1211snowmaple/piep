@@ -4,9 +4,9 @@
 //! 作者の読みで足す（組み立ては [`crate::search_suggest`]）。候補を押した先は
 //! 返す：作者・シリーズは取得元と ID、題は取得元の ID と棚の作品の ID。
 
-use crate::database::models::SearchSuggestion;
 use crate::library::{Library, Result};
 use crate::library_entity::id;
+use crate::models::SearchSuggestion;
 use crate::search_suggest::{self, Candidate, POOL_PER_KIND};
 use rusqlite::{params, Connection};
 use std::sync::{Arc, Mutex};

@@ -4,14 +4,14 @@
 //! ファイルのような数は持たない。棚のファイルは
 //! 中身の指紋で台帳と結ばれているので、照合は `verify` が、未参照の片付けは `reclaim` が担う。
 
-use crate::database::models::{
-    DashboardSummary, DashboardTrendPoint, DbStats, EntityProfileRepairStatus, FacetCount,
-    IncompleteEntityProfile, LibraryMaintenanceResult, LibraryShelfCounts,
-    SearchIndexOptimizationResult, SearchIndexStatus, SourceBreakdown,
-};
 use crate::library::{
     Error, Library, ReclaimOptions, ReclaimReport, Result, RevisionFilter, WorkFilter,
     WorkListQuery,
+};
+use crate::models::{
+    DashboardSummary, DashboardTrendPoint, DbStats, EntityProfileRepairStatus, FacetCount,
+    IncompleteEntityProfile, LibraryMaintenanceResult, LibraryShelfCounts,
+    SearchIndexOptimizationResult, SearchIndexStatus, SourceBreakdown,
 };
 use serde::Serialize;
 use std::path::Path;
@@ -208,7 +208,7 @@ impl Library {
         } else {
             None
         };
-        let model = crate::database::semantic_index::status(&self.semantic_storage());
+        let model = crate::search_engine::semantic_index::status(&self.semantic_storage());
         let indexed = total.saturating_sub(pending);
         let semantic_indexed = semantic.map_or(0, |s| s.indexed);
         Ok(SearchIndexStatus {
@@ -259,13 +259,12 @@ impl Library {
         drop(conn);
         let database = self.root().join("library.db");
         let derived = self.search_storage();
-        let semantic_bytes = crate::database::queries::recursive_file_size(&derived.join("search"));
-        let history_bytes = crate::database::queries::recursive_file_size(&derived.join("history"));
-        let lexical_bytes =
-            crate::database::queries::recursive_file_size(&derived.join("search-index"));
+        let semantic_bytes = crate::analysis::recursive_file_size(&derived.join("search"));
+        let history_bytes = crate::analysis::recursive_file_size(&derived.join("history"));
+        let lexical_bytes = crate::analysis::recursive_file_size(&derived.join("search-index"));
         let segments =
-            crate::database::tantivy_index::searchable_segment_count(&derived).unwrap_or(0);
-        let process = crate::database::queries::process_resource_snapshot();
+            crate::search_engine::tantivy_index::searchable_segment_count(&derived).unwrap_or(0);
+        let process = crate::analysis::process_resource_snapshot();
         Ok(ShelfDiagnostics {
             measured_at: chrono::Utc::now().to_rfc3339(),
             works: count(works),
@@ -303,8 +302,8 @@ impl Library {
         conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE); PRAGMA optimize;")?;
         if compact {
             let required = before.saturating_add(before / 4).saturating_add(256 << 20);
-            let available = crate::database::queries::available_space_bytes(self.root())
-                .ok_or_else(|| {
+            let available =
+                crate::analysis::available_space_bytes(self.root()).ok_or_else(|| {
                     Error::Integrity("空き容量を確かめられないので圧縮しません".into())
                 })?;
             if available < required {
@@ -326,19 +325,19 @@ impl Library {
 
     /// 全文検索の索引（いまの版と過去の版）の断片を一つにまとめる。
     pub fn optimize_search_index(&self) -> Result<SearchIndexOptimizationResult> {
-        use crate::database::tantivy_index::{optimize_segments, searchable_segment_count};
+        use crate::search_engine::tantivy_index::{optimize_segments, searchable_segment_count};
         let started = std::time::Instant::now();
         let current = self.search_storage();
         let history = current.join("history");
         let size = || {
-            crate::database::queries::recursive_file_size(&current.join("search-index"))
-                + crate::database::queries::recursive_file_size(&history.join("search-index"))
+            crate::analysis::recursive_file_size(&current.join("search-index"))
+                + crate::analysis::recursive_file_size(&history.join("search-index"))
         };
         let before_bytes = size();
         let required = before_bytes
             .saturating_add(before_bytes / 10)
             .saturating_add(512 << 20);
-        let available = crate::database::queries::available_space_bytes(&current)
+        let available = crate::analysis::available_space_bytes(&current)
             .ok_or_else(|| Error::Integrity("空き容量を確かめられないので統合しません".into()))?;
         if available < required {
             return Err(Error::Integrity(format!(

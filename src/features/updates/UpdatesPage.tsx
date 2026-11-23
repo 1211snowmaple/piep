@@ -89,7 +89,7 @@ export function isSettledCandidateStatus(status: string): boolean {
   return status === "saved" || status === "skipped" || status === "done";
 }
 
-/** お気に入り・読みかけの確認で棚が選ぶ作品の上限（`update_jobs_shelf.rs` と同じ）。 */
+/** お気に入り・読みかけの確認で棚が選ぶ作品の上限（`update_jobs_items.rs` と同じ）。 */
 const SHELF_SCOPE_LIMIT = 500;
 const CANDIDATE_DISPLAY_PAGE_SIZE = 60;
 

@@ -7,13 +7,13 @@
 //! 反映した編集があれば、編集の基準版の応答と画像を使い、本文を編集で差し替える（取得元が
 //! 書いていたのと同じ形で渡す）。編集で足した画像は、本へ加える画像として返す。
 
-use crate::database::models::{AssetEntry, EditedSourceForm, WorkBlock};
-use crate::database::queries::{
+use crate::analysis::{
     blocks_to_fanbox_blocks, blocks_to_pixiv_text, blocks_to_plain_text, EDITOR_IMAGE_ASSET_TYPE,
 };
 use crate::library::{
     Error, Fingerprint, Library, LibraryId, ResourceReference, ResourceScope, Result,
 };
+use crate::models::{AssetEntry, EditedSourceForm, WorkBlock};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -147,7 +147,7 @@ impl Library {
             if attachment {
                 attachments.push(AssetEntry {
                     id: attachments.len() as i64 + 1,
-                    download_id: 0,
+                    work_id: 0,
                     asset_type: "file".into(),
                     filename: name.clone(),
                     local_path: path.to_string_lossy().into_owned(),
@@ -177,7 +177,7 @@ impl Library {
                     let entry = match by_file.get(&media.file) {
                         Some((name, path)) => AssetEntry {
                             id,
-                            download_id: 0,
+                            work_id: 0,
                             asset_type: "illustration".into(),
                             filename: name.clone(),
                             local_path: path.to_string_lossy().into_owned(),
@@ -201,7 +201,7 @@ impl Library {
                             )?;
                             let entry = AssetEntry {
                                 id,
-                                download_id: 0,
+                                work_id: 0,
                                 asset_type: EDITOR_IMAGE_ASSET_TYPE.into(),
                                 filename: name,
                                 local_path: path.to_string_lossy().into_owned(),

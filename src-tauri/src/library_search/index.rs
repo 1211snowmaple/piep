@@ -1,5 +1,5 @@
 //! 本文の検索の索引。`<棚>/derived/` に置く派生物で、全文索引の実装
-//! （`crate::database::tantivy_index`）を使う。重み・字句解析・問い合わせの解釈はそちらが決める。
+//! （`crate::search_engine::tantivy_index`）を使う。重み・字句解析・問い合わせの解釈はそちらが決める。
 //!
 //! 索引は二つある。いまの版の索引（`derived/search-index/`、文書は作品ごと）と、過去の版の
 //! 索引（`derived/history/search-index/`、文書は改稿ごと）。作り方は同じで、文書の単位と
@@ -10,8 +10,8 @@
 //! 作り直す」なので、保存・編集・タグの付け替えのあとに呼べば、変わったものだけが入れ替わる。
 
 use super::document::{source_url, SearchDocument};
-use crate::database::tantivy_index::{self, Prepared, TantivyIndexDocument};
 use crate::library::{Error, Library, LibraryId, Result};
+use crate::search_engine::tantivy_index::{self, Prepared, TantivyIndexDocument};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -616,7 +616,7 @@ fn index_document(key: i64, doc: &SearchDocument) -> TantivyIndexDocument {
         // お気に入りと更新の監視は一覧の絞り込みが持つ。索引に写すと、押すたびに作り直しになる。
         favorite: false,
         watch_updates: false,
-        asset_kinds: crate::database::search::normalize_search_text(&doc.asset_kinds.join(" ")),
+        asset_kinds: crate::search_engine::text::normalize_search_text(&doc.asset_kinds.join(" ")),
         text_length: doc.text_length,
     }
 }

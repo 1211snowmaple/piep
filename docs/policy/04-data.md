@@ -28,7 +28,7 @@
 [ライブラリ全体の可逆圧縮](../plan/library-lossless-storage.md) に、台帳の設計は
 [ライブラリのデータモデル再設計](../plan/library-data-model.md) に定める。棚は旧形式
 （`piep.db` と `downloads/` の作品フォルダー）との後方互換を持たず、旧形式の台帳を読むコードも
-もう無い。保存フォルダーからの取り込み（`commands/reimport_shelf.rs`）は、旧形式と同じ
+もう無い。保存フォルダーからの取り込み（`commands/reimport.rs`）は、旧形式と同じ
 フォルダーの形を読むが、台帳は読まない。
 
 ## 棚の形
@@ -296,8 +296,8 @@ content_files ── file_chunks ── chunks   ファイルの構成と部分�
 束は作ったあとで中身が変わる。作品を足せば共有タグが変わり、外せば題名の共通部分も
 変わる。作ったときの名前に縛られる理由は無い。
 
-- `db_propose_collection_names` が、いまの中身から名前の案を出し直す
-- `db_name_collection_with_model` が、モデルにも名前と説明を考えてもらう
+- `propose_collection_names` が、いまの中身から名前の案を出し直す
+- `name_collection_with_model` が、モデルにも名前と説明を考えてもらう
 - どちらも**保存はしない**。案を並べるだけで、決めるのは利用者
 
 ### タグの出どころを混ぜない
@@ -434,7 +434,7 @@ EPUB 画面の中に閉じてしまう。
 
 ## バックアップ
 
-**バックアップは、棚そのものの自立した写しである**（`commands/backup_shelf.rs`、
+**バックアップは、棚そのものの自立した写しである**（`commands/backup.rs`、
 `Library::backup`）。分割 ZIP は使わない。棚は実体を指紋で持つので、写しはそのまま棚として
 開いて検査できる。
 

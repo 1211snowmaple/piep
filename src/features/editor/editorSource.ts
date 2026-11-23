@@ -97,7 +97,7 @@ export function previewEditorSource(id: string): EditorSource {
 function shelfAsset(media: ShelfEditorMedia): EditorAsset {
   return {
     id: media.id,
-    downloadId: 0,
+    workId: 0,
     assetType: "illustration",
     filename: media.name,
     localPath: "",

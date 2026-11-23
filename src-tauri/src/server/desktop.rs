@@ -224,32 +224,6 @@ mod credential {
         credential_manager::delete(&name(url))
             .map_err(|_| "サーバーの鍵を資格情報マネージャーから消せません".to_string())
     }
-
-    /// 0.41.0 までは URL を含まない一つの名前に置いていた。0.42.0 でその名前を読むのを
-    /// やめたため、つないでいるサーバーの鍵が見えなくなった。起動時に一度だけ今の名前へ移す。
-    fn unnamed() -> String {
-        format!("{}/server-admin-token", credential_manager::PREFIX)
-    }
-
-    /// 旧い名前の鍵を `url` の名前へ移し、旧い名前を消す。移したら真。
-    pub fn adopt_unnamed(url: &str) -> Result<bool, String> {
-        adopt_from(&unnamed(), url)
-    }
-
-    pub(super) fn adopt_from(old: &str, url: &str) -> Result<bool, String> {
-        let Some(token) = credential_manager::read(old)
-            .map_err(|_| "サーバーの鍵を資格情報マネージャーから読めません".to_string())?
-        else {
-            return Ok(false);
-        };
-        if load(url)?.is_none() {
-            credential_manager::write(&name(url), &token)
-                .map_err(|_| "サーバーの鍵を資格情報マネージャーに保存できません".to_string())?;
-        }
-        credential_manager::delete(old)
-            .map_err(|_| "サーバーの鍵を資格情報マネージャーから消せません".to_string())?;
-        Ok(true)
-    }
 }
 
 impl DesktopServer {
@@ -257,18 +231,10 @@ impl DesktopServer {
         let dir = app_data.join("server");
         fs::create_dir_all(&dir)
             .map_err(|error| format!("サーバーの置き場を作れません: {error}"))?;
-        forget_embedded_server(&dir);
         let settings: DesktopServerSettings = fs::read(dir.join("settings.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        if let Some(remote) = &settings.remote {
-            match credential::adopt_unnamed(&remote.url) {
-                Ok(true) => log::info!("サーバーの鍵を、つないでいるサーバーの名前へ移しました"),
-                Ok(false) => {}
-                Err(error) => log::warn!("サーバーの鍵を移せません: {error}"),
-            }
-        }
         Ok(Self {
             dir,
             settings: Mutex::new(settings),
@@ -832,13 +798,6 @@ impl DesktopServer {
 }
 
 /// 0.40 まであった内蔵サーバーの登録・証明書を消す。設定の `embedded` は読むときに捨てる。
-fn forget_embedded_server(dir: &Path) {
-    for name in ["state.db", "state.db-wal", "state.db-shm"] {
-        let _ = fs::remove_file(dir.join(name));
-    }
-    let _ = fs::remove_dir_all(dir.join("tls"));
-}
-
 /// 送るべき変更があったかを見る印。
 fn change_generation(state: &AppState) -> Option<i64> {
     state.shelf.library().ok()?.change_marker().ok()
@@ -847,32 +806,6 @@ fn change_generation(state: &AppState) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_key_under_the_old_name_moves_to_the_server_name_once() {
-        let id = crate::library::LibraryId::now_v7().simple().to_string();
-        let old = format!(
-            "{}/test-old-server-key/{id}",
-            crate::credential_manager::PREFIX
-        );
-        let url = format!("https://moved-{id}.invalid:8443");
-        crate::credential_manager::write(&old, b"held-token").unwrap();
-        assert!(credential::adopt_from(&old, &url).unwrap());
-        assert_eq!(
-            credential::load(&url).unwrap().as_deref(),
-            Some("held-token")
-        );
-        assert_eq!(crate::credential_manager::read(&old).unwrap(), None);
-        // 二度目は何もしない。今の名前に鍵があれば、旧い名前の鍵で上書きしない。
-        assert!(!credential::adopt_from(&old, &url).unwrap());
-        crate::credential_manager::write(&old, b"stale").unwrap();
-        assert!(credential::adopt_from(&old, &url).unwrap());
-        assert_eq!(
-            credential::load(&url).unwrap().as_deref(),
-            Some("held-token")
-        );
-        credential::delete(&url).unwrap();
-    }
 
     #[test]
     fn each_server_keeps_its_own_key_name() {

@@ -1,24 +1,24 @@
 //! コレクションの提案の材料を、棚から作業用の表へ写す。
 //!
-//! 提案の計算（`database::queries` の走査・種からの提案・追加の候補・名前の案）は、作品の番号で
+//! 提案の計算（`analysis` の走査・種からの提案・追加の候補・名前の案）は、作品の番号で
 //! 結んだ表を SQL で引く。ここでは棚の今の姿から同じ形の表をメモリ上に組み、その計算をそのまま走らせる。
 //! 作品の番号は作業用の表の中だけのもので、棚の作品 ID との対応をここで持つ。
 //!
 //! 写すもの：
-//! - `downloads`：棚にある作品（今の版の題・作者・本文の長さ・公開日・表紙）。
-//! - `download_series`：今の版のシリーズと話数。
-//! - `tags`・`download_tags`：今の版の取得元のタグと、持ち主のタグ。
+//! - `works`：棚にある作品（今の版の題・作者・本文の長さ・公開日・表紙）。
+//! - `work_series`：今の版のシリーズと話数。
+//! - `tags`・`work_tags`：今の版の取得元のタグと、持ち主のタグ。
 //! - `work_links`：本文リンク（根拠ごとに一行）。棚に無い作品へのリンクは番号を持たない。
 //! - `collection_pair_feedback`：組の採否。
-//! - `work_collections`・`work_collection_members`：今あるコレクションの顔ぶれ。
+//! - `collections`・`collection_members`：今あるコレクションの顔ぶれ。
 
-use crate::database::queries::{Corpus, SuggestionSource};
+use crate::analysis::{Corpus, SuggestionSource};
 use crate::library::{Library, LibraryId};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 
 const SCHEMA: &str = "
-CREATE TABLE downloads (
+CREATE TABLE works (
     id INTEGER PRIMARY KEY,
     source TEXT NOT NULL,
     source_id TEXT NOT NULL,
@@ -27,33 +27,33 @@ CREATE TABLE downloads (
     author_id TEXT NOT NULL,
     content_type TEXT NOT NULL,
     cover_path TEXT,
-    downloaded_at TEXT NOT NULL,
+    saved_at TEXT NOT NULL,
     source_created_at TEXT,
     text_length INTEGER DEFAULT 0,
     UNIQUE(source, source_id)
 );
-CREATE TABLE download_series (
-    download_id INTEGER NOT NULL,
+CREATE TABLE work_series (
+    work_id INTEGER NOT NULL,
     series_source TEXT NOT NULL,
     series_key TEXT NOT NULL,
     title TEXT NOT NULL,
     content_order INTEGER,
-    PRIMARY KEY(download_id, series_source, series_key)
+    PRIMARY KEY(work_id, series_source, series_key)
 );
 CREATE TABLE tags (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE);
-CREATE TABLE download_tags (
-    download_id INTEGER NOT NULL,
+CREATE TABLE work_tags (
+    work_id INTEGER NOT NULL,
     tag_id INTEGER NOT NULL,
-    PRIMARY KEY(download_id, tag_id)
+    PRIMARY KEY(work_id, tag_id)
 );
 CREATE TABLE work_links (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     from_source TEXT NOT NULL,
     from_source_id TEXT NOT NULL,
-    from_download_id INTEGER,
+    from_work_id INTEGER,
     to_source TEXT NOT NULL,
     to_source_id TEXT NOT NULL,
-    to_download_id INTEGER,
+    to_work_id INTEGER,
     relation_type TEXT NOT NULL,
     evidence_type TEXT NOT NULL,
     anchor_text TEXT,
@@ -74,7 +74,7 @@ CREATE TABLE collection_pair_feedback (
     updated_at TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(left_source, left_source_id, right_source, right_source_id)
 );
-CREATE TABLE work_collections (
+CREATE TABLE collections (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
@@ -82,11 +82,11 @@ CREATE TABLE work_collections (
     created_at TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE work_collection_members (
+CREATE TABLE collection_members (
     collection_id TEXT NOT NULL,
     source TEXT NOT NULL,
     source_id TEXT NOT NULL,
-    download_id INTEGER,
+    work_id INTEGER,
     title_snapshot TEXT NOT NULL,
     author_snapshot TEXT NOT NULL,
     position INTEGER NOT NULL,
@@ -151,8 +151,8 @@ impl<'a> ShelfSuggestions<'a> {
             )?;
             let mut rows = stmt.query([])?;
             let mut insert = tx.prepare(
-                "INSERT OR IGNORE INTO downloads(id,source,source_id,title,author_name,author_id,
-                     content_type,cover_path,downloaded_at,source_created_at,text_length)
+                "INSERT OR IGNORE INTO works(id,source,source_id,title,author_name,author_id,
+                     content_type,cover_path,saved_at,source_created_at,text_length)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             )?;
             while let Some(r) = rows.next()? {
@@ -192,7 +192,7 @@ impl<'a> ShelfSuggestions<'a> {
             )?;
             let mut rows = stmt.query([])?;
             let mut insert =
-                tx.prepare("INSERT OR IGNORE INTO download_series VALUES(?1,?2,?3,?4,?5)")?;
+                tx.prepare("INSERT OR IGNORE INTO work_series VALUES(?1,?2,?3,?4,?5)")?;
             while let Some(r) = rows.next()? {
                 let Some(id) = by_work.get(&uuid(&r.get::<_, Vec<u8>>(0)?)?) else {
                     continue;
@@ -221,9 +221,8 @@ impl<'a> ShelfSuggestions<'a> {
             )?;
             let mut rows = stmt.query([library.id.as_bytes().as_slice()])?;
             let mut tag = tx.prepare("INSERT OR IGNORE INTO tags(name) VALUES(?1)")?;
-            let mut link = tx.prepare(
-                "INSERT OR IGNORE INTO download_tags SELECT ?1,id FROM tags WHERE name=?2",
-            )?;
+            let mut link =
+                tx.prepare("INSERT OR IGNORE INTO work_tags SELECT ?1,id FROM tags WHERE name=?2")?;
             while let Some(r) = rows.next()? {
                 let Some(id) = by_work.get(&uuid(&r.get::<_, Vec<u8>>(0)?)?) else {
                     continue;
@@ -250,8 +249,8 @@ impl<'a> ShelfSuggestions<'a> {
             )?;
             let mut rows = stmt.query([])?;
             let mut insert = tx.prepare(
-                "INSERT OR IGNORE INTO work_links(from_source,from_source_id,from_download_id,to_source,
-                     to_source_id,to_download_id,relation_type,evidence_type,anchor_text,context_text,
+                "INSERT OR IGNORE INTO work_links(from_source,from_source_id,from_work_id,to_source,
+                     to_source_id,to_work_id,relation_type,evidence_type,anchor_text,context_text,
                      confidence,status) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             )?;
             while let Some(r) = rows.next()? {
@@ -312,7 +311,7 @@ impl<'a> ShelfSuggestions<'a> {
             let mut stmt = shelf.prepare("SELECT id,title,description,ordered FROM collections")?;
             let mut rows = stmt.query([])?;
             let mut insert = tx.prepare(
-                "INSERT INTO work_collections(id,name,description,collection_kind) VALUES(?1,?2,?3,?4)",
+                "INSERT INTO collections(id,name,description,collection_kind) VALUES(?1,?2,?3,?4)",
             )?;
             while let Some(r) = rows.next()? {
                 let ordered: bool = r.get(3)?;
@@ -333,7 +332,7 @@ impl<'a> ShelfSuggestions<'a> {
             )?;
             let mut rows = stmt.query([])?;
             let mut insert = tx.prepare(
-                "INSERT OR IGNORE INTO work_collection_members(collection_id,source,source_id,download_id,
+                "INSERT OR IGNORE INTO collection_members(collection_id,source,source_id,work_id,
                      title_snapshot,author_snapshot,position) VALUES(?1,?2,?3,?4,?5,?6,?7)",
             )?;
             while let Some(r) = rows.next()? {
@@ -415,7 +414,7 @@ impl SuggestionSource for ShelfSuggestions<'_> {
             return Ok(HashMap::new());
         }
         let vectors =
-            crate::database::semantic_index::work_centroids(&self.semantic_storage(), &keys)?;
+            crate::search_engine::semantic_index::work_centroids(&self.semantic_storage(), &keys)?;
         Ok(vectors
             .into_iter()
             .filter_map(|(key, vector)| self.from_doc.get(&key).map(|id| (*id, vector)))
@@ -424,7 +423,8 @@ impl SuggestionSource for ShelfSuggestions<'_> {
 
     fn semantic_ready(&self) -> bool {
         !self.doc_keys.is_empty()
-            && crate::database::semantic_index::status(&self.semantic_storage()).indexed_works > 0
+            && crate::search_engine::semantic_index::status(&self.semantic_storage()).indexed_works
+                > 0
     }
 
     fn similar_works(&self, seeds: &[i64], limit: usize) -> Result<Vec<(i64, f64)>, String> {
@@ -436,8 +436,11 @@ impl SuggestionSource for ShelfSuggestions<'_> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let hits =
-            crate::database::semantic_index::similar_works(&self.semantic_storage(), &keys, limit)?;
+        let hits = crate::search_engine::semantic_index::similar_works(
+            &self.semantic_storage(),
+            &keys,
+            limit,
+        )?;
         Ok(hits
             .into_iter()
             .filter_map(|(key, score)| self.from_doc.get(&key).map(|id| (*id, score)))

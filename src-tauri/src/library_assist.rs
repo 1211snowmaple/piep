@@ -7,12 +7,12 @@
 //! 覚え書き（あらすじ・作風のメモ・前回のあらすじ）は作り直せるものなので、版の記録ではなく
 //! 一つの表に置き換えで持つ。作品は棚の ID（文字列）で指す。
 
+use crate::analysis::collection_rules::is_informative_tag;
+use crate::analysis::{AiNote, RelatedTagCandidate, TaggedName};
 use crate::assist::{
     AssistNote, AssistProvenance, ShelfTagCount, ShelfTagPair, ShelfTagPairs, ShelfTagProfile,
     SplitWork, WorkFacts,
 };
-use crate::database::collection_rules::is_informative_tag;
-use crate::database::queries::{AiNote, RelatedTagCandidate, TaggedName};
 use crate::library::{
     EntityKind, Error, Library, LibraryId, ResourceScope, Result, TagProvenance, TagUpdate, UserTag,
 };

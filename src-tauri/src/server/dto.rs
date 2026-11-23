@@ -1,7 +1,6 @@
-//! 携帯の一覧の条件（`MobileSearchRequest`）。受け取った条件を検査し、検索の条件へ直す。
+//! 携帯の一覧の条件（`MobileSearchRequest`）と、その検査。棚の問い合わせへは `reader::list` が直す。
 //! 返す型は `crates/piep-mobile-api` にある（携帯の Rust と画面の型が同じ定義を使う）。
 
-use crate::database::SearchParams;
 use chrono::NaiveDate;
 use serde::Deserialize;
 
@@ -43,8 +42,8 @@ pub struct MobileSearchRequest {
 }
 
 impl MobileSearchRequest {
-    /// モバイル API で受け取る条件を絞り、PC 版の唯一の検索入口に渡す。
-    pub fn into_db_params(self) -> Result<SearchParams, String> {
+    /// 受け取った条件の長さ・範囲・語彙を確かめる。
+    pub fn validate(&self) -> Result<(), String> {
         if self
             .text
             .as_ref()
@@ -177,42 +176,7 @@ impl MobileSearchRequest {
         if date_from.zip(date_to).is_some_and(|(from, to)| from > to) {
             return Err("日付の範囲が正しくありません".into());
         }
-        let mut params = serde_json::json!({
-            "text": self.text,
-            "cursor": self.cursor,
-            "limit": self.limit.unwrap_or(if self.offset.is_some() { 20 } else { 30 }).clamp(1, 50),
-            "offset": self.offset,
-            "source": self.source,
-            "contentType": self.content_type,
-            "authorsInclude": self.authors_include,
-            "authorsExclude": self.authors_exclude,
-            "tagsInclude": self.tags_include,
-            "tagsExclude": self.tags_exclude,
-            "tagFilterMode": self.tag_filter_mode,
-            "minCharCount": self.min_char_count,
-            "maxCharCount": self.max_char_count,
-            "minAssetCount": self.min_asset_count,
-            "maxAssetCount": self.max_asset_count,
-            "revisionFilter": self.revision_filter,
-            "editFilter": self.edit_filter,
-            "coverFilter": self.cover_filter,
-            "dateField": self.date_field,
-            "dateFrom": self.date_from,
-            "dateTo": self.date_to,
-            "favorite": self.favorite,
-            "sortBy": self.sort_by,
-            "sortOrder": self.sort_order,
-            "personSource": self.person_source,
-            "personKey": self.person_key,
-            "seriesSource": self.series_source,
-            "seriesKey": self.series_key,
-            "projection": "libraryCompact",
-        });
-        // Older clients omit offset; keep that wire shape unchanged.
-        if self.offset.is_none() {
-            params.as_object_mut().unwrap().remove("offset");
-        }
-        serde_json::from_value(params).map_err(|_| "検索条件を読み取れません".into())
+        Ok(())
     }
 }
 
@@ -220,80 +184,40 @@ impl MobileSearchRequest {
 mod tests {
     use super::*;
 
-    #[test]
-    fn search_input_caps_page_size_and_rejects_oversized_query() {
-        let request: MobileSearchRequest = serde_json::from_value(serde_json::json!({
-            "text": "海", "limit": 500
-        }))
-        .expect("request");
-        assert_eq!(request.into_db_params().expect("params").limit, Some(50));
-        let oversized: MobileSearchRequest = serde_json::from_value(serde_json::json!({
-            "text": "海".repeat(201)
-        }))
-        .expect("request");
-        assert!(oversized.into_db_params().is_err());
+    fn parse(value: serde_json::Value) -> MobileSearchRequest {
+        serde_json::from_value(value).expect("request")
     }
 
     #[test]
-    fn numbered_search_pages_default_to_twenty_and_accept_legacy_requests() {
-        let legacy: MobileSearchRequest = serde_json::from_value(serde_json::json!({
-            "text": "海"
-        }))
-        .expect("legacy request without offset");
-        let legacy_params = legacy.into_db_params().expect("legacy params");
-        assert_eq!(legacy_params.offset, None);
-        assert_eq!(legacy_params.limit, Some(30));
-
-        let numbered: MobileSearchRequest = serde_json::from_value(serde_json::json!({
-            "text": "海", "offset": 40
-        }))
-        .expect("numbered request");
-        let numbered_params = numbered.into_db_params().expect("numbered params");
-        assert_eq!(numbered_params.offset, Some(40));
-        assert_eq!(numbered_params.limit, Some(20));
-    }
-
-    #[test]
-    fn numbered_search_rejects_out_of_range_offsets_and_cursor_combinations() {
+    fn oversized_query_and_out_of_range_pages_are_rejected() {
+        assert!(parse(serde_json::json!({ "text": "海", "limit": 500 }))
+            .validate()
+            .is_ok());
+        assert!(parse(serde_json::json!({ "text": "海".repeat(201) }))
+            .validate()
+            .is_err());
         for request in [
             serde_json::json!({ "offset": -1 }),
             serde_json::json!({ "offset": MAX_NUMBERED_OFFSET + 1 }),
             serde_json::json!({ "cursor": "after", "offset": 20 }),
         ] {
-            let parsed: MobileSearchRequest = serde_json::from_value(request).expect("request");
-            assert!(parsed.into_db_params().is_err());
+            assert!(parse(request).validate().is_err());
         }
+        assert!(parse(serde_json::json!({ "text": "海", "offset": 40 }))
+            .validate()
+            .is_ok());
     }
 
     #[test]
-    fn search_forwards_exclusions_and_character_range() {
-        let request: MobileSearchRequest = serde_json::from_value(serde_json::json!({
-            "authorsExclude": ["除外する作者"],
-            "tagsExclude": ["除外するタグ"],
-            "minCharCount": 1000,
-            "maxCharCount": 5000
-        }))
-        .expect("request");
-        let params = request.into_db_params().expect("params");
-        assert_eq!(params.authors_exclude, Some(vec!["除外する作者".into()]));
-        assert_eq!(params.tags_exclude, Some(vec!["除外するタグ".into()]));
-        assert_eq!(params.min_char_count, Some(1000));
-        assert_eq!(params.max_char_count, Some(5000));
-
-        let invalid: MobileSearchRequest = serde_json::from_value(serde_json::json!({
-            "minCharCount": 5001,
-            "maxCharCount": 5000
-        }))
-        .expect("request");
-        assert!(invalid.into_db_params().is_err());
-    }
-
-    #[test]
-    fn search_forwards_non_ai_filters_to_existing_search() {
-        let request: MobileSearchRequest = serde_json::from_value(serde_json::json!({
+    fn known_filters_pass() {
+        assert!(parse(serde_json::json!({
             "authorsInclude": ["作者A", "作者B"],
+            "authorsExclude": ["除外する作者"],
             "tagsInclude": ["猫", "海"],
+            "tagsExclude": ["除外するタグ"],
             "tagFilterMode": "or",
+            "minCharCount": 1000,
+            "maxCharCount": 5000,
             "minAssetCount": 2,
             "maxAssetCount": 12,
             "revisionFilter": "revised",
@@ -305,24 +229,8 @@ mod tests {
             "sortBy": "published",
             "sortOrder": "asc"
         }))
-        .expect("request");
-        let params = request.into_db_params().expect("params");
-        assert_eq!(
-            params.authors_include,
-            Some(vec!["作者A".into(), "作者B".into()])
-        );
-        assert_eq!(params.tags_include, Some(vec!["猫".into(), "海".into()]));
-        assert_eq!(params.tag_filter_mode.as_deref(), Some("or"));
-        assert_eq!(params.min_asset_count, Some(2));
-        assert_eq!(params.max_asset_count, Some(12));
-        assert_eq!(params.revision_filter.as_deref(), Some("revised"));
-        assert_eq!(params.edit_filter.as_deref(), Some("edited"));
-        assert_eq!(params.cover_filter.as_deref(), Some("has_cover"));
-        assert_eq!(params.date_field.as_deref(), Some("source_created_at"));
-        assert_eq!(params.date_from.as_deref(), Some("2024-02-29"));
-        assert_eq!(params.date_to.as_deref(), Some("2026-10-14"));
-        assert_eq!(params.sort_by.as_deref(), Some("published"));
-        assert_eq!(params.sort_order.as_deref(), Some("asc"));
+        .validate()
+        .is_ok());
     }
 
     #[test]
@@ -340,10 +248,11 @@ mod tests {
             serde_json::json!({ "dateFrom": "2026-10-15", "dateTo": "2026-10-14" }),
             serde_json::json!({ "sortBy": "json_path" }),
             serde_json::json!({ "tagsInclude": [" "] }),
+            serde_json::json!({ "minCharCount": 5001, "maxCharCount": 5000 }),
         ] {
             let parsed: MobileSearchRequest =
                 serde_json::from_value(request.clone()).expect("request shape");
-            assert!(parsed.into_db_params().is_err(), "accepted {request}");
+            assert!(parsed.validate().is_err(), "accepted {request}");
         }
     }
 }

@@ -14,7 +14,7 @@ type CollectionCoverData = Pick<
 /**
  * 束の表紙。
  *
- * 作れる材料はすでに全部あった。`cover_download_id` も、メンバーの `cover_path`
+ * 作れる材料はすでに全部あった。`cover_work_id` も、メンバーの `cover_path`
  * も保存されていて、`CollectionCard` が受け取って捨てていただけである。
  *
  * 一枚に決め打ちしないのは、束の性格が一定でないため。前後編の2作なら看板は

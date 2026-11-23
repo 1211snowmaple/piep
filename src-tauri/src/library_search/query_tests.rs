@@ -6,10 +6,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[test]
-fn reads_the_old_shelf_filters_and_leaves_the_rest_as_words() {
+fn reads_the_filters_and_leaves_the_rest_as_words() {
     let parts = parse_query(
         "海 tag:\"長編 小説\" -tag:悲恋 author:Alice -creator:Bob series:pixiv:12 \
-         pixiv:34 series:\"灯台\" source:FANBOX id:56 title:題 -series_title:副題 foo:bar -海辺",
+         series:\"灯台\" source:FANBOX id:56 title:題 -series_title:副題 foo:bar -海辺",
     );
     assert_eq!(parts.text, "海 題 -副題 foo:bar -海辺");
     assert_eq!(parts.tags, ["長編 小説"]);
@@ -22,10 +22,6 @@ fn reads_the_old_shelf_filters_and_leaves_the_rest_as_words() {
             SeriesRef::Key {
                 provider: "pixiv".into(),
                 key: "12".into()
-            },
-            SeriesRef::Key {
-                provider: "pixiv".into(),
-                key: "34".into()
             },
             SeriesRef::KeyOrTitle("灯台".into()),
         ]
@@ -77,8 +73,10 @@ fn work_urls_become_the_work_and_its_provider() {
 struct Temp(PathBuf);
 impl Drop for Temp {
     fn drop(&mut self) {
-        crate::database::tantivy_index::release_runtime(&self.0.join("derived"));
-        crate::database::tantivy_index::release_runtime(&self.0.join("derived").join("history"));
+        crate::search_engine::tantivy_index::release_runtime(&self.0.join("derived"));
+        crate::search_engine::tantivy_index::release_runtime(
+            &self.0.join("derived").join("history"),
+        );
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -191,7 +189,6 @@ fn filters_written_in_the_query_narrow_the_list() {
     // 取得元・シリーズ。同じ題でも取得元が違えば別のシリーズ。
     assert_eq!(ids(&search("source:fanbox")), vec![fanbox]);
     assert_eq!(ids(&search("series:pixiv:10")), vec![second, first]);
-    assert_eq!(ids(&search("pixiv:10")), vec![second, first]);
     assert_eq!(ids(&search("series:灯台")), vec![fanbox, second, first]);
     assert_eq!(
         ids(&search("series:灯台 source:pixiv")),

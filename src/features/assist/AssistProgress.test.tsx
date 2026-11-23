@@ -15,7 +15,7 @@ vi.mock("@/services/eventBus", () => ({
 
 const event = (change: Partial<AssistProgressEvent>): AssistProgressEvent => ({
   feature: "work_synopsis",
-  downloadId: "w-7",
+  workId: "w-7",
   stage: "drafting",
   section: null,
   sections: null,
@@ -25,10 +25,10 @@ const event = (change: Partial<AssistProgressEvent>): AssistProgressEvent => ({
 
 describe("AssistProgressLine", () => {
   it("names the stage for this work only", () => {
-    render(<MantineProvider theme={theme}><AssistProgressLine feature="work_synopsis" downloadId="w-7" active /></MantineProvider>);
+    render(<MantineProvider theme={theme}><AssistProgressLine feature="work_synopsis" workId="w-7" active /></MantineProvider>);
     expect(screen.getByText("準備しています")).toBeInTheDocument();
 
-    act(() => listeners.forEach((listener) => listener({ payload: event({ downloadId: "w-8", stage: "checking" }) })));
+    act(() => listeners.forEach((listener) => listener({ payload: event({ workId: "w-8", stage: "checking" }) })));
     expect(screen.getByText("準備しています")).toBeInTheDocument();
 
     act(() => listeners.forEach((listener) => listener({ payload: event({ stage: "checking" }) })));

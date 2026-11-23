@@ -302,7 +302,7 @@ export function getAssistRuntimeProfile(engine: AssistEngine): Promise<AssistRun
 
 /** 設定したエンジンを、実際の仕事で試す。保存する前に、何が返るのかを見せる。 */
 export function tryAssistEngine(engine: AssistEngine, collectionId?: string): Promise<TrialResult> {
-  return invoke<TrialResult>("db_try_naming_engine", { engine, collectionId: collectionId ?? null });
+  return invoke<TrialResult>("try_naming_engine", { engine, collectionId: collectionId ?? null });
 }
 
 // ---- タグ -----------------------------------------------------------------
@@ -506,7 +506,7 @@ export function summarizeWork(engine: AssistEngine, work: AssistWork): Promise<A
 export interface AssistProgressEvent {
   feature: AssistFeatureId;
   /** 棚の作品の ID。 */
-  downloadId: AssistWork;
+  workId: AssistWork;
   stage: "reading" | "combining" | "drafting" | "checking" | "revising" | "rechecking" | "writing";
   /** 長編を区切って読むときの、何番目の区切りか（1から）。 */
   section: number | null;
@@ -540,7 +540,7 @@ export function proposeSplits(engine: AssistEngine, collectionId: string): Promi
 
 /** 提案の名前を、モデルにも考えてもらう。既存の案に足すだけで置き換えない。 */
 export function nameCollectionSuggestion(suggestionId: string, engine: AssistEngine): Promise<CollectionSuggestion> {
-  return invoke<CollectionSuggestion>("db_name_collection_suggestion", { suggestionId, engine });
+  return invoke<CollectionSuggestion>("name_collection_suggestion", { suggestionId, engine });
 }
 
 /** モデルが返した束の名前と、一行の説明。 */
@@ -551,5 +551,5 @@ export interface NamedBundle {
 
 /** すでにあるコレクションの名前と説明を、モデルにも考えてもらう。 */
 export function nameCollectionWithModel(collectionId: string, engine: AssistEngine): Promise<GeneratedAssist<NamedBundle>> {
-  return invoke<GeneratedAssist<NamedBundle>>("db_name_collection_with_model", { collectionId, engine });
+  return invoke<GeneratedAssist<NamedBundle>>("name_collection_with_model", { collectionId, engine });
 }

@@ -70,7 +70,7 @@ impl ReaderBundle {
             if item.file.length.get() > MAX_FILE_BYTES || item.file.chunks.len() > MAX_FILE_CHUNKS {
                 return fail("ファイルが転送上限を超えています");
             }
-            item.file.to_native().validate_layout()?;
+            item.file.to_content_file().validate_layout()?;
         }
         Ok(())
     }

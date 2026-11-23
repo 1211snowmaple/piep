@@ -3,11 +3,11 @@
 //! ライブラリの「コレクション」タブと、コレクションの画面が読む。並び・数え方・別版の畳み方は、
 //! 切り替えの前に全コレクションを突き合わせて合わせたもの。
 
-use crate::database::collection_rules::edition_match_key;
-use crate::database::search::normalize_search_text;
+use crate::analysis::collection_rules::edition_match_key;
 use crate::library::{Error, Library, LibraryId, Result, WorkCard};
 use crate::library_entity::fingerprint;
 use crate::library_entity_list::{collection_summaries, CollectionSummary};
+use crate::search_engine::text::normalize_search_text;
 use rusqlite::params;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
