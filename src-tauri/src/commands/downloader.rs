@@ -15,7 +15,6 @@ use crate::pixiv_api;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use tauri::Manager;
 
 #[path = "downloader_save.rs"]
 pub(super) mod shelf;
@@ -749,8 +748,9 @@ fn fanbox_has_material_content(data: &serde_json::Value) -> bool {
 /// IPC には出さない。**題名・作者・タグをどう読むかは取得元の作法であって
 /// 画面の都合ではない**ので、材料を画面から受け取る形にはしない。保存ジョブと
 /// 更新ジョブが、取り寄せた応答をそのまま渡して呼ぶ。
-pub async fn download_and_save(
-    app: tauri::AppHandle,
+pub(super) async fn download_and_save(
+    state: &crate::AppState,
+    item: &crate::models::UpdateJobItem,
     data: serde_json::Value,
     source: String,
     source_id: String,
@@ -765,12 +765,20 @@ pub async fn download_and_save(
     } else {
         data
     };
-    let shelf = app
-        .try_state::<Arc<crate::commands::shelf::Shelf>>()
-        .map(|state| Arc::clone(&state))
-        .ok_or_else(|| "棚は開いていません".to_string())?;
+    let shelf = Arc::clone(&state.shelf);
     let library = shelf.library()?;
-    shelf::save_to_shelf(shelf, library, data, source, source_id, cookie, user_agent).await
+    shelf::save_to_shelf_as(
+        shelf,
+        library,
+        data,
+        source,
+        source_id,
+        cookie,
+        user_agent,
+        false,
+        Some((state, item)),
+    )
+    .await
 }
 
 pub(crate) fn fanbox_missing_material_error(data: &serde_json::Value) -> String {

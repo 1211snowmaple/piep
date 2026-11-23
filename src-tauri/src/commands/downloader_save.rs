@@ -13,8 +13,9 @@ use crate::library::{
     asset_reference, EntityKind, Library, LibraryId, ResourceReference, ResourceScope, StagedAsset,
     WorkSave,
 };
+use serde_json::value::{to_raw_value, RawValue};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -36,6 +37,9 @@ pub struct ShelfSaved {
     /// pixiv の本文が指す挿絵のうち、手元に無いもの（閲覧できない・取得できなかった）。
     pub missing_references: Vec<String>,
 }
+
+pub(in crate::commands) const JOB_ACQUISITION_REQUEST: &str = "acquisitionRequest";
+pub(in crate::commands) const JOB_ACQUISITION_RETRY: &str = "acquisitionRetryRequired";
 
 pub(super) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, String> + Send + 'static,
@@ -77,7 +81,7 @@ fn missing_references<'a>(
     crate::analysis::pixiv_missing_references_for_filenames(data, names)
 }
 
-async fn references_left_by_edit(
+pub(in crate::commands) async fn references_left_by_edit(
     library: Arc<Library>,
     work: LibraryId,
     snapshot: LibraryId,
@@ -321,6 +325,7 @@ pub(crate) async fn save_folder_to_shelf(
 }
 
 /// 取り寄せた応答を棚へ保存する。
+#[cfg(test)]
 pub(super) async fn save_to_shelf(
     shelf: Arc<Shelf>,
     library: Arc<Library>,
@@ -331,7 +336,7 @@ pub(super) async fn save_to_shelf(
     user_agent: Option<String>,
 ) -> Result<ShelfSaved, String> {
     save_to_shelf_as(
-        shelf, library, data, source, source_id, cookie, user_agent, false,
+        shelf, library, data, source, source_id, cookie, user_agent, false, None,
     )
     .await
 }
@@ -348,11 +353,14 @@ pub(crate) async fn save_originals_to_shelf(
     source: String,
     source_id: String,
 ) -> Result<ShelfSaved, String> {
-    save_to_shelf_as(shelf, library, data, source, source_id, None, None, true).await
+    save_to_shelf_as(
+        shelf, library, data, source, source_id, None, None, true, None,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn save_to_shelf_as(
+pub(super) async fn save_to_shelf_as(
     shelf: Arc<Shelf>,
     library: Arc<Library>,
     data: Value,
@@ -361,6 +369,7 @@ async fn save_to_shelf_as(
     cookie: Option<String>,
     user_agent: Option<String>,
     upgrade_images: bool,
+    job: Option<(&crate::AppState, &crate::models::UpdateJobItem)>,
 ) -> Result<ShelfSaved, String> {
     let mut data = data;
     let work_lock = work_save_mutex(&source, &source_id);
@@ -488,6 +497,22 @@ async fn save_to_shelf_as(
         false
     };
     let request = LibraryId::now_v7();
+    // 取り直した応答は前回と異なり得るため、未完了分の再試行には新しい要求 ID を割り当てる。
+    let mut job_payload = if let Some((state, item)) = job {
+        // 原入力の本文や数値の字句はそのままに、再開用の値だけを差し替える。
+        let mut payload: BTreeMap<String, Box<RawValue>> =
+            serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
+        payload.insert(
+            JOB_ACQUISITION_REQUEST.into(),
+            to_raw_value(&request).map_err(|e| e.to_string())?,
+        );
+        payload.remove(JOB_ACQUISITION_RETRY);
+        let json = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+        state.jobs().set_update_job_item_payload(item.id, &json)?;
+        Some((state, item.id, payload))
+    } else {
+        None
+    };
     let route = if reader_only {
         "prepare-reader"
     } else if upgrade_images {
@@ -550,6 +575,17 @@ async fn save_to_shelf_as(
             .await
         };
         let asset_failure = repairs::download_result(download, repair)?;
+        // FANBOX の補完では通信に失敗しても保存と試行回数を確定する。再開時にも再試行を続ける。
+        if let Some((state, item_id, payload)) = job_payload.as_mut() {
+            if asset_failure.is_some() {
+                payload.insert(
+                    JOB_ACQUISITION_RETRY.into(),
+                    to_raw_value(&true).map_err(|e| e.to_string())?,
+                );
+                let json = serde_json::to_string(payload).map_err(|e| e.to_string())?;
+                state.jobs().set_update_job_item_payload(*item_id, &json)?;
+            }
+        }
         let mut assets = {
             let (dir, data, source) = (staging.join("data_assets"), data.clone(), source.clone());
             blocking(move || staged_from(&dir, &data, &source)).await?

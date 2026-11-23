@@ -12,7 +12,9 @@
 //! ログは1ジョブ `MAX_UPDATE_JOB_LOGS` 行で頭打ちにし、超えた分は古い方から
 //! 落とす。長いジョブのログでライブラリを太らせない。
 
+use super::downloader::shelf::{JOB_ACQUISITION_REQUEST, JOB_ACQUISITION_RETRY};
 use crate::fanbox_api::models::FanboxPost;
+use crate::library::{AcquisitionState, EntityKind, Library, LibraryId};
 use crate::models::{
     StartUpdateJobRequest, UpdateCandidateInput, UpdateCredentials, UpdateJobItem,
     UpdateJobItemInput, UpdateJobItemState, UpdateJobSnapshot, UpdateJobSummary,
@@ -470,22 +472,40 @@ fn format_thousands(value: i64) -> String {
 /// （配信元が更新時刻だけ動かした場合）も、そうと分かるようにする。
 fn describe_candidate_save(
     shelf: &super::downloader::ShelfSaved,
-    previous_title: Option<&str>,
-    previous_length: Option<i64>,
+    previous: Option<(&str, i64)>,
+    masked: &[&str],
 ) -> ItemOutcome {
     let reference = shelf.work;
-    match previous_length {
-        Some(before) if shelf.revised => ItemOutcome::Saved(
+    // 挿絵や作品情報が欠けたままなら、本文を保存しても再試行できるよう候補を残す。
+    if !shelf.missing_references.is_empty() || !masked.is_empty() {
+        let mut losses = Vec::new();
+        if !shelf.missing_references.is_empty() {
+            losses.push(format!(
+                "参照先の挿絵を閲覧できません: {}",
+                shelf.missing_references.join(", ")
+            ));
+        }
+        if !masked.is_empty() {
+            losses.push(format!(
+                "作品情報（{}）が取得元で伏せられています",
+                crate::analysis::masked_metadata_label(masked)
+            ));
+        }
+        return ItemOutcome::PartialSaved(
+            reference,
+            format!(
+                "本文は保存しましたが、{}。候補を残して再試行できます",
+                losses.join("。")
+            ),
+        );
+    }
+    match previous {
+        Some((title, before)) if shelf.revised => ItemOutcome::Saved(
             reference,
             format!(
                 "改稿を保存: {}（{}, v{}）",
                 shelf.title,
-                describe_source_change(
-                    previous_title.unwrap_or(&shelf.title),
-                    &shelf.title,
-                    before,
-                    shelf.text_length
-                ),
+                describe_source_change(title, &shelf.title, before, shelf.text_length),
                 shelf.version
             ),
         ),
@@ -2691,16 +2711,6 @@ fn catch_up_semantic_index(state: &AppState) {
 /// 保存した作品の指し先。棚の作品。
 type SavedRef = crate::library::LibraryId;
 
-/// 棚の作品の一覧の一件（棚から外した作品は無いものとする）。
-fn shelf_card(
-    app: &tauri::AppHandle,
-    source: &str,
-    key: &str,
-) -> Result<Option<crate::library::WorkCard>, String> {
-    let library = shelf::library(app)?;
-    shelf::saved_card(&library, source, key)
-}
-
 /// 保存した作品を更新の監視に載せる。
 fn watch_saved_work(app: &tauri::AppHandle, saved: SavedRef) {
     let work = saved;
@@ -2928,13 +2938,20 @@ async fn process_update_job_item(
     if payload.get("kind").and_then(Value::as_str) == Some("permission_check") {
         return recheck_deferred_item(state, item, credentials, payload).await;
     }
+    if item.item_type == "candidate" {
+        return process_candidate_item(state, item, credentials).await;
+    }
+    if item.item_type == "work" && payload.get(JOB_ACQUISITION_REQUEST).is_some() {
+        let library = state.shelf.library()?;
+        if let Some(outcome) = resume_saved_item(&library, item, &payload).await? {
+            return Ok(outcome);
+        }
+    }
     if item.item_type != "target" {
         if let (Some(source), Some(id)) = (&item.source, &item.source_id) {
-            let repair_save = item.item_type == "candidate"
-                && payload.get("kind").and_then(Value::as_str) == Some("save");
             if state
                 .candidates()
-                .candidate_acquisition_blocked(source, id, repair_save)?
+                .candidate_acquisition_blocked(source, id, false)?
             {
                 return Ok(ItemOutcome::Held(BLOCKED_CANDIDATE_MESSAGE.into()));
             }
@@ -2965,7 +2982,6 @@ async fn process_update_job_item(
             )
             .await
         }
-        "candidate" => process_candidate_item(app, state, item, credentials).await,
         _ => Ok(ItemOutcome::Skipped(format!(
             "未対応のジョブ項目をスキップ: {}",
             item.item_type
@@ -3387,8 +3403,95 @@ async fn process_target_item(
     }))
 }
 
+/// 棚への確定と実行項目を閉じる処理の間で止まった場合、要求に対応する保存結果を使う。
+async fn resume_saved_item(
+    library: &Arc<Library>,
+    item: &UpdateJobItem,
+    payload: &Value,
+) -> Result<Option<ItemOutcome>, String> {
+    let Some(request) = payload.get(JOB_ACQUISITION_REQUEST) else {
+        return Ok(None);
+    };
+    let request: LibraryId = serde_json::from_value(request.clone()).map_err(|e| e.to_string())?;
+    let fail = |error: crate::library::Error| error.to_string();
+    let Some(info) = library.find_acquisition(request).map_err(fail)? else {
+        return Ok(None);
+    };
+    if info.ticket.kind != EntityKind::Work
+        || !matches!(info.ticket.route.as_str(), "save" | "prepare-reader")
+        || Some(info.ticket.provider.as_str()) != item.source.as_deref()
+        || Some(info.ticket.external_key.as_str()) != item.source_id.as_deref()
+    {
+        return Err("実行項目と取得要求の作品が一致しません".into());
+    }
+    if info.state != AcquisitionState::Complete
+        || payload[JOB_ACQUISITION_RETRY].as_bool() == Some(true)
+    {
+        return Ok(None);
+    }
+    let result = info.result.ok_or("完了した取得の保存結果がありません")?;
+    let (title, text_length, version) = library
+        .work_snapshot_summary(result.entity_id, result.snapshot_id)
+        .map_err(fail)?;
+    let previous = info
+        .ticket
+        .base_snapshot
+        .map(|base| library.work_snapshot_summary(result.entity_id, base))
+        .transpose()
+        .map_err(fail)?;
+    let previous = previous
+        .as_ref()
+        .map(|(title, length, _)| (title.as_str(), *length));
+    let mut masked = Vec::new();
+    let mut missing = Vec::new();
+    if info.ticket.provider == "pixiv" {
+        missing = library
+            .pixiv_source_image_gaps(result.entity_id, result.snapshot_id)
+            .map_err(fail)?;
+        missing = super::downloader::shelf::references_left_by_edit(
+            Arc::clone(library),
+            result.entity_id,
+            result.snapshot_id,
+            missing,
+        )
+        .await;
+        if item.item_type == "candidate" {
+            let input = info
+                .payloads
+                .iter()
+                .find(|payload| payload.slot == "work-save-input")
+                .ok_or("完了した取得の原応答がありません")?;
+            let file = library.file(input.file).map_err(fail)?;
+            let mut raw = Vec::new();
+            library
+                .objects
+                .read_range(&file, 0, file.length, &mut raw)
+                .map_err(|e| e.to_string())?;
+            masked = crate::analysis::masked_pixiv_metadata(
+                &serde_json::from_slice(&raw).map_err(|e| e.to_string())?,
+            );
+        }
+    }
+    let saved = super::downloader::ShelfSaved {
+        work: result.entity_id,
+        title,
+        text_length,
+        version,
+        revised: result.created_revision && previous.is_some(),
+        created: previous.is_none(),
+        missing_references: missing,
+    };
+    Ok(Some(if item.item_type == "work" {
+        shelf::describe_work_save(
+            &saved,
+            previous.unwrap_or((&saved.title, saved.text_length)),
+        )
+    } else {
+        describe_candidate_save(&saved, previous, &masked)
+    }))
+}
+
 async fn process_candidate_item(
-    app: &tauri::AppHandle,
     state: &Arc<AppState>,
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
@@ -3397,8 +3500,18 @@ async fn process_candidate_item(
     let source = item.source.as_deref().unwrap_or("");
     let source_id = item.source_id.as_deref().unwrap_or("");
     let kind = payload.get("kind").and_then(|v| v.as_str());
+    let library = state.shelf.library()?;
+    if let Some(outcome) = resume_saved_item(&library, item, &payload).await? {
+        return Ok(outcome);
+    }
+    if state
+        .candidates()
+        .candidate_acquisition_blocked(source, source_id, kind == Some("save"))?
+    {
+        return Ok(ItemOutcome::Held(BLOCKED_CANDIDATE_MESSAGE.into()));
+    }
     // 手元にあるかどうか・監視しているかを棚で見る。
-    let card = shelf_card(app, source, source_id)?;
+    let card = shelf::saved_card(&library, source, source_id)?;
     // 改稿の候補は「すでに手元にある作品」が対象なので、保存済みでも取りに行く。
     // まとめ保存も、監視に載っている作品は取り直す。
     let refetch = kind == Some("revision")
@@ -3414,12 +3527,11 @@ async fn process_candidate_item(
         )));
     }
     let previous = card.map(|card| (card.title, card.text_length as i64));
-    save_candidate(app, state, item, credentials, &payload, previous).await
+    save_candidate(state, item, credentials, &payload, previous).await
 }
 
-/// 候補を取りに行って保存する。`previous` は手元にあった版（題・字数・版の番号）。
+/// 候補を取りに行って保存する。`previous` は手元にあった版の題と字数。
 async fn save_candidate(
-    app: &tauri::AppHandle,
     state: &Arc<AppState>,
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
@@ -3428,8 +3540,9 @@ async fn save_candidate(
 ) -> Result<ItemOutcome, String> {
     let source = item.source.as_deref().unwrap_or("");
     let source_id = item.source_id.as_deref().unwrap_or("");
-    let previous_title = previous.as_ref().map(|(title, _)| title.clone());
-    let previous_length = previous.as_ref().map(|(_, length)| *length);
+    let previous = previous
+        .as_ref()
+        .map(|(title, length)| (title.as_str(), *length));
 
     if source == "pixiv" {
         let Some(token) = pixiv_token(credentials) else {
@@ -3439,49 +3552,20 @@ async fn save_candidate(
         };
         let data = super::downloader::fetch_pixiv_novel(source_id.to_string(), token).await?;
         let value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
+        let masked = crate::analysis::masked_pixiv_metadata(&value);
         let updated = super::downloader::download_and_save(
-            app.clone(),
-            value.clone(),
+            state,
+            item,
+            value,
             "pixiv".to_string(),
             source_id.to_string(),
             None,
             None,
         )
         .await?;
-        let missing = updated.missing_references.clone();
-        // A gate that still hides the details must not settle as complete:
-        // clearing the candidate here would lose the work from the audit,
-        // because an unchanged body creates no new version to inspect.
-        let masked = crate::analysis::masked_pixiv_metadata(&value);
-        if !missing.is_empty() || !masked.is_empty() {
-            let mut losses = Vec::new();
-            if !missing.is_empty() {
-                losses.push(format!(
-                    "参照先の挿絵を閲覧できません: {}",
-                    missing.join(", ")
-                ));
-            }
-            if !masked.is_empty() {
-                losses.push(format!(
-                    "作品情報（{}）が取得元で伏せられています",
-                    crate::analysis::masked_metadata_label(&masked)
-                ));
-            }
-            return Ok(ItemOutcome::PartialSaved(
-                updated.work,
-                format!(
-                    "本文は保存しましたが、{}。候補を残して再試行できます",
-                    losses.join("。")
-                ),
-            ));
-        }
         // 保存したついでにシリーズを監視へ入れることはしない。監視対象は
         // 利用者が自分で選ぶもので、勝手に増えると取得先への負荷にもなる。
-        Ok(describe_candidate_save(
-            &updated,
-            previous_title.as_deref(),
-            previous_length,
-        ))
+        Ok(describe_candidate_save(&updated, previous, &masked))
     } else if source == "fanbox" {
         if payload
             .pointer("/originalData/isRestricted")
@@ -3512,7 +3596,8 @@ async fn save_candidate(
             return Ok(ItemOutcome::Held(reason));
         }
         let updated = super::downloader::download_and_save(
-            app.clone(),
+            state,
+            item,
             value,
             "fanbox".to_string(),
             source_id.to_string(),
@@ -3520,11 +3605,7 @@ async fn save_candidate(
             Some(user_agent),
         )
         .await?;
-        Ok(describe_candidate_save(
-            &updated,
-            previous_title.as_deref(),
-            previous_length,
-        ))
+        Ok(describe_candidate_save(&updated, previous, &[]))
     } else {
         Ok(ItemOutcome::Skipped(format!(
             "未対応ソースをスキップ: {}",

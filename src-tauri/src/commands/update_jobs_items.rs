@@ -518,7 +518,8 @@ pub(super) async fn process_work(
         listings::remember_verified_listing(library, &card, listed_update.as_deref())?;
     }
     let saved = super::super::downloader::download_and_save(
-        app.clone(),
+        state,
+        item,
         fetched,
         source.to_owned(),
         key.to_owned(),
@@ -526,23 +527,33 @@ pub(super) async fn process_work(
         user_agent,
     )
     .await?;
+    Ok(describe_work_save(
+        &saved,
+        (&card.title, card.text_length as i64),
+    ))
+}
+
+pub(super) fn describe_work_save(
+    saved: &super::super::downloader::ShelfSaved,
+    (previous_title, previous_length): (&str, i64),
+) -> ItemOutcome {
     let reference = saved.work;
     if !saved.missing_references.is_empty() {
-        return Ok(ItemOutcome::PartialSaved(
+        return ItemOutcome::PartialSaved(
             reference,
             format!("[一部保存] {}: 参照先の挿絵を閲覧できません", saved.title),
-        ));
+        );
     }
-    Ok(if saved.revised {
+    if saved.revised {
         ItemOutcome::Saved(
             reference,
             format!(
                 "更新を保存: {}（{}, v{}）",
                 saved.title,
                 describe_source_change(
-                    &card.title,
+                    previous_title,
                     &saved.title,
-                    card.text_length as i64,
+                    previous_length,
                     saved.text_length
                 ),
                 saved.version
@@ -550,7 +561,7 @@ pub(super) async fn process_work(
         )
     } else {
         ItemOutcome::Skipped(format!("最新: {}", saved.title))
-    })
+    }
 }
 
 #[cfg(test)]
