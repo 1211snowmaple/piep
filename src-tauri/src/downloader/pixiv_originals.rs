@@ -171,7 +171,7 @@ pub(crate) fn fill_cover_original_from_shelf(
 pub(crate) fn cdn_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .read_timeout(Duration::from_secs(30))
+        .read_timeout(crate::advanced_settings::source_timeout())
         .build()
         .map_err(|error| format!("画像サーバーへの接続を作れません: {error}"))
 }

@@ -10,6 +10,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { subscribeTauriEvent } from "@/services/eventBus";
 import { isTauriRuntime } from "@/services/dbApi";
 import { rememberWindowColorScheme } from "@/services/startupApi";
+import { loadAdvancedSettings } from "@/lib/advancedSettings";
 import { useIncompleteSaveRepair } from "@/features/updates/repairIncompleteSaves";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import { invalidateShelf } from "@/features/library/shelf";
@@ -87,6 +88,10 @@ function AppContent() {
   const { pathname } = useAppRouter();
   const queryClient = useQueryClient();
   const { colorScheme } = useMantineColorScheme();
+  useEffect(() => {
+    // 詳細設定のうち画面で使う値（読む速さ・処理の記録の件数）。読めなければ既定のまま。
+    void loadAdvancedSettings();
+  }, []);
   useEffect(() => {
     // Only the next launch's window colour depends on this; failing to write it
     // changes nothing on screen now.

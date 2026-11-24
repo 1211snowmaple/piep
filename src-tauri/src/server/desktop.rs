@@ -17,13 +17,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
-/// ダウンロードの途中で何度も送らないよう、変わってからこれだけ静かになるのを待つ。
-const AUTO_SEND_QUIET: Duration = Duration::from_secs(5 * 60);
+// ダウンロードの途中で何度も送らないよう、変わってから静かになるのを待つ時間と、
+// 失敗のあとに置く間は詳細設定にある（既定 5 分と 15 分）。送るたびに本棚の写しを
+// 作るので、すぐには繰り返さない。
 const AUTO_SEND_POLL: Duration = Duration::from_secs(30);
 /// 起動直後の検索や修復と競わないように待つ。
 const AUTO_SEND_STARTUP_DELAY: Duration = Duration::from_secs(2 * 60);
-/// 失敗のあとは間を置く。送るたびに本棚の写しを作るので、すぐには繰り返さない。
-const AUTO_SEND_RETRY: Duration = Duration::from_secs(15 * 60);
 /// 携帯で変えたお気に入りを、単独サーバーへ聞きに行く間隔。
 const FAVORITES_POLL: Duration = Duration::from_secs(60);
 /// 一度に受け取る携帯のお気に入りの数。
@@ -759,8 +758,9 @@ impl DesktopServer {
                         seen = generation;
                         changed_at = Some(Instant::now());
                     }
-                    let quiet =
-                        changed_at.is_none_or(|at: Instant| at.elapsed() >= AUTO_SEND_QUIET);
+                    let quiet = changed_at.is_none_or(|at: Instant| {
+                        at.elapsed() >= crate::advanced_settings::auto_send_quiet()
+                    });
                     let waited = retry_at.is_none_or(|at| Instant::now() >= at);
                     if waited && progress.should_send(quiet, generation) {
                         match server.send_once(Arc::clone(&state)).await {
@@ -771,7 +771,9 @@ impl DesktopServer {
                             Err(error) => {
                                 progress.after_failure();
                                 log::warn!("自動送信に失敗しました: {error}");
-                                retry_at = Some(Instant::now() + AUTO_SEND_RETRY);
+                                retry_at = Some(
+                                    Instant::now() + crate::advanced_settings::auto_send_retry(),
+                                );
                             }
                         }
                     }

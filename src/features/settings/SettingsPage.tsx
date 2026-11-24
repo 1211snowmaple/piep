@@ -60,6 +60,7 @@ import { APP_VERSION } from "@/lib/version";
 import { AppUpdateCard } from "@/features/settings/AppUpdateCard";
 import { AssistSection } from "@/features/settings/AssistSection";
 import { ServerSection } from "@/features/settings/ServerSection";
+import { AdvancedSection } from "@/features/settings/AdvancedSection";
 import { LibrarySidebarSettings } from "./LibrarySidebarSettings";
 import { SectionIntro } from "./SectionIntro";
 import { SettingsNavigation } from "./SettingsNavigation";
@@ -81,6 +82,7 @@ const SECTIONS = [
   "search",
   "assist",
   "diagnostics",
+  "advanced",
   "appearance",
   "about",
 ] as const;
@@ -303,6 +305,7 @@ export default function SettingsPage() {
     { id: "search", label: "検索", description: "探し方・検索データ", icon: Icons.search, group: "使いやすくする", keywords: "インデックス 索引 意味検索 GPU" },
     { id: "assist", label: "AIの手伝い", beta: true, description: "モデル・接続・利用する機能", icon: Icons.optimize, group: "使いやすくする", keywords: "推論 サーバー" },
     { id: "diagnostics", label: "診断とメンテナンス", description: "保存状態・容量・修復", icon: Icons.diagnostics, group: "管理する", keywords: "性能 最適化 エラー 画像 重複" },
+    { id: "advanced", label: "詳細設定", description: "取得の間隔・履歴・待ち時間", icon: Icons.advancedSettings, group: "管理する", keywords: "間隔 待ち時間 やり直し 再試行 リトライ 時間切れ タイムアウト 履歴 記録 送信 読む速さ 読了時間" },
     { id: "about", label: "piepについて", description: "バージョン・アプリの更新", icon: Icons.info, group: "管理する", keywords: "アップデート リリース 拡張" },
   ];
 
@@ -319,6 +322,7 @@ export default function SettingsPage() {
           {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => startRebuild(includeSemantic)} cancel={() => { if (rebuildOperationRef.current) { void requestOperationCancel(rebuildOperationRef.current.id); return; } if (rebuild) reportJobAction(cancelSearchRebuildIndex(rebuild.jobId), "索引の作り直しを中止できません"); }} />)}
           {section === "assist" && <AssistSection />}
           {section === "diagnostics" && <DiagnosticsPage embedded />}
+          {section === "advanced" && <AdvancedSection />}
           {section === "appearance" && <AppearanceSection colorScheme={colorScheme} setColorScheme={setColorScheme} />}
           {section === "about" && <AboutSection runtime={runtime} />}
         </Grid.Col>

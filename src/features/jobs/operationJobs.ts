@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { notifications } from "@mantine/notifications";
+import { OPERATION_JOBS_CEILING, operationJobsKept } from "@/lib/advancedSettings";
 
 export type OperationKind =
   "save" | "update" | "epub" | "backup" | "restore" | "search" | "maintenance";
@@ -59,7 +60,7 @@ export interface OperationController {
 }
 
 const STORAGE_KEY = "piep.operation-history";
-const MAX_JOBS = 100;
+// 残す件数は詳細設定の「処理の記録を残す件数」（既定 100 件）。
 // 画面中は全件を保持するが、localStorage は容量が有限なので、再起動後に
 // 復元する履歴だけはDBの更新ジョブと同じ2000件までに抑える。
 const MAX_PERSISTED_LOGS = 2_000;
@@ -107,7 +108,9 @@ function loadJobs(): OperationJob[] {
       ),
     );
     const loadedAt = now();
-    return loaded.slice(0, MAX_JOBS).map((job) => {
+    // 読み込むのは詳細設定より先（このファイルを読み込んだ時点）なので、ここでは設定の上限まで残す。
+    // 今の件数で切ると、件数を増やした人の記録が起動のたびに既定の件数へ削られる。
+    return loaded.slice(0, OPERATION_JOBS_CEILING).map((job) => {
       if (
         job.status !== "queued" &&
         job.status !== "running" &&
@@ -146,7 +149,7 @@ let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
 function writePersistedJobs() {
   try {
-    const persisted = jobs.slice(0, MAX_JOBS).map((job) => ({
+    const persisted = jobs.slice(0, operationJobsKept()).map((job) => ({
       ...job,
       logs: job.logs.slice(-MAX_PERSISTED_LOGS),
     }));
@@ -186,7 +189,7 @@ function updateJob(
   jobs = jobs
     .map((job) => (job.id === jobId ? updater(job) : job))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    .slice(0, MAX_JOBS);
+    .slice(0, operationJobsKept());
   pruneDetachedHandlers();
   emit(persistence);
 }
@@ -230,7 +233,7 @@ export function startOperation(
       { id: id(), level: "info", message: "処理を開始しました", createdAt },
     ],
   };
-  jobs = [job, ...jobs].slice(0, MAX_JOBS);
+  jobs = [job, ...jobs].slice(0, operationJobsKept());
   pruneDetachedHandlers();
   if (options.onCancel) cancelHandlers.set(jobId, options.onCancel);
   if (options.onRetry) retryHandlers.set(jobId, options.onRetry);

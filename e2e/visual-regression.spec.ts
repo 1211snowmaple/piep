@@ -137,6 +137,7 @@ test("critical workspaces keep a stable layout", async ({ page }, testInfo) => {
     ["collection", "/#/collections/demo-long", "星の航路と秘密の図書室をめぐる長い連載の関連作品"],
     ["settings-library", "/#/settings?section=library", "保存とバックアップ"],
     ["settings-assist", "/#/settings?section=assist", "AIの手伝い"],
+    ["settings-advanced", "/#/settings?section=advanced", "取得元との通信"],
     ["updates", "/#/updates", "新作・改稿"],
     ["epub", "/#/epub", "EPUB書き出し"],
     ["epub-templates", "/#/epub/templates", "テンプレートスタジオ"],

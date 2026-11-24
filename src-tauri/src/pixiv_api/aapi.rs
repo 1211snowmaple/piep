@@ -28,7 +28,6 @@ const API_RATE_LIMIT_DELAY: Duration = Duration::from_millis(750);
 /// 取得制限だけを理由に何度やり直すか。
 const API_RATE_LIMIT_RETRIES: u32 = 3;
 const API_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn build_api_client(
     connect_timeout: Duration,
@@ -89,7 +88,10 @@ impl AppPixivAPI {
     /// release は `panic = "abort"` なので**理由を出さずにアプリが消えた**。
     /// 起きる頻度は低いが、起きたときの見え方が最悪だった。
     fn new_with(token_manager: TokenManager) -> Result<Self, PixivError> {
-        let client = build_api_client(API_CONNECT_TIMEOUT, API_REQUEST_TIMEOUT)?;
+        let client = build_api_client(
+            API_CONNECT_TIMEOUT,
+            crate::advanced_settings::source_timeout(),
+        )?;
         Ok(Self {
             hosts: "https://app-api.pixiv.net".to_string(),
             client,

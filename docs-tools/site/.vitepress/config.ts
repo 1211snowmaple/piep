@@ -61,6 +61,7 @@ export default {
           { text: "ドキュメントの作り", link: "/policy/10-documentation" },
           { text: "AI補助の方針", link: "/policy/11-assist" },
           { text: "サーバーの方針", link: "/policy/12-server" },
+          { text: "設定と詳細設定", link: "/policy/13-settings" },
         ],
       },
       {

@@ -220,6 +220,8 @@ pub fn library_dir(app_data: &Path) -> PathBuf {
 /// 起動のときに呼ぶ。棚を開き（無ければ作る）、本文の検索の索引は別のスレッドで同期する。
 pub fn open_for_startup(state: Arc<Shelf>, app_data: &Path) -> Result<(), String> {
     super::library_health::set_settings_dir(app_data);
+    // 履歴の整理より前に読む（起動時の整理が残す件数を使う）。
+    crate::advanced_settings::load(app_data);
     let path = library_dir(app_data);
     // 予約した復元は、棚を開く前に入れ替える。
     super::backup::apply_pending_restore(&path);

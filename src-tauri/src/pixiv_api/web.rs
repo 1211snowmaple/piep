@@ -39,7 +39,6 @@ pub const PIXIV_WEB_HOST: &str = "https://www.pixiv.net";
 /// UA に紐づくため、必ず取得時の UA と一致させる**（[`WebSession`] を参照）。
 pub const PIXIV_WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// 一覧が1リクエストで受け取れる ID の数。101 件から 400 が返る。
 pub const MAX_IDS_PER_REQUEST: usize = 100;
 /// Stop a run of missing details before a provider failure can mark many works unavailable.
@@ -450,7 +449,7 @@ impl WebPixivAPI {
         // 限られる。API 側（`aapi` / `token_manager` / FANBOX）は `none()`。
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(crate::advanced_settings::source_web_timeout())
             .redirect(reqwest::redirect::Policy::limited(3))
             .build()?;
         Ok(Self {

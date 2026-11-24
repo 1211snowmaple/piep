@@ -24,13 +24,6 @@ use super::{
 /// 全文を一度に読ませる要求の上限。ローカルの推論サーバーは文脈長で
 /// 自分から断るので、こちらは誤設定で無制限に膨らまない程度に抑える。
 pub(super) const LOCAL_LONG_REQUEST_BYTES: usize = 4 * 1024 * 1024;
-/// 全文の読み込み（prefill）を含めて待つ上限。
-///
-/// 6万トークンの本文でも、読み込み（約1,100 トークン/秒）と答え（約300
-/// トークン）で1分少々。以前は思考を含めて900秒待っていたが、GPU のメモリが
-/// 溢れた推論サーバーは数十トークン/秒まで落ちて止まり、利用者は15分待った
-/// あげくに失敗を見ることになった（2026-11-01、Strata の issue #481）。
-pub(super) const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// どれだけ考えさせるか。
 ///
@@ -96,7 +89,7 @@ impl CallOptions {
             top_p,
             top_k: Some(20),
             presence_penalty: None,
-            timeout: LONG_REQUEST_TIMEOUT,
+            timeout: crate::advanced_settings::assist_long_timeout(),
             max_request_bytes: LOCAL_LONG_REQUEST_BYTES,
             reasoning_budget: None,
             shared_prefix_messages: None,
