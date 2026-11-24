@@ -50,6 +50,7 @@ pub struct PcClientState {
     saved: Mutex<Option<SavedConnection>>,
     // 保存直前の確認から履歴の永続化まで、登録変更と排他にする。
     connection_generation: Mutex<u64>,
+    shelf_scope: Mutex<Option<shelf::ShelfScope>>,
     // 要求ごとに TLS を張り直すと、外からの接続では 1 枚の画像ごとに往復が増える。
     client: Mutex<Option<(String, reqwest::Client)>>,
 }
@@ -61,6 +62,7 @@ impl PcClientState {
             cipher,
             saved: Mutex::new(None),
             connection_generation: Mutex::new(0),
+            shelf_scope: Mutex::new(None),
             client: Mutex::new(None),
         }
     }
@@ -773,6 +775,13 @@ pub async fn pc_connection_status(
                     Err(_) => Some("offline"),
                 };
                 state.with_connection(generation, || {
+                    if issue.is_none() {
+                        *state
+                            .shelf_scope
+                            .lock()
+                            .map_err(|_| ClientError::storage())? =
+                            shelf.as_ref().map(shelf::ShelfStatus::scope);
+                    }
                     Ok(ConnectionStatus {
                         shelf,
                         ..ConnectionStatus::from_saved(&saved, issue.is_none(), issue)

@@ -13,7 +13,7 @@ import { AppSidebar, type Section, type Shelf } from "./AppSidebar";
 import { PcLibrary } from "./PcLibrary";
 import { PcConnectionSettings } from "./PcConnectionSettings";
 import { AppUpdateNotice, AppUpdateSettings, useAppUpdate } from "./appUpdate";
-import { sendReading } from "./readingSync";
+import { refreshReading, sendReading } from "./readingSync";
 import { OnlineReader } from "./OnlineReader";
 import { OfflineLibrary } from "./OfflineLibrary";
 import { WorkDetail } from "./WorkDetail";
@@ -146,6 +146,10 @@ function App() {
   const pcConnection = statusQuery.data ?? null;
   // 本文を棚から読めるかは、接続の状態が決める。読む画面が開く前に揃える。
   adoptShelf(pcConnection);
+  const readingShelf = connectedShelf();
+  useEffect(() => {
+    if (readingShelf) void refreshReading(0);
+  }, [readingShelf]);
   const setPcConnection = useCallback((next: PcConnectionStatus | null | ((old: PcConnectionStatus | null) => PcConnectionStatus | null)) => {
     queryClient.setQueryData<PcConnectionStatus | null>(statusQueryKey, (old) => typeof next === "function" ? next(old ?? null) : next);
   }, [queryClient]);
@@ -535,7 +539,6 @@ function App() {
       if (document.visibilityState === "visible") void sendReading();
       else void flushLocalReading();
     };
-    deliver();
     document.addEventListener("visibilitychange", deliver);
     return () => document.removeEventListener("visibilitychange", deliver);
   }, []);

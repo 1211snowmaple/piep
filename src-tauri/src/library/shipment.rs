@@ -207,6 +207,7 @@ impl Library {
             // 本文に無い位置（この棚では別の版）や、いま書かれた位置との食い違い。写さない。
             Err(
                 error @ (Error::Integrity(_)
+                | Error::InvalidReadingLocation
                 | Error::ResourceUnavailable
                 | Error::Sql(rusqlite::Error::QueryReturnedNoRows)),
             ) => {
