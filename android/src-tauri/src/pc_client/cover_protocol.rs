@@ -327,16 +327,22 @@ fn parse_route(path: &str) -> Option<Route> {
         }
         [
             "shelf-page",
+            library,
+            subject,
+            epoch,
+            generation,
             entity,
-            kind @ ("snapshot" | "edit"),
+            "snapshot" | "edit",
             view,
             asset,
         ] => {
-            let entity = uuid::Uuid::parse_str(entity).ok()?;
-            let view = uuid::Uuid::parse_str(view).ok()?;
+            for id in [library, subject, epoch, entity, view] {
+                uuid::Uuid::parse_str(id).ok()?;
+            }
+            generation.parse::<u64>().ok()?;
             let asset: usize = asset.parse().ok().filter(|asset| *asset < 1_000_000)?;
             Some(Route::ShelfPage {
-                key: format!("{entity}/{kind}/{view}"),
+                key: parts[1..parts.len() - 1].join("/"),
                 asset,
             })
         }
@@ -723,6 +729,17 @@ mod tests {
             "01a1eeaa-0000-7000-8000-000000000001",
             "01a1eeaa-0000-7000-8000-000000000002",
             "01a1eeaa-0000-7000-8000-000000000003",
+        );
+        let document_key = format!("{library}/{work}/{snapshot}/7/{work}/edit/{snapshot}");
+        assert_eq!(
+            parse_route(&format!(
+                "/shelf-page%2F{}%2F0",
+                document_key.replace('/', "%2F")
+            )),
+            Some(Route::ShelfPage {
+                key: document_key,
+                asset: 0,
+            })
         );
         assert_eq!(
             parse_route(&format!(

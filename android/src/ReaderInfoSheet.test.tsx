@@ -24,13 +24,13 @@ it("最新版に表紙がなくても、作品情報は選んだ版の写しの�
   });
   const metadata: PcMetadata = {
     work: {
-      id: "work", snapshotId: "current", source: "pixiv", sourceId: "1", title: "作品", authorName: "作者",
+      readingScope: { libraryId: "library", subjectId: "reader" }, id: "work", snapshotId: "current", source: "pixiv", sourceId: "1", title: "作品", authorName: "作者",
       authorId: "", contentType: "novel", tags: [], excerpt: null, textLength: 200, assetCount: 0, hasCover: false,
       currentVersion: 2, edited: false, editId: null, favorite: false, favoriteGeneration: "0", seriesTitle: null,
       seriesId: null, sourceCreatedAt: null, savedAt: "",
     },
     versions: [{ snapshotId: "old", version: 1, textLength: 100, savedAt: "" }, { snapshotId: "current", version: 2, textLength: 200, savedAt: "" }],
-    people: [], series: [], activeEditHash: null,
+    people: [], series: [],
   };
   const sheet = (work: PcMetadata["work"], versions: PcMetadata["versions"]) => <ReaderInfoSheet
     work={work} versions={versions} selectedVersion={1} latestEdited={false} tab="info"
