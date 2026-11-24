@@ -34,7 +34,7 @@ export const pcConnectionIssueText: Record<NonNullable<PcConnectionStatus["issue
   revoked: "端末の登録が解除されました。デスクトップ版の「携帯を追加」で登録文字列を出し直して再登録してください。",
   not_ready: "サーバーは本棚の準備中です。しばらくしてからもう一度試してください。",
   remote_error: "サーバーは応答していますが、作品を読み込めません。サーバーの状態を確認してください。",
-  no_library: "サーバーにはまだライブラリがありません。デスクトップ版からライブラリを送ってください。",
+  no_library: "この端末ではライブラリを開けません。デスクトップ版の「設定 → サーバー」で、未送信なら「今すぐ送る」を押し、送信済みなら「ライブラリを読める携帯」でこの端末をオンにしてください。",
 };
 
 export function pcConnectionIssue(status: PcConnectionStatus): string | null {

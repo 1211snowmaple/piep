@@ -115,7 +115,7 @@ export function PcConnectionSettings({ status, onStatusChange }: { status: PcCon
       <div className="qr-scanner-frame" aria-hidden="true" />
       <button type="button" className="primary-button" onClick={() => scannerControls.stop?.()}>やめる</button>
     </div>, document.body)}
-    <div className="connection-setting"><div><h2>サーバーとの接続</h2><p>piep サーバーの本棚を読むための接続を管理します。</p></div><span className={status?.reachable ? "connection-badge connected" : "connection-badge"}><span className="status-dot" />{status?.reachable ? "接続中" : "未接続"}</span></div>
+    <div className="connection-setting"><div><h2>サーバーとの接続</h2><p>piep サーバーの本棚を読むための接続を管理します。</p></div><span className={status?.reachable ? "connection-badge connected" : "connection-badge"}><span className="status-dot" />{status?.reachable ? "接続中" : status?.issue === "no_library" ? "登録済み" : "未接続"}</span></div>
     {status?.issue && <p className="connection-issue">{pcConnectionIssue(status)}</p>}
     {problem && <p className="inline-alert" role="alert">{problem}</p>}
     {status?.paired && <><label className="connection-sync"><input type="checkbox" checked={syncReading} onChange={(event) => { const enabled = event.target.checked; setReadingSyncEnabled(enabled); setSyncReading(enabled); if (enabled) void sendReading(); }} />読書位置を同期する</label><p className="settings-help">同じ作品を別の端末で開いたときに、続きから読めます。圏外で読んだ分は、次につながったときに届きます。</p></>}

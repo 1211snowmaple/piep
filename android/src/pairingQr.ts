@@ -16,5 +16,5 @@ export function isPairingPayload(text: string): boolean {
     && typeof record.role === "string"
     && typeof record.url === "string" && record.url.startsWith("https://")
     && typeof record.secret === "string" && record.secret.length > 0
-    && (record.fingerprint === undefined || typeof record.fingerprint === "string");
+    && (record.fingerprint == null || typeof record.fingerprint === "string");
 }

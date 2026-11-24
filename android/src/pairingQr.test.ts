@@ -6,6 +6,7 @@ const pairing = { version: 2, role: "reader", url: "https://192.168.0.5:38991", 
 describe("読み取った QR の形", () => {
   it("デスクトップ版の登録文字列は接続に回す", () => {
     expect(isPairingPayload(JSON.stringify(pairing))).toBe(true);
+    expect(isPairingPayload(JSON.stringify({ ...pairing, fingerprint: null }))).toBe(true);
     const { fingerprint: _, ...trusted } = pairing;
     expect(isPairingPayload(JSON.stringify(trusted))).toBe(true);
   });
@@ -19,6 +20,7 @@ describe("読み取った QR の形", () => {
       "null",
       JSON.stringify({ ...pairing, url: "http://192.168.0.5:38991" }),
       JSON.stringify({ ...pairing, extra: "x" }),
+      JSON.stringify({ ...pairing, fingerprint: false }),
       JSON.stringify({ ...pairing, secret: "" }),
       JSON.stringify({ url: pairing.url }),
     ]) expect(isPairingPayload(text), text).toBe(false);
