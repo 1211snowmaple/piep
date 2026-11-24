@@ -104,14 +104,18 @@ function flush(): Promise<void> {
     while (queued.size) {
       const batch = [...queued.values()];
       queued.clear();
+      let failed = false;
       for (const reading of batch) {
         try { await invoke<void>("reading_local_put", { reading }); }
         catch {
           // 書けなかった記録は、次に書くときにもう一度送る。新しい記録が来ていればそちらを送る。
+          // 一件で止めず、同じまとまりのほかの記録も送る（止めると、取り出した残りを捨てる）。
           if (!queued.has(workKey(reading))) queued.set(workKey(reading), reading);
-          return;
+          failed = true;
         }
       }
+      // 書けなかった記録を同じ流れで送り直し続けない。次に書くときか、画面を離れるときに送る。
+      if (failed) return;
     }
   })().finally(() => { flushing = null; });
   return flushing;
@@ -125,8 +129,10 @@ function store(row: LocalReading, shelfMoved: boolean, shelfNow = false): void {
 }
 
 /** 書きかけの記録を送り終えるまで待つ。画面を閉じるときとアプリを離れるときに呼ぶ。 */
-export function flushLocalReading(): Promise<void> {
-  return queued.size || flushing ? flush() : Promise.resolve();
+export async function flushLocalReading(): Promise<void> {
+  // 送りかけの流れが残した記録（書けなかったもの、待つあいだに来たもの）も送り終える。
+  if (flushing) await flushing;
+  if (queued.size) await flush();
 }
 
 export function isLocalReadingLoaded(work: WorkIdentity): boolean {

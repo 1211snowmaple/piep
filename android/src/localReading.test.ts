@@ -3,7 +3,7 @@ import type { PcWork, ReadingScope } from "./pcApi";
 import type { LocalReading } from "./localReading";
 
 // 端末の SQLite の代わり。コマンドの名前と引数は Rust 側と同じ。
-const db = vi.hoisted(() => ({ rows: new Map<string, LocalReading>(), failPut: false, calls: [] as string[] }));
+const db = vi.hoisted(() => ({ rows: new Map<string, LocalReading>(), failPut: false, failKeys: new Set<string>(), calls: [] as string[] }));
 const keyOf = ({ scope: { libraryId, subjectId }, workId }: LocalReading["key"]) => `${libraryId}/${subjectId}/${workId}`;
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
@@ -12,8 +12,8 @@ vi.mock("@tauri-apps/api/core", () => ({
     switch (command) {
       case "reading_local_get": return db.rows.get(keyOf(args.key as LocalReading["key"])) ?? null;
       case "reading_local_put": {
-        if (db.failPut) throw { code: "device_records" };
         const row = args.reading as LocalReading;
+        if (db.failPut || db.failKeys.has(keyOf(row.key))) throw { code: "device_records" };
         db.rows.set(keyOf(row.key), structuredClone(row));
         return null;
       }
@@ -49,6 +49,7 @@ async function fresh() {
 beforeEach(() => {
   db.rows.clear();
   db.failPut = false;
+  db.failKeys.clear();
   db.calls.length = 0;
   window.localStorage.clear();
 });
@@ -159,6 +160,26 @@ describe("端末の読書の記録", () => {
     db.failPut = false;
     await store.flushLocalReading();
     expect(db.rows.get(workKey)).toMatchObject({ page: 3 });
+  });
+
+  it("一件書けなくても、同じまとまりのほかの記録は捨てない", async () => {
+    const store = await fresh();
+    const [first, second, third] = ["100", "200", "300"].map((sourceId, i) => ({ ...work, id: `w${i}`, sourceId }) as PcWork);
+    const key = (item: PcWork) => keyOf({ scope, workId: item.id });
+    for (const item of [first, second, third]) await store.loadLocalReading(item);
+    db.failKeys.add(key(second));
+    // 一件目を送っているあいだに、二件目と三件目が同じまとまりに溜まる。
+    store.saveLocalPosition(first, position);
+    store.saveLocalPosition(second, position);
+    store.saveLocalPosition(third, position);
+    await store.flushLocalReading();
+    expect(db.rows.has(key(first))).toBe(true);
+    expect(db.rows.has(key(third))).toBe(true);
+    expect(db.rows.has(key(second))).toBe(false);
+    // 書けなかった一件は残っていて、次に送る。
+    db.failKeys.clear();
+    await store.flushLocalReading();
+    expect(db.rows.get(key(second))).toMatchObject({ page: 3 });
   });
 
   it("読めなかったときも画面は開ける", async () => {

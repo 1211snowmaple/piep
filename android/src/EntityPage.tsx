@@ -125,9 +125,9 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
   const sentSort: PcWorkSort = relevance && page.query ? "standard" : workSort;
   // 本棚と同じ絞り込みを、この作者・シリーズの中で使う。含めるタグは札、並び順は並び替えで決める。
   const filters = page.filters ?? defaultPcSearch;
-  const filterCount = activeFilterCount({ ...filters, tag: "", sort: "remembered" });
+  const filterCount = activeFilterCount({ ...filters, tag: [], sort: "remembered" });
   const [filterOpen, setFilterOpen] = useState(false);
-  const search = useMemo(() => ({ ...defaultPcSearch, ...filters, text: page.query, tag: page.tags.join(","), tagMode: "and" as const, sort: sentSort }), [filters, page.query, page.tags, sentSort]);
+  const search = useMemo(() => ({ ...defaultPcSearch, ...filters, text: page.query, tag: page.tags, tagMode: "and" as const, sort: sentSort }), [filters, page.query, page.tags, sentSort]);
   const scope = useMemo(() => ({ kind: page.kind, source: page.source, key: page.key }), [page.kind, page.source, page.key]);
   const list = useWorkList({ search, scope, pagingMode, page: page.listPage, enabled: reachable && page.tab === "works" });
 
@@ -192,7 +192,7 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
           }} />
         </LiveSearch>
         <TagFilter detail={detail} selected={page.tags} onToggle={(tag) => update({ tags: page.tags.includes(tag) ? page.tags.filter((item) => item !== tag) : [...page.tags, tag], listPage: 1 })} />
-        {filterOpen && <FilterSheet scope={page.kind} criteria={{ ...filters, text: page.query, sort: "remembered" }} onClose={() => setFilterOpen(false)} onApply={(next) => { setFilterOpen(false); update({ filters: { ...next, text: "", tag: "", tagMode: "and", sort: "remembered" }, listPage: 1 }); }} />}
+        {filterOpen && <FilterSheet scope={page.kind} criteria={{ ...filters, text: page.query, sort: "remembered" }} onClose={() => setFilterOpen(false)} onApply={(next) => { setFilterOpen(false); update({ filters: { ...next, text: "", tag: [], tagMode: "and", sort: "remembered" }, listPage: 1 }); }} />}
         {(page.query || page.tags.length > 0 || filterCount > 0) && <div className="entity-filter-summary"><span>{list.total != null ? `約 ${list.total.toLocaleString("ja-JP")} 件` : list.loading ? "" : `${list.items.length} 件`}</span><button type="button" onClick={() => update({ query: "", tags: [], filters: undefined, listPage: 1 })}>すべて解除</button></div>}
         <WorkResults omit={isPerson ? "author" : "series"} list={list} savedRevision={savedRevision} reachable={reachable} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onSaved={onSaved} onPage={(next) => navigation.push({ page: { ...page, listPage: next } })} emptyTitle="作品が見つかりません" emptyHint={page.query || page.tags.length || filterCount ? "検索語やタグ、絞り込みを変えて試してください。" : "この一覧に表示できる作品はありません。"} />
       </section>}
