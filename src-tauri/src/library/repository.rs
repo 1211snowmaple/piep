@@ -1442,6 +1442,11 @@ impl Library {
                 )?;
             }
             tx.execute("INSERT INTO library_items(work_id,added_at,generation) VALUES(?1,?2,1) ON CONFLICT(work_id) DO NOTHING",params![entity.as_bytes().as_slice(),acquired_at])?;
+            // 補完を試した印は今の版でだけ効く。版が進んだら前の版の印は要らない。
+            tx.execute(
+                "DELETE FROM incomplete_save_attempts WHERE work_id=?1 AND snapshot_id<>?2",
+                params![entity.as_bytes().as_slice(), snapshot.as_bytes().as_slice()],
+            )?;
             // 本文の文字数は本文ファイルだけで決まる。引き継いだ本文は前に数えた値を使う。
             if let Some(body) = body {
                 tx.execute(

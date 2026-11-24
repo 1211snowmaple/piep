@@ -61,6 +61,10 @@ impl ShelfScope {
             && self.connection_generation == other.connection_generation
     }
 
+    pub(super) fn connection_generation(&self) -> u64 {
+        self.connection_generation
+    }
+
     #[cfg(test)]
     pub(super) fn for_tests(
         library_id: Id,
@@ -832,11 +836,14 @@ pub(super) async fn bundle(
     let endpoint = format!("{}/bundle", view_path(scope, entity, &view));
     read(state, scope, &endpoint, |bytes| {
         let bundle = ReaderBundle::parse(bytes).map_err(|_| ClientError::protocol())?;
-        if bundle.library_id != scope.library_id
-            || bundle.entity_id != entity
-            || bundle.scope != view
-        {
+        if bundle.library_id != scope.library_id {
             return Err(ClientError::protocol());
+        }
+        if bundle.entity_id != entity || bundle.scope != view {
+            return Err(ClientError {
+                code: "reader_view_changed",
+                message: "本文が変わりました。もう一度読み込んでください",
+            });
         }
         Ok(bundle)
     })
