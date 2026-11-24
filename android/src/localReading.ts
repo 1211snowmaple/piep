@@ -1,5 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { PcWork } from "./pcApi";
+import { sameReadingScope, type PcWork, type ReadingScope } from "./pcApi";
 import type { ReaderFont, ReaderLayout } from "./readerPrefs";
 import { minimumReadProgress } from "./workText";
 
@@ -14,12 +14,13 @@ import { minimumReadProgress } from "./workText";
 // layout が違う位置は、割合だけを使って戻す。ページごとと一続きでは top の基準が違う。
 export type SavedPosition = { page: number; top: number; ratio: number; fontSize: number; lineHeight: number; readerWidth: number; fontFamily: ReaderFont; layout?: ReaderLayout };
 
+type ReadingKey = { scope: ReadingScope; workId: string };
+
 export interface LocalReading {
-  source: string;
-  sourceId: string;
-  /** 位置が指す本文の版。 */
-  version: number;
-  editHash: string | null;
+  key: ReadingKey;
+  /** 位置が指す保存版と編集。 */
+  snapshotId: string;
+  editId: string | null;
   page: number;
   position: SavedPosition | null;
   /** 0 から 1。 */
@@ -29,8 +30,6 @@ export interface LocalReading {
   shelved: boolean;
   /** この端末で最後に読み進めた時刻。0 はまだ読み進めていない。 */
   readAt: number;
-  /** 最後に読んだときの接続先。作品の番号はサーバーごとに振られるので、別のサーバーの棚に混ぜない。 */
-  serverUrl: string | null;
   work: PcWork | null;
 }
 
@@ -39,10 +38,9 @@ export interface RecentWork {
   at: number;
   progress: number;
   finished: boolean;
-  server?: string;
 }
 
-export type WorkIdentity = Pick<PcWork, "id" | "source" | "sourceId" | "currentVersion">;
+export type WorkIdentity = Pick<PcWork, "readingScope" | "id" | "snapshotId" | "editId">;
 
 const shelfChanged = "piep:recent-reading-changed";
 const shelfLimit = 120;
@@ -54,40 +52,40 @@ const loading = new Map<string, Promise<void>>();
 const unreadable = new Set<string>();
 const queued = new Map<string, LocalReading>();
 let flushing: Promise<void> | null = null;
-let currentServer: string | null = null;
+let currentScope: ReadingScope | null = null;
 let shelfNoticeAt = 0;
 let shelfTimer: number | undefined;
-const lastShelves = new Map<boolean, { server: string; items: RecentWork[] }>();
+const lastShelves = new Map<boolean, RecentWork[]>();
 
-const keyOf = (source: string, sourceId: string) => `${source}:${sourceId}`;
-const workKey = (work: Pick<PcWork, "source" | "sourceId">) => keyOf(work.source, work.sourceId);
+const keyOf = ({ scope: { libraryId, subjectId }, workId }: ReadingKey) => `${libraryId}/${subjectId}/${workId}`;
+const workKey = (row: LocalReading) => keyOf(row.key);
+const identityOf = (work: WorkIdentity): ReadingKey => ({ scope: work.readingScope, workId: work.id });
+export const localReadingKey = (work: WorkIdentity): string => keyOf(identityOf(work));
 
-function sameRevision(row: LocalReading, work: WorkIdentity, editHash: string | null): boolean {
-  return row.version === work.currentVersion && (row.editHash ?? null) === (editHash ?? null);
+function sameRevision(row: LocalReading, work: WorkIdentity): boolean {
+  return row.snapshotId === work.snapshotId && row.editId === work.editId;
 }
 
 /** 今の本文の記録。版が違う記録は、別の本文のものなので使わない。 */
-function current(work: WorkIdentity, editHash: string | null): LocalReading | null {
-  const row = cache.get(workKey(work));
-  return row && sameRevision(row, work, editHash) ? row : null;
+function current(work: WorkIdentity): LocalReading | null {
+  const row = cache.get(localReadingKey(work));
+  return row && sameRevision(row, work) ? row : null;
 }
 
 /** 書き換える行。版が変わっていたら、前の版の位置と時刻を引き継がない。 */
-function editable(work: WorkIdentity, editHash: string | null): LocalReading {
-  const row = cache.get(workKey(work));
-  if (row && sameRevision(row, work, editHash)) return { ...row };
+function editable(work: WorkIdentity): LocalReading {
+  const row = cache.get(localReadingKey(work));
+  if (row && sameRevision(row, work)) return { ...row };
   return {
-    source: work.source,
-    sourceId: work.sourceId,
-    version: work.currentVersion,
-    editHash,
+    key: identityOf(work),
+    snapshotId: work.snapshotId,
+    editId: work.editId,
     page: 0,
     position: null,
     progress: row?.progress ?? 0,
     finished: row?.finished ?? false,
     shelved: row?.shelved ?? false,
     readAt: 0,
-    serverUrl: row?.serverUrl ?? null,
     work: row?.work ?? null,
   };
 }
@@ -137,64 +135,65 @@ export async function flushLocalReading(): Promise<void> {
   if (queued.size) await flush();
 }
 
-export function isLocalReadingLoaded(work: Pick<PcWork, "source" | "sourceId">): boolean {
-  return cache.has(workKey(work)) || unreadable.has(workKey(work)) || !isTauri();
+export function isLocalReadingLoaded(work: WorkIdentity): boolean {
+  const key = localReadingKey(work);
+  return cache.has(key) || unreadable.has(key) || !isTauri();
 }
 
 /** 作品を開く前に記録を読み込む。 */
 export function loadLocalReading(work: WorkIdentity): Promise<void> {
-  const key = workKey(work);
+  const key = localReadingKey(work);
   if (cache.has(key) || !isTauri()) return Promise.resolve();
   const inFlight = loading.get(key);
   if (inFlight) return inFlight;
   const task = (async () => {
     let row: LocalReading | null = null;
-    try { row = await invoke<LocalReading | null>("reading_local_get", { source: work.source, sourceId: work.sourceId }); }
+    try { row = await invoke<LocalReading | null>("reading_local_get", { key: identityOf(work) }); }
     catch { unreadable.add(key); return; }
     // 送りかけの記録があれば、そちらのほうが新しい。
     unreadable.delete(key);
-    if (!cache.has(key)) cache.set(key, row ?? editable(work, null));
+    if (!cache.has(key)) cache.set(key, row ?? editable(work));
   })().finally(() => loading.delete(key));
   loading.set(key, task);
   return task;
 }
 
-export function localPage(work: WorkIdentity, editHash: string | null): number {
-  return current(work, editHash)?.page ?? 0;
+export function localPage(work: WorkIdentity): number {
+  return current(work)?.page ?? 0;
 }
 
-export function localPosition(work: WorkIdentity, editHash: string | null): SavedPosition | null {
-  return current(work, editHash)?.position ?? null;
+export function localPosition(work: WorkIdentity): SavedPosition | null {
+  return current(work)?.position ?? null;
 }
 
-export function localReadingTime(work: WorkIdentity, editHash: string | null): number {
-  return current(work, editHash)?.readAt ?? 0;
+export function localReadingTime(work: WorkIdentity): number {
+  return current(work)?.readAt ?? 0;
 }
 
 /** 詳細画面の「続きから読む」のため。開いただけのものは続きとして扱わない。 */
-export function hasLocalPosition(work: WorkIdentity, editHash: string | null): boolean {
-  const saved = localPosition(work, editHash);
+export function hasLocalPosition(work: WorkIdentity): boolean {
+  const saved = localPosition(work);
   return saved !== null && (saved.page > 0 || (saved.ratio ?? 0) > 0.01);
 }
 
-export function saveLocalPage(work: WorkIdentity, editHash: string | null, page: number): void {
-  const row = editable(work, editHash);
-  if (row.page === page && cache.has(workKey(work))) return;
+export function saveLocalPage(work: WorkIdentity, page: number): void {
+  const row = editable(work);
+  if (row.page === page && cache.has(localReadingKey(work))) return;
   store({ ...row, page }, false);
 }
 
-export function saveLocalPosition(work: WorkIdentity, editHash: string | null, position: SavedPosition): void {
-  store({ ...editable(work, editHash), page: position.page, position }, false);
+export function saveLocalPosition(work: WorkIdentity, position: SavedPosition): void {
+  store({ ...editable(work), page: position.page, position }, false);
 }
 
 /** 読み進めた時刻を残す。サーバーの位置と比べるときに使う。 */
-export function markLocalReading(work: WorkIdentity, editHash: string | null, time: number): void {
-  store({ ...editable(work, editHash), readAt: time }, true);
+export function markLocalReading(work: WorkIdentity, time: number): void {
+  store({ ...editable(work), readAt: time }, true);
 }
 
 /** サーバーの位置で開いたとき。位置と時刻を一緒に書かないと、次に開いたとき古い位置を最新と扱う。 */
-export function adoptLocalPosition(work: WorkIdentity, editHash: string | null, position: SavedPosition, time: number): void {
-  store({ ...editable(work, editHash), page: position.page, position, readAt: time }, true);
+export function adoptLocalPosition(work: WorkIdentity, position: SavedPosition, time: number): void {
+  store({ ...editable(work), page: position.page, position, readAt: time }, true);
 }
 
 /** 読書画面で 1% 以上と出る作品だけを棚に載せる（`readingPercent` と同じ境目）。 */
@@ -204,44 +203,45 @@ const partRead = (progress: number) => progress >= minimumReadProgress;
  * 「続きを読む」の材料。サーバーの検索は「読みかけ」で絞れず、読書位置からは作品を引けないので、
  * この端末で読んだ作品を表示に要る情報ごと覚える。開いただけでは棚に並べない。
  */
-export function rememberReading(work: PcWork, editHash: string | null, progress: number, finished: boolean): void {
-  const row = editable(work, editHash);
+export function rememberReading(work: PcWork, progress: number, finished: boolean): void {
+  const row = editable(work);
   // 頭へ戻した作品は棚から降ろす。読み進めればまた並ぶ。
   const shelved = finished || partRead(progress);
   const joined = shelved !== row.shelved || finished !== row.finished;
-  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, serverUrl: currentServer ?? row.serverUrl, work }, shelved || row.shelved, joined);
+  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, work }, shelved || row.shelved, joined);
 }
 
-/** 接続先が変わったら呼ぶ。「続きを読む」は接続先ごとに分ける。 */
-export function setReadingServer(server: string | null): void {
-  if (server === currentServer) return;
-  currentServer = server;
+/** 「続きを読む」に出す棚と利用者を切り替える。 */
+export function setReadingScope(scope: ReadingScope | null): void {
+  if (sameReadingScope(scope, currentScope)) return;
+  currentScope = scope ? { libraryId: scope.libraryId, subjectId: scope.subjectId } : null;
+  lastShelves.clear();
   noticeShelf(true);
 }
 
-export function readingServer(): string | null {
-  return currentServer;
+export function readingScope(): ReadingScope | null {
+  return currentScope;
 }
 
 export const shelfChangedEvent = shelfChanged;
 
 /** 前に読み込んだ棚。画面を開き直したとき、読み込みを待たずに同じ棚を出す。 */
 export function cachedShelf(finished = false): RecentWork[] {
-  const lastShelf = lastShelves.get(finished);
-  return lastShelf && lastShelf.server === currentServer ? lastShelf.items : [];
+  return lastShelves.get(finished) ?? [];
 }
 
 /** 読み終えたものを除いた「続きを読む」。新しく読んだ順。 */
 export async function loadShelf(finished = false): Promise<RecentWork[]> {
-  const server = currentServer;
-  if (!server || !isTauri()) return [];
+  const scope = currentScope;
+  if (!scope || !isTauri()) return [];
   await flushLocalReading();
+  if (scope !== currentScope) return [];
   try {
-    const rows = await invoke<LocalReading[]>("reading_local_shelf", { serverUrl: server, limit: finished ? 200 : shelfLimit, finished });
-    for (const row of rows) if (!queued.has(workKey(row))) cache.set(workKey(row), row);
-    // 0.6 までは少しでも動かせば棚に載せたので、頭にいる作品が記録に残っている。
-    const items = rows.filter((row) => row.work && row.finished === finished && (finished || partRead(row.progress))).map((row) => ({ work: row.work!, at: row.readAt, progress: row.progress, finished: row.finished, server: row.serverUrl ?? undefined }));
-    lastShelves.set(finished, { server, items });
+    const rows = await invoke<LocalReading[]>("reading_local_shelf", { scope, limit: finished ? 200 : shelfLimit, finished });
+    if (scope !== currentScope) return [];
+    for (const row of rows) if (!cache.has(workKey(row))) cache.set(workKey(row), row);
+    const items = rows.filter((row) => row.work && row.finished === finished && (finished || partRead(row.progress))).map((row) => ({ work: row.work!, at: row.readAt, progress: row.progress, finished: row.finished }));
+    lastShelves.set(finished, items);
     return items;
-  } catch { return cachedShelf(finished); }
+  } catch { return scope === currentScope ? cachedShelf(finished) : []; }
 }

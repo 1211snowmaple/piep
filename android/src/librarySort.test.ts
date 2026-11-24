@@ -4,11 +4,11 @@ import type { OfflineWork, PcWork } from "./pcApi";
 
 function saved(id: string, sourceCreatedAt: string | null, savedAt: string, savedAtMs: number): OfflineWork {
   const work: PcWork = {
-    id, source: "pixiv", sourceId: id, title: id, authorName: "作者", authorId: "1", contentType: "novel",
+    readingScope: { libraryId: "l1", subjectId: "u1" }, id, source: "pixiv", sourceId: id, title: id, authorName: "作者", authorId: "1", contentType: "novel",
     tags: [], excerpt: null, textLength: 100, assetCount: 0, hasCover: false, favorite: false, seriesTitle: null, seriesId: null,
     currentVersion: 1, snapshotId: "s1", edited: false, editId: null, favoriteGeneration: "0", sourceCreatedAt, savedAt,
   };
-  return { work, savedAtMs, shelfLibrary: "l1", savedVersion: 1, savedEditHash: null, pageCount: 1 };
+  return { work, savedAtMs, pageCount: 1 };
 }
 
 it("公開日が欠けた作品は、棚の保存日を使って公開日順に並べる", () => {
