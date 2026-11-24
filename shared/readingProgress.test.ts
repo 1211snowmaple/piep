@@ -3,8 +3,10 @@ import { minimumReadProgress, readingFinished, readingPercent } from "./readingP
 
 describe("読書の進み具合", () => {
   it("最後のページの端まで読んだときだけ読了とみなす", () => {
-    expect(readingFinished(200 / 201, 201)).toBe(false);
-    expect(readingFinished(1, 201)).toBe(true);
+    expect(readingFinished(199, 201, true)).toBe(false);
+    expect(readingFinished(200, 201, false)).toBe(false);
+    expect(readingFinished(200, 201, true)).toBe(true);
+    expect(readingFinished(-1, 0, true)).toBe(false);
     expect(readingPercent(200 / 201, 201)).toBe(99);
     expect(readingPercent(1, 201)).toBe(100);
   });
@@ -12,6 +14,10 @@ describe("読書の進み具合", () => {
   it("読みかけに数える量に届いたら 1% から、届かなければ 0%", () => {
     expect(readingPercent(minimumReadProgress - 0.0001)).toBe(0);
     expect(readingPercent(minimumReadProgress)).toBe(1);
+  });
+
+  it("最後のページにまだ読むところがあれば 99% にとどめる", () => {
+    expect(readingPercent(0.999, 1)).toBe(99);
   });
 
   it("ページ数を渡さなければ 99% で止める。デスクトップの読書画面の丸め方と同じ値になる", () => {

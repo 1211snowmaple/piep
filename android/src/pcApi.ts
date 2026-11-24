@@ -3,6 +3,7 @@ import type {
   MobilePage, MobilePerson, MobileSeriesMembership, MobileVersion, MobileWork, MobileWorkPage,
 } from "@shared/mobileApi";
 import { invoke } from "@tauri-apps/api/core";
+import type { CollectionCoverMode } from "@shared/collectionCover";
 import { markFavoriteRead, nextFavoriteRevision } from "./favoriteFreshness";
 import { listShelfCollections, listShelfEntities, listShelfEntitySeries, lookupShelfWork, connectedShelf, NO_SHELF, searchShelf, shelfCollectionDetail, shelfEntityDetail, shelfMetadata, shelfSuggestions, shelfWork, shelfWorkCollections } from "./shelf";
 
@@ -75,7 +76,7 @@ export type PcEntitySeriesPage = MobileEntitySeriesPage;
 export type PcEntityDetail = Omit<MobileEntityDetail, "collections"> & { collections: PcCollection[] };
 
 export type PcCollection = Omit<MobileCollection, "coverMode"> & {
-  coverMode: "mosaic" | "spine" | "single" | "sigil" | "file";
+  coverMode: CollectionCoverMode;
   /** コレクションの棚の UUID。表紙は棚から引く。 */
   shelfLibrary?: string;
 };

@@ -1,4 +1,4 @@
-import { readingPercent } from "@shared/readingProgress";
+import { readingFinished, readingPercent } from "@shared/readingProgress";
 import { READER_FONTS, READER_TYPE_DEFAULTS, READER_TYPE_LIMITS, readerTypeFont, readerTypeNumber, type ReaderFont } from "@shared/readerType";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -696,6 +696,7 @@ function Reader({ source }: { source: ReaderSource }) {
     let shelfPage = 0;
     let shelfDirty = false;
     let lastRatio = 0;
+    const finished = () => readingFinished(sourcePage - 1, pageCount, atFlowEdge(viewport, vertical, 1));
     const toShelf = (finished: boolean, force: boolean) => {
       if (!shelfReading) return;
       const now = Date.now();
@@ -724,7 +725,7 @@ function Reader({ source }: { source: ReaderSource }) {
       // 行の多い本で指を滑らせている間じゅう本文を走査することになる。
       // 最後のページを読み切ったら、読みかけの棚から降ろす。降ろす口が
       // 「作品を消したとき」しか無かったので、読み終えた本も棚に積まれ続けていた。
-      if (sourcePage >= pageCount && atFlowEdge(viewport, vertical, 1)) {
+      if (finished()) {
         clearReadingPosition(readingId, version);
         toShelf(true, true);
         pendingTop = null;
@@ -763,10 +764,7 @@ function Reader({ source }: { source: ReaderSource }) {
       const label = progressTextRef.current;
       if (label) {
         const remaining = Math.max(0, totalChars * (1 - progress / 100));
-        // 全体の割合を丸めると、201ページの本は200ページ目で読了になる。
-        // 読書位置を片付ける条件と同じく、最後のページの端まで読んだときだけ。
-        const finished = sourcePage >= pageCount && atFlowEdge(viewport, vertical, 1);
-        label.textContent = finished ? "読了" : `${readingPercent(progress / 100)}% · 残り${formatReadingTime(remaining)}`;
+        label.textContent = finished() ? "読了" : `${readingPercent(progress / 100)}% · 残り${formatReadingTime(remaining)}`;
       }
       toTopRef.current?.toggleAttribute("data-visible", progress > 8);
       // Only a genuine scroll writes the position. The priming call below runs

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Badge, Group, Popover, Text, Tooltip } from "@mantine/core";
 import { useAppNavigate } from "@/app/router";
+import { visibleTagCount } from "@shared/tagRow";
 
 const GAP = 5;
 
@@ -33,18 +34,8 @@ export function TagRow({ tags, interactive = true }: { tags: string[]; interacti
     // Before first layout (and in environments without one) every width reads
     // as 0, which would otherwise collapse the row to a single tag.
     if (available <= 0) return;
-    const chipWidth = chip ? chip.offsetWidth + GAP : 0;
     const widths = items.map((item) => item.offsetWidth);
-
-    let used = 0;
-    let fits = 0;
-    for (let index = 0; index < widths.length; index += 1) {
-      const next = used + (index ? GAP : 0) + widths[index];
-      const isLast = index === widths.length - 1;
-      if (next + (isLast ? 0 : chipWidth) > available) break;
-      used = next;
-      fits += 1;
-    }
+    const chipWidth = chip?.offsetWidth;
 
     const show = (count: number) => {
       items.forEach((item, index) => {
@@ -55,8 +46,10 @@ export function TagRow({ tags, interactive = true }: { tags: string[]; interacti
       else chip?.removeAttribute("data-hidden");
     };
 
-    // Always keep one tag so the row never collapses to just a counter.
-    let visible = Math.max(1, fits);
+    let visible = visibleTagCount({
+      widths, available, gap: GAP,
+      overflowWidth: chipWidth === undefined ? undefined : () => chipWidth,
+    });
     show(visible);
     // The arithmetic above can drift - most often because the widths were read
     // with a fallback font that the real one later replaces - so the result is

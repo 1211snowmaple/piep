@@ -1,11 +1,8 @@
 // 読書の進み具合の規則。進み具合は 0〜1 の割合で受け取る。
 
-/**
- * 全体の割合を丸めると、201 ページの本は 200 ページ目で 100% になる。読書位置を片付ける
- * 条件と同じく、最後のページの端まで読んだときだけ読了とみなす。
- */
-export function readingFinished(progress: number, pageCount: number): boolean {
-  return pageCount > 0 && progress * pageCount >= pageCount - 0.02;
+/** ページ番号は 0 から。最後のページの末尾に着いたときに読了とみなす。 */
+export function readingFinished(page: number, pageCount: number, atPageEnd: boolean): boolean {
+  return pageCount > 0 && page === pageCount - 1 && atPageEnd;
 }
 
 /**
@@ -20,7 +17,7 @@ export const minimumReadProgress = 0.005;
  * 読書画面で 1% と出た作品は必ず棚にも載る。
  */
 export function readingPercent(progress: number, pageCount = 0): number {
-  if (pageCount > 0 && readingFinished(progress, pageCount)) return 100;
+  if (pageCount > 0 && progress >= 1) return 100;
   if (!(progress >= minimumReadProgress)) return 0;
   return Math.max(1, Math.min(99, Math.round(progress * 100)));
 }

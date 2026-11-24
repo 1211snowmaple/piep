@@ -1,5 +1,5 @@
 import { adoptLocalPosition, flushLocalReading, localPage, localPosition, localReadingKey, localReadingTime, markLocalReading, rememberReading, saveLocalPage, saveLocalPosition, type SavedPosition } from "./localReading";
-import { progressLabel } from "./workText";
+import { progressLabel, readingFinished } from "@shared/readingProgress";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { followContentLink } from "./contentLinks";
 import { useAppNavigation } from "./appHistory";
@@ -144,8 +144,10 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
 
   const reportPosition = (position: LivePosition) => {
     latestPosition.current = position;
-    const next = position.pageCount > 0 ? Math.min(1, (position.page + position.ratio) / position.pageCount) : 0;
-    setProgress((old) => Math.abs(old - next) < 0.002 ? old : next);
+    const { page, pageCount, ratio, atPageEnd } = position;
+    const done = readingFinished(page, pageCount, atPageEnd);
+    const next = done ? 1 : pageCount > 0 ? Math.min(1 - Number.EPSILON, (page + ratio) / pageCount) : 0;
+    setProgress((old) => (old === 1) === done && Math.abs(old - next) < 0.002 ? old : next);
   };
 
   /** 本文を受け取る。ページは棚から開いた一冊を端末の中で組んである。 */
@@ -259,18 +261,20 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     void recordShelfReading(shelf.entityId, shelfLocation(shelf, write.page, write.position), write.finished).then(() => sendReading());
   };
 
-  const queueReadingWrite = (pageNumber: number, ratio: number, pageCount: number) => {
+  const queueReadingWrite = (pageNumber: number, ratio: number, pageCount: number, atPageEnd: boolean) => {
     if (selectedVersion !== null || !positionKey) return;
     const time = Date.now();
     markLocalReading(readingWork, time);
     setRemoteOffer(null);
+    const position = Math.min(1, Math.max(0, ratio));
+    const finished = readingFinished(pageNumber, pageCount, atPageEnd);
     queuedWrite.current = {
       page: pageNumber,
-      position: Math.min(1, Math.max(0, ratio)),
-      finished: pageNumber === pageCount - 1 && ratio >= 0.98,
+      position,
+      finished,
     };
     if (writeTimer.current === null) writeTimer.current = window.setTimeout(sendQueuedWrite, WRITE_DELAY_MS);
-    rememberReading(readingWork, pageCount > 0 ? (pageNumber + Math.min(1, Math.max(0, ratio))) / pageCount : 0, pageNumber === pageCount - 1 && ratio >= 0.98);
+    rememberReading(readingWork, pageCount > 0 ? (pageNumber + position) / pageCount : 0, finished);
   };
 
   const acceptRemote = () => {
@@ -424,11 +428,14 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     let size = { width: viewport.clientWidth, height: viewport.clientHeight };
     let fraction = 0;
     let latest: SavedPosition | null = null;
+    // スクロール位置と高さの丸めがずれても、2px 以内なら末尾とする。
+    const atPageEnd = (top: number) => top >= viewport.scrollHeight - viewport.clientHeight - 2;
     if (syncedPage.current === null) syncedPage.current = pageIndex;
     else if (syncedPage.current !== pageIndex) {
       syncedPage.current = pageIndex;
       // 一画面に収まるページは、開いた時点で読み切っている。最後のページなら読了まで届かせる。
-      queueReadingWrite(pageIndex, saved?.ratio ?? (viewport.scrollHeight - viewport.clientHeight <= 1 ? 1 : 0), pageCount);
+      const ratio = saved?.ratio ?? (atPageEnd(0) ? 1 : 0);
+      queueReadingWrite(pageIndex, ratio, pageCount, ratio >= 1);
     }
     const readPosition = () => {
       const length = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
@@ -445,7 +452,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
         layout: "pages",
       };
       latest = position;
-      reportPosition({ page: pageIndex, top: position.top, ratio: position.ratio, pageCount });
+      reportPosition({ page: pageIndex, top: position.top, ratio: position.ratio, pageCount, atPageEnd: atPageEnd(position.top) });
       return position;
     };
     const flush = () => {
@@ -453,7 +460,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       changed = false;
       if (selectedVersion === null) saveLocalPosition(readingWork, latest);
       // 位置を戻しただけのスクロールは、読み進めた印ではない。
-      if (restoredTop === null || Math.abs(latest.top - restoredTop) > 2) queueReadingWrite(pageIndex, latest.ratio, pageCount);
+      if (restoredTop === null || Math.abs(latest.top - restoredTop) > 2) queueReadingWrite(pageIndex, latest.ratio, pageCount, atPageEnd(latest.top));
     };
     const onScroll = () => {
       if (!restored) return;
@@ -796,7 +803,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     if (selectedVersion !== null || !positionKey) return;
     const saved: SavedPosition = { page: position.page, top: position.top, ratio: position.ratio, fontSize, lineHeight, readerWidth, fontFamily, layout: "continuous" };
     saveLocalPosition(readingWork, saved);
-    queueReadingWrite(position.page, position.ratio, position.pageCount);
+    queueReadingWrite(position.page, position.ratio, position.pageCount, position.atPageEnd);
   };
 
   const rejectContinuousStart = (loaded: PcPage | null): boolean => {
