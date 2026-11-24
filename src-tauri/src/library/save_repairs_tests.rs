@@ -151,10 +151,10 @@ fn incomplete_saves_are_tried_once_per_snapshot() {
     library.verify().unwrap();
 }
 
-/// 補完のジョブが先に新しい版を保存してから印を付けても、もう今の版でない試した版には印を
+/// 補完のジョブが先に新しい版を保存してから数えても、もう今の版でない試した版には記録を
 /// 残さず、新しい版は次の候補に残る。
 #[test]
-fn a_mark_for_a_version_that_is_no_longer_current_is_not_kept() {
+fn an_attempt_on_a_version_that_is_no_longer_current_is_not_kept() {
     let (_temp, library) = fixture();
     save(&library, "1", "本文");
     discover(&library, "1", "revision", Some("incomplete"));
@@ -170,23 +170,22 @@ fn a_mark_for_a_version_that_is_no_longer_current_is_not_kept() {
             .unwrap(),
         0
     );
-    assert_eq!(marks(&library), 0);
+    assert_eq!(rows(&library), 0);
     assert_eq!(keys(library.incomplete_save_repairs(50).unwrap()), ["1"]);
+    library.verify().unwrap();
 }
 
-fn marks(library: &Library) -> i64 {
+fn rows(library: &Library) -> i64 {
     library
         .reader()
         .unwrap()
-        .query_row("SELECT count(*) FROM incomplete_save_attempts", [], |r| {
-            r.get(0)
-        })
+        .query_row("SELECT count(*) FROM repair_attempts", [], |r| r.get(0))
         .unwrap()
 }
 
-/// 試した版の後に新しい版を保存したら、前の版の印は保存と一緒に消える。
+/// 試した版の後に新しい版を保存したら、前の版の記録は保存と一緒に消える。
 #[test]
-fn saving_a_new_version_drops_the_mark_of_the_previous_one() {
+fn saving_a_new_version_drops_the_attempts_on_the_previous_one() {
     let (_temp, library) = fixture();
     save(&library, "1", "本文");
     discover(&library, "1", "revision", Some("incomplete"));
@@ -194,46 +193,45 @@ fn saving_a_new_version_drops_the_mark_of_the_previous_one() {
     library
         .record_incomplete_save_attempts(&[("1".to_owned(), tried)], 10)
         .unwrap();
-    assert_eq!(marks(&library), 1);
-    // 同じ内容の保存では版は変わらず、印も残る。
+    assert_eq!(rows(&library), 1);
+    // 同じ内容の保存では版は変わらず、記録も残る。
     save(&library, "1", "本文");
-    assert_eq!(marks(&library), 1);
+    assert_eq!(rows(&library), 1);
     save(&library, "1", "挿絵まで取れた本文");
-    assert_eq!(marks(&library), 0);
+    assert_eq!(rows(&library), 0);
     library.verify().unwrap();
 }
 
-/// 前の仕組みで残った、今の版を指さない印は、次に印を付けるときに消える。
+/// 補完の回数は、欠けた版を作った保存を 1 回目として数え、上限に届いたら候補から外す。
+/// 欠けの指紋は、表示できない挿絵の参照と伏せられた作品情報から作る。
 #[test]
-fn recording_attempts_sweeps_marks_left_on_old_versions() {
+fn pixiv_attempts_count_the_save_that_left_the_gap() {
     let (_temp, library) = fixture();
-    save(&library, "1", "本文");
-    save(&library, "2", "本文");
-    let first = save(&library, "1", "本文").snapshot_id;
-    save(&library, "1", "新しい本文");
-    // 古い仕組みが残した印を直に書く。
+    let saved = save(&library, "1", "前[pixivimage:123]後");
+    discover(&library, "1", "revision", Some("incomplete"));
+    let tried = library.incomplete_save_repairs(50).unwrap()[0].2;
     library
-        .conn
-        .lock()
+        .record_incomplete_save_attempts(&[("1".to_owned(), tried)], 10)
+        .unwrap();
+    let (attempts, fingerprint, request): (u32, Vec<u8>, Option<Vec<u8>>) = library
+        .reader()
         .unwrap()
-        .execute(
-            "INSERT INTO incomplete_save_attempts(work_id,snapshot_id,attempted_at)
-             SELECT entity_id,id,1 FROM revision_snapshots WHERE id=?1",
-            [first.as_bytes().as_slice()],
+        .query_row(
+            "SELECT attempts,gap_fingerprint,request_id FROM repair_attempts WHERE work_id=?1",
+            [saved.entity_id.as_bytes().as_slice()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert_eq!(marks(&library), 1);
-    discover(&library, "2", "revision", Some("incomplete"));
-    let tried = library.incomplete_save_repairs(50).unwrap()[0].2;
-    assert_eq!(
-        library
-            .record_incomplete_save_attempts(&[("2".to_owned(), tried)], 10)
-            .unwrap(),
-        1
-    );
-    assert_eq!(marks(&library), 1);
-    assert_eq!(
-        keys(library.incomplete_save_repairs(50).unwrap()),
-        Vec::<String>::new()
-    );
+    assert_eq!(attempts, 2);
+    assert_eq!(request, None);
+    let expected = repair_attempts::gap_fingerprint(
+        &library.reader().unwrap(),
+        saved.snapshot_id,
+        &["[pixivimage:123]".to_owned()],
+    )
+    .unwrap();
+    assert_eq!(fingerprint, expected.0.to_vec());
+    assert!(attempts >= repair_attempts::MAX_REPAIR_ATTEMPTS);
+    assert!(library.incomplete_save_repairs(50).unwrap().is_empty());
+    library.verify().unwrap();
 }

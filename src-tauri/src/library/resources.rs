@@ -249,6 +249,25 @@ pub(super) fn resources(
 }
 
 impl Library {
+    /// 取得元の応答（保存データ）。版に結び付いた最初のもの。
+    pub fn work_original(&self, work: LibraryId, snapshot: LibraryId) -> Result<Option<String>> {
+        let scope = ResourceScope::Snapshot(snapshot);
+        let original = self
+            .resource_manifest(work, scope)?
+            .resources
+            .into_iter()
+            .filter(|info| matches!(info.reference, ResourceReference::Original { .. }))
+            .filter(|info| info.file.is_some())
+            // この版を作った応答を先に。
+            .min_by_key(|info| info.role != "source_response");
+        let Some(original) = original else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        self.read_resource(work, scope, &original.reference, None, &mut bytes)?;
+        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
     pub fn resource_manifest(
         &self,
         entity: LibraryId,

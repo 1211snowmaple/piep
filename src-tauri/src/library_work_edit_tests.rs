@@ -463,9 +463,7 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
              DROP TABLE discovery_summaries;
              DROP TABLE job_history_visibility;
              DROP TABLE execution_logs;
-             DROP TABLE incomplete_save_attempts;
              DROP TABLE ai_notes;
-             DROP TABLE asset_repair_state;
              DROP INDEX acquisition_attempt_entity;
              DROP TABLE job_import_evidence;
              DROP TABLE execution_items;
@@ -485,6 +483,7 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
              DROP TABLE outbox; ALTER TABLE outbox_v17 RENAME TO outbox;
              DROP TABLE library_tasks;
              DROP TABLE pending_edit_images;
+             DROP TABLE repair_attempts;
              DELETE FROM schema_migrations WHERE version>=18; PRAGMA user_version=17;",
         )
         .unwrap();

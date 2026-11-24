@@ -294,7 +294,9 @@ fn settle_migrated_acquisitions(stale_bindings: bool) {
         conn.execute_batch(&super::super::schema::guards_for_tests())
             .unwrap();
         conn.execute_batch(
-            "DROP TABLE pending_edit_images; DROP TABLE library_tasks;
+            "DROP TABLE pending_edit_images; DROP TABLE library_tasks; DROP TABLE repair_attempts;
+             CREATE TABLE incomplete_save_attempts(work_id BLOB PRIMARY KEY, snapshot_id BLOB NOT NULL, attempted_at INTEGER NOT NULL) STRICT;
+             CREATE TABLE asset_repair_state(work_id BLOB PRIMARY KEY, snapshot_id BLOB NOT NULL, state_fingerprint BLOB NOT NULL, attempts INTEGER NOT NULL, request_id BLOB NOT NULL) STRICT;
              DELETE FROM schema_migrations WHERE version>=30; PRAGMA user_version=29;",
         )
         .unwrap();

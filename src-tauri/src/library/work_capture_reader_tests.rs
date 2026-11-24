@@ -347,7 +347,7 @@ fn fanbox_files_reader_readiness_and_attempts_commit_together_and_roll_back_toge
         1
     );
     library.verify().unwrap();
-    library.conn.lock().unwrap().execute_batch("DROP TRIGGER reject_reader_output; CREATE TRIGGER reject_asset_state BEFORE UPDATE ON asset_repair_state BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
+    library.conn.lock().unwrap().execute_batch("DROP TRIGGER reject_reader_output; CREATE TRIGGER reject_asset_state BEFORE UPDATE ON repair_attempts BEGIN SELECT RAISE(ABORT,'injected'); END; CREATE TRIGGER reject_asset_state_insert BEFORE INSERT ON repair_attempts BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
     let request = LibraryId::now_v7();
     assert!(library
         .save_readable_work(

@@ -1,9 +1,10 @@
-//! FANBOX の欠けた資産を取り直した状態。作品の保存と一緒に確定し、同じ状態では有限回で止める。
-use super::{CaptureResult, Error, Fingerprint, Library, LibraryId, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+//! FANBOX の欠けた資産の取り直し。回数は作品の保存と一緒に `repair_attempts` へ確定し、
+//! 同じ状態では有限回で止める。
+use super::{repair_attempts, CaptureResult, Error, Fingerprint, Library, LibraryId, Result};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const MAX_REPAIR_ATTEMPTS: u32 = 3;
+pub(crate) use super::repair_attempts::MAX_REPAIR_ATTEMPTS;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AssetRepairObservation {
@@ -22,55 +23,24 @@ pub(crate) struct AssetRepairPlan {
     pub attempts: u32,
 }
 
-pub(super) fn fingerprint(
-    conn: &Connection,
-    snapshot: LibraryId,
-    urls: &[String],
-) -> Result<Fingerprint> {
-    let mut urls = urls.to_vec();
-    urls.sort();
-    urls.dedup();
-    let mut stmt=conn.prepare("SELECT 'media',m.slot,r.file_id FROM snapshot_media m LEFT JOIN media_renditions r ON r.id=m.rendition_id WHERE m.snapshot_id=?1 UNION ALL SELECT 'file',slot,file_id FROM snapshot_files WHERE snapshot_id=?1 ORDER BY 1,2")?;
-    let held = stmt
-        .query_map([snapshot.as_bytes().as_slice()], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<Vec<u8>>>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(Fingerprint::of(&serde_json::to_vec(&(
-        "shelf-assets-v1",
-        urls,
-        held,
-    ))?))
-}
-
 pub(super) fn record(
     conn: &Connection,
     result: &CaptureResult,
     request: LibraryId,
-    base: Option<LibraryId>,
     observation: &AssetRepairObservation,
+    at: i64,
 ) -> Result<()> {
-    let next = fingerprint(conn, result.snapshot_id, &observation.expected_urls)?;
-    let prior:Option<(Vec<u8>,Vec<u8>,u32)>=conn.query_row("SELECT snapshot_id,state_fingerprint,attempts FROM asset_repair_state WHERE work_id=?1",[result.entity_id.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-    let attempts = if observation.complete {
-        0
-    } else {
-        match prior {
-            Some((snapshot, hash, n))
-                if !result.created_revision
-                    && hash == next.0
-                    && base.is_some_and(|b| b.as_bytes().as_slice() == snapshot) =>
-            {
-                n.saturating_add(1)
-            }
-            _ => 1,
-        }
-    };
-    conn.execute("INSERT INTO asset_repair_state(work_id,snapshot_id,state_fingerprint,attempts,request_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(work_id) DO UPDATE SET snapshot_id=excluded.snapshot_id,state_fingerprint=excluded.state_fingerprint,attempts=excluded.attempts,request_id=excluded.request_id",params![result.entity_id.as_bytes().as_slice(),result.snapshot_id.as_bytes().as_slice(),next.0.as_slice(),attempts,request.as_bytes().as_slice()])?;
+    let next =
+        repair_attempts::gap_fingerprint(conn, result.snapshot_id, &observation.expected_urls)?;
+    repair_attempts::record(
+        conn,
+        result.entity_id,
+        result.snapshot_id,
+        next,
+        observation.complete,
+        Some(request),
+        at,
+    )?;
     Ok(())
 }
 
@@ -87,8 +57,8 @@ impl Library {
         if !current {
             return Err(Error::Superseded);
         }
-        let hash = fingerprint(&conn, snapshot, expected_urls)?;
-        let attempts=conn.query_row("SELECT attempts FROM asset_repair_state WHERE work_id=?1 AND snapshot_id=?2 AND state_fingerprint=?3",params![work.as_bytes().as_slice(),snapshot.as_bytes().as_slice(),hash.0.as_slice()],|r|r.get::<_,u32>(0)).optional()?.unwrap_or(0);
+        let hash = repair_attempts::gap_fingerprint(&conn, snapshot, expected_urls)?;
+        let attempts = repair_attempts::attempts(&conn, work, snapshot, hash)?;
         Ok(AssetRepairPlan {
             fingerprint: hash,
             attempts,
@@ -96,7 +66,7 @@ impl Library {
     }
 
     pub(super) fn verify_asset_repairs(&self, conn: &Connection) -> Result<()> {
-        let mut stmt=conn.prepare("SELECT s.snapshot_id,s.work_id,a.id,a.state,a.result_snapshot_id,a.input_manifest_file_id FROM asset_repair_state s LEFT JOIN acquisition_attempts a ON a.id=s.request_id")?;
+        let mut stmt=conn.prepare("SELECT s.snapshot_id,s.work_id,a.id,a.state,a.result_snapshot_id,a.input_manifest_file_id FROM repair_attempts s LEFT JOIN acquisition_attempts a ON a.id=s.request_id WHERE s.request_id IS NOT NULL")?;
         for row in stmt.query_map([], |r| {
             Ok((
                 r.get::<_, Vec<u8>>(0)?,
@@ -131,8 +101,9 @@ impl Library {
                 .ok_or_else(|| Error::Integrity("資産の取り直しの入力に状態がありません".into()))?;
             let snapshot = LibraryId::from_slice(&snapshot)
                 .map_err(|_| Error::Integrity("資産の保存版が不正です".into()))?;
-            let expected = fingerprint(conn, snapshot, &observed.expected_urls)?;
-            let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM asset_repair_state WHERE work_id=?1 AND request_id=?2 AND state_fingerprint=?3 AND ((?4 AND attempts=0) OR (NOT ?4 AND attempts>0)))",params![work,request.as_bytes().as_slice(),expected.0.as_slice(),observed.complete],|r|r.get(0))?;
+            let expected =
+                repair_attempts::gap_fingerprint(conn, snapshot, &observed.expected_urls)?;
+            let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM repair_attempts WHERE work_id=?1 AND request_id=?2 AND gap_fingerprint=?3 AND ((?4 AND attempts=0) OR (NOT ?4 AND attempts>0)))",params![work,request.as_bytes().as_slice(),expected.0.as_slice(),observed.complete],|r|r.get(0))?;
             if !valid {
                 return Err(Error::Integrity(
                     "資産の取り直しの保存状態が入力と一致しません".into(),
