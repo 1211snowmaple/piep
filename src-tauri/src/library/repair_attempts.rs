@@ -3,7 +3,8 @@
 //! - 欠けの状態は指紋（`gap_fingerprint`）で表す。期待した項目（FANBOX は応答が指す画像・添付の
 //!   URL、pixiv は見られなかった挿絵の参照と伏せられた作品情報）と、その版が持つ画像・添付から作る。
 //! - `attempts` は、同じ版・同じ指紋のまま欠けが残った保存の回数。0 は揃った。版か指紋が変われば
-//!   1 から数え直す。[`MAX_REPAIR_ATTEMPTS`] に届いたら、その状態ではもう取りに行かない。
+//!   1 から数え直す。上限（詳細設定の「欠けた作品を取りに行く回数」、既定は
+//!   [`DEFAULT_REPAIR_ATTEMPTS`]）に届いたら、その状態ではもう取りに行かない。上限は呼ぶ側が渡す。
 //! - 行は今の版だけを指す。新しい版を保存したら前の版の行は消える（`forget_other_versions`）。
 //! - 取得の要求と結んだ行（FANBOX）は `request_id` を持ち、取得の入力の観測と突き合わせる
 //!   （`asset_repairs::verify_asset_repairs`）。pixiv の補完は保存ジョブの外で数えるので持たない。
@@ -15,7 +16,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 mod tests;
 
 /// 同じ版・同じ欠けで取りに行く回数の上限。欠けたまま確定した最初の保存も 1 回に数える。
-pub(crate) const MAX_REPAIR_ATTEMPTS: u32 = 2;
+/// 上限の既定値。詳細設定（`advanced_settings.rs`）の既定と同じ。
+#[cfg(test)]
+pub(crate) const DEFAULT_REPAIR_ATTEMPTS: u32 = 2;
 
 /// 欠けの指紋。`expected` は取得元が持つと示した項目、残りはその版が持つ画像・添付。
 /// FANBOX の取得の入力に残した観測から同じ値を作り直せるよう、作り方は変えない。

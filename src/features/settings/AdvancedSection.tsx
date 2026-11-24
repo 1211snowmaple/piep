@@ -41,6 +41,7 @@ export const ADVANCED_DESCRIPTIONS: Record<string, string> = {
   deepCheckIntervalDays: "一覧の情報が同じでも、この日数が過ぎた作品は本文まで確かめます。短くすると文字数の変わらない直しに早く気づきますが、取得が増えます。",
   sourceTimeoutSecs: "応答が無いまま、この時間が過ぎたら諦めます。回線が遅いときは長くしてください。",
   assetDownloadConcurrency: "1 にすると、画像の多い作品の保存が遅くなるかわりに、配信元への負担が減ります。",
+  repairAttempts: "挿絵や添付が取れなかった作品、作品情報が伏せられていた作品を、同じ状態のまま何回まで取りに行くかです。最初の保存も 1 回に数えます。1 にすると取り直しません。",
   keepUpdateJobs: "終わった確認を、新しい方からこの件数だけ残します。",
   keepUpdateJobDays: "これより古い確認は、次に起動したときに消します。",
   operationJobsKept: "保存や書き出しなどの記録を、新しい方からこの件数だけ残します。",

@@ -39,6 +39,7 @@ export const PREVIEW_ADVANCED_SPECS: AdvancedSettingSpec[] = [
   { key: "deepCheckIntervalDays", label: "本文まで突き合わせる間隔", group: "source", unit: "days", default: 14, min: 7, max: 90 },
   { key: "sourceTimeoutSecs", label: "取得元の応答を待つ時間", group: "source", unit: "seconds", default: 30, min: 15, max: 120 },
   { key: "assetDownloadConcurrency", label: "画像を同時に取る数", group: "source", unit: "count", default: 2, min: 1, max: 2 },
+  { key: "repairAttempts", label: "欠けた作品を取りに行く回数", group: "source", unit: "count", default: 2, min: 1, max: 5 },
   { key: "keepUpdateJobs", label: "更新の確認の履歴を残す件数", group: "history", unit: "count", default: 50, min: 10, max: 500 },
   { key: "keepUpdateJobDays", label: "更新の確認の履歴を残す日数", group: "history", unit: "days", default: 30, min: 7, max: 365 },
   { key: "operationJobsKept", label: "処理の記録を残す件数", group: "history", unit: "count", default: 100, min: 20, max: 500 },

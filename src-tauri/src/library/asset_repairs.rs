@@ -4,8 +4,6 @@ use super::{repair_attempts, CaptureResult, Error, Fingerprint, Library, Library
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-pub(crate) use super::repair_attempts::MAX_REPAIR_ATTEMPTS;
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AssetRepairObservation {
     pub expected_urls: Vec<String>,

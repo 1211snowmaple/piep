@@ -81,6 +81,8 @@ settings! {
     DeepCheckIntervalDays = "deepCheckIntervalDays", "本文まで突き合わせる間隔", Source, Days, 14, 7, 90;
     SourceTimeoutSecs = "sourceTimeoutSecs", "取得元の応答を待つ時間", Source, Seconds, 30, 15, 120;
     AssetDownloadConcurrency = "assetDownloadConcurrency", "画像を同時に取る数", Source, Count, 2, 1, 2;
+    // 欠けたまま確定した最初の保存も 1 回に数える（library/repair_attempts.rs）。1 は取り直さない。
+    RepairAttempts = "repairAttempts", "欠けた作品を取りに行く回数", Source, Count, 2, 1, 5;
     // 履歴
     KeepUpdateJobs = "keepUpdateJobs", "更新の確認の履歴を残す件数", History, Count, 50, 10, 500;
     KeepUpdateJobDays = "keepUpdateJobDays", "更新の確認の履歴を残す日数", History, Days, 30, 7, 365;
@@ -255,6 +257,11 @@ pub fn new_works_delay_ms() -> u64 {
 
 pub fn rate_limit_retries() -> u32 {
     get(Setting::RateLimitRetries) as u32
+}
+
+/// 欠けたまま保存した作品を、同じ版・同じ欠けで取りに行く回数の上限（最初の保存を含む）。
+pub fn repair_attempts() -> u32 {
+    get(Setting::RepairAttempts) as u32
 }
 
 pub fn consecutive_error_limit() -> u32 {

@@ -117,7 +117,7 @@ fn the_same_rules_hold_for_every_source() {
 fn fanbox_stops_at_the_limit() {
     let (temp, library) = fixture();
     let mut saved = fanbox(&library, &temp.0.join("staged"), false);
-    for _ in 1..MAX_REPAIR_ATTEMPTS {
+    for _ in 1..DEFAULT_REPAIR_ATTEMPTS {
         saved = fanbox(&library, &temp.0.join("staged"), false);
     }
     let plan = library
@@ -127,7 +127,7 @@ fn fanbox_stops_at_the_limit() {
             &["https://example.invalid/a".into()],
         )
         .unwrap();
-    assert_eq!(plan.attempts, MAX_REPAIR_ATTEMPTS);
+    assert_eq!(plan.attempts, DEFAULT_REPAIR_ATTEMPTS);
     library.verify().unwrap();
 }
 
@@ -239,7 +239,7 @@ fn migration_moves_the_current_rows_of_both_tables() {
         )
         .unwrap();
     assert_eq!(snapshot, current.snapshot_id.as_bytes().to_vec());
-    assert_eq!(attempts, MAX_REPAIR_ATTEMPTS);
+    assert_eq!(attempts, DEFAULT_REPAIR_ATTEMPTS);
     assert_eq!(fingerprint, vec![0; 32]);
     assert_eq!(request, None);
     assert_eq!(at, 7);

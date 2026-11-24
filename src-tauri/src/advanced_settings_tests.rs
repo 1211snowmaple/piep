@@ -18,6 +18,11 @@ fn defaults_are_the_values_the_code_used_before() {
     assert_eq!(values.get(Setting::DeepCheckIntervalDays), 14);
     assert_eq!(values.get(Setting::SourceTimeoutSecs), 30);
     assert_eq!(values.get(Setting::AssetDownloadConcurrency), 2);
+    // 補完の記録の試験が使う既定と同じ（library/repair_attempts.rs）。
+    assert_eq!(
+        values.get(Setting::RepairAttempts),
+        i64::from(crate::library::repair_attempts::DEFAULT_REPAIR_ATTEMPTS)
+    );
     assert_eq!(values.get(Setting::KeepUpdateJobs), 50);
     assert_eq!(values.get(Setting::KeepUpdateJobDays), 30);
     assert_eq!(values.get(Setting::OperationJobsKept), 100);

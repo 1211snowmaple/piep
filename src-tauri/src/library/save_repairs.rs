@@ -49,10 +49,12 @@ impl Library {
     }
 
     /// 取得元から取り直せば補える見込みのある一部保存の pixiv 作品を `(作品 ID, 題名, 今の版)` で
-    /// 返す。今の版で補完の上限に届いていないものだけ。試した回数は、ここで返した版に数える。
+    /// 返す。今の版で補完の上限（`attempt_limit`、最初の保存を含む）に届いていないものだけ。
+    /// 試した回数は、ここで返した版に数える。
     pub fn incomplete_save_repairs(
         &self,
         limit: usize,
+        attempt_limit: u32,
     ) -> Result<Vec<(String, String, LibraryId)>> {
         let limit = limit.clamp(1, MAX_INCOMPLETE_SAVE_REPAIRS) as i64;
         let conn = self.reader()?;
@@ -60,16 +62,15 @@ impl Library {
             "SELECT p.external_key,p.title,p.snapshot_id FROM discovery_candidates c
                JOIN work_current_projection p ON p.work_id=c.work_id
               WHERE p.provider='pixiv' AND c.decision='held' AND c.hold_kind='incomplete'
-                AND NOT EXISTS(SELECT 1 FROM repair_attempts a
-                                WHERE a.work_id=c.work_id AND a.snapshot_id=p.snapshot_id
-                                  AND a.attempts>=?2)
+                -- 記録が無くても、欠けた版を作った保存で 1 回（record_retry と同じ数え方）。
+                AND coalesce((SELECT max(a.attempts,1) FROM repair_attempts a
+                               WHERE a.work_id=c.work_id AND a.snapshot_id=p.snapshot_id),1)<?2
               ORDER BY c.work_id
               LIMIT ?1",
         )?;
-        let rows = statement.query_map(
-            params![limit, repair_attempts::MAX_REPAIR_ATTEMPTS],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, Vec<u8>>(2)?)),
-        )?;
+        let rows = statement.query_map(params![limit, attempt_limit], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get::<_, Vec<u8>>(2)?))
+        })?;
         rows.map(|row| {
             let (key, title, snapshot) = row?;
             let snapshot = LibraryId::from_slice(&snapshot)
