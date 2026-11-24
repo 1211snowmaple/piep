@@ -7,7 +7,6 @@ use crate::fanbox_api::error::FanboxError;
 use crate::fanbox_api::models::*;
 
 const FANBOX_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const FANBOX_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FANBOX_JSON_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_INITIAL_RESPONSE_CAPACITY: usize = 64 * 1024;
 /// 一覧を辿るときに、ページとページの間で空ける時間。
@@ -81,7 +80,10 @@ impl FanboxAPI {
     /// 新規クライアントの作成
     /// **組み立ての失敗で落ちない。** 詳しい理由は `AppPixivAPI::new_with` に。
     pub fn new(cookie: String, user_agent: String) -> Result<Self, FanboxError> {
-        let client = build_api_client(FANBOX_CONNECT_TIMEOUT, FANBOX_REQUEST_TIMEOUT)?;
+        let client = build_api_client(
+            FANBOX_CONNECT_TIMEOUT,
+            crate::advanced_settings::source_timeout(),
+        )?;
         Ok(Self {
             client,
             cookie,

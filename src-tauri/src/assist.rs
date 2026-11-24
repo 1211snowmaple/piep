@@ -37,9 +37,6 @@ pub use grounded::{ClaimVerdict, GroundedClaim};
 pub use harness::ToolTrace;
 pub use proofread::{proofread, ProofreadSegment, ProofreadSuggestion};
 
-/// 長編の部分抽出では、モデルの初回ロードと十分な思考時間も含めて待つ。
-/// 60秒では、GPUへ載せた直後や長いチャンクで正常な応答まで打ち切っていた。
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 /// 送る作品の上限。全部送っても名前は良くならず、入力だけが伸びる。
 const MAX_WORKS_SENT: usize = 12;
 /// 1作あたりに送るタグの上限。
@@ -576,9 +573,9 @@ fn validate_engine(engine: &AssistEngine) -> Result<(), String> {
     Ok(())
 }
 
+// 待ち時間は要求ごとに付ける（詳細設定で変えられるので、作り置きの接続には持たせない）。
 static ASSIST_CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
     reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
         // 最初に検証したローカル URL から外部へ 307/308 されると、POST 本文も
         // そのまま転送される。最終宛先を曖昧にしないため redirect は受けない。
         .redirect(reqwest::redirect::Policy::none())
@@ -588,7 +585,6 @@ static ASSIST_CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(
 
 static LOCAL_ASSIST_CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
     reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
@@ -1192,6 +1188,7 @@ async fn post_chat_request(
     let request = checked_request_body(body)?;
     let response = client(base_url)?
         .post(endpoint(base_url, "chat/completions"))
+        .timeout(crate::advanced_settings::assist_timeout())
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(request)
         .send()

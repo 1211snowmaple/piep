@@ -1,4 +1,5 @@
 /// 保存した応答の解釈・索引・提案の計算。棚のコードから使う（外へは出さない）。
+pub mod advanced_settings;
 pub(crate) mod analysis;
 /// 実データで挙動を確かめる example から触れるように公開している。
 pub mod assist;
@@ -163,8 +164,8 @@ fn prepare_library(
     }
     // 終わったジョブは放っておくと溜まり続ける。起動時に一度だけ整理する。
     match state.jobs().prune_update_jobs(
-        commands::update_jobs::KEEP_UPDATE_JOBS,
-        commands::update_jobs::KEEP_UPDATE_JOB_DAYS,
+        advanced_settings::keep_update_jobs(),
+        advanced_settings::keep_update_job_days(),
     ) {
         Ok(removed) if removed > 0 => log::info!("古い更新ジョブを{removed}件整理しました"),
         Ok(_) => {}
@@ -290,6 +291,9 @@ pub fn run() -> tauri::Result<()> {
             // 起動 (commands::startup)
             commands::startup::startup_wait_for_library,
             commands::startup::startup_remember_color_scheme,
+            // 詳細設定 (commands::settings)
+            commands::settings::settings_advanced_get,
+            commands::settings::settings_advanced_save,
             // 棚の読み取り (commands::shelf)
             commands::shelf::shelf_status,
             commands::shelf::shelf_set_user_state,

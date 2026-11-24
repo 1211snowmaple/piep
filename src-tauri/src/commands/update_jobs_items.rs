@@ -187,8 +187,7 @@ fn can_skip_pixiv_body(
         .and_then(chrono::DateTime::from_timestamp_millis)
         .is_some_and(|at| {
             let age = chrono::Utc::now().signed_duration_since(at);
-            age >= chrono::Duration::zero()
-                && age < chrono::Duration::days(DEEP_CHECK_INTERVAL_DAYS)
+            age >= chrono::Duration::zero() && age < deep_check_window()
         });
     if !recent {
         return Ok(false);
@@ -1050,7 +1049,7 @@ pub(super) mod tests {
             "create_date": "2026-11-01T00:00:00Z", "user": { "id": 77, "name": "作者", "account": "a" }
         })).unwrap();
         assert!(!can_skip_pixiv_body(&library, &card, &metadata).unwrap());
-        let old = (chrono::Utc::now() - chrono::Duration::days(DEEP_CHECK_INTERVAL_DAYS + 1))
+        let old = (chrono::Utc::now() - (deep_check_window() + chrono::Duration::days(1)))
             .timestamp_millis();
         library
             .record_work_check(card.id, card.snapshot_id, old, true)

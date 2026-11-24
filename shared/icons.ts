@@ -1,5 +1,6 @@
 import {
   ALargeSmall,
+  SlidersHorizontal,
   ChevronsLeft,
   ChevronsRight,
   LoaderCircle,
@@ -228,6 +229,8 @@ export const Icons = {
   settings: Settings,
   /** Measurement and maintenance of the library. */
   diagnostics: Gauge,
+  /** Fine-grained values: request spacing, retries, how much history to keep. */
+  advancedSettings: SlidersHorizontal,
   help: CircleHelp,
   appMenu: Menu,
 

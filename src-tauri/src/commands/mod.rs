@@ -13,6 +13,7 @@ pub mod pdf;
 pub(crate) mod profile_images;
 pub mod reimport;
 pub mod server;
+pub mod settings;
 pub mod shelf;
 pub mod shell;
 pub mod startup;

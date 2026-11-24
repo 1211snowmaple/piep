@@ -1,4 +1,5 @@
-//! A shared API gate per provider also covers competing jobs and pagination.
+//! 取得元ごとに一つの門。同時に走るジョブやページ送りも、この門を通って間隔をあける。
+//! 間隔は詳細設定の「取得元へ問い合わせる間隔」（既定 0.8 秒、下限 0.4 秒）。
 use std::{sync::LazyLock, time::Duration};
 use tokio::{sync::Mutex, time::Instant};
 
@@ -12,7 +13,7 @@ impl ApiGate {
         // Keep the lock while waiting: cancellation doesn't reserve future slots.
         let mut next = self.0.lock().await;
         tokio::time::sleep_until(*next).await;
-        *next = Instant::now() + Duration::from_millis(800);
+        *next = Instant::now() + crate::advanced_settings::request_gap();
     }
 
     pub async fn defer(&self, delay: Duration) {

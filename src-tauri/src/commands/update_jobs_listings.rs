@@ -94,14 +94,13 @@ pub(super) fn can_skip_listing(
         .map_err(|e| e.to_string())?;
     // FANBOX の一覧には投稿の更新時刻が出て、作者が書き直せば変わる。日付が手元の版と同じなら
     // 本文を開かない（何日経っていても）。pixiv の一覧の指紋は文字数の変わらない直しを拾えない
-    // ので、本文の突き合わせから DEEP_CHECK_INTERVAL_DAYS 以内のときだけ省く。
+    // ので、本文の突き合わせから詳細設定の日数（既定 14 日）以内のときだけ省く。
     let recently_verified = context
         .last_deep_checked_at
         .and_then(chrono::DateTime::from_timestamp_millis)
         .is_some_and(|v| {
             let age = chrono::Utc::now().signed_duration_since(v);
-            age >= chrono::Duration::zero()
-                && age < chrono::Duration::days(DEEP_CHECK_INTERVAL_DAYS)
+            age >= chrono::Duration::zero() && age < deep_check_window()
         });
     if card.provider != "fanbox" && !recently_verified {
         return Ok(false);
@@ -678,7 +677,7 @@ mod tests {
             .remember_work_source_update(card.id, card.snapshot_id, old)
             .unwrap();
         assert!(!can_skip_listing(&library, &card, &date(old)).unwrap());
-        let expired = card.saved_at - (DEEP_CHECK_INTERVAL_DAYS + 1) * 86_400_000;
+        let expired = card.saved_at - (deep_check_window().num_days() + 1) * 86_400_000;
         library
             .record_work_check(card.id, card.snapshot_id, expired, true)
             .unwrap();

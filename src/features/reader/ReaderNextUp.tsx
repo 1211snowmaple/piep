@@ -5,21 +5,22 @@ import { formatNumber } from "@/lib/format";
 import { summaryText } from "@/lib/content";
 import { readReadingPosition } from "@/features/library/readingShelf";
 import type { ShelfEntry } from "@/types/library";
+import { readingCharsPerMinute } from "@/lib/advancedSettings";
 
 /**
- * 黙読の速さの目安（字/分）。日本語の小説でよく言われる 400〜600字/分の
- * なかほど。人によって倍は違うので、「約」を付けた目安としてだけ使う。
+ * 字数から読む時間の目安（分）。1分未満も「約1分」にする。
+ *
+ * 速さは詳細設定の「読む速さ」（既定 550字/分）。日本語の小説でよく言われる
+ * 400〜600字/分のなかほどで、人によって倍は違うので、「約」を付けた目安として
+ * だけ使う。
  */
-export const READING_CHARS_PER_MINUTE = 550;
-
-/** 字数から読む時間の目安（分）。1分未満も「約1分」にする。 */
-export function readingMinutes(chars: number): number {
-  return Math.max(1, Math.round(chars / READING_CHARS_PER_MINUTE));
+export function readingMinutes(chars: number, charsPerMinute = readingCharsPerMinute()): number {
+  return Math.max(1, Math.round(chars / charsPerMinute));
 }
 
 /** 「約N分」「約1時間20分」。長編で「約140分」と出されても量が掴めない。 */
-export function formatReadingTime(chars: number): string {
-  const minutes = readingMinutes(chars);
+export function formatReadingTime(chars: number, charsPerMinute = readingCharsPerMinute()): string {
+  const minutes = readingMinutes(chars, charsPerMinute);
   if (minutes < 60) return `約${minutes}分`;
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;

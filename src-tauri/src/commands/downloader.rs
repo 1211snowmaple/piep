@@ -1073,7 +1073,7 @@ mod pixiv_meta_signature_tests {
     }
 
     /// 取りこぼしの明文化。文字数の変わらない修正は指紋に現れない。
-    /// これを拾うのは DEEP_CHECK_INTERVAL_DAYS ごとの本文突き合わせの役目。
+    /// これを拾うのは 詳細設定の日数（既定 14 日）ごとの本文突き合わせの役目。
     #[test]
     fn a_same_length_body_edit_is_invisible_to_the_signature() {
         let detail = detail();

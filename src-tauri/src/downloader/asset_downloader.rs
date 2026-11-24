@@ -8,7 +8,6 @@ use tokio::task::JoinSet;
 pub(crate) const MAX_ASSET_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_PROFILE_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ASSET_IMAGE_PIXELS: u64 = 100_000_000;
-const ASSET_DOWNLOAD_CONCURRENCY: usize = 2;
 
 /// アセットダウンロード対象
 #[derive(Debug, Clone)]
@@ -957,14 +956,16 @@ pub async fn download_and_link_assets(
     //
     // 止まっている接続を捨てたいだけなので、見るのは「次のかたまりが来ない
     // 時間」でよい。落ち切るまでの合計には上限を置かない。
+    // 同時に取る数は詳細設定（既定 2、今より増やせない）。
+    let concurrency = crate::advanced_settings::asset_download_concurrency();
     let client = reqwest::Client::builder()
-        .read_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(crate::advanced_settings::source_timeout())
         .connect_timeout(std::time::Duration::from_secs(10))
-        .pool_max_idle_per_host(ASSET_DOWNLOAD_CONCURRENCY)
+        .pool_max_idle_per_host(concurrency)
         .build()
         .map_err(|error| format!("Asset HTTP client creation failed: {error}"))?;
     let mut join_set = JoinSet::new();
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(ASSET_DOWNLOAD_CONCURRENCY));
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
     let previous_dir = parent_dir.to_path_buf();
     let requested = download_targets.clone();
     let reusable_assets = tokio::task::spawn_blocking(move || {

@@ -5,7 +5,7 @@
 //! 項目だけを後から追える。
 //!
 //! **制限に当たった項目は、同じジョブの中で待ち直す。** pixiv の 429 は数秒で
-//! 解けないことがある。`MAX_RATE_LIMIT_RETRIES` 回まで、待ち時間を
+//! 解けないことがある。詳細設定の回数（既定 3 回）まで、待ち時間を
 //! `RATE_LIMIT_BACKOFF_BASE_MS` から `MAX_RATE_LIMIT_BACKOFF_MS` へ延ばし
 //! ながら試す。短い固定回数で失敗にすると、待てば通るものを落とす。
 //!
@@ -34,41 +34,35 @@ pub(super) mod shelf;
 #[path = "update_jobs_history_tests.rs"]
 mod history_tests;
 
-const UPDATE_JOB_DELAY_MS: u64 = 2_000;
-/// 新作だけの確認で、作者の間にあける時間。
-///
-/// 1人あたりの通信が一覧の1回だけになるので、この間隔で毎秒の通信量が通常の
-/// 確認と同じ（実測で約 0.6 回/秒）になる。縮めると取得元への圧が増えるだけで、
-/// 通信の総数が減るわけではない。
-const NEW_WORKS_DELAY_MS: u64 = 1_500;
+// 項目の間の時間は詳細設定（`advanced_settings`）にある。既定は通常の確認で 2 秒、
+// 新作だけの確認で 1.5 秒。新作だけの確認は1人あたりの通信が一覧の1回だけになるので、
+// この差で毎秒の通信量が通常の確認と同じ（実測で約 0.6 回/秒）になる。縮めると取得元への
+// 圧が増えるだけで、通信の総数が減るわけではない。下限は既定の半分。
 const FAST_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
-/// 制限で止まった項目を、同じジョブの中でやり直す回数の上限。
-/// pixiv の 429 は数秒では解除されないことがあるため、短い固定回数で
-/// 失敗扱いにせず、十分な時間をかけて段階的に待つ。
-const MAX_RATE_LIMIT_RETRIES: u32 = 3;
+// 制限で止まった項目を同じジョブの中でやり直す回数と、取得エラーが何件続いたら
+// 止めるかは、詳細設定にある（どちらも既定 3 回）。pixiv の 429 は数秒では解除
+// されないことがあるため、短い固定回数で失敗扱いにせず、十分な時間をかけて
+// 段階的に待つ。
 const RATE_LIMIT_BACKOFF_BASE_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 5 * 60 * 1_000;
-const MAX_CONSECUTIVE_ERRORS: u32 = 3;
 const ERROR_BACKOFF_BASE_MS: u64 = 10_000;
 const MAX_ERROR_BACKOFF_MS: u64 = 60_000;
 /// 1ジョブが持つログの上限。超えた分は古い方から落とす。
 const MAX_UPDATE_JOB_LOGS: i64 = 2_000;
 /// 何項目ごとにログの上限を確かめるか。
 const LOG_TRIM_INTERVAL: u32 = 100;
-/// 終わったジョブを、新しい方から何件残すか。
-pub const KEEP_UPDATE_JOBS: i64 = 50;
-/// それより古いジョブを、何日で消すか。
-pub const KEEP_UPDATE_JOB_DAYS: i64 = 30;
 
 /// 前回までの候補は全件たどるが、一度に読む本文データはこの件数に収める。
 const PENDING_CANDIDATE_PAGE_SIZE: i64 = 500;
 
-/// メタデータの指紋が同じでも、この日数を過ぎたら本文まで突き合わせる。
+/// メタデータの指紋が同じでも、この日数を過ぎたら本文まで突き合わせる（詳細設定）。
 ///
 /// 文字数の変わらない改稿を取りこぼさないための保険。短くすると取得回数が
 /// 増え、長くすると細かい修正に気づくのが遅れる。
-const DEEP_CHECK_INTERVAL_DAYS: i64 = 14;
+fn deep_check_window() -> chrono::Duration {
+    chrono::Duration::days(crate::advanced_settings::deep_check_interval_days())
+}
 static ACTIVE_UPDATE_JOBS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static PENDING_UPDATE_RESTARTS: OnceLock<Mutex<HashMap<String, UpdateCredentials>>> =
     OnceLock::new();
@@ -2056,6 +2050,9 @@ async fn run_update_job(
     // 通常の失敗が続く場合も、取得元を続けて叩かず停止する。
     let mut consecutive_errors: u32 = 0;
     let mut rate_limit_retries: HashMap<i64, u32> = HashMap::new();
+    // 詳細設定はジョブの始めに一度読む。途中で変えても、走っているジョブは変わらない。
+    let retry_limit = crate::advanced_settings::rate_limit_retries();
+    let error_limit = crate::advanced_settings::consecutive_error_limit();
     let mut processed_since_trim: u32 = 0;
     // The save page uses each changed-item event to update its individual
     // rows. Preserve that behavior for explicit save jobs.
@@ -2179,9 +2176,9 @@ async fn run_update_job(
         let failed = outcome.is_err();
         let restart_pending = has_pending_restart(&job_id);
         let mut next_delay_ms = if new_works_only && item.item_type == "target" {
-            NEW_WORKS_DELAY_MS
+            crate::advanced_settings::new_works_delay_ms()
         } else {
-            UPDATE_JOB_DELAY_MS
+            crate::advanced_settings::update_check_delay_ms()
         };
         if item.item_type == "work"
             && matches!(
@@ -2400,7 +2397,7 @@ async fn run_update_job(
                     }
                     let attempts = rate_limit_retries.entry(item.id).or_insert(0);
                     *attempts += 1;
-                    if *attempts <= MAX_RATE_LIMIT_RETRIES {
+                    if *attempts <= retry_limit {
                         let delay_ms = if kind == FailureKind::Network {
                             error_delay_ms(*attempts)
                         } else {
@@ -2512,7 +2509,7 @@ async fn run_update_job(
                         }
                     }
                 }
-                if too_many_consecutive_errors(consecutive_errors) {
+                if too_many_consecutive_errors(consecutive_errors, error_limit) {
                     let message = format!(
                         "取得エラーが{consecutive_errors}件続いたため一時停止しました。エラー内容を確認してから再開してください"
                     );
@@ -2898,8 +2895,8 @@ fn error_delay_ms(consecutive_errors: u32) -> u64 {
         .min(MAX_ERROR_BACKOFF_MS)
 }
 
-fn too_many_consecutive_errors(consecutive_errors: u32) -> bool {
-    consecutive_errors >= MAX_CONSECUTIVE_ERRORS
+fn too_many_consecutive_errors(consecutive_errors: u32, limit: u32) -> bool {
+    consecutive_errors >= limit
 }
 
 /// Long rate-limit waits must not make pause/cancel feel ignored. Wake in short
@@ -4247,8 +4244,14 @@ mod tests {
         assert_eq!(error_delay_ms(1), 10_000);
         assert_eq!(error_delay_ms(2), 20_000);
         assert!(error_delay_ms(99) <= MAX_ERROR_BACKOFF_MS);
-        assert!(!too_many_consecutive_errors(2));
-        assert!(too_many_consecutive_errors(3));
+        let limit = crate::advanced_settings::consecutive_error_limit();
+        assert_eq!(limit, 3);
+        assert!(!too_many_consecutive_errors(2, limit));
+        assert!(too_many_consecutive_errors(3, limit));
+        // 詳細設定で回数を増やせば、そこまで止まらない。
+        assert!(!too_many_consecutive_errors(3, 5));
+        assert!(too_many_consecutive_errors(5, 5));
+        assert!(too_many_consecutive_errors(1, 1));
     }
 
     #[test]
