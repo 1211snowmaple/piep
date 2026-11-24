@@ -852,11 +852,13 @@ pub struct PcSearchCriteria {
     text: String,
     source: String,
     content_type: String,
-    author: String,
-    author_exclude: String,
+    /// 作者とタグは一件ずつの並び。区切り文字を含むタグもそのまま一件として送る
+    /// （自由入力の分け方は入力欄が受け持つ）。
+    author: Vec<String>,
+    author_exclude: Vec<String>,
     favorite: bool,
-    tag: String,
-    tag_exclude: String,
+    tag: Vec<String>,
+    tag_exclude: Vec<String>,
     min_chars: String,
     max_chars: String,
     sort: String,
@@ -879,10 +881,11 @@ pub struct PcWorkScope {
     key: String,
 }
 
-fn split_search_terms(value: &str) -> Option<Vec<String>> {
-    let terms: Vec<String> = value
-        .split(['\n', '\r', ',', '、', '，'])
-        .map(str::trim)
+/// 一件ずつの作者・タグから空のものを除く。分けることはしない。
+fn search_terms(values: &[String]) -> Option<Vec<String>> {
+    let terms: Vec<String> = values
+        .iter()
+        .map(|term| term.trim())
         .filter(|term| !term.is_empty())
         .map(str::to_string)
         .collect();
@@ -938,7 +941,7 @@ fn search_request(
         None | Some("") => MobileDateField::default(),
         Some(value) => vocabulary(value)?,
     };
-    let tags_include = split_search_terms(&criteria.tag);
+    let tags_include = search_terms(&criteria.tag);
     let mut request = MobileSearchRequest {
         text: search_choice(Some(&criteria.text)),
         cursor,
@@ -946,13 +949,13 @@ fn search_request(
         limit: Some(20),
         source: search_choice(Some(&criteria.source)),
         content_type: search_choice(Some(&criteria.content_type)),
-        authors_include: split_search_terms(&criteria.author),
-        authors_exclude: split_search_terms(&criteria.author_exclude),
+        authors_include: search_terms(&criteria.author),
+        authors_exclude: search_terms(&criteria.author_exclude),
         tag_filter_mode: search_choice(criteria.tag_mode.as_deref())
             // 「すべて」は既定なので送らない。「どれか」はタグを指したときだけ意味がある。
             .filter(|mode| mode != "and" && (mode != "or" || tags_include.is_some())),
         tags_include,
-        tags_exclude: split_search_terms(&criteria.tag_exclude),
+        tags_exclude: search_terms(&criteria.tag_exclude),
         min_char_count: parse_search_count(&criteria.min_chars)?,
         max_char_count: parse_search_count(&criteria.max_chars)?,
         min_asset_count: parse_search_count(criteria.min_assets.as_deref().unwrap_or(""))?,
@@ -1162,9 +1165,9 @@ mod tests {
 
     fn search_criteria(mut changes: serde_json::Value) -> PcSearchCriteria {
         let mut value = serde_json::json!({
-            "text": "", "source": "", "contentType": "", "author": "",
-            "authorExclude": "", "favorite": false, "tag": "",
-            "tagExclude": "", "minChars": "", "maxChars": "", "sort": "standard"
+            "text": "", "source": "", "contentType": "", "author": [],
+            "authorExclude": [], "favorite": false, "tag": [],
+            "tagExclude": [], "minChars": "", "maxChars": "", "sort": "standard"
         });
         for (key, field) in changes.as_object_mut().expect("changes object") {
             value[key] = field.take();
@@ -1419,9 +1422,9 @@ mod tests {
     }
 
     #[test]
-    fn search_request_splits_multiple_terms_and_forwards_non_ai_filters() {
+    fn search_request_forwards_terms_and_non_ai_filters() {
         let criteria = search_criteria(serde_json::json!({
-            "author": "作者A、作者B\n作者C", "tag": "猫, 海",
+            "author": ["作者A", " 作者B ", "", "作者C"], "tag": ["猫", "海"],
             "tagMode": "or", "minAssets": "2", "maxAssets": "12",
             "revision": "revised", "edit": "edited", "cover": "has_cover",
             "dateField": "published", "dateFrom": "2024-02-29", "dateTo": "2026-10-14",
@@ -1473,11 +1476,25 @@ mod tests {
         }
     }
 
+    /// 区切り文字を含むタグ・作者は、分けずに一件として送る。
+    #[test]
+    fn a_tag_with_a_delimiter_is_sent_as_one_tag() {
+        let criteria = search_criteria(serde_json::json!({
+            "author": ["山田、太郎"], "tag": ["猫、海", "A,B"], "tagExclude": ["春，夏"]
+        }));
+        let payload =
+            serde_json::to_value(search_request(&criteria, None, None, None).expect("request"))
+                .unwrap();
+        assert_eq!(payload["authorsInclude"], serde_json::json!(["山田、太郎"]));
+        assert_eq!(payload["tagsInclude"], serde_json::json!(["猫、海", "A,B"]));
+        assert_eq!(payload["tagsExclude"], serde_json::json!(["春，夏"]));
+    }
+
     #[test]
     fn search_request_rejects_invalid_ranges_dates_and_choices() {
         for changes in [
-            serde_json::json!({ "author": "a,b,c,d,e,f,g,h,i,j,k" }),
-            serde_json::json!({ "tag": "猫", "tagMode": "xor" }),
+            serde_json::json!({ "author": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"] }),
+            serde_json::json!({ "tag": ["猫"], "tagMode": "xor" }),
             serde_json::json!({ "minAssets": "3", "maxAssets": "2" }),
             serde_json::json!({ "minAssets": "-1" }),
             serde_json::json!({ "revision": "both" }),

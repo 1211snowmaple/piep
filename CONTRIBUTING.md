@@ -60,10 +60,10 @@ EPUBCheck）、`docs`（画面と Rust の境界の突き合わせ・方針書�
 | 変えた物 | 足す段 |
 |---|---|
 | 画面 | `-Stage frontend,rust,docs,visual` |
-| 携帯の画面 | `android` |
-| 携帯の Rust・署名・Gradle | `apk`（重い。鍵なしで組めることだけを見る） |
+| 携帯の画面・携帯の Rust | `android`（画面の組み立てと試験、携帯の Rust の試験・clippy・rustfmt） |
+| 携帯の Rust・署名・Gradle | `apk` も（重い。鍵なしで組めることだけを見る） |
 
-版は `rust-toolchain.toml`（Rust）と Node.js 24.x にそろえる。`cargo-nextest` と、`docs-tools` の
+版は `rust-toolchain.toml`（Rust。携帯は `android/rust-toolchain.toml`）と Node.js 24.x にそろえる。`cargo-nextest` と、`docs-tools` の
 依存（`npm --prefix docs-tools ci`）が要る。
 
 `docs` の段はフロントと Rust の境界を突き合わせる。`invoke("名前")` に対応するコマンドが無い、

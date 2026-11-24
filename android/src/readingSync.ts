@@ -4,14 +4,9 @@ import { connectedShelf, type OpenedShelfWork } from "./shelf";
 
 /** 読む画面が溜めておく、次に書く位置。 */
 export interface ReadingWrite {
-  source: string;
-  sourceId: string;
-  version: number | null;
-  editHash: string | null;
   page: number;
   position: number;
   finished: boolean;
-  deviceTime: number;
 }
 
 export interface RemoteStart {

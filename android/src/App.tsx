@@ -20,12 +20,12 @@ import { WorkDetail } from "./WorkDetail";
 import { EntityPage } from "./EntityPage";
 import { homePage, NavigationProvider, useAppHistory, type LibraryPage } from "./appHistory";
 import { forgetServerImages } from "./images";
-import { flushLocalReading } from "./localReading";
-import { setReadingServer, useLocalReadingsReady } from "./recentReading";
+import { flushLocalReading, localReadingKey, setReadingScope } from "./localReading";
+import { useLocalReadingsReady } from "./recentReading";
 import { statusQueryKey } from "./workList";
 import { forgetFavoriteChanges, useFavoriteNotice } from "./favorites";
 import { adoptShelf, connectedShelf } from "./shelf";
-import { defaultPcSearch, getPcStatus, type OfflineWork, type PcConnectionStatus, type PcSearchCriteria, type PcWork } from "./pcApi";
+import { defaultPcSearch, getPcStatus, sameReadingScope, type OfflineWork, type PcConnectionStatus, type PcSearchCriteria, type PcWork, type ReadingScope } from "./pcApi";
 import { handleReaderKeyboard } from "./readerKeyboard";
 import { PullIndicator, usePullToRefresh } from "./pullToRefresh";
 import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
@@ -153,21 +153,26 @@ function App() {
   const setPcConnection = useCallback((next: PcConnectionStatus | null | ((old: PcConnectionStatus | null) => PcConnectionStatus | null)) => {
     queryClient.setQueryData<PcConnectionStatus | null>(statusQueryKey, (old) => typeof next === "function" ? next(old ?? null) : next);
   }, [queryClient]);
-  // 接続先が変わったら、前のサーバーの一覧・カーソル・詳細・本文を引きずらない。
+  // 接続先や棚・利用者が変わったら、前の一覧・カーソル・詳細・本文を引きずらない。
   const serverUrl = statusQuery.data === undefined ? undefined : statusQuery.data?.url ?? null;
+  const shelfScope = connectedShelf();
   const shownServer = useRef(serverUrl);
+  const shownScope = useRef<ReadingScope | null>(null);
   useEffect(() => {
+    setReadingScope(shelfScope);
     if (serverUrl === undefined) return;
-    setReadingServer(serverUrl);
     const previous = shownServer.current;
+    const serverChanged = previous !== undefined && previous !== serverUrl;
+    const readerChanged = shownScope.current && shelfScope && !sameReadingScope(shownScope.current, shelfScope);
     shownServer.current = serverUrl;
-    if (previous === undefined || previous === serverUrl) return;
+    if (shelfScope || serverChanged) shownScope.current = shelfScope;
+    if (!serverChanged && !readerChanged) return;
     forgetServerImages();
     forgetFavoriteChanges();
     restart();
     const fromServer = (query: { queryKey: readonly unknown[] }) => query.queryKey[0] !== statusQueryKey[0] && query.queryKey[0] !== "offline-works";
     void queryClient.cancelQueries({ predicate: fromServer }).then(() => queryClient.resetQueries({ predicate: fromServer }));
-  }, [serverUrl, queryClient, restart]);
+  }, [serverUrl, shelfScope, queryClient, restart]);
   const [appUpdate, setAppUpdate] = useAppUpdate();
   const [page, setPage] = useState(() => storedNumber(positionKey, 0, 0, preview.pages.length - 1));
   // 選んだときだけ保存する。保存しておかなければ、既定を変えたときにそのまま効く。
@@ -568,9 +573,9 @@ function App() {
 
   const readerProps = { type: readerType, behavior: readerBehavior, onBack: closeReader, onTypeChange: changeReaderType, onBehaviorChange: changeReaderBehavior, backLabel: selectedWork ? "作品詳細に戻る" : "作品一覧に戻る" };
   const activeReader = !recordsReady ? null : offlineWork
-    ? <OnlineReader key={`saved:${offlineWork.work.id}`} work={offlineWork.work} offline offlineCollections={offlineWork.collections ?? []} offlineEditHash={offlineWork.savedEditHash} offlineAuthorCover={Boolean(offlineWork.hasAuthorCover)} snapshotGeneration={offlineWork.savedAtMs} startPage={offlineStartPage} {...readerProps} />
+    ? <OnlineReader key={`saved:${localReadingKey(offlineWork.work)}`} work={offlineWork.work} offline offlineCollections={offlineWork.collections ?? []} offlineAuthorCover={Boolean(offlineWork.hasAuthorCover)} snapshotGeneration={offlineWork.savedAtMs} startPage={offlineStartPage} {...readerProps} />
     : onlineWork
-      ? <OnlineReader key={`pc:${onlineWork.id}:${entry.reader?.kind === "online" ? entry.reader.version ?? "latest" : "latest"}`} selectedVersion={entry.reader?.kind === "online" ? entry.reader.version : undefined} work={onlineWork} onSaved={savedWorkChanged} {...readerProps} />
+      ? <OnlineReader key={`pc:${localReadingKey(onlineWork)}:${entry.reader?.kind === "online" ? entry.reader.version ?? "latest" : "latest"}`} selectedVersion={entry.reader?.kind === "online" ? entry.reader.version : undefined} work={onlineWork} onSaved={savedWorkChanged} {...readerProps} />
       : reading ? (
       <div className={`reader-screen reader-theme--${readerTheme} reader-bars--pinned`}>
         <header className="reader-toolbar">

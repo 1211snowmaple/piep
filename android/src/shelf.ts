@@ -1,6 +1,6 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import type { MobileCollection, MobileEntityDetail, MobileSearchSuggestions, MobileCollectionDetail, MobileWorkPage, MobileWork, MobileWorkDetail } from "@shared/mobileApi";
-import type { PcCollection, PcCollectionDetail, PcConnectionStatus, PcEntityDetail, PcEntityPage, PcEntitySeriesPage, PcMetadata, PcOutlineEntry, PcPage, PcSearchPage, PcWork, PcWorkSearch, SearchSuggestion } from "./pcApi";
+import type { PcCollection, PcCollectionDetail, PcConnectionStatus, PcEntityDetail, PcEntityPage, PcEntitySeriesPage, PcMetadata, PcOutlineEntry, PcPage, PcSearchPage, PcWork, PcWorkSearch, ReadingScope, SearchSuggestion } from "./pcApi";
 
 type ShelfScope = NonNullable<PcConnectionStatus["shelf"]>["scope"];
 
@@ -70,7 +70,7 @@ export async function shelfSuggestions(library: ShelfScope, text: string): Promi
 
 /** 取得元と ID から棚の作品を引く。棚に無ければ失敗する。 */
 export async function lookupShelfWork(library: ShelfScope, source: string, key: string): Promise<PcWork> {
-  return shelfWork(await invoke<MobileWork>("pc_lookup_work", { library, provider: source, key }));
+  return shelfWork(await invoke<MobileWork>("pc_lookup_work", { library, provider: source, key }), library);
 }
 
 /** 棚のコレクション。表紙は棚から引くので、棚の UUID を添える。 */
@@ -104,7 +104,7 @@ export async function shelfWorkCollections(library: ShelfScope, work: string): P
 /** コレクションの画面。`collection` は棚の UUID。 */
 export async function shelfCollectionDetail(library: ShelfScope, collection: string): Promise<PcCollectionDetail> {
   const { members, ...summary } = await invoke<MobileCollectionDetail>("pc_collection", { library, collection });
-  return { ...shelfCollection(summary, library), members: members.map((member) => ({ ...member, work: member.work ? shelfWork(member.work) : null })) };
+  return { ...shelfCollection(summary, library), members: members.map((member) => ({ ...member, work: member.work ? shelfWork(member.work, library) : null })) };
 }
 
 /** 棚の作者のアイコン・ヘッダー、シリーズの表紙。 */
@@ -113,15 +113,15 @@ export function shelfEntityCoverPath(kind: "people" | "series", source: string, 
   return shelf ? `shelf-entity/${shelf.libraryId}/${kind}/${source}/${encodeURIComponent(key)}${banner ? "/banner" : ""}` : null;
 }
 
-/** 棚の一件を、カードと画面が読む形にする。 */
-export function shelfWork(work: MobileWork): PcWork {
-  return { ...work };
+/** 作品を取得したときの棚と利用者を、読書記録のために添える。 */
+export function shelfWork(work: MobileWork, { libraryId, subjectId }: ReadingScope): PcWork {
+  return { ...work, readingScope: { libraryId, subjectId } };
 }
 
 /** 一覧の一ページを棚から引く。 */
 export async function searchShelf(library: ShelfScope, criteria: PcWorkSearch, cursor: string | null, entity: { kind: string; source: string; key: string } | null, offset: number | null, limit: number | null): Promise<PcSearchPage> {
   const page = await invoke<MobileWorkPage>("pc_search", { library, criteria, cursor, offset, limit, scope: entity });
-  return { items: page.items.map(shelfWork), nextCursor: page.nextCursor, totalEstimate: page.totalEstimate, indexComplete: page.indexComplete };
+  return { items: page.items.map((work) => shelfWork(work, library)), nextCursor: page.nextCursor, totalEstimate: page.totalEstimate, indexComplete: page.indexComplete };
 }
 
 /** 作品の画面を棚から引く。版の一覧には、以前の版を開くための版ごとの写しの ID を添える。 */
@@ -130,19 +130,11 @@ export async function shelfMetadata(workId: string): Promise<PcMetadata> {
   if (!library) throw NO_SHELF;
   const detail = await invoke<MobileWorkDetail>("pc_work", { library, work: workId });
   return {
-    work: shelfWork(detail.work),
+    work: shelfWork(detail.work, library),
     people: detail.people,
     series: detail.series,
     versions: detail.versions,
-    // 編集の中身の印は渡らない。編集の UUID で読書位置と保存版を分ける（編集し直せば別の本文）。
-    activeEditHash: shelfEditHash(detail.work),
   };
-}
-
-/** 編集の印。端末に保存した版の印（Rust 側の `edit:{UUID}`）と同じ形。 */
-export function shelfEditHash(work: Pick<MobileWork, "edited" | "editId" | "snapshotId">): string | null {
-  if (!work.edited) return null;
-  return work.editId ? `edit:${work.editId}` : `edit:${work.snapshotId}`;
 }
 
 /** 棚の作品の表紙。版の UUID を鍵にして、版が変われば取り直す。 */

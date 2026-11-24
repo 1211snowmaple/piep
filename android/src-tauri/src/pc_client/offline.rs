@@ -2,6 +2,7 @@
 
 use super::device_db::DeviceDb;
 use super::image_validation::validate_saved_image;
+use super::local_reading::ReadingScope;
 use super::shelf::{self, ShelfScope};
 use super::shelf_reader;
 use super::*;
@@ -172,15 +173,13 @@ impl OfflineState {
 pub struct OfflineWork {
     /// 棚の一覧と同じ形で残す。
     pub work: piep_mobile_api::MobileWork,
-    /// 保存した棚の UUID。
-    pub shelf_library: String,
+    /// 保存したときの棚と利用者。圏外でもこの組で読書位置を記録する。
+    pub reading_scope: ReadingScope,
     #[serde(default)]
     pub people: Vec<MobilePerson>,
     #[serde(default)]
     pub series: Vec<MobileSeriesMembership>,
     pub saved_at_ms: u64,
-    pub saved_version: i64,
-    pub saved_edit_hash: Option<String>,
     pub page_count: usize,
     #[serde(default)]
     pub collections: Vec<MobileCollection>,
@@ -213,6 +212,9 @@ struct CurrentPointer {
 #[serde(rename_all = "camelCase")]
 pub struct OfflinePage {
     generation: String,
+    reading_scope: ReadingScope,
+    snapshot_id: String,
+    edit_id: Option<String>,
     #[serde(flatten)]
     page: MobilePage,
 }
@@ -347,6 +349,9 @@ fn read_offline_page(
     }
     Ok(OfflinePage {
         generation,
+        reading_scope: manifest.summary.reading_scope,
+        snapshot_id: manifest.summary.work.snapshot_id,
+        edit_id: manifest.summary.work.edit_id,
         page: page_data,
     })
 }
@@ -406,6 +411,7 @@ fn read_manifest(
         serde_json::from_slice(&fs::read(snapshot.join("manifest.json")).map_err(|_| storage())?)
             .map_err(|_| storage())?;
     if OfflineKey::of(&manifest.summary.work).as_ref() != Some(work_id)
+        || !manifest.summary.reading_scope.valid()
         || manifest.pages.len() != manifest.summary.page_count
         || manifest.summary.page_count == 0
         || manifest.summary.page_count > MAX_PAGES
@@ -931,16 +937,13 @@ async fn save_shelf_into(
     }
     let summary = OfflineWork {
         work: work.clone(),
-        shelf_library: library.library_id().get().to_string(),
+        reading_scope: library.into(),
         people: detail.people.clone(),
         series: detail.series.clone(),
         saved_at_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| storage())?
             .as_millis() as u64,
-        saved_version: work.current_version,
-        // 版は、残した作品の版と編集の UUID で見分ける。
-        saved_edit_hash: work.edit_id.as_ref().map(|id| format!("edit:{id}")),
         page_count,
         collections,
         collection_positions,
@@ -1176,9 +1179,9 @@ pub(super) mod tests {
         pages: usize,
     ) -> serde_json::Value {
         serde_json::json!({
-            "work": work_json(key, source_id, title), "shelfLibrary": Uuid::from_u128(2).to_string(),
-            "savedAtMs": 1, "savedVersion": 1,
-            "savedEditHash": null, "pageCount": pages
+            "work": work_json(key, source_id, title),
+            "readingScope": { "libraryId": Uuid::from_u128(2), "subjectId": Uuid::from_u128(3) },
+            "savedAtMs": 1, "pageCount": pages
         })
     }
 
@@ -1360,9 +1363,8 @@ pub(super) mod tests {
             {"source": "pixiv", "key": "anthology", "title": "短編集", "contentOrder": null}
         ]);
         let snapshot = serde_json::json!({
-            "work": work, "shelfLibrary": Uuid::from_u128(2).to_string(),
-            "people": people, "series": series, "savedAtMs": 1, "savedVersion": 1,
-            "savedEditHash": null, "pageCount": 1,
+            "work": work, "readingScope": { "libraryId": Uuid::from_u128(2), "subjectId": Uuid::from_u128(3) },
+            "people": people, "series": series, "savedAtMs": 1, "pageCount": 1,
             "hasAuthorCover": true, "hasSeriesCover": true,
             "authorCoverEntity": {"source": "pixiv", "key": "co-author"},
             "seriesCoverEntity": {"source": "pixiv", "key": "anthology"}
@@ -1534,8 +1536,7 @@ pub(super) mod tests {
                     "editId": null, "favorite": false, "favoriteGeneration": "0",
                     "seriesTitle": null, "seriesId": null, "sourceCreatedAt": null,
                     "savedAt": "2026-11-19T00:00:00Z"
-                }, "shelfLibrary": Uuid::now_v7().to_string(), "savedAtMs": 1, "savedVersion": 2,
-                    "savedEditHash": null,
+                }, "readingScope": { "libraryId": Uuid::now_v7(), "subjectId": Uuid::now_v7() }, "savedAtMs": 1,
                     "pageCount": 1},
                 "pages": [{"page": 0, "sha256": digest(&page)}],
                 "assets": [{"id": 0, "mimeType": "image/png", "sha256": digest(image)}]
@@ -1560,6 +1561,9 @@ pub(super) mod tests {
         assert_eq!(listed["work"]["snapshotId"], serde_json::json!(snapshot_id));
 
         let page = read_offline_page(&state, &key, 0).unwrap();
+        assert_eq!(page.reading_scope, works[0].reading_scope);
+        assert_eq!(page.snapshot_id, works[0].work.snapshot_id);
+        assert_eq!(page.edit_id, works[0].work.edit_id);
         let asset = read_offline_asset(&state, &key, 0, &page.generation).unwrap();
         assert_eq!(STANDARD.decode(asset.base64).unwrap(), image);
 

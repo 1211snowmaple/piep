@@ -1,6 +1,6 @@
 import { contentTypeLabel } from "@shared/format";
 import { ENTITY_SORT_OPTIONS, RELEVANCE_SORT_OPTION, SERIES_ORDER_SORT_OPTIONS, WORK_SORT_OPTIONS, sortLabel, type SortChoice } from "@shared/sortOptions";
-import { defaultPcSearch, type FixedSort, type OfflineWork, type PcSearchCriteria, type PcSort, type PcWorkSort } from "./pcApi";
+import { defaultPcSearch, type FixedSort, type OfflineWork, type PcSearchCriteria, type PcSort, type PcWorkSort, joinSearchTerms } from "./pcApi";
 
 export type { FixedSort } from "./pcApi";
 export type MenuGroup<T extends string> = { label: string; items: { value: T; label: string }[] };
@@ -106,8 +106,8 @@ export function describeCondition(criteria: PcSearchCriteria): string {
   if (criteria.text) parts.push(`「${criteria.text}」`);
   if (criteria.source) parts.push(criteria.source === "fanbox" ? "FANBOX" : "pixiv");
   if (criteria.contentType) parts.push(contentTypeLabel(criteria.contentType));
-  if (criteria.author) parts.push(criteria.author);
-  if (criteria.tag) parts.push(`#${criteria.tag}`);
+  if (criteria.author.length) parts.push(joinSearchTerms(criteria.author));
+  for (const tag of criteria.tag) parts.push(`#${tag}`);
   if (criteria.favorite) parts.push("お気に入り");
   if (criteria.sort !== "remembered" && criteria.sort !== "standard") parts.push(sortLabels[criteria.sort]);
   return parts.join("・") || "保存した条件";
@@ -115,8 +115,8 @@ export function describeCondition(criteria: PcSearchCriteria): string {
 
 export function hasConditionToSave(criteria: PcSearchCriteria): boolean {
   return Object.entries(defaultPcSearch).some(([key, value]) =>
-    !(key === "tagMode" && !criteria.tag) && !(key === "dateField" && !criteria.dateFrom && !criteria.dateTo)
-    && criteria[key as keyof PcSearchCriteria] !== value);
+    !(key === "tagMode" && !criteria.tag.length) && !(key === "dateField" && !criteria.dateFrom && !criteria.dateTo)
+    && JSON.stringify(criteria[key as keyof PcSearchCriteria]) !== JSON.stringify(value));
 }
 
 // ---- 作者・シリーズの一覧の順。デスクトップ版の ENTITY_SORT_OPTIONS と同じ項目を持つ。

@@ -1,7 +1,8 @@
 name: "Android"
 
-# 携帯アプリの画面側を確かめ、鍵なしで APK まで組めることを確かめる。
+# 携帯アプリの画面側と Rust 側を確かめ、鍵なしで APK まで組めることを確かめる。
 # 署名した配布物は Release ワークフローが同じ手順（android-apk.yml）で組む。
+# 検査の中身は tools/check.ps1 の android 段にある。実行役の選び方は Quality と同じ。
 on:
   workflow_dispatch:
   pull_request:
@@ -21,23 +22,27 @@ on:
       - "crates/**"
 
 jobs:
-  frontend:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: android
+  android:
+    runs-on: ${{ (vars.CI_RUNNER == 'self' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","snow"]') || 'windows-latest' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           check-latest: true
-          cache: npm
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           cache-dependency-path: android/package-lock.json
+      # 版は android/rust-toolchain.toml が決める。既定の版は変えない。
+      - run: rustup toolchain install
+        working-directory: android
+      - if: runner.environment == 'github-hosted'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: android/src-tauri
       - run: npm ci
-      # 型検査と本番用の組み立て。
-      - run: npm run build
-      - run: npm test
+        working-directory: android
+      - run: ./tools/check.ps1 -Stage android
 
   apk:
     uses: ./.github/workflows/android-apk.yml

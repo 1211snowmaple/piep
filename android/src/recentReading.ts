@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { cachedShelf, isLocalReadingLoaded, loadLocalReading, loadShelf, shelfChangedEvent, type RecentWork, type WorkIdentity } from "./localReading";
+import { cachedShelf, isLocalReadingLoaded, loadLocalReading, loadShelf, localReadingKey, readingScope, shelfChangedEvent, type RecentWork, type WorkIdentity } from "./localReading";
 
-export { rememberReading, setReadingServer, type RecentWork } from "./localReading";
+export type { RecentWork } from "./localReading";
 
 /** 読み終えたものは棚から外す。新しく読んだ順。記録は端末の SQLite から読む。 */
 export function useReadingShelf(finished = false): RecentWork[] {
@@ -9,7 +9,12 @@ export function useReadingShelf(finished = false): RecentWork[] {
   useEffect(() => {
     let alive = true;
     let latest = 0;
+    let scope = readingScope();
     const update = () => {
+      if (scope !== readingScope()) {
+        scope = readingScope();
+        setItems(cachedShelf(finished));
+      }
       const request = ++latest;
       void loadShelf(finished).then((next) => { if (alive && request === latest) setItems(next); });
     };
@@ -27,7 +32,7 @@ export function useReadingShelf(finished = false): RecentWork[] {
 export function useLocalReadingsReady(works: (WorkIdentity | null | undefined)[]): boolean {
   const [, setLoaded] = useState(0);
   const present = works.filter((work): work is WorkIdentity => Boolean(work));
-  const key = present.map((work) => `${work.source}:${work.sourceId}`).join("|");
+  const key = present.map(localReadingKey).join("|");
   useEffect(() => {
     let alive = true;
     for (const work of present) {
