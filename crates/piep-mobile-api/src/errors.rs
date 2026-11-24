@@ -19,6 +19,8 @@ pub enum ReaderErrorCode {
     ReadingCursorExpired,
     FavoriteConflict,
     ReadingConflict,
+    LibraryChanged,
+    InvalidReadingLocation,
 }
 
 #[derive(Serialize, Deserialize)]

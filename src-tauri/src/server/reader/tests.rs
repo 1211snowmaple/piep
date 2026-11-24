@@ -1041,6 +1041,15 @@ impl Server {
         body: serde_json::Value,
         token: &str,
     ) -> reqwest::RequestBuilder {
+        self.with_write_scope(self.favorite_request(work, body, token), token)
+    }
+
+    fn favorite_request(
+        &self,
+        work: uuid::Uuid,
+        body: serde_json::Value,
+        token: &str,
+    ) -> reqwest::RequestBuilder {
         self.client
             .put(format!(
                 "{}/api/libraries/{}/works/{work}/favorite",
@@ -1048,6 +1057,53 @@ impl Server {
             ))
             .bearer_auth(token)
             .json(&body)
+    }
+}
+
+#[tokio::test]
+async fn favorite_write_from_another_scope_cannot_change_the_shelf() {
+    let server = Server::start().await;
+    let work = save(&server.library, capture("stale-favorite", None));
+    let body = json!({"requestId": uuid::Uuid::now_v7(), "expected": "0", "favorite": true});
+    let subject = server.authority.subject.get().to_string();
+    let epoch = server.context.sync_epoch.get().to_string();
+    let previous_epoch = uuid::Uuid::now_v7().to_string();
+    let other_subject = server.authority.other_subject.get().to_string();
+
+    // 同じ棚に作品があり、お気に入りの更新世代も合う要求を送る。
+    for (name, subjects, epochs) in [
+        ("古い同期世代", vec![&subject], vec![&previous_epoch]),
+        ("別の利用者", vec![&other_subject], vec![&epoch]),
+        ("同期世代なし", vec![&subject], vec![]),
+        ("利用者なし", vec![], vec![&epoch]),
+        ("同期世代の重複", vec![&subject], vec![&epoch, &epoch]),
+        ("利用者の重複", vec![&subject, &subject], vec![&epoch]),
+    ] {
+        let mut request = server.favorite_request(work.entity_id, body.clone(), "fixture");
+        for value in subjects {
+            request = request.header("x-piep-subject-id", value.as_str());
+        }
+        for value in epochs {
+            request = request.header("x-piep-sync-epoch", value.as_str());
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.headers()["x-piep-sync-epoch"], epoch.as_str());
+        let status = response.status();
+        let payload: serde_json::Value = response.json().await.unwrap();
+        let state = server
+            .library
+            .user_state(work.entity_id, server.authority.subject.get())
+            .unwrap();
+        assert_eq!(
+            (status, payload, state.favorite, state.generation),
+            (
+                StatusCode::CONFLICT,
+                json!({"code": "library_changed"}),
+                false,
+                0
+            ),
+            "{name}"
+        );
     }
 }
 
@@ -1774,6 +1830,33 @@ impl Server {
         body: serde_json::Value,
         token: &str,
     ) -> reqwest::RequestBuilder {
+        self.with_write_scope(self.reading_request(work, body, token), token)
+    }
+
+    fn with_write_scope(
+        &self,
+        request: reqwest::RequestBuilder,
+        token: &str,
+    ) -> reqwest::RequestBuilder {
+        let subject = if token == "second" {
+            self.authority.other_subject
+        } else {
+            self.authority.subject
+        };
+        request
+            .header("x-piep-subject-id", subject.get().to_string())
+            .header(
+                "x-piep-sync-epoch",
+                self.context.sync_epoch.get().to_string(),
+            )
+    }
+
+    fn reading_request(
+        &self,
+        work: uuid::Uuid,
+        body: serde_json::Value,
+        token: &str,
+    ) -> reqwest::RequestBuilder {
         self.client
             .put(format!(
                 "{}/api/libraries/{}/works/{work}/reading",
@@ -1803,6 +1886,42 @@ impl Server {
             .json()
             .await
             .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn reading_write_from_another_scope_cannot_change_the_shelf() {
+    let server = Server::start().await;
+    let work = save(&server.library, capture("stale-reading", None));
+    let body = json!({
+        "requestId": uuid::Uuid::now_v7(), "expected": "0", "finished": false,
+        "location": {"viewKind": "snapshot", "viewId": work.snapshot_id, "page": 0, "ratioPpm": 0}
+    });
+    let wrong = uuid::Uuid::now_v7();
+    for (subject, epoch) in [
+        (server.library.id, wrong),
+        (wrong, server.context.sync_epoch.get()),
+    ] {
+        let response = server
+            .reading_request(work.entity_id, body.clone(), "fixture")
+            .header("x-piep-subject-id", subject.to_string())
+            .header("x-piep-sync-epoch", epoch.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["code"],
+            "library_changed"
+        );
+        assert_eq!(
+            server
+                .library
+                .reading_position(work.entity_id, server.library.id)
+                .unwrap()
+                .generation,
+            0
+        );
     }
 }
 
@@ -1874,6 +1993,22 @@ async fn reading_positions_are_written_once_refuse_stale_generations_and_come_ba
     assert_eq!(conflict["code"], "reading_conflict");
     assert_eq!(conflict["current"]["generation"], "1");
     assert_eq!(conflict["current"]["location"]["page"], 1);
+
+    // 写しに残っていない版は、更新世代が違っていても位置の拒否として返す。
+    let missing_view = server
+        .reading_as(
+            north.entity_id,
+            json!({"requestId": uuid::Uuid::now_v7(), "expected": "0", "location": at(uuid::Uuid::now_v7(), 0, 0), "finished": false}),
+            "fixture",
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_view.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        missing_view.json::<serde_json::Value>().await.unwrap()["code"],
+        "invalid_reading_location"
+    );
 
     // 本文に無いページ・別の作品の版・形の崩れ・知らない作品・権限の無い端末は断る。
     let fresh = || uuid::Uuid::now_v7().to_string();

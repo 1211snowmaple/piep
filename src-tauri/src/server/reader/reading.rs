@@ -11,7 +11,10 @@
 //! 単独サーバーの棚は配る写しなので、携帯が書いた位置はデスクトップ版が管理の口から同じ一覧で
 //! 読み、自分の棚へ取り込む（`owner_reading`）。
 
-use super::{internal, invalid, not_found, read_permit, ApiError, Context, ErrorCode, Principal};
+use super::{
+    check_write_scope, internal, invalid, not_found, read_permit, ApiError, Context, ErrorCode,
+    Principal,
+};
 use crate::library::protocol::Id;
 use crate::library::{
     server_device, Library, LibraryId, ReadingAnchor, ReadingLocation, ReadingPosition,
@@ -19,7 +22,7 @@ use crate::library::{
 };
 use axum::{
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
@@ -386,6 +389,7 @@ pub(super) async fn put(
     State(ctx): State<Arc<Context>>,
     Extension(principal): Extension<Principal>,
     path: Result<Path<WorkPath>, axum::extract::rejection::PathRejection>,
+    headers: HeaderMap,
     body: Result<Json<ReadingBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Path(location) = path.map_err(|_| invalid())?;
@@ -393,6 +397,7 @@ pub(super) async fn put(
     if location.library != ctx.library_id {
         return Err(not_found());
     }
+    check_write_scope(&headers, &principal, &ctx)?;
     let request = uuid::Uuid::parse_str(&update.request_id)
         .ok()
         .filter(|request| !request.is_nil())
@@ -446,7 +451,7 @@ pub(super) async fn put(
             finished: update.finished,
         }) {
             Ok(position) => Ok(Json(reading_item(work, &position, device)).into_response()),
-            // 世代の食い違いか、本文に無い位置（別の作品の版・範囲の外）。
+            // 世代の食い違いでは、現在の位置を返す。
             Err(crate::library::Error::Integrity(_)) => {
                 let current = library
                     .reading_position(work, subject)
@@ -461,10 +466,11 @@ pub(super) async fn put(
                 Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, ErrorCode::Busy))
             }
             // その作品のものでない版・編集（引いても見つからない）。
-            Err(crate::library::Error::ResourceUnavailable)
-            | Err(crate::library::Error::Sql(rusqlite::Error::QueryReturnedNoRows)) => {
-                Err(invalid())
-            }
+            Err(crate::library::Error::InvalidReadingLocation)
+            | Err(crate::library::Error::ResourceUnavailable)
+            | Err(crate::library::Error::Sql(rusqlite::Error::QueryReturnedNoRows)) => Err(
+                ApiError(StatusCode::BAD_REQUEST, ErrorCode::InvalidReadingLocation),
+            ),
             Err(error) => {
                 log::error!("棚の読書位置を書けません: {error}");
                 Err(internal())

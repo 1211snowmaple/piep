@@ -12,17 +12,47 @@ beforeEach(() => {
 });
 
 /** 同期は棚と受け渡すので、棚に届いている接続にしてから読み込む。 */
-async function loadSync() {
+async function adoptEpoch(epoch = "0190a000-0000-7000-8000-000000000005") {
   const shelf = await import("./shelf");
   shelf.adoptShelf({
     url: "https://server", reachable: true,
     shelf: {
-      scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
+      scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: epoch, connectionGeneration: 1 },
       readerBundle: true,
     },
   } as never);
+}
+
+async function loadSync() {
+  await adoptEpoch();
   return import("./readingSync");
 }
+
+it("前の同期世代の実行中に新しい世代を確認したら、その世代でも同期する", async () => {
+  let finish!: () => void;
+  api.invoke.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+  api.invoke.mockResolvedValue(undefined);
+  const { refreshReading } = await loadSync();
+  const first = refreshReading();
+  const epoch = "0190a000-0000-7000-8000-000000000007";
+  await adoptEpoch(epoch);
+  const next = refreshReading();
+  finish();
+  await Promise.all([first, next]);
+  expect(api.invoke).toHaveBeenCalledTimes(2);
+  expect(api.invoke).toHaveBeenLastCalledWith("pc_reading_sync", { scope: expect.objectContaining({ syncEpoch: epoch }) });
+});
+
+it("同期世代が変わったら、直前に同期が終わっていても取り直す", async () => {
+  api.invoke.mockResolvedValue(undefined);
+  const { refreshReading } = await loadSync();
+  await refreshReading();
+  await refreshReading();
+  expect(api.invoke).toHaveBeenCalledTimes(1);
+  await adoptEpoch("0190a000-0000-7000-8000-000000000007");
+  await refreshReading();
+  expect(api.invoke).toHaveBeenCalledTimes(2);
+});
 
 it("同期中に届いた送信要求をまとめ、同期は常に一つだけ動かす", async () => {
   const finish: (() => void)[] = [];

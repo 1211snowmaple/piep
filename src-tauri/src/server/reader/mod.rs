@@ -13,7 +13,7 @@ use crate::library::{
 use axum::{
     body::Body,
     extract::{Path, Query, Request, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -163,6 +163,30 @@ fn not_found() -> ApiError {
 fn internal() -> ApiError {
     ApiError(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::StorageError)
 }
+
+fn scope_header_is(headers: &HeaderMap, name: &str, id: Id) -> bool {
+    let values = headers.get_all(name);
+    let mut values = values.iter();
+    values
+        .next()
+        .is_some_and(|value| value == id.get().to_string().as_str())
+        && values.next().is_none()
+}
+
+/// 書き込み先を、端末が開いていた棚の利用者と同期世代に限る。
+fn check_write_scope(
+    headers: &HeaderMap,
+    principal: &Principal,
+    ctx: &Context,
+) -> Result<(), ApiError> {
+    if !scope_header_is(headers, "x-piep-subject-id", principal.subject)
+        || !scope_header_is(headers, "x-piep-sync-epoch", ctx.sync_epoch)
+    {
+        return Err(ApiError(StatusCode::CONFLICT, ErrorCode::LibraryChanged));
+    }
+    Ok(())
+}
+
 fn library_error(error: crate::library::Error) -> ApiError {
     match error {
         crate::library::Error::ResourceUnavailable => not_found(),
