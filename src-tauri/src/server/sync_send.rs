@@ -273,6 +273,7 @@ pub async fn admin_post(
 }
 
 /// 本文の要らない応答（204）を返す口へ JSON を置く。
+#[cfg(test)]
 pub async fn admin_put(
     remote: &RemoteServer,
     token: &str,

@@ -1,6 +1,6 @@
 //! サーバーモードのコマンド。実体は `crate::server::desktop` にある。
 
-use crate::server::desktop::{DesktopServer, DesktopServerStatus, PairingDetails};
+use crate::server::desktop::{DesktopServer, DesktopServerStatus};
 use crate::AppState;
 use std::sync::Arc;
 use tauri::Manager;
@@ -21,50 +21,10 @@ pub async fn server_status(app: tauri::AppHandle) -> Result<DesktopServerStatus,
     Ok(controller(&app)?.status().await)
 }
 
-/// 携帯の登録文字列を、つないでいる単独サーバーで発行する。
-#[tauri::command]
-pub async fn server_create_reader_pairing(app: tauri::AppHandle) -> Result<PairingDetails, String> {
-    controller(&app)?.create_reader_pairing().await
-}
-
-/// 単独サーバーの携帯に、棚を読む許可を付け外しする。
-#[tauri::command]
-pub async fn server_set_remote_shelf_reader(
-    app: tauri::AppHandle,
-    device_id: String,
-    read: bool,
-) -> Result<(), String> {
-    controller(&app)?
-        .set_remote_shelf_reader(&device_id, read)
-        .await
-}
-
-/// 単独サーバーに登録されている端末の一覧を返す。
-#[tauri::command]
-pub async fn server_list_remote_devices(
-    app: tauri::AppHandle,
-) -> Result<Vec<serde_json::Value>, String> {
-    controller(&app)?.list_remote_devices().await
-}
-
-/// 単独サーバーの版・作品数・索引の進み具合を返す。
+/// 単独サーバーの版・配信状況・管理画面の状態を返す。
 #[tauri::command]
 pub async fn server_remote_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     controller(&app)?.remote_status().await
-}
-
-/// 単独サーバーに、新しい版を確かめて当てるよう頼む。
-#[tauri::command]
-pub async fn server_update_remote(app: tauri::AppHandle) -> Result<(), String> {
-    controller(&app)?.update_remote().await
-}
-
-/// 単独サーバーに、新しいバージョンがあるかを確かめてもらう。
-#[tauri::command]
-pub async fn server_check_remote_update(
-    app: tauri::AppHandle,
-) -> Result<serde_json::Value, String> {
-    controller(&app)?.check_remote_update().await
 }
 
 /// 管理画面へ入る、一度きりのリンクを返す。

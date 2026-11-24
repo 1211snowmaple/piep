@@ -84,7 +84,7 @@ export function PcConnectionSettings({ status, onStatusChange }: { status: PcCon
       if (!content) return;
       // piep の登録用 QR の形でなければ、入力欄にも入れず、接続もしない。
       if (!isPairingPayload(content)) {
-        setProblem("piep の接続用 QR ではありません。デスクトップ版の「携帯を追加」に出る QR を読んでください");
+        setProblem("サーバーの管理画面で「端末 → 携帯を追加 → 登録に進む」と進み、登録用の QR を読んでください");
         return;
       }
       setPairingText(content);
@@ -102,7 +102,7 @@ export function PcConnectionSettings({ status, onStatusChange }: { status: PcCon
   };
 
   const registrationForm = <div className="connection-registration">
-    <p>デスクトップ版 piep の「設定 → サーバー」の「携帯を追加」で「次へ」を押し、表示された QR を読むと、そのまま接続します。登録文字列を貼り付けたときは「サーバーと接続」を押します。</p>
+    <p>サーバーの管理画面で「端末 → 携帯を追加 → 登録に進む」と進み、表示された登録用の QR を読みます。登録文字列を貼り付けたときは「サーバーと接続」を押します。</p>
     <label>端末の名前<input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} maxLength={64} /></label>
     {isTauri() && <button type="button" className="secondary-button" disabled={busy} onClick={() => void scanPairing()}>QR を読む</button>}
     <label>登録文字列<textarea value={pairingText} onChange={(event) => setPairingText(event.target.value)} rows={4} placeholder='{"version":2,"url":"https://..."}' /></label>
@@ -111,7 +111,7 @@ export function PcConnectionSettings({ status, onStatusChange }: { status: PcCon
 
   return <section className="settings-card connection-settings">
     {scanning && createPortal(<div className="qr-scanner" role="dialog" aria-label="QR を読む">
-      <p>デスクトップ版に出ている QR を写してください</p>
+      <p>サーバーの管理画面に出ている登録用の QR を写してください</p>
       <div className="qr-scanner-frame" aria-hidden="true" />
       <button type="button" className="primary-button" onClick={() => scannerControls.stop?.()}>やめる</button>
     </div>, document.body)}

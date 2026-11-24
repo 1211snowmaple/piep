@@ -69,6 +69,8 @@ export interface Device {
   role: "reader" | "admin";
   createdAt: string;
   lastSeenAt: string | null;
+  /** 配信中のライブラリを、この携帯で読めるか。 */
+  readsShelf?: boolean;
 }
 
 /** 棚の受け取りの進み具合。 */
@@ -196,6 +198,7 @@ export const adminApi = {
   sessions: () => get<{ sessions: AdminSession[]; currentId: string | null }>("/api/admin/sessions"),
   endSession: (id: string) => request<void>("DELETE", `/api/admin/sessions/${encodeURIComponent(id)}`),
   revokeDevice: (id: string) => request<void>("DELETE", `/api/admin/devices/${encodeURIComponent(id)}`),
+  setReaderAccess: (id: string, read: boolean) => put<void>(`/api/admin/devices/${encodeURIComponent(id)}/shelf`, { read }),
   addReader: (url: string) => post<Pairing>("/api/admin/pairings", { url }),
   replaceAdmin: (url: string) => post<Pairing>("/api/admin/pairings", { url, role: "admin" }),
   storage: () => get<Storage>("/api/admin/storage"),
