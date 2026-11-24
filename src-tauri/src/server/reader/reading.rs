@@ -11,7 +11,9 @@
 //! 単独サーバーの棚は配る写しなので、携帯が書いた位置はデスクトップ版が管理の口から同じ一覧で
 //! 読み、自分の棚へ取り込む（`owner_reading`）。
 
-use super::{internal, invalid, not_found, read_permit, ApiError, Context, Principal};
+use super::{
+    check_write_scope, internal, invalid, not_found, read_permit, ApiError, Context, Principal,
+};
 use crate::library::protocol::Id;
 use crate::library::{
     server_device, Library, LibraryId, ReadingAnchor, ReadingLocation, ReadingPosition,
@@ -375,15 +377,6 @@ fn conflict(current: MobileReading) -> Response {
     response
 }
 
-fn scope_header_is(headers: &HeaderMap, name: &str, id: Id) -> bool {
-    let values = headers.get_all(name);
-    let mut values = values.iter();
-    values
-        .next()
-        .is_some_and(|value| value == id.get().to_string().as_str())
-        && values.next().is_none()
-}
-
 /// 読書位置を書く。読む画面のページ（0 から）とその中の割合を、読んでいる版の写しか編集に結ぶ。
 pub(super) async fn put(
     State(ctx): State<Arc<Context>>,
@@ -397,11 +390,7 @@ pub(super) async fn put(
     if location.library != ctx.library_id {
         return Err(not_found());
     }
-    if !scope_header_is(&headers, "x-piep-subject-id", principal.subject)
-        || !scope_header_is(&headers, "x-piep-sync-epoch", ctx.sync_epoch)
-    {
-        return Err(ApiError(StatusCode::CONFLICT, "library_changed"));
-    }
+    check_write_scope(&headers, &principal, &ctx)?;
     let request = uuid::Uuid::parse_str(&update.request_id)
         .ok()
         .filter(|request| !request.is_nil())
