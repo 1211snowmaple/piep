@@ -151,10 +151,10 @@ fn incomplete_saves_are_tried_once_per_snapshot() {
     library.verify().unwrap();
 }
 
-/// 補完のジョブが先に新しい版を保存してから印を付けても、印は試した版にだけ付き、新しい版は
-/// 次の候補に残る。
+/// 補完のジョブが先に新しい版を保存してから印を付けても、もう今の版でない試した版には印を
+/// 残さず、新しい版は次の候補に残る。
 #[test]
-fn the_attempt_mark_stays_on_the_version_that_was_tried() {
+fn a_mark_for_a_version_that_is_no_longer_current_is_not_kept() {
     let (_temp, library) = fixture();
     save(&library, "1", "本文");
     discover(&library, "1", "revision", Some("incomplete"));
@@ -168,7 +168,72 @@ fn the_attempt_mark_stays_on_the_version_that_was_tried() {
         library
             .record_incomplete_save_attempts(&[("1".to_owned(), tried)], 10)
             .unwrap(),
+        0
+    );
+    assert_eq!(marks(&library), 0);
+    assert_eq!(keys(library.incomplete_save_repairs(50).unwrap()), ["1"]);
+}
+
+fn marks(library: &Library) -> i64 {
+    library
+        .reader()
+        .unwrap()
+        .query_row("SELECT count(*) FROM incomplete_save_attempts", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+}
+
+/// 試した版の後に新しい版を保存したら、前の版の印は保存と一緒に消える。
+#[test]
+fn saving_a_new_version_drops_the_mark_of_the_previous_one() {
+    let (_temp, library) = fixture();
+    save(&library, "1", "本文");
+    discover(&library, "1", "revision", Some("incomplete"));
+    let tried = library.incomplete_save_repairs(50).unwrap()[0].2;
+    library
+        .record_incomplete_save_attempts(&[("1".to_owned(), tried)], 10)
+        .unwrap();
+    assert_eq!(marks(&library), 1);
+    // 同じ内容の保存では版は変わらず、印も残る。
+    save(&library, "1", "本文");
+    assert_eq!(marks(&library), 1);
+    save(&library, "1", "挿絵まで取れた本文");
+    assert_eq!(marks(&library), 0);
+    library.verify().unwrap();
+}
+
+/// 前の仕組みで残った、今の版を指さない印は、次に印を付けるときに消える。
+#[test]
+fn recording_attempts_sweeps_marks_left_on_old_versions() {
+    let (_temp, library) = fixture();
+    save(&library, "1", "本文");
+    save(&library, "2", "本文");
+    let first = save(&library, "1", "本文").snapshot_id;
+    save(&library, "1", "新しい本文");
+    // 古い仕組みが残した印を直に書く。
+    library
+        .conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO incomplete_save_attempts(work_id,snapshot_id,attempted_at)
+             SELECT entity_id,id,1 FROM revision_snapshots WHERE id=?1",
+            [first.as_bytes().as_slice()],
+        )
+        .unwrap();
+    assert_eq!(marks(&library), 1);
+    discover(&library, "2", "revision", Some("incomplete"));
+    let tried = library.incomplete_save_repairs(50).unwrap()[0].2;
+    assert_eq!(
+        library
+            .record_incomplete_save_attempts(&[("2".to_owned(), tried)], 10)
+            .unwrap(),
         1
     );
-    assert_eq!(keys(library.incomplete_save_repairs(50).unwrap()), ["1"]);
+    assert_eq!(marks(&library), 1);
+    assert_eq!(
+        keys(library.incomplete_save_repairs(50).unwrap()),
+        Vec::<String>::new()
+    );
 }
