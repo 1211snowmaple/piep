@@ -31,10 +31,10 @@ export const pcConnectionIssueText: Record<NonNullable<PcConnectionStatus["issue
   certificate_untrusted: "サーバーの証明書を確認できません。URL が正しいか確かめてください。",
   secret_lost: "この端末に保存した登録を読めません。登録し直してください。",
   protocol_mismatch: "サーバーとの接続形式が合いません。アプリとサーバーを、どちらも新しい版にしてください。",
-  revoked: "端末の登録が解除されました。デスクトップ版の「携帯を追加」で登録文字列を出し直して再登録してください。",
+  revoked: "端末の登録が解除されました。サーバーの管理画面の「端末 → 携帯を追加」から再登録してください。",
   not_ready: "サーバーは本棚の準備中です。しばらくしてからもう一度試してください。",
   remote_error: "サーバーは応答していますが、作品を読み込めません。サーバーの状態を確認してください。",
-  no_library: "この端末ではライブラリを開けません。デスクトップ版の「設定 → サーバー」で、未送信なら「今すぐ送る」を押し、送信済みなら「ライブラリを読める携帯」でこの端末をオンにしてください。",
+  no_library: "サーバーの管理画面の「端末」で、この携帯のライブラリ閲覧を許可してください。まだ配信されていない場合は、デスクトップ版の「設定 → サーバー」から送信してください。",
 };
 
 export function pcConnectionIssue(status: PcConnectionStatus): string | null {

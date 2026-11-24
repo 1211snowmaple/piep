@@ -1,32 +1,24 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { ActionIcon, Alert, Anchor, Button, Code, Group, Loader, Menu, Modal, Progress, Stack, Switch, Text, Textarea, Tooltip } from "@mantine/core";
+import { ActionIcon, Alert, Anchor, Button, Code, Group, Menu, Progress, Stack, Switch, Text, Textarea, Tooltip } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { QRCodeSVG } from "qrcode.react";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import { errorMessage, formatNumber } from "@/lib/format";
-import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
+import { Icons, IconSize } from "@/lib/icons";
 import { isNewer, relativeTime, windowLabel } from "@/lib/serverFormat";
 import { APP_VERSION } from "@/lib/version";
 import { openExternalUrl } from "@/services/openerApi";
 import {
   serverAdminLink,
-  serverCheckRemoteUpdate,
   serverConnectRemote,
-  serverCreateReaderPairing,
   serverDisconnectRemote,
-  serverRemoteDevices,
   serverRemoteStatus,
-  serverSetRemoteShelfReader,
   serverSendNow,
   serverSendStop,
   serverSetAutoSend,
   serverStatus,
-  serverUpdateRemote,
   type DesktopServerStatus,
   type RemoteServerStatus,
-  type ServerDevice,
-  type ServerPairing,
 } from "@/services/serverApi";
 import "@/styles/server.css";
 import { SectionIntro } from "./SectionIntro";
@@ -97,10 +89,10 @@ export function ServerSection({ runtime }: { runtime: boolean }) {
       <SectionIntro
         beta
         title="サーバー"
-        description="外出先の携帯から、ライブラリを検索して読めるようにします。"
+        description="この PC のライブラリをサーバーに送ります。"
       />
       <div className="sv-stack" style={{ marginTop: 16 }}>
-        {!runtime && <Alert color="blue">サーバーの操作はデスクトップアプリで利用できます。</Alert>}
+        {!runtime && <Alert color="blue">サーバーへの接続と送信はデスクトップアプリで利用できます。</Alert>}
         {problem && <Alert color="red" title="操作できませんでした" withCloseButton onClose={() => setProblem(null)}>{problem}</Alert>}
         {status.error && <Alert color="red" title="サーバーの状態を確認できません">{errorMessage(status.error)}</Alert>}
         {runtime && cardProps && (cardProps.status.remote
@@ -146,18 +138,6 @@ function CopyValue({ value, label, children }: { value: string; label: string; c
   );
 }
 
-function Tile({ icon: Icon, title, description, next, disabled, busy, onClick }: { icon: LucideIcon; title: string; description: string; next?: boolean; disabled?: boolean; busy?: boolean; onClick: () => void }) {
-  return (
-    <button type="button" className="sv-card sv-tile" data-next={next || undefined} disabled={disabled} onClick={onClick}>
-      <span className="sv-icon">{busy ? <Loader size={16} color="currentColor" /> : <Icon size={18} strokeWidth={1.9} aria-hidden />}</span>
-      <span className="sv-tile-body">
-        <span className="sv-title">{title}</span>
-        <span className="sv-desc">{description}</span>
-      </span>
-    </button>
-  );
-}
-
 function hostOf(url: string | undefined): string {
   if (!url) return "サーバー";
   try {
@@ -198,14 +178,14 @@ export function remoteView({ name, details, offline, registrationLost, sending, 
     };
   }
   if (!details) return { tone: "busy", headline: `${name} を確認しています`, summary: null };
-  if (sending) return { tone: "busy", headline: `${name} へ送信しています`, summary: "完了すると、携帯に反映されます。" };
+  if (sending) return { tone: "busy", headline: `${name} へ送信しています`, summary: null };
   if (update && hasNewVersion(details)) {
     return {
       tone: "ok",
       headline: "新しいバージョンがあります",
       summary: update.auto
         ? update.window ? `次の ${windowLabel(update.window)} に自動で更新します。` : "夜間に自動で更新します。"
-        : "自動更新は切っています。押すと更新します。",
+        : "管理画面の「更新」から更新できます。",
     };
   }
   return { tone: "ok", headline: `${name} に接続しています`, summary: null };
@@ -217,15 +197,6 @@ function hasNewVersion(details: RemoteServerStatus): boolean {
   return isNewer(update.latest, details.version) && !(update.skipped ?? []).includes(update.latest);
 }
 
-/** 次にすることを 1 つだけ示す。同時に 2 つは光らせない。 */
-export function nextAction(details: RemoteServerStatus | undefined, phones: number): "send" | "phone" | "update" | null {
-  if (!details) return null;
-  if (details.shelf === null) return "send";
-  if (phones === 0) return "phone";
-  if (hasNewVersion(details)) return "update";
-  return null;
-}
-
 function versionFact(details: RemoteServerStatus | undefined, offline: boolean): string {
   if (!details) return offline ? "読めませんでした" : "確認しています";
   const update = details.update;
@@ -233,12 +204,6 @@ function versionFact(details: RemoteServerStatus | undefined, offline: boolean):
   if (hasNewVersion(details)) return `${details.version}（${update.latest} があります）`;
   if (update.latest && update.lastCheckedAt) return `${details.version}・最新・${relativeTime(update.lastCheckedAt)}に確認`;
   return `${details.version}・まだ確認していません`;
-}
-
-function phonesFact(phones: ServerDevice[]): string {
-  if (phones.length === 0) return "まだありません";
-  const latest = phones.map((phone) => phone.lastSeenAt).filter((seen): seen is string => Boolean(seen)).sort().pop();
-  return `${phones.length} 台・${latest ? `最後の接続 ${relativeTime(latest)}` : "まだ接続していません"}`;
 }
 
 function Reconnect({ pending, active, perform }: Pick<CardProps, "pending" | "active" | "perform">) {
@@ -257,19 +222,11 @@ function Reconnect({ pending, active, perform }: Pick<CardProps, "pending" | "ac
 function ConnectedRemote(props: CardProps) {
   const { status, pending, active, perform } = props;
   const remote = status.remote;
-  const [adding, setAdding] = useState(false);
   const details = useQuery({
     queryKey: [REMOTE_STATUS_KEY, remote?.url],
     queryFn: serverRemoteStatus,
     enabled: Boolean(remote),
     refetchInterval: (query) => (query.state.data?.update?.phase.state === "applying" ? 2_000 : 15_000),
-    retry: false,
-  });
-  const remoteDevices = useQuery({
-    queryKey: ["server-remote-devices", remote?.url],
-    queryFn: serverRemoteDevices,
-    enabled: adding,
-    refetchInterval: 3_000,
     retry: false,
   });
   const { refetch: refetchDetails } = details;
@@ -286,12 +243,7 @@ function ConnectedRemote(props: CardProps) {
   const send = status.send;
   const last = status.lastSend;
   const view = remoteView({ name, details: data, offline, registrationLost, sending: send.running, checkedAt: details.dataUpdatedAt });
-  const phones = (data?.devices ?? []).filter((device) => device.role === "reader");
-  // 棚を配っているサーバーだけ、携帯ごとに棚を読む許可を付け外しできる。
-  const shelfPhones = phones.filter((phone) => phone.readsShelf !== undefined);
-  const next = offline ? null : nextAction(data, phones.length);
   const update = data?.update;
-  const fresh = data ? hasNewVersion(data) : false;
   const applying = update?.phase.state === "applying";
   const fraction = send.bytesTotal > 0 ? Math.min(100, Math.floor((send.bytesDone / send.bytesTotal) * 100)) : 0;
   const sendTitle = send.phase === "upload" ? `送っています ${fraction}%` : send.message ?? SEND_PHASE[send.phase] ?? "送っています";
@@ -302,23 +254,17 @@ function ConnectedRemote(props: CardProps) {
     connectionError && !registrationLost && !connectionError.includes("接続できません") ? connectionError : null,
     lastError,
     data?.shelfPending && !send.running ? "送ったライブラリは、サーバーを再起動すると読めるようになります。" : null,
-    update?.lastError ? `更新できませんでした: ${update.lastError}` : null,
   ].filter((note): note is string => Boolean(note));
 
-  const checkOrUpdate = () => {
-    if (fresh) return void perform(serverUpdateRemote, "update");
-    // 管理画面のないサーバーには確認だけの口がない。頼めば確かめて当ててくれる。
-    return void perform(data?.adminWeb ? async () => { await serverCheckRemoteUpdate(); } : serverUpdateRemote, "update");
-  };
+  const adminAvailable = data?.adminWeb === "available";
   const openAdmin = () => {
-    if (data?.adminWeb !== "available") return void openExternalUrl(`${SERVER_GUIDE_URL}#管理画面`);
     return void perform(async () => { await openExternalUrl(await serverAdminLink()); }, "admin");
   };
   const confirmDisconnect = () => modals.openConfirmModal({
     title: `この PC と ${name} の接続を解除しますか？`,
     children: (
       <Stack gap="xs">
-        <Text size="sm">消えるのは、この PC に保存した鍵だけです。自動で送る設定も切ります。サーバーのライブラリと携帯の登録はそのまま残ります。</Text>
+        <Text size="sm">この PC に保存した接続情報を消し、自動送信を停止します。</Text>
         <Text size="sm">接続し直すときは、管理画面の「端末」にある「別の PC へ入れ替える」を使います。管理画面を使えないときは、サーバーで <Code>piep-server admin-pair --replace</Code> を実行します。</Text>
       </Stack>
     ),
@@ -329,7 +275,7 @@ function ConnectedRemote(props: CardProps) {
 
   return (
     <>
-      <section className="sv-card sv-status" aria-label="サーバーの状況">
+      <section className="sv-card sv-status" aria-label="接続先のサーバー">
         <div className="sv-top">
           <div>
             <Group gap={10} wrap="nowrap">
@@ -338,43 +284,27 @@ function ConnectedRemote(props: CardProps) {
             </Group>
             {view.summary && <Text size="sm" c="dimmed" mt={6}>{view.summary}</Text>}
           </div>
-          {offline && !registrationLost && !applying && (
-            <Button size="xs" variant="default" style={{ flex: "none" }} loading={details.isFetching} onClick={() => void details.refetch()}>もう一度確認</Button>
-          )}
+          <Group gap={8} wrap="nowrap">
+            {offline && !registrationLost && !applying && (
+              <Button size="xs" variant="default" loading={details.isFetching} onClick={() => void details.refetch()}>もう一度確認</Button>
+            )}
+            <Menu position="bottom-end" width={240}>
+              <Menu.Target><ActionIcon size={30} variant="default" aria-label="接続の操作"><Icons.more size={IconSize.menu} /></ActionIcon></Menu.Target>
+              <Menu.Dropdown>
+                <Menu.Item color="red" disabled={pending} onClick={confirmDisconnect}>この PC との接続を解除</Menu.Item>
+              </Menu.Dropdown>
+            </Menu>
+          </Group>
         </div>
         {registrationLost && <Reconnect pending={pending} active={active} perform={perform} />}
         <div className="sv-facts">
           <Fact label="サーバー">{name}</Fact>
           <Fact label="URL"><CopyValue value={remote?.url ?? ""} label="URL をコピー">{remote?.url}</CopyValue></Fact>
           <Fact label="バージョン">{versionFact(data, offline)}</Fact>
-          <Fact label="ライブラリ">
-            {!data ? (offline ? "読めませんでした" : "確認しています") : data.shelf === null ? "まだ送っていません" : `${formatNumber(Number(data.shelf.works))} 作品`}
-          </Fact>
-          <Fact label="前回の送信">{last.finishedAt ? `${relativeTime(last.finishedAt)}${last.error ? "・送れませんでした" : ""}` : "なし"}</Fact>
-          <Fact label="携帯">{data ? phonesFact(phones) : offline ? "読めませんでした" : "確認しています"}</Fact>
-          <Fact label="自動">
-            ライブラリを送る {status.autoSend ? "入" : "切"}
-            {update ? `・更新 ${update.auto ? update.window ? windowLabel(update.window) : "入" : "切"}` : ""}
+          <Fact label="配信中のライブラリ">
+            {!data ? (offline ? "確認できませんでした" : "確認しています") : data.shelf === null ? "未配信" : `${formatNumber(Number(data.shelf.works))} 作品`}
           </Fact>
         </div>
-        {shelfPhones.length > 0 && (
-          <Stack gap={6} mt="md" role="group" aria-label="ライブラリを読める携帯">
-            <Text size="sm" fw={650}>ライブラリを読める携帯</Text>
-            {shelfPhones.map((phone) => (
-              <Switch
-                key={phone.id}
-                size="sm"
-                label={phone.name}
-                checked={phone.readsShelf === true}
-                disabled={pending || offline}
-                onChange={(event) => {
-                  const read = event.currentTarget.checked;
-                  void perform(async () => { await serverSetRemoteShelfReader(phone.id, read); await refetchDetails(); });
-                }}
-              />
-            ))}
-          </Stack>
-        )}
         {notes.length > 0 && (
           <Stack gap={4} mt="md">
             {notes.map((note) => <Text key={note} size="sm" style={{ overflowWrap: "anywhere" }}>{note}</Text>)}
@@ -382,57 +312,46 @@ function ConnectedRemote(props: CardProps) {
         )}
       </section>
 
-      <div className="sv-tiles">
-        {send.running ? (
-          <div className="sv-card sv-tile">
-            <span className="sv-icon"><Icons.send size={IconSize.nav} strokeWidth={1.9} aria-hidden /></span>
-            <span className="sv-tile-body">
-              <span className="sv-title">{sendTitle}</span>
-              <span className="sv-tile-progress">
-                <Progress size="sm" value={send.phase === "upload" ? fraction : 0} style={{ flex: 1 }} aria-label="送信の進み具合" />
-                <Tooltip label="送り終えた分はサーバーに残り、次回はその続きから送ります">
-                  <DangerButton size="compact-xs" onClick={() => void perform(serverSendStop)}>中止</DangerButton>
-                </Tooltip>
-              </span>
-            </span>
+      <section className="sv-card sv-status" aria-labelledby="server-send-title">
+        <div className="sv-action">
+          <div>
+            <Text id="server-send-title" component="h3" fw={650}>ライブラリの送信</Text>
+            <Text size="sm" c="dimmed" role={send.running ? "status" : undefined}>
+              {send.running ? sendTitle : last.finishedAt ? `前回の送信 ${relativeTime(last.finishedAt)}${last.error ? "・送れませんでした" : ""}` : "送信すると、サーバーで配信できるようになります。"}
+            </Text>
           </div>
-        ) : (
-          <Tile icon={Icons.send} title="今すぐ送る" description="変更をサーバーへ送ります" next={next === "send"} disabled={pending || offline} busy={active === "send"} onClick={() => void perform(serverSendNow, "send")} />
-        )}
-        <Tile
-          icon={Icons.updates}
-          title={applying ? "更新しています" : fresh ? `${update?.latest} に更新` : "更新を確認"}
-          description={applying || fresh ? "数十秒ほど止まります" : update === null ? "このサーバーは自分では更新しません" : "最新かどうかを確かめます"}
-          next={next === "update"}
-          disabled={pending || offline || applying || update === null}
-          busy={active === "update" || applying}
-          onClick={checkOrUpdate}
-        />
-        <Tile icon={Icons.phone} title="携帯を追加" description="QR を読むと登録できます" next={next === "phone"} disabled={pending || offline} onClick={() => setAdding(true)} />
-      </div>
-
-      <div className="sv-card sv-bar">
+          {send.running ? (
+            <Tooltip label="送り終えた分はサーバーに残り、次回はその続きから送ります">
+              <DangerButton size="sm" disabled={pending} onClick={() => void perform(serverSendStop)}>中止</DangerButton>
+            </Tooltip>
+          ) : (
+            <Button size="sm" disabled={pending || offline || applying || !data} loading={active === "send"} onClick={() => void perform(serverSendNow, "send")}>今すぐ送る</Button>
+          )}
+        </div>
+        {send.running && <Progress mt="sm" size="sm" value={send.phase === "upload" ? fraction : 0} aria-label="送信の進み具合" />}
         <Switch
+          mt="md"
           label="自動で送る"
-          description="変更して 5 分後に送ります"
+          description="変更後、次の変更がないまま 5 分経つと送ります"
           checked={status.autoSend}
           disabled={pending}
           onChange={(event) => { const enabled = event.currentTarget.checked; void perform(() => serverSetAutoSend(enabled)); }}
         />
-        <Group gap={8} wrap="nowrap" style={{ flex: "none" }}>
-          <Button size="xs" variant="default" disabled={pending || offline || !data?.adminWeb} loading={active === "admin"} rightSection={<Icons.externalLink size={IconSize.menu} />} onClick={openAdmin}>管理画面を開く</Button>
-          <Menu position="bottom-end" width={240}>
-            <Menu.Target><ActionIcon size={30} variant="default" aria-label="その他"><Icons.more size={IconSize.menu} /></ActionIcon></Menu.Target>
-            <Menu.Dropdown>
-              <Menu.Item color="red" disabled={pending} onClick={confirmDisconnect}>この PC との接続を解除</Menu.Item>
-            </Menu.Dropdown>
-          </Menu>
-        </Group>
-      </div>
+      </section>
 
-      <Modal opened={adding} onClose={() => setAdding(false)} title="携帯を追加" centered>
-        <AddPhoneSteps devices={remoteDevices.data ?? []} ready={remoteDevices.isSuccess} onClose={() => setAdding(false)} />
-      </Modal>
+      <section className="sv-card sv-status sv-action" aria-labelledby="server-admin-title">
+        <div>
+          <Text id="server-admin-title" component="h3" fw={650}>サーバー管理</Text>
+          <Text size="sm" c="dimmed">携帯の登録と閲覧許可、サーバーの更新や設定はブラウザの管理画面で行います。</Text>
+          {data?.adminWeb === "public-only" && <Text size="sm" c="dimmed" mt={4}>現在の接続先では、サーバーの PC で管理画面を開けます。</Text>}
+          {data?.adminWeb === "disabled" && <Text size="sm" c="dimmed" mt={4}>管理画面はサーバーで停止されています。</Text>}
+        </div>
+        {adminAvailable ? (
+          <Button size="sm" variant="default" disabled={pending || offline} loading={active === "admin"} rightSection={<Icons.externalLink size={IconSize.menu} />} onClick={openAdmin}>管理画面を開く</Button>
+        ) : (
+          <Button size="sm" variant="default" rightSection={<Icons.externalLink size={IconSize.menu} />} onClick={() => void openExternalUrl(`${SERVER_GUIDE_URL}#管理画面`)}>開き方を見る</Button>
+        )}
+      </section>
     </>
   );
 }
@@ -470,102 +389,5 @@ function ConnectRemoteCard({ pending, active, perform }: CardProps) {
         </div>
       </Stack>
     </section>
-  );
-}
-
-/** QR は一度に一つだけ出す。カメラが別の QR を拾わないようにするため。 */
-function QrImage({ value, label }: { value: string; label: string }) {
-  return (
-    <div style={{ alignSelf: "center", padding: 16, background: "#fff", borderRadius: 8, lineHeight: 0 }}>
-      <QRCodeSVG value={value} size={264} level="M" aria-label={label} />
-    </div>
-  );
-}
-
-function AddPhoneSteps({ devices, ready, onClose }: { devices: ServerDevice[]; ready: boolean; onClose: () => void }) {
-  // 開いた時点の一覧を覚えておき、増えた 1 台を「登録しました」と知らせる。
-  const [known, setKnown] = useState<Set<string> | null>(() => (ready ? new Set(devices.map((device) => device.id)) : null));
-  useEffect(() => {
-    if (ready && known === null) setKnown(new Set(devices.map((device) => device.id)));
-  }, [ready, known, devices]);
-  const [step, setStep] = useState<"app" | "pairing">("app");
-  const [pairing, setPairing] = useState<ServerPairing | null>(null);
-  const [issuing, setIssuing] = useState(false);
-  const [expired, setExpired] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!pairing) return;
-    const timer = window.setTimeout(() => { setPairing(null); setExpired(true); }, pairing.expiresInSeconds * 1_000);
-    return () => window.clearTimeout(timer);
-  }, [pairing]);
-
-  // 登録の鍵の有効期限は発行した時から進むので、登録の手順に入るまで発行しない。
-  const issue = async () => {
-    setIssuing(true);
-    setProblem(null);
-    setCopied(false);
-    setExpired(false);
-    try {
-      setPairing(await serverCreateReaderPairing());
-    } catch (error) {
-      setProblem(errorMessage(error));
-    } finally {
-      setIssuing(false);
-    }
-  };
-
-  const added = known ? devices.find((device) => !known.has(device.id)) : undefined;
-  if (added) {
-    return (
-      <Stack gap="md">
-        <Text size="sm">「{added.name || "Android 端末"}」を登録しました。</Text>
-        <Group justify="flex-end"><Button onClick={onClose}>閉じる</Button></Group>
-      </Stack>
-    );
-  }
-  if (step === "app") {
-    return (
-      <Stack gap="md">
-        <Text fw={600} size="sm">手順 1 / 2　アプリを入れる</Text>
-        <Text size="sm">携帯のカメラでこの QR を読むと、Android 版の配布ページが開きます。APK をダウンロードして入れてください。</Text>
-        <QrImage value={RELEASES_URL} label="Android 版の配布ページ" />
-        <Text size="xs" c="dimmed">すでに入っている場合は、そのまま次へ進んでください。</Text>
-        <Group justify="flex-end">
-          <Button onClick={() => { setStep("pairing"); if (!pairing) void issue(); }}>次へ</Button>
-        </Group>
-      </Stack>
-    );
-  }
-  return (
-    <Stack gap="md">
-      <Text fw={600} size="sm">手順 2 / 2　サーバーに登録する</Text>
-      <Text size="sm">携帯のアプリを開き、「設定 → サーバーとの接続 → QR を読む」でこの QR を読み取ってください。</Text>
-      {problem && <Alert color="red" title="QR を作成できませんでした">{problem}</Alert>}
-      {pairing ? (
-        <>
-          <QrImage value={pairing.payload} label="登録用の QR" />
-          <Text size="xs" c="dimmed">{Math.round(pairing.expiresInSeconds / 60)} 分間有効で、一度だけ使えます。</Text>
-          <Group gap="xs">
-            <Button
-              size="xs"
-              variant="default"
-              onClick={() => void navigator.clipboard.writeText(pairing.payload).then(() => setCopied(true)).catch(() => setProblem("登録文字列をコピーできませんでした"))}
-            >{copied ? "コピーしました" : "登録文字列をコピー"}</Button>
-          </Group>
-          <Text size="xs" c="dimmed">QR を読めないときは、コピーした文字列を携帯に貼り付けてください。この文字列を知っている人はライブラリを読めるので、人に見せないでください。</Text>
-        </>
-      ) : (
-        <>
-          {expired && <Text size="sm" c="dimmed">QR の有効期限が切れました。</Text>}
-          {(expired || problem) && <Group><Button variant="default" loading={issuing} onClick={() => void issue()}>QR を作り直す</Button></Group>}
-          {issuing && !expired && !problem && <Text size="sm" c="dimmed">QR を作成しています</Text>}
-        </>
-      )}
-      <Group justify="space-between">
-        <Button variant="subtle" onClick={() => setStep("app")}>戻る</Button>
-        <Button variant="default" onClick={onClose}>閉じる</Button>
-      </Group>
-    </Stack>
   );
 }

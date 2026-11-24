@@ -5,7 +5,7 @@
 
 use super::store::Role;
 use super::sync_send::{
-    admin_get, admin_get_if_present, admin_post, admin_put, pair_admin, RemoteServer, SendHandle,
+    admin_get, admin_get_if_present, admin_post, pair_admin, RemoteServer, SendHandle,
     SendProgress, CANCELED,
 };
 use crate::{library::protocol::Id, AppState};
@@ -163,13 +163,6 @@ pub struct DesktopServerStatus {
     pub last_send: LastSend,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairingDetails {
-    pub payload: String,
-    pub expires_in_seconds: u64,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PairingText {
@@ -283,46 +276,6 @@ impl DesktopServer {
         }
     }
 
-    /// 携帯の登録文字列を、つないでいる単独サーバーで発行する。
-    pub async fn create_reader_pairing(&self) -> Result<PairingDetails, String> {
-        let remote = self
-            .settings()
-            .remote
-            .ok_or("単独サーバーにつないでいません")?;
-        let token = credential::load(&remote.url)?
-            .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        let body = admin_post(
-            &remote,
-            &token,
-            "pairings",
-            &serde_json::json!({ "url": remote.url }),
-        )
-        .await?;
-        let payload = body
-            .get("payload")
-            .and_then(|value| value.as_str())
-            .ok_or("サーバーの応答を読み取れません")?
-            .to_string();
-        let expires_in_seconds = body
-            .get("expiresInSeconds")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(600);
-        Ok(PairingDetails {
-            payload,
-            expires_in_seconds,
-        })
-    }
-    pub async fn list_remote_devices(&self) -> Result<Vec<serde_json::Value>, String> {
-        let remote = self
-            .settings()
-            .remote
-            .ok_or("単独サーバーにつないでいません")?;
-        let token = credential::load(&remote.url)?
-            .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        let body = admin_get(&remote, &token, "devices").await?;
-        Ok(body.as_array().cloned().unwrap_or_default())
-    }
-
     pub async fn remote_status(&self) -> Result<serde_json::Value, String> {
         let remote = self
             .settings()
@@ -331,33 +284,6 @@ impl DesktopServer {
         let token = credential::load(&remote.url)?
             .ok_or("サーバーの鍵がありません。登録し直してください")?;
         admin_get(&remote, &token, "status").await
-    }
-
-    /// デスクトップ版の方が新しければ、サーバーにも更新を頼む。
-    async fn update_remote_if_behind(&self) {
-        let Ok(status) = self.remote_status().await else {
-            return;
-        };
-        let behind = status["version"]
-            .as_str()
-            .is_some_and(|version| super::update::is_newer(env!("CARGO_PKG_VERSION"), version));
-        // 自動更新を切っているサーバーは、押されるまで変えない。
-        if behind && status["update"]["auto"].as_bool() == Some(true) {
-            if let Err(error) = self.update_remote().await {
-                log::warn!("サーバーの更新を頼めません: {error}");
-            }
-        }
-    }
-
-    /// 新しいバージョンがあるかだけを確かめてもらう。当てはしない。
-    pub async fn check_remote_update(&self) -> Result<serde_json::Value, String> {
-        let remote = self
-            .settings()
-            .remote
-            .ok_or("単独サーバーにつないでいません")?;
-        let token = credential::load(&remote.url)?
-            .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        admin_post(&remote, &token, "update/check", &serde_json::json!({})).await
     }
 
     /// 管理画面へ入る、一度きりのリンクを作る。接続先の URL で開くので、その名前が覚えられる。
@@ -373,41 +299,6 @@ impl DesktopServer {
             .as_str()
             .ok_or("サーバーの応答を読めません")?;
         Ok(format!("{}{path}", remote.url.trim_end_matches('/')))
-    }
-
-    pub async fn update_remote(&self) -> Result<(), String> {
-        let remote = self
-            .settings()
-            .remote
-            .ok_or("単独サーバーにつないでいません")?;
-        let token = credential::load(&remote.url)?
-            .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        admin_post(&remote, &token, "update", &serde_json::json!({})).await?;
-        Ok(())
-    }
-
-    /// 単独サーバーの携帯に、棚を読む許可を付け外しする。
-    pub async fn set_remote_shelf_reader(&self, device_id: &str, read: bool) -> Result<(), String> {
-        if device_id.is_empty()
-            || !device_id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-        {
-            return Err("端末を指定し直してください".into());
-        }
-        let remote = self
-            .settings()
-            .remote
-            .ok_or("単独サーバーにつないでいません")?;
-        let token = credential::load(&remote.url)?
-            .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        admin_put(
-            &remote,
-            &token,
-            &format!("devices/{device_id}/shelf"),
-            &serde_json::json!({ "read": read }),
-        )
-        .await
     }
 
     pub async fn connect_remote(&self, pairing: &str, device_name: &str) -> Result<(), String> {
@@ -719,9 +610,6 @@ impl DesktopServer {
         }
         let failed = record.error.clone();
         self.change_settings(|settings| settings.last_send = record)?;
-        if phase == "done" {
-            self.update_remote_if_behind().await;
-        }
         match failed {
             Some(error) if error == CANCELED => Ok(SendAttempt::Canceled),
             Some(error) => Err(error),
@@ -733,10 +621,6 @@ impl DesktopServer {
         let server = Arc::clone(self);
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(AUTO_SEND_STARTUP_DELAY).await;
-            // 送るものがなくても、デスクトップ版が新しくなったらサーバーを追いつかせる。
-            if server.settings().remote.is_some() {
-                server.update_remote_if_behind().await;
-            }
             // 起動して落ち着いたあとに一度送る。変わっていなければ問い合わせだけで終わる。
             let mut progress = AutoSendProgress::default();
             let mut seen = None;

@@ -55,13 +55,13 @@ export function showFailure(error: unknown): void {
 }
 
 /** 全ページで読む状況。止まっている間も最後の内容を残す。 */
-export function useStatus() {
+export function useStatus(pollInterval = 15_000) {
   return useQuery<AdminStatus>({
     queryKey: ["status"],
     queryFn: adminApi.status,
     refetchInterval: (query) => {
       const phase = query.state.data?.update?.phase.state;
-      return query.state.status === "error" || phase === "applying" || phase === "checking" ? 2_000 : 15_000;
+      return query.state.status === "error" || phase === "applying" || phase === "checking" ? 2_000 : pollInterval;
     },
     refetchIntervalInBackground: false,
   });

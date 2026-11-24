@@ -83,6 +83,9 @@ html { overflow-y: scroll; scrollbar-gutter: stable; }
 .adm-col-time { width: 1%; color: var(--adm-dim); white-space: nowrap; }
 .adm-cell-sub { margin-top: 3px; color: var(--adm-dim); font-size: 13.5px; line-height: 1.5; }
 .adm-cell-action { width: 1%; text-align: right; white-space: nowrap; }
+.adm-reader-access { display: inline-flex; vertical-align: middle; white-space: nowrap; }
+.adm-reader-access .mantine-Switch-label { min-inline-size: 3em; }
+.adm-card-pad.adm-device-help { padding-block-start: 0; }
 .adm-dim { color: var(--adm-dim); white-space: nowrap; text-align: right; }
 .adm-nowrap { white-space: nowrap; overflow-wrap: normal; }
 .adm-strong { font-weight: 600; }
@@ -141,6 +144,7 @@ html { overflow-y: scroll; scrollbar-gutter: stable; }
   .adm-table:not(:has(thead)) tbody tr:first-child td { border-top: 0; }
   .adm-table td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 6.5em; color: var(--adm-dim); font-size: 13px; }
   .adm-cell-action:not(:empty) { padding-top: 8px; }
+  .adm-device-table .adm-cell-action:last-child { text-align: right; }
   .adm-dim { text-align: left; }
   .adm-card { padding: 18px; }
   .adm-card[data-flush] > .adm-card-head, .adm-toolbar, .adm-card-pad { padding-inline: 18px; }
