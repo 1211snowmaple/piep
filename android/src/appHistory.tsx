@@ -208,7 +208,7 @@ export function NavigationProvider({ value, children }: { value: Omit<AppNavigat
   const full = useMemo<AppNavigation>(() => ({
     ...value,
     openEntity: (kind, source, key, displayName) => push({ page: entityPage(kind, source, key, displayName), detail: null, reader: null }),
-    openTag: (tag) => push({ page: { ...homePage, criteria: { ...defaultPcSearch, tag } }, detail: null, reader: null }),
+    openTag: (tag) => push({ page: { ...homePage, criteria: { ...defaultPcSearch, tag: [tag] } }, detail: null, reader: null }),
   }), [value, push]);
   return <NavigationContext.Provider value={full}>{children}</NavigationContext.Provider>;
 }

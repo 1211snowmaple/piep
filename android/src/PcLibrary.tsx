@@ -11,7 +11,7 @@ import { useReadingShelf } from "./recentReading";
 import { CollectionBrowser, CollectionMembers, EntityBrowser } from "./LibraryGroups";
 import { ChoiceMenu, SortMenu, relevanceLabel } from "./SortMenu";
 import { effectiveSort, entitySortGroups, entitySortLabel, loadEntitySort, saveEntitySort, sortLabels, type EntitySort, type FixedSort } from "./librarySort";
-import { defaultPcSearch, lookupPcWork, pcConnectionIssue, type PcConnectionStatus, type PcSearchCriteria, type PcSort, type PcWork } from "./pcApi";
+import { defaultPcSearch, lookupPcWork, pcConnectionIssue, type PcConnectionStatus, type PcSearchCriteria, type PcSort, type PcWork, joinSearchTerms } from "./pcApi";
 import { useAppNavigation, type LibraryPage, type LibraryTab } from "./appHistory";
 import { useSavedStates, useWorkList, WorkListSkeleton, WorkResults } from "./workList";
 import { readingPercent, scrollMainToTop } from "./workText";
@@ -113,10 +113,10 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
     if (criteria.source) filterChips.push({ key: "source", text: criteria.source === "fanbox" ? "FANBOX" : "pixiv", clear: { source: "" } });
     if (criteria.contentType) filterChips.push({ key: "type", text: contentTypeLabel(criteria.contentType), clear: { contentType: "" } });
     if (criteria.favorite) filterChips.push({ key: "favorite", text: "お気に入り", clear: { favorite: false } });
-    if (criteria.author) filterChips.push({ key: "author", text: `作者: ${criteria.author}`, clear: { author: "" } });
-    if (criteria.authorExclude) filterChips.push({ key: "authorExclude", text: `除外作者: ${criteria.authorExclude}`, clear: { authorExclude: "" } });
-    if (criteria.tag) filterChips.push({ key: "tag", text: `タグ: ${criteria.tag}${criteria.tagMode === "or" ? "（いずれか）" : ""}`, clear: { tag: "" } });
-    if (criteria.tagExclude) filterChips.push({ key: "tagExclude", text: `除外タグ: ${criteria.tagExclude}`, clear: { tagExclude: "" } });
+    if (criteria.author.length) filterChips.push({ key: "author", text: `作者: ${joinSearchTerms(criteria.author)}`, clear: { author: [] } });
+    if (criteria.authorExclude.length) filterChips.push({ key: "authorExclude", text: `除外作者: ${joinSearchTerms(criteria.authorExclude)}`, clear: { authorExclude: [] } });
+    if (criteria.tag.length) filterChips.push({ key: "tag", text: `タグ: ${joinSearchTerms(criteria.tag)}${criteria.tagMode === "or" ? "（いずれか）" : ""}`, clear: { tag: [] } });
+    if (criteria.tagExclude.length) filterChips.push({ key: "tagExclude", text: `除外タグ: ${joinSearchTerms(criteria.tagExclude)}`, clear: { tagExclude: [] } });
     if (criteria.minChars || criteria.maxChars) filterChips.push({ key: "chars", text: `文字数: ${criteria.minChars || "0"}〜${criteria.maxChars || "上限なし"}`, clear: { minChars: "", maxChars: "" } });
     if (criteria.minAssets || criteria.maxAssets) filterChips.push({ key: "assets", text: `添付数: ${criteria.minAssets || "0"}〜${criteria.maxAssets || "上限なし"}`, clear: { minAssets: "", maxAssets: "" } });
     if (criteria.revision) filterChips.push({ key: "revision", text: criteria.revision === "revised" ? "改稿あり" : "初版のみ", clear: { revision: "" } });
@@ -130,7 +130,7 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
     <SearchField value={input} label={`${target}を検索`} placeholder={tab === "works" ? "作品・作者・本文を検索" : `${target}を検索`} onChange={setInput} onSubmit={submitSearch} onSuggestion={tab === "works" && status?.shelf ? (item) => {
       if (item.kind === "tag") navigation.openTag(item.value);
       else if ((item.kind === "author" || item.kind === "series") && item.source && item.sourceKey) navigation.openEntity(item.kind === "author" ? "person" : "series", item.source, item.sourceKey, item.label);
-      else if (item.kind === "author") changeCriteria({ ...criteria, text: "", author: item.label });
+      else if (item.kind === "author") changeCriteria({ ...criteria, text: "", author: [item.label] });
       else if (item.kind === "title" && item.source) void lookupPcWork(item.source, item.value).then((work) => work ? onOpenWork(work) : submitSearch(item.label)).catch(() => submitSearch(item.label));
       else submitSearch(item.label);
     } : undefined}>
