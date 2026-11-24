@@ -484,6 +484,7 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
              DROP TABLE library_tasks;
              DROP TABLE pending_edit_images;
              DROP TABLE repair_attempts;
+             ALTER TABLE library_meta DROP COLUMN repair_attempt_limit;
              DELETE FROM schema_migrations WHERE version>=18; PRAGMA user_version=17;",
         )
         .unwrap();

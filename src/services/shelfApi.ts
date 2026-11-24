@@ -166,6 +166,21 @@ export function shelfStatus(): Promise<ShelfState> {
   return invoke<ShelfState>("shelf_status");
 }
 
+/** 補完で取りに行く回数の上限（棚の設定）と、選べる範囲。最初の保存も 1 回に数える。 */
+export interface RepairAttemptLimit {
+  value: number;
+  min: number;
+  max: number;
+}
+
+export function shelfRepairAttemptLimit(): Promise<RepairAttemptLimit> {
+  return invoke<RepairAttemptLimit>("shelf_repair_attempt_limit");
+}
+
+export function shelfSetRepairAttemptLimit(value: number): Promise<RepairAttemptLimit> {
+  return invoke<RepairAttemptLimit>("shelf_set_repair_attempt_limit", { value });
+}
+
 /** 作品ごとの利用者の状態。 */
 export interface ShelfUserState {
   favorite: boolean;

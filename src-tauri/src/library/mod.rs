@@ -26,7 +26,7 @@ mod reader_references;
 mod reading;
 mod reclaim;
 mod renditions;
-mod repair_attempts;
+pub(crate) mod repair_attempts;
 mod repository;
 mod resources;
 mod revision_folds;

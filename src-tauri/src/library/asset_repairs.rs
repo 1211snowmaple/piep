@@ -4,8 +4,6 @@ use super::{repair_attempts, CaptureResult, Error, Fingerprint, Library, Library
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-pub(crate) use super::repair_attempts::MAX_REPAIR_ATTEMPTS;
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct AssetRepairObservation {
     pub expected_urls: Vec<String>,
@@ -21,6 +19,8 @@ impl AssetRepairObservation {
 pub(crate) struct AssetRepairPlan {
     pub fingerprint: Fingerprint,
     pub attempts: u32,
+    /// 棚の設定の上限。
+    pub limit: u32,
 }
 
 pub(super) fn record(
@@ -62,6 +62,7 @@ impl Library {
         Ok(AssetRepairPlan {
             fingerprint: hash,
             attempts,
+            limit: repair_attempts::limit(&conn)?,
         })
     }
 

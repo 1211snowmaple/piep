@@ -358,7 +358,7 @@ pub(super) fn observation(data: &Value, assets: &[StagedAsset]) -> AssetRepairOb
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::asset_repairs::MAX_REPAIR_ATTEMPTS;
+    use crate::library::repair_attempts::DEFAULT_REPAIR_ATTEMPTS as MAX_REPAIR_ATTEMPTS;
     use serde_json::json;
 
     struct Fixture(PathBuf);

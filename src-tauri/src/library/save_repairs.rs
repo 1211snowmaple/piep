@@ -66,10 +66,9 @@ impl Library {
               ORDER BY c.work_id
               LIMIT ?1",
         )?;
-        let rows = statement.query_map(
-            params![limit, repair_attempts::MAX_REPAIR_ATTEMPTS],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, Vec<u8>>(2)?)),
-        )?;
+        let rows = statement.query_map(params![limit, repair_attempts::limit(&conn)?], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get::<_, Vec<u8>>(2)?))
+        })?;
         rows.map(|row| {
             let (key, title, snapshot) = row?;
             let snapshot = LibraryId::from_slice(&snapshot)

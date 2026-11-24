@@ -231,7 +231,7 @@ fn pixiv_attempts_count_the_save_that_left_the_gap() {
     )
     .unwrap();
     assert_eq!(fingerprint, expected.0.to_vec());
-    assert!(attempts >= repair_attempts::MAX_REPAIR_ATTEMPTS);
+    assert!(attempts >= repair_attempts::DEFAULT_REPAIR_ATTEMPTS);
     assert!(library.incomplete_save_repairs(50).unwrap().is_empty());
     library.verify().unwrap();
 }

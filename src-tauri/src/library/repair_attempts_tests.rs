@@ -117,7 +117,7 @@ fn the_same_rules_hold_for_every_source() {
 fn fanbox_stops_at_the_limit() {
     let (temp, library) = fixture();
     let mut saved = fanbox(&library, &temp.0.join("staged"), false);
-    for _ in 1..MAX_REPAIR_ATTEMPTS {
+    for _ in 1..DEFAULT_REPAIR_ATTEMPTS {
         saved = fanbox(&library, &temp.0.join("staged"), false);
     }
     let plan = library
@@ -127,7 +127,7 @@ fn fanbox_stops_at_the_limit() {
             &["https://example.invalid/a".into()],
         )
         .unwrap();
-    assert_eq!(plan.attempts, MAX_REPAIR_ATTEMPTS);
+    assert_eq!(plan.attempts, DEFAULT_REPAIR_ATTEMPTS);
     library.verify().unwrap();
 }
 
@@ -185,7 +185,8 @@ fn migration_moves_the_current_rows_of_both_tables() {
         )
         .unwrap();
         conn.execute_batch(
-            "DELETE FROM schema_migrations WHERE version>=34; PRAGMA user_version=33;",
+            "ALTER TABLE library_meta DROP COLUMN repair_attempt_limit;
+             DELETE FROM schema_migrations WHERE version>=34; PRAGMA user_version=33;",
         )
         .unwrap();
     }
@@ -216,7 +217,8 @@ fn migration_moves_the_current_rows_of_both_tables() {
         )
         .unwrap();
         conn.execute_batch(
-            "DELETE FROM schema_migrations WHERE version>=34; PRAGMA user_version=33;",
+            "ALTER TABLE library_meta DROP COLUMN repair_attempt_limit;
+             DELETE FROM schema_migrations WHERE version>=34; PRAGMA user_version=33;",
         )
         .unwrap();
     }
@@ -239,9 +241,42 @@ fn migration_moves_the_current_rows_of_both_tables() {
         )
         .unwrap();
     assert_eq!(snapshot, current.snapshot_id.as_bytes().to_vec());
-    assert_eq!(attempts, MAX_REPAIR_ATTEMPTS);
+    assert_eq!(attempts, DEFAULT_REPAIR_ATTEMPTS);
     assert_eq!(fingerprint, vec![0; 32]);
     assert_eq!(request, None);
     assert_eq!(at, 7);
+    library.verify().unwrap();
+}
+
+/// 上限は棚の設定。既定は 2、範囲の外は断り、開き直しても残る。上げれば、上限に届いていた
+/// 状態をまた取りに行く。
+#[test]
+fn the_limit_is_a_shelf_setting() {
+    let (temp, library) = fixture();
+    assert_eq!(
+        library.repair_attempt_limit().unwrap(),
+        DEFAULT_REPAIR_ATTEMPTS
+    );
+    fanbox(&library, &temp.0.join("staged"), false);
+    let saved = fanbox(&library, &temp.0.join("staged"), false);
+    let plan = |library: &Library| {
+        library
+            .asset_repair_plan(
+                saved.entity_id,
+                saved.snapshot_id,
+                &["https://example.invalid/a".into()],
+            )
+            .unwrap()
+    };
+    assert_eq!((plan(&library).attempts, plan(&library).limit), (2, 2));
+    for wrong in [0, REPAIR_ATTEMPT_LIMITS.end() + 1] {
+        assert!(library.set_repair_attempt_limit(wrong).is_err());
+    }
+    assert_eq!(library.repair_attempt_limit().unwrap(), 2);
+    library.set_repair_attempt_limit(3).unwrap();
+    assert_eq!(plan(&library).limit, 3);
+    drop(library);
+    let library = Library::open(&temp.0.join("shelf")).unwrap();
+    assert_eq!(library.repair_attempt_limit().unwrap(), 3);
     library.verify().unwrap();
 }

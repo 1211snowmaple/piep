@@ -241,11 +241,10 @@ fn skip_save_on_shelf(
     }
     if source == "fanbox" && respect_repair_limit {
         let urls = targets.iter().map(|t| t.url.clone()).collect::<Vec<_>>();
-        let exhausted = library
+        let plan = library
             .asset_repair_plan(work, snapshot, &urls)
-            .map_err(fail)?
-            .attempts
-            >= crate::library::asset_repairs::MAX_REPAIR_ATTEMPTS;
+            .map_err(fail)?;
+        let exhausted = plan.attempts >= plan.limit;
         if exhausted {
             for info in &resources {
                 if let Some(file) = &info.file {

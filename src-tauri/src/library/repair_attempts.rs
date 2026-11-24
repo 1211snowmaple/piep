@@ -3,7 +3,8 @@
 //! - 欠けの状態は指紋（`gap_fingerprint`）で表す。期待した項目（FANBOX は応答が指す画像・添付の
 //!   URL、pixiv は見られなかった挿絵の参照と伏せられた作品情報）と、その版が持つ画像・添付から作る。
 //! - `attempts` は、同じ版・同じ指紋のまま欠けが残った保存の回数。0 は揃った。版か指紋が変われば
-//!   1 から数え直す。[`MAX_REPAIR_ATTEMPTS`] に届いたら、その状態ではもう取りに行かない。
+//!   1 から数え直す。棚の設定の上限（`library_meta.repair_attempt_limit`）に届いたら、その状態では
+//!   もう取りに行かない。
 //! - 行は今の版だけを指す。新しい版を保存したら前の版の行は消える（`forget_other_versions`）。
 //! - 取得の要求と結んだ行（FANBOX）は `request_id` を持ち、取得の入力の観測と突き合わせる
 //!   （`asset_repairs::verify_asset_repairs`）。pixiv の補完は保存ジョブの外で数えるので持たない。
@@ -14,8 +15,46 @@ use rusqlite::{params, Connection, OptionalExtension};
 #[path = "repair_attempts_tests.rs"]
 mod tests;
 
-/// 同じ版・同じ欠けで取りに行く回数の上限。欠けたまま確定した最初の保存も 1 回に数える。
-pub(crate) const MAX_REPAIR_ATTEMPTS: u32 = 2;
+/// 同じ版・同じ欠けで取りに行く回数の上限の既定値。欠けたまま確定した最初の保存も 1 回に数える
+/// （2 は、最初の保存と取り直し 1 回）。
+#[cfg(test)]
+pub(crate) const DEFAULT_REPAIR_ATTEMPTS: u32 = 2;
+/// 設定できる上限の範囲。台帳の CHECK（移行 35）と同じ。
+pub const REPAIR_ATTEMPT_LIMITS: std::ops::RangeInclusive<u32> = 1..=5;
+
+/// 棚の設定の上限。
+pub(super) fn limit(conn: &Connection) -> Result<u32> {
+    Ok(conn.query_row(
+        "SELECT repair_attempt_limit FROM library_meta WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+impl super::Library {
+    /// 補完で取りに行く回数の上限（棚の設定）。
+    pub fn repair_attempt_limit(&self) -> Result<u32> {
+        limit(&*self.reader()?)
+    }
+
+    /// 補完で取りに行く回数の上限を変える。範囲の外は断る。今までの記録はそのまま、新しい上限で
+    /// 比べ直す（上限を上げれば、上限に届いていた作品をまた取りに行く）。
+    pub fn set_repair_attempt_limit(&self, value: u32) -> Result<()> {
+        if !REPAIR_ATTEMPT_LIMITS.contains(&value) {
+            return Err(Error::Unsupported(format!(
+                "補完の回数の上限は {} から {} までです",
+                REPAIR_ATTEMPT_LIMITS.start(),
+                REPAIR_ATTEMPT_LIMITS.end()
+            )));
+        }
+        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        conn.execute(
+            "UPDATE library_meta SET repair_attempt_limit=?1 WHERE singleton=1",
+            [value],
+        )?;
+        Ok(())
+    }
+}
 
 /// 欠けの指紋。`expected` は取得元が持つと示した項目、残りはその版が持つ画像・添付。
 /// FANBOX の取得の入力に残した観測から同じ値を作り直せるよう、作り方は変えない。

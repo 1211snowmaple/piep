@@ -292,6 +292,8 @@ pub fn run() -> tauri::Result<()> {
             commands::startup::startup_remember_color_scheme,
             // 棚の読み取り (commands::shelf)
             commands::shelf::shelf_status,
+            commands::shelf::shelf_repair_attempt_limit,
+            commands::shelf::shelf_set_repair_attempt_limit,
             commands::shelf::shelf_set_user_state,
             commands::shelf::shelf_remove_work,
             commands::shelf::shelf_edit_collection,

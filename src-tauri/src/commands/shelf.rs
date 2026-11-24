@@ -274,6 +274,55 @@ pub fn shelf_status(state: State<'_, Arc<Shelf>>) -> ShelfState {
     state.status()
 }
 
+/// 補完で取りに行く回数の上限（棚の設定）と、選べる範囲。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairAttemptLimit {
+    pub value: u32,
+    pub min: u32,
+    pub max: u32,
+}
+
+fn repair_attempt_limit_of(
+    library: &crate::library::Library,
+) -> Result<RepairAttemptLimit, String> {
+    let range = crate::library::repair_attempts::REPAIR_ATTEMPT_LIMITS;
+    Ok(RepairAttemptLimit {
+        value: library.repair_attempt_limit().map_err(|e| e.to_string())?,
+        min: *range.start(),
+        max: *range.end(),
+    })
+}
+
+/// 補完で取りに行く回数の上限を読む。
+#[tauri::command]
+pub async fn shelf_repair_attempt_limit(
+    state: State<'_, Arc<Shelf>>,
+) -> Result<RepairAttemptLimit, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || repair_attempt_limit_of(&*state.library()?))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 補完で取りに行く回数の上限を変える。範囲の外は断る。
+#[tauri::command]
+pub async fn shelf_set_repair_attempt_limit(
+    state: State<'_, Arc<Shelf>>,
+    value: u32,
+) -> Result<RepairAttemptLimit, String> {
+    let state = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let library = state.library()?;
+        library
+            .set_repair_attempt_limit(value)
+            .map_err(|e| e.to_string())?;
+        repair_attempt_limit_of(&library)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn parse_id(value: &str) -> Result<LibraryId, String> {
     LibraryId::parse_str(value).map_err(|_| "識別子が不正です".to_string())
 }
