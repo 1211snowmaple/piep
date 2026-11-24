@@ -19,7 +19,7 @@ function currentShelf(page: AppPage): Shelf | null {
   if (page.shelf) return page.shelf;
   for (const shelf of ["all", "favorite", "revised"] as const) {
     const wanted: PcSearchCriteria = { ...defaultPcSearch, ...shelfCriteria[shelf] };
-    if ((Object.keys(wanted) as (keyof PcSearchCriteria)[]).every((key) => ["sort", "tagMode", "dateField"].includes(key) || page.criteria[key] === wanted[key])) return shelf;
+    if ((Object.keys(wanted) as (keyof PcSearchCriteria)[]).every((key) => ["sort", "tagMode", "dateField"].includes(key) || JSON.stringify(page.criteria[key]) === JSON.stringify(wanted[key]))) return shelf;
   }
   return null;
 }

@@ -89,11 +89,12 @@ export interface PcSearchCriteria {
   text: string;
   source: "" | "pixiv" | "fanbox";
   contentType: "" | "novel" | "article" | "text" | "image" | "file";
-  author: string;
-  authorExclude: string;
+  /** 作者とタグは一件ずつ。札で選んだタグは区切り文字を含んでいてもそのまま一件にする。 */
+  author: string[];
+  authorExclude: string[];
   favorite: boolean;
-  tag: string;
-  tagExclude: string;
+  tag: string[];
+  tagExclude: string[];
   tagMode: "and" | "or";
   minChars: string;
   maxChars: string;
@@ -121,7 +122,17 @@ export type PcSort = "standard" | FixedSort;
 export type PcWorkSort = PcSort | "series_order:asc" | "series_order:desc";
 export type PcWorkSearch = Omit<PcSearchCriteria, "sort"> & { sort: PcWorkSort };
 
-export const defaultPcSearch: PcSearchCriteria = { text: "", source: "", contentType: "", author: "", authorExclude: "", favorite: false, tag: "", tagExclude: "", tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", revision: "", edit: "", cover: "", dateField: "saved", dateFrom: "", dateTo: "", sort: "remembered" };
+export const defaultPcSearch: PcSearchCriteria = { text: "", source: "", contentType: "", author: [], authorExclude: [], favorite: false, tag: [], tagExclude: [], tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", revision: "", edit: "", cover: "", dateField: "saved", dateFrom: "", dateTo: "", sort: "remembered" };
+
+/** 入力欄に書いた作者・タグを一件ずつに分ける。分けるのは自由入力だけ。 */
+export function splitSearchTerms(text: string): string[] {
+  return text.split(/[\n\r,、，]+/).map((part) => part.trim()).filter(Boolean);
+}
+
+/** 一件ずつの作者・タグを、入力欄や札に出す一続きの文字にする。 */
+export function joinSearchTerms(terms: string[]): string {
+  return terms.join("、");
+}
 
 /** 作品の保存した版。写しの ID で以前の版を棚から開く。 */
 export type PcVersion = MobileVersion;
