@@ -9,7 +9,7 @@ piep の検査の入口。手元でも CI でも、これ一つを呼ぶ。
   rust      Rust の試験（nextest）・clippy・rustfmt・EPUB の適合（EPUBCheck）
   docs      画面と Rust の境界の突き合わせ・方針書の数・文書サイトの組み立て
   visual    画面の組み立てと Playwright の視覚の試験
-  android   携帯の画面側の組み立てと試験
+  android   携帯の画面側の組み立てと試験、携帯の Rust の試験・clippy・rustfmt
   apk       携帯の APK を鍵なしで組めること（重い）
 
 CI の各ジョブは同じ段をこのスクリプトで呼ぶ。手順を workflow に直接書かない。
@@ -147,6 +147,12 @@ if ('android' -in $Stage) {
     try {
         Step '携帯の画面の組み立て' { Invoke-Native npm @('run', 'build') }
         Step '携帯の画面の試験' { Invoke-Native npm @('test') }
+        # 携帯の Rust（端末の記録・接続・本文の組み立て）の試験は、手元の PC の上で動く。
+        # 版は android/rust-toolchain.toml が決めるので、android の中から呼ぶ。
+        $mobile = 'src-tauri/Cargo.toml'
+        Step '携帯の Rust の試験' { Invoke-Native cargo @('test', '--manifest-path', $mobile) }
+        Step '携帯の clippy' { Invoke-Native cargo @('clippy', '--manifest-path', $mobile, '--all-targets', '--', '-D', 'warnings') }
+        Step '携帯の rustfmt' { Invoke-Native cargo @('fmt', '--manifest-path', $mobile, '--all', '--', '--check') }
     } finally { Pop-Location }
 }
 
