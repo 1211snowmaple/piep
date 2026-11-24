@@ -692,7 +692,11 @@ mod tests {
                 first.snapshot_id
             );
         }
-        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        // 最初の保存も 1 回に数えるので、取りに行くのは残りの回数だけ。
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            (MAX_REPAIR_ATTEMPTS - 1) as usize
+        );
         assert_eq!(
             library
                 .asset_repair_plan(
@@ -702,7 +706,7 @@ mod tests {
                 )
                 .unwrap()
                 .attempts,
-            3
+            MAX_REPAIR_ATTEMPTS
         );
         library.verify().unwrap();
         server.abort();
@@ -727,7 +731,7 @@ mod tests {
             mime_type: Some("text/plain".into()),
         };
         let mut first = None;
-        for _ in 0..3 {
+        for _ in 0..MAX_REPAIR_ATTEMPTS {
             first = Some(
                 library
                     .save_work_with_asset_repair(
@@ -787,7 +791,7 @@ mod tests {
                 )
                 .unwrap()
                 .attempts,
-            3
+            MAX_REPAIR_ATTEMPTS
         );
         library
             .reader_document(first.entity_id, ResourceScope::Snapshot(first.snapshot_id))
@@ -1003,7 +1007,7 @@ mod tests {
             mime_type: None,
         };
         let mut first = None;
-        for _ in 0..3 {
+        for _ in 0..MAX_REPAIR_ATTEMPTS {
             first = Some(
                 library
                     .save_work_with_asset_repair(
@@ -1049,7 +1053,7 @@ mod tests {
                 )
                 .unwrap()
                 .attempts,
-            3
+            MAX_REPAIR_ATTEMPTS
         );
         library
             .reader_document(first.entity_id, ResourceScope::Snapshot(first.snapshot_id))

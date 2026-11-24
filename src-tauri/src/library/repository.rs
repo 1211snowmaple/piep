@@ -1442,11 +1442,8 @@ impl Library {
                 )?;
             }
             tx.execute("INSERT INTO library_items(work_id,added_at,generation) VALUES(?1,?2,1) ON CONFLICT(work_id) DO NOTHING",params![entity.as_bytes().as_slice(),acquired_at])?;
-            // 補完を試した印は今の版でだけ効く。版が進んだら前の版の印は要らない。
-            tx.execute(
-                "DELETE FROM incomplete_save_attempts WHERE work_id=?1 AND snapshot_id<>?2",
-                params![entity.as_bytes().as_slice(), snapshot.as_bytes().as_slice()],
-            )?;
+            // 補完を試した記録は今の版でだけ効く。版が進んだら前の版の記録は要らない。
+            super::repair_attempts::forget_other_versions(&tx, entity, snapshot)?;
             // 本文の文字数は本文ファイルだけで決まる。引き継いだ本文は前に数えた値を使う。
             if let Some(body) = body {
                 tx.execute(
@@ -1521,13 +1518,7 @@ impl Library {
                 tx.execute("INSERT INTO source_entity_state(entity_id,last_checked_at,last_fetched_at) VALUES(?1,?2,?2) ON CONFLICT(entity_id) DO UPDATE SET last_checked_at=max(coalesce(last_checked_at,excluded.last_checked_at),excluded.last_checked_at),last_fetched_at=max(coalesce(last_fetched_at,excluded.last_fetched_at),excluded.last_fetched_at)",params![result.entity_id.as_bytes().as_slice(),checked_at])?;
             }
             if let Some(observation) = &context.asset_repair {
-                super::asset_repairs::record(
-                    tx,
-                    result,
-                    request,
-                    context.ticket.base_snapshot,
-                    observation,
-                )?;
+                super::asset_repairs::record(tx, result, request, observation, now)?;
             }
         }
         tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'capture',?3,?4)",params![request.as_bytes().as_slice(),result.entity_id.as_bytes().as_slice(),serde_json::to_string(result)?,now])?;
@@ -1749,6 +1740,7 @@ impl Library {
         self.verify_work_list(&conn)?;
         self.verify_reading_positions(&conn)?;
         self.verify_acquisitions(&conn)?;
+        super::repair_attempts::verify(&conn)?;
         self.verify_asset_repairs(&conn)?;
         super::source_state::verify_source_state(&conn)?;
         super::searches::verify_searches(&conn)?;

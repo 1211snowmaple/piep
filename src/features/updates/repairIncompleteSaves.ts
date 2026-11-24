@@ -6,7 +6,7 @@ import { getConnectionStatus } from "@/services/authApi";
 import { getUpdateJobCommand, listIncompleteSaveRepairWorksCommand, listUpdateJobsCommand, recordIncompleteSaveRepairAttemptsCommand, startSaveJobCommand, type UpdateJobSnapshot } from "@/services/updateJobApi";
 import { invalidateAfterUpdateJob, isUpdateJobActive } from "./updateJobs";
 
-// 試した作品は棚が版ごとに覚える。
+// 試した回数は棚が版ごとに数える（取得元によらない補完の記録）。
 // A backlog (e.g. R-18 details masked by older builds) becomes a series of
 // short jobs. Each waits for the user's own jobs, so none monopolises the
 // connection for hours.
@@ -21,12 +21,12 @@ async function startRepair(shouldContinue: () => boolean): Promise<RepairResult>
   const repairWorks = await listIncompleteSaveRepairWorksCommand(REPAIR_BATCH_SIZE);
   if (!repairWorks.length || !shouldContinue()) return { waiting: false };
   const job = await startSaveJobCommand(repairWorks.map(({ source, sourceId, title }) => ({ source, sourceId, title })), false);
-  // 印は候補にした版に付ける。ジョブが先に新しい版を保存していても、その版は次の候補に残る。
+  // 回数は候補にした版に数える。ジョブが先に新しい版を保存していたら数えず、その版は次の候補に残る。
   await recordIncompleteSaveRepairAttemptsCommand(repairWorks.map(({ sourceId, snapshot }) => ({ sourceId, snapshot })));
   return { waiting: false, job };
 }
 
-/** 一部保存の作品を、版ごとに一度だけ、通常の保存ジョブで取り直す。 */
+/** 一部保存の作品を、同じ版では棚の上限まで、通常の保存ジョブで取り直す。 */
 export function startIncompleteSaveRepair(shouldContinue: () => boolean = () => true): Promise<RepairResult> {
   starting ??= startRepair(shouldContinue).finally(() => { starting = null; });
   return starting;

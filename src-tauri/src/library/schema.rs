@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 33;
+pub(crate) const VERSION: i64 = 34;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -38,6 +38,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_031_restore_reader_guards.sql"),
     include_str!("migration_032_library_tasks.sql"),
     include_str!("migration_033_pending_edit_images.sql"),
+    include_str!("migration_034_repair_attempts.sql"),
 ];
 /// これらの版の SQL を当てた直後に、触れた版の指紋を計算し直す。
 /// 28: 区分を指紋から外した。30: 移した取得の経路と画像の画質をそろえた。
@@ -203,7 +204,7 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
-            33
+            VERSION
         );
         assert_eq!(
             conn.query_row("SELECT count(*) FROM pending_edit_images", [], |r| r
@@ -269,7 +270,7 @@ mod tests {
         conn.execute_batch("DROP TABLE asset_repair_state").unwrap();
         open(&conn, id).unwrap();
         assert_eq!(
-            conn.query_row("SELECT count(*) FROM asset_repair_state", [], |r| r
+            conn.query_row("SELECT count(*) FROM repair_attempts", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
             0

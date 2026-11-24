@@ -95,7 +95,7 @@ fn attempts_are_atomic_idempotent_state_bound_and_survive_backup() {
             .asset_repair_plan(first.entity_id, first.snapshot_id, &urls)
             .unwrap()
             .attempts,
-        3
+        MAX_REPAIR_ATTEMPTS
     );
     let mut changed = urls.clone();
     changed.push("https://example.invalid/new".into());
@@ -113,7 +113,7 @@ fn attempts_are_atomic_idempotent_state_bound_and_survive_backup() {
         copy.asset_repair_plan(first.entity_id, first.snapshot_id, &urls)
             .unwrap()
             .attempts,
-        3
+        MAX_REPAIR_ATTEMPTS
     );
     let filled = save(&copy, &fixture.0.join("staged"), LibraryId::now_v7(), true).unwrap();
     assert!(!filled.created_revision);
@@ -256,7 +256,7 @@ fn a_rejected_memo_write_rolls_back_the_save_and_does_not_spend_an_attempt() {
     )
     .unwrap();
     let urls = fanbox_expected_urls(&data());
-    library.conn.lock().unwrap().execute_batch("CREATE TRIGGER refuse_asset_attempt BEFORE UPDATE ON asset_repair_state BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
+    library.conn.lock().unwrap().execute_batch("CREATE TRIGGER refuse_asset_attempt BEFORE UPDATE ON repair_attempts BEGIN SELECT RAISE(ABORT,'injected'); END; CREATE TRIGGER refuse_asset_attempt_insert BEFORE INSERT ON repair_attempts BEGIN SELECT RAISE(ABORT,'injected'); END").unwrap();
     let request = LibraryId::now_v7();
     assert!(save(&library, &fixture.0.join("staged"), request, true).is_err());
     assert_eq!(
@@ -278,7 +278,9 @@ fn a_rejected_memo_write_rolls_back_the_save_and_does_not_spend_an_attempt() {
         .conn
         .lock()
         .unwrap()
-        .execute_batch("DROP TRIGGER refuse_asset_attempt")
+        .execute_batch(
+            "DROP TRIGGER refuse_asset_attempt; DROP TRIGGER refuse_asset_attempt_insert",
+        )
         .unwrap();
     save(
         &library,

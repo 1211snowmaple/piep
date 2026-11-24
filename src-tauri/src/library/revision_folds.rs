@@ -152,7 +152,7 @@ impl Library {
                     AND EXISTS(SELECT 1 FROM revision_snapshots p WHERE p.entity_id=s.entity_id
                             AND p.published=1 AND p.sequence<s.sequence)
                     AND NOT EXISTS(SELECT 1 FROM edit_revisions e WHERE e.base_snapshot_id=s.id)
-                    AND NOT EXISTS(SELECT 1 FROM incomplete_save_attempts i WHERE i.snapshot_id=s.id)",
+                    AND NOT EXISTS(SELECT 1 FROM repair_attempts i WHERE i.snapshot_id=s.id AND i.attempts>0)",
             )?
             .query_map([], |r| {
                 Ok((
@@ -276,7 +276,7 @@ fn fold(tx: &Connection, candidate: &Candidate, now: i64) -> Result<()> {
         "DELETE FROM snapshot_people WHERE snapshot_id=?1",
         "DELETE FROM snapshot_series WHERE snapshot_id=?1",
         "DELETE FROM snapshot_tags WHERE snapshot_id=?1",
-        "DELETE FROM asset_repair_state WHERE snapshot_id=?1",
+        "DELETE FROM repair_attempts WHERE snapshot_id=?1",
         "DELETE FROM revision_snapshots WHERE id=?1",
     ] {
         tx.execute(sql, [current])?;
