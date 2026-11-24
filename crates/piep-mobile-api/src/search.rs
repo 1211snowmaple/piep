@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 /// 番号のページで飛べる先の上限。デスクトップの画面と同じ。
 pub const MAX_NUMBERED_OFFSET: i64 = 5_000;
+/// 一ページで取得できる作品の上限。
+pub const MAX_SEARCH_LIMIT: i64 = 50;
 
 /// 作品の並べ方。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +183,15 @@ impl MobileSearchRequest {
             return Err("検索カーソルとページ番号は同時に指定できません".into());
         }
         if self
+            .limit
+            .is_some_and(|limit| !(1..=MAX_SEARCH_LIMIT).contains(&limit))
+        {
+            return Err("一ページの件数は 1〜50 件にしてください".into());
+        }
+        if self.favorite == Some(false) {
+            return Err("お気に入りだけに絞るときは true を指定してください".into());
+        }
+        if self
             .offset
             .is_some_and(|offset| !(0..=MAX_NUMBERED_OFFSET).contains(&offset))
         {
@@ -271,9 +282,6 @@ mod tests {
 
     #[test]
     fn oversized_query_and_out_of_range_pages_are_rejected() {
-        assert!(parse(serde_json::json!({ "text": "海", "limit": 500 }))
-            .validate()
-            .is_ok());
         assert!(parse(serde_json::json!({ "text": "海".repeat(201) }))
             .validate()
             .is_err());
@@ -287,6 +295,34 @@ mod tests {
         assert!(parse(serde_json::json!({ "text": "海", "offset": 40 }))
             .validate()
             .is_ok());
+    }
+
+    #[test]
+    fn only_page_sizes_from_one_to_fifty_are_accepted() {
+        for limit in [1, 50] {
+            assert!(parse(serde_json::json!({ "limit": limit }))
+                .validate()
+                .is_ok());
+        }
+        for limit in [500, 51, 0, -1] {
+            assert!(
+                parse(serde_json::json!({ "limit": limit }))
+                    .validate()
+                    .is_err(),
+                "{limit}"
+            );
+        }
+    }
+
+    #[test]
+    fn favorite_filter_accepts_true_or_no_filter() {
+        assert!(MobileSearchRequest::default().validate().is_ok());
+        assert!(parse(serde_json::json!({ "favorite": true }))
+            .validate()
+            .is_ok());
+        assert!(parse(serde_json::json!({ "favorite": false }))
+            .validate()
+            .is_err());
     }
 
     #[test]

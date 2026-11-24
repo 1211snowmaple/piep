@@ -10,7 +10,9 @@
 
 use serde::{Deserialize, Serialize};
 
+mod errors;
 mod search;
+pub use errors::{MutationConflict, ReaderError, ReaderErrorCode};
 pub use search::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

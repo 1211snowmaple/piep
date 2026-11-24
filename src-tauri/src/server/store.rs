@@ -5,8 +5,9 @@
 //! 鍵はすべて SHA-256 だけを持ち、平文は発行した瞬間に返すだけで残さない。
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+pub use piep_library_protocol::Role;
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Mutex;
@@ -15,27 +16,11 @@ use subtle::ConstantTimeEq;
 
 pub const MAX_READERS: i64 = 16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    Reader,
-    Admin,
-}
-
-impl Role {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Reader => "reader",
-            Self::Admin => "admin",
-        }
-    }
-
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "reader" => Some(Self::Reader),
-            "admin" => Some(Self::Admin),
-            _ => None,
-        }
+fn parse_role(value: &str) -> Option<Role> {
+    match value {
+        "reader" => Some(Role::Reader),
+        "admin" => Some(Role::Admin),
+        _ => None,
     }
 }
 
@@ -188,7 +173,7 @@ impl ServerStore {
             for row in rows {
                 let (hash, role) = row.map_err(storage)?;
                 if bool::from(hash.as_slice().ct_eq(submitted.as_slice())) {
-                    matched = Role::parse(&role);
+                    matched = parse_role(&role);
                 }
             }
         }
@@ -256,7 +241,7 @@ impl ServerStore {
         for row in rows.flatten() {
             let (id, role, hash, seen) = row;
             if bool::from(hash.as_slice().ct_eq(submitted.as_slice())) {
-                found = Role::parse(&role).map(|role| (AuthorizedDevice { id, role }, seen));
+                found = parse_role(&role).map(|role| (AuthorizedDevice { id, role }, seen));
             }
         }
         drop(stmt);
@@ -297,7 +282,7 @@ impl ServerStore {
                 Ok(DeviceSummary {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    role: Role::parse(&row.get::<_, String>(2)?).unwrap_or(Role::Reader),
+                    role: parse_role(&row.get::<_, String>(2)?).unwrap_or(Role::Reader),
                     created_at: row.get(3)?,
                     last_seen_at: row.get(4)?,
                 })

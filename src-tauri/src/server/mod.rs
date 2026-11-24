@@ -21,8 +21,7 @@ pub mod tls;
 pub mod update;
 pub mod watchdog;
 
-/// 携帯端末との契約の版。壊す変更のときだけ上げる。
-pub const API_VERSION: u32 = 2;
+pub use piep_library_protocol::API_VERSION;
 /// 待ち受けの既定のポート。
 pub const DEFAULT_PORT: u16 = 38777;
 

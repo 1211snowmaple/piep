@@ -55,6 +55,33 @@ async fn pair_with(client: &reqwest::Client, url: &str, secret: &str) -> serde_j
 }
 
 #[tokio::test]
+async fn admin_pairing_checks_the_reply_version_and_role() {
+    for (version, role, accepted) in [
+        (API_VERSION, "admin", true),
+        (API_VERSION + 1, "admin", false),
+        (API_VERSION, "reader", false),
+    ] {
+        let url = spawn_plain(axum::Router::new().route(
+            "/api/pair",
+            axum::routing::post(move || async move {
+                axum::Json(serde_json::json!({
+                    "apiVersion": version,
+                    "role": role,
+                    "deviceId": "fixture",
+                    "token": "fixture",
+                }))
+            }),
+        ));
+        let remote = RemoteServer {
+            url,
+            fingerprint: None,
+        };
+        let result = pair_admin(&remote, "fixture", "試験端末").await;
+        assert_eq!(result.is_ok(), accepted, "{version} {role}");
+    }
+}
+
+#[tokio::test]
 async fn self_signed_https_requires_pairing_and_revocation_takes_effect() {
     let root = TestRoot::created("self_signed");
     let (parts, _paths) = standalone(&root.0);

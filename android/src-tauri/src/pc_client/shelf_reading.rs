@@ -12,11 +12,15 @@
 //! 新しい更新世代を使って送り直す。対象の作品・版と位置は、棚が書き込み時に確かめる。
 
 use super::device_db::{DeviceDb, records_error};
-use super::shelf::{ShelfScope, canonical_generation, check_scope, library_changed};
+use super::shelf::{
+    ShelfScope, canonical_generation, check_scope, library_changed, response_code,
+    supports_mutations,
+};
 use super::{ClientError, PcClientState, REQUEST_TIMEOUT, bounded_response_bytes};
 use piep_library_protocol::{Id, MAX_IDENTITY_BYTES, MAX_MANIFEST_BYTES};
 use piep_mobile_api::{
-    MobileReading, MobileReadingLocation, MobileReadingPage, MobileReadingUpdate,
+    MobileReading, MobileReadingLocation, MobileReadingPage, MobileReadingUpdate, MutationConflict,
+    ReaderErrorCode as ErrorCode,
 };
 use reqwest::StatusCode;
 use rusqlite::{OptionalExtension, Transaction};
@@ -156,17 +160,6 @@ fn forget_sent(
 fn known_generation(tx: &Transaction<'_>, key: &str, work: &str) -> Result<String, ClientError> {
     let known: Option<MobileReading> = query_json(tx, "shelf_positions", key, work)?;
     Ok(known.map_or_else(|| "0".to_string(), |known| known.generation))
-}
-
-#[derive(Deserialize)]
-struct Conflict {
-    error: String,
-    current: MobileReading,
-}
-
-#[derive(Deserialize)]
-struct Refusal {
-    error: String,
 }
 
 fn record_rejection(
@@ -327,6 +320,14 @@ impl ShelfReadingState {
         keys: &ReadingKeys,
         pending: Vec<(String, PendingWrite)>,
     ) -> Result<bool, ClientError> {
+        if pending.is_empty() {
+            return Ok(false);
+        }
+        // 書き込みに対応していない接続先には送らない。未送信の位置は端末に残す。
+        let (saved, client) = connection(pc, scope)?;
+        if !supports_mutations(pc, &client, &saved, scope).await? {
+            return Ok(false);
+        }
         let mut rewritten = false;
         for (work, write) in pending {
             let Some(write) = self.prepare_write(pc, scope, keys, &work, write)? else {
@@ -478,9 +479,9 @@ async fn send(
         // 世代の食い違いは棚の入れ替わり（409）と同じ番号で返るので、本文で見分ける。
         StatusCode::CONFLICT if scope.matches(response.headers()) => {
             let bytes = bounded_response_bytes(response, MAX_IDENTITY_BYTES).await?;
-            let conflict: Conflict =
+            let conflict: MutationConflict<MobileReading> =
                 serde_json::from_slice(&bytes).map_err(|_| library_changed())?;
-            if conflict.error != "reading_conflict"
+            if conflict.code != ErrorCode::ReadingConflict
                 || conflict.current.work != work
                 || !valid_reading(&conflict.current)
             {
@@ -488,18 +489,17 @@ async fn send(
             }
             Sent::Conflict(conflict.current)
         }
-        StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND if scope.matches(response.headers()) => {
-            let bytes = bounded_response_bytes(response, MAX_IDENTITY_BYTES).await?;
-            let refusal: Refusal =
-                serde_json::from_slice(&bytes).map_err(|_| ClientError::protocol())?;
-            match (status, refusal.error.as_str()) {
-                (StatusCode::BAD_REQUEST, "invalid_reading_location") => {
+        status @ (StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND)
+            if scope.matches(response.headers()) =>
+        {
+            match (status, response_code(response).await) {
+                (StatusCode::BAD_REQUEST, Some(ErrorCode::InvalidReadingLocation)) => {
                     Sent::Refused("invalid_reading_location")
                 }
-                (StatusCode::NOT_FOUND, "resource_unavailable") => {
+                (StatusCode::NOT_FOUND, Some(ErrorCode::ResourceUnavailable)) => {
                     Sent::Refused("resource_unavailable")
                 }
-                _ => return Err(ClientError::protocol()),
+                _ => return Err(ClientError::remote()),
             }
         }
         _ => {
@@ -540,13 +540,11 @@ async fn fetch(
         .await
         .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
     if response.status() == StatusCode::BAD_REQUEST && scope.matches(response.headers()) {
-        let bytes = bounded_response_bytes(response, MAX_IDENTITY_BYTES).await?;
-        let refusal: Refusal =
-            serde_json::from_slice(&bytes).map_err(|_| ClientError::protocol())?;
-        if refusal.error == "reading_cursor_expired" {
-            return Ok(None);
-        }
-        return Err(ClientError::protocol());
+        return if response_code(response).await == Some(ErrorCode::ReadingCursorExpired) {
+            Ok(None)
+        } else {
+            Err(ClientError::remote())
+        };
     }
     let bytes = bounded_response_bytes(check_scope(response, scope)?, MAX_MANIFEST_BYTES).await?;
     let page: MobileReadingPage =

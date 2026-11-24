@@ -439,7 +439,7 @@ struct PairRequest {
 async fn pair(
     State(ctx): State<Ctx>,
     ApiJson(request): ApiJson<PairRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<piep_library_protocol::PairReply>, ApiError> {
     if request.secret.len() > 128 || request.device_name.chars().count() > 64 {
         return Err(ApiError::invalid("登録情報が長すぎます"));
     }
@@ -459,12 +459,12 @@ async fn pair(
                 true,
                 Some(paired.role.as_str()),
             );
-            Ok(Json(serde_json::json!({
-            "deviceId": paired.device_id,
-            "token": paired.token,
-            "role": paired.role,
-            "apiVersion": API_VERSION,
-            })))
+            Ok(Json(piep_library_protocol::PairReply {
+                device_id: paired.device_id,
+                token: paired.token,
+                role: paired.role,
+                api_version: API_VERSION,
+            }))
         }
         // 理由を区別しない。鍵が合っているかどうかを外から測らせない。
         Err(PairError::Rejected | PairError::TooManyDevices) => Err(ApiError::unauthorized()),

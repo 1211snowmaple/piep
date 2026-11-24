@@ -1,4 +1,6 @@
-use crate::{Decimal, Error, Id, Result, MAX_BODY_BYTES, MAX_FILE_BYTES, MAX_MANIFEST_BYTES};
+use crate::{
+    Decimal, Error, Id, Result, API_VERSION, MAX_BODY_BYTES, MAX_FILE_BYTES, MAX_MANIFEST_BYTES,
+};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_IDENTITY_BYTES: usize = 64 * 1024;
@@ -8,6 +10,7 @@ pub const MAX_IDENTITY_BYTES: usize = 64 * 1024;
 pub struct Capabilities {
     pub resource_transfer: bool,
     pub reader_bundle: bool,
+    #[serde(default)]
     pub mutations: bool,
 }
 
@@ -31,7 +34,7 @@ impl LibraryIdentity {
     pub fn new(library_id: Id, subject_id: Id, sync_epoch: Id) -> Self {
         Self {
             format: "piep-library-api".into(),
-            api_version: 2,
+            api_version: API_VERSION,
             storage_version: 1,
             transfer_format: "piep-resource-transfer-v1".into(),
             library_id,
@@ -40,7 +43,7 @@ impl LibraryIdentity {
             capabilities: Capabilities {
                 resource_transfer: true,
                 reader_bundle: true,
-                mutations: false,
+                mutations: true,
             },
             max_file_bytes: Decimal::new(MAX_FILE_BYTES),
             max_body_bytes: Decimal::new(MAX_BODY_BYTES),
@@ -49,7 +52,7 @@ impl LibraryIdentity {
     }
     pub fn validate(&self) -> Result<()> {
         if self.format != "piep-library-api"
-            || self.api_version != 2
+            || self.api_version != API_VERSION
             || self.storage_version != 1
             || self.transfer_format != "piep-resource-transfer-v1"
             || !self.capabilities.resource_transfer
