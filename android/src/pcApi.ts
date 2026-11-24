@@ -45,7 +45,15 @@ export function pcConnectionIssue(status: PcConnectionStatus): string | null {
 // サーバーから届く型は shared/mobileApi.ts（Rust の定義から生成）にある。
 // ここでは、画面だけが持つ項目を足す。
 
+/** 端末の読書記録を分ける棚と読み手。 */
+export type ReadingScope = Pick<NonNullable<PcConnectionStatus["shelf"]>["scope"], "libraryId" | "subjectId">;
+
+export function sameReadingScope(left: ReadingScope | null, right: ReadingScope | null): boolean {
+  return left?.libraryId === right?.libraryId && left?.subjectId === right?.subjectId;
+}
+
 export type PcWork = MobileWork & {
+  readingScope: ReadingScope;
   /** フロント側だけの取得順。お気に入りの書き込みより新しい応答を見分ける。 */
   favoriteReadSequence?: number;
 };
@@ -144,7 +152,6 @@ export interface PcMetadata {
   /** 古い順。 */
   versions: PcVersion[];
   /** 編集の印（`edit:{UUID}`）。編集がなければ null。 */
-  activeEditHash: string | null;
 }
 
 export type PcPerson = MobilePerson;
@@ -155,6 +162,9 @@ export type PcPage = MobilePage;
 
 export interface OfflinePage extends PcPage {
   generation: string;
+  readingScope: ReadingScope;
+  snapshotId: string;
+  editId: string | null;
 }
 
 export interface PcOutlineEntry {
@@ -170,13 +180,9 @@ export interface PcAsset {
 
 export interface OfflineWork {
   work: PcWork;
-  /** 保存した棚の UUID。 */
-  shelfLibrary: string;
   people?: PcPerson[];
   series?: PcSeriesMembership[];
   savedAtMs: number;
-  savedVersion: number;
-  savedEditHash: string | null;
   pageCount: number;
   collections?: PcCollection[];
   collectionPositions?: Record<string, number>;
@@ -270,10 +276,10 @@ export const lookupPcWork = (source: string, key: string): Promise<PcWork | null
   return shelf ? lookupShelfWork(shelf, source, key) : Promise.resolve(null);
 };
 /** Rust が返す保存版の一覧の行。作品は棚の一覧と同じ形で残っている。 */
-type StoredOfflineWork = Omit<OfflineWork, "work"> & { work: MobileWork };
+type StoredOfflineWork = Omit<OfflineWork, "work"> & { work: MobileWork; readingScope: ReadingScope };
 
 /** 保存版の行を画面の形にする。作品は一覧の一件と同じ変換を通す。 */
-const offlineWork = (stored: StoredOfflineWork): OfflineWork => ({ ...stored, work: shelfWork(stored.work) });
+const offlineWork = ({ work, readingScope, ...saved }: StoredOfflineWork): OfflineWork => ({ ...saved, work: shelfWork(work, readingScope) });
 
 export const listOfflineWorks = () => invoke<StoredOfflineWork[]>("offline_list_works").then((works) => works.map(offlineWork));
 /** 端末に保存する。今つながっている棚から、読む画面と同じ組み立てで保存する。 */
@@ -282,12 +288,18 @@ export const saveOfflineWork = (workId: string) => {
   if (!library) return noShelf();
   return invoke<StoredOfflineWork>("offline_save_shelf_work", { library, work: workId }).then(offlineWork);
 };
-export const getOfflinePage = (workId: string, page: number) => invoke<OfflinePage>("offline_get_page", { workId, page });
+export async function getOfflinePage(work: PcWork, page: number): Promise<OfflinePage> {
+  const saved = await invoke<OfflinePage>("offline_get_page", { workId: work.id, page });
+  if (!sameReadingScope(work.readingScope, saved.readingScope) || work.snapshotId !== saved.snapshotId || work.editId !== saved.editId) {
+    throw new Error("端末の保存が更新されました。作品を開き直してください");
+  }
+  return saved;
+}
 export const getOfflineOutline = (workId: string, generation: string) => invoke<PcOutlineEntry[]>("offline_get_outline", { workId, generation });
 export const getOfflineAsset = (workId: string, assetId: number, generation: string) => invoke<PcAsset>("offline_get_asset", { workId, assetId, generation });
 export const deleteOfflineWork = (work: Pick<PcWork, "id" | "source" | "sourceId">) => invoke<void>("offline_delete_work", { workId: work.id, source: work.source, sourceId: work.sourceId });
-/** 同じ作品かは取得元の識別子まで見て決める。 */
-export const sameWork = (left: Pick<PcWork, "id" | "source" | "sourceId">, right: Pick<PcWork, "id" | "source" | "sourceId">) => left.id === right.id && left.source === right.source && left.sourceId === right.sourceId;
+/** 保存した作品が、この棚と利用者の同じ作品か。 */
+export const sameWork = (left: PcWork, right: PcWork) => left.id === right.id && sameReadingScope(left.readingScope, right.readingScope);
 export const searchOfflineText = (query: string) => invoke<OfflineTextHit[]>("offline_search_text", { query });
 export const listOfflineIssues = () => invoke<OfflineIssue[]>("offline_list_issues");
 export const deleteOfflineIssue = (workId: string) => invoke<void>("offline_delete_corrupt_work", { workId });

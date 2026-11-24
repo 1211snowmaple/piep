@@ -1,8 +1,8 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import type { MobileCollection, MobileEntityDetail, MobileSearchSuggestions, MobileCollectionDetail, MobileWorkPage, MobileWork, MobileWorkDetail } from "@shared/mobileApi";
-import type { PcCollection, PcCollectionDetail, PcConnectionStatus, PcEntityDetail, PcEntityPage, PcEntitySeriesPage, PcMetadata, PcOutlineEntry, PcPage, PcSearchPage, PcWork, PcWorkSearch, SearchSuggestion } from "./pcApi";
+import type { PcCollection, PcCollectionDetail, PcConnectionStatus, PcEntityDetail, PcEntityPage, PcEntitySeriesPage, PcMetadata, PcOutlineEntry, PcPage, PcSearchPage, PcWork, PcWorkSearch, ReadingScope, SearchSuggestion } from "./pcApi";
 
-type ShelfScope = NonNullable<PcConnectionStatus["shelf"]>["scope"];
+export type ShelfScope = NonNullable<PcConnectionStatus["shelf"]>["scope"];
 
 /** 棚から開いた一冊。ページと画像は端末の中で組んである。 */
 export interface OpenedShelfWork {
@@ -17,22 +17,22 @@ export interface OpenedShelfWork {
 }
 
 let scope: ShelfScope | null = null;
-const opened = new Map<string, Promise<OpenedShelfWork | null>>();
+const opened = new Map<string, Promise<OpenedShelfWork>>();
 
 /** 棚に届かない接続で、棚を使う操作をしたとき。 */
 export const NO_SHELF = { code: "library_changed", message: "接続先の本棚が変わりました。一覧を開き直してください" };
+const READER_VIEW_CHANGED = { code: "reader_view_changed", message: "本文が変わりました。もう一度読み込んでください" };
+
+function shelfKey(shelf: ShelfScope): string {
+  return `${shelf.libraryId}/${shelf.subjectId}/${shelf.syncEpoch}/${shelf.connectionGeneration}`;
+}
 
 /**
  * 接続先が配信している棚を使う。接続や棚が変わったら、前の棚で開いたものは使わない。
  */
 export function adoptShelf(status: PcConnectionStatus | null): void {
   const next = status?.reachable && status.shelf?.readerBundle ? status.shelf.scope : null;
-  const same = next && scope
-    && next.libraryId === scope.libraryId
-    && next.subjectId === scope.subjectId
-    && next.syncEpoch === scope.syncEpoch
-    && next.connectionGeneration === scope.connectionGeneration;
-  if (same) return;
+  if (next && scope && shelfKey(next) === shelfKey(scope)) return;
   scope = next;
   opened.clear();
 }
@@ -57,10 +57,15 @@ export function setShelfFavorite(library: ShelfScope, work: string, expected: st
   return invoke<ShelfFavorite>("pc_set_favorite", { library, work, request: crypto.randomUUID(), expected, favorite });
 }
 
+export function isCurrentShelf(library: ShelfScope): boolean {
+  const current = connectedShelf();
+  return current !== null && shelfKey(library) === shelfKey(current);
+}
+
 /** 一覧の問い合わせの鍵に足す。棚や接続が変われば、一覧も取り直す。 */
 export function connectedShelfKey(): string | null {
   const shelf = connectedShelf();
-  return shelf ? `${shelf.libraryId}/${shelf.subjectId}/${shelf.syncEpoch}/${shelf.connectionGeneration}` : null;
+  return shelf ? shelfKey(shelf) : null;
 }
 
 export async function shelfSuggestions(library: ShelfScope, text: string): Promise<SearchSuggestion[]> {
@@ -70,7 +75,7 @@ export async function shelfSuggestions(library: ShelfScope, text: string): Promi
 
 /** 取得元と ID から棚の作品を引く。棚に無ければ失敗する。 */
 export async function lookupShelfWork(library: ShelfScope, source: string, key: string): Promise<PcWork> {
-  return shelfWork(await invoke<MobileWork>("pc_lookup_work", { library, provider: source, key }));
+  return shelfWork(await invoke<MobileWork>("pc_lookup_work", { library, provider: source, key }), library);
 }
 
 /** 棚のコレクション。表紙は棚から引くので、棚の UUID を添える。 */
@@ -104,7 +109,7 @@ export async function shelfWorkCollections(library: ShelfScope, work: string): P
 /** コレクションの画面。`collection` は棚の UUID。 */
 export async function shelfCollectionDetail(library: ShelfScope, collection: string): Promise<PcCollectionDetail> {
   const { members, ...summary } = await invoke<MobileCollectionDetail>("pc_collection", { library, collection });
-  return { ...shelfCollection(summary, library), members: members.map((member) => ({ ...member, work: member.work ? shelfWork(member.work) : null })) };
+  return { ...shelfCollection(summary, library), members: members.map((member) => ({ ...member, work: member.work ? shelfWork(member.work, library) : null })) };
 }
 
 /** 棚の作者のアイコン・ヘッダー、シリーズの表紙。 */
@@ -113,15 +118,15 @@ export function shelfEntityCoverPath(kind: "people" | "series", source: string, 
   return shelf ? `shelf-entity/${shelf.libraryId}/${kind}/${source}/${encodeURIComponent(key)}${banner ? "/banner" : ""}` : null;
 }
 
-/** 棚の一件を、カードと画面が読む形にする。 */
-export function shelfWork(work: MobileWork): PcWork {
-  return { ...work };
+/** 作品を取得したときの棚と利用者を、読書記録のために添える。 */
+export function shelfWork(work: MobileWork, { libraryId, subjectId }: ReadingScope): PcWork {
+  return { ...work, readingScope: { libraryId, subjectId } };
 }
 
 /** 一覧の一ページを棚から引く。 */
 export async function searchShelf(library: ShelfScope, criteria: PcWorkSearch, cursor: string | null, entity: { kind: string; source: string; key: string } | null, offset: number | null, limit: number | null): Promise<PcSearchPage> {
   const page = await invoke<MobileWorkPage>("pc_search", { library, criteria, cursor, offset, limit, scope: entity });
-  return { items: page.items.map(shelfWork), nextCursor: page.nextCursor, totalEstimate: page.totalEstimate, indexComplete: page.indexComplete };
+  return { items: page.items.map((work) => shelfWork(work, library)), nextCursor: page.nextCursor, totalEstimate: page.totalEstimate, indexComplete: page.indexComplete };
 }
 
 /** 作品の画面を棚から引く。版の一覧には、以前の版を開くための版ごとの写しの ID を添える。 */
@@ -130,19 +135,11 @@ export async function shelfMetadata(workId: string): Promise<PcMetadata> {
   if (!library) throw NO_SHELF;
   const detail = await invoke<MobileWorkDetail>("pc_work", { library, work: workId });
   return {
-    work: shelfWork(detail.work),
+    work: shelfWork(detail.work, library),
     people: detail.people,
     series: detail.series,
     versions: detail.versions,
-    // 編集の中身の印は渡らない。編集の UUID で読書位置と保存版を分ける（編集し直せば別の本文）。
-    activeEditHash: shelfEditHash(detail.work),
   };
-}
-
-/** 編集の印。端末に保存した版の印（Rust 側の `edit:{UUID}`）と同じ形。 */
-export function shelfEditHash(work: Pick<MobileWork, "edited" | "editId" | "snapshotId">): string | null {
-  if (!work.edited) return null;
-  return work.editId ? `edit:${work.editId}` : `edit:${work.snapshotId}`;
 }
 
 /** 棚の作品の表紙。版の UUID を鍵にして、版が変われば取り直す。 */
@@ -153,34 +150,25 @@ export function shelfCoverPath(work: PcWork, large: boolean): string | null {
 }
 
 /**
- * 作品を棚で開く。棚に無い作品や、棚に届かない接続では null。
+ * 作品情報で確定した保存版か編集を、その情報を引いた棚で開く。
  * `fresh` は開き直すとき（端末が覚えておける冊数を超えて、組んだものが消えたとき）。
  */
-export function openShelfWork(work: Pick<PcWork, "source" | "sourceId">, fresh = false): Promise<OpenedShelfWork | null> {
-  const current = scope;
-  if (!current || !isTauri()) return Promise.resolve(null);
-  const id = `${work.source}:${work.sourceId}`;
+export function openShelfWork(library: ShelfScope, work: Pick<PcWork, "id" | "snapshotId" | "editId">, fresh = false): Promise<OpenedShelfWork> {
+  if (!isCurrentShelf(library)) return Promise.reject(NO_SHELF);
+  const view: OpenedShelfWork["view"] = work.editId
+    ? { kind: "edit", id: work.editId }
+    : { kind: "snapshot", id: work.snapshotId };
+  const id = `${shelfKey(library)}/${work.id}/${view.kind}/${view.id}`;
   const found = opened.get(id);
   if (found && !fresh) return found;
-  const next = invoke<OpenedShelfWork>("pc_open", { scope: current, provider: work.source, key: work.sourceId })
-    .catch(() => null);
+  const next = invoke<OpenedShelfWork>("pc_open", { scope: library, work: work.id, view }).then((document) => {
+    if (!isCurrentShelf(library)) throw NO_SHELF;
+    if (document.entityId !== work.id || document.view.kind !== view.kind || document.view.id !== view.id) throw READER_VIEW_CHANGED;
+    return document;
+  });
   opened.set(id, next);
-  // 開けなかったことは覚えない。次に開いたときに確かめ直す。
-  void next.then((result) => { if (!result && opened.get(id) === next) opened.delete(id); });
-  return next;
-}
-
-/** 作品の保存した版の一つ（版ごとの写し）を棚で開く。`fresh` は開き直すとき。 */
-export function openShelfSnapshot(work: string, snapshot: string, fresh = false): Promise<OpenedShelfWork | null> {
-  const current = connectedShelf();
-  if (!current) return Promise.resolve(null);
-  const id = `snapshot:${work}:${snapshot}`;
-  const found = opened.get(id);
-  if (found && !fresh) return found;
-  const next = invoke<OpenedShelfWork>("pc_open_snapshot", { scope: current, work, snapshot })
-    .catch(() => null);
-  opened.set(id, next);
-  void next.then((result) => { if (!result && opened.get(id) === next) opened.delete(id); });
+  // 失敗した要求は覚えない。同じ鍵を開き直していたら、新しい要求を残す。
+  void next.catch(() => { if (opened.get(id) === next) opened.delete(id); });
   return next;
 }
 
