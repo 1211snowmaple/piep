@@ -2,15 +2,15 @@ import { CONTENT_TYPE_LABELS } from "@shared/format";
 import { Icons } from "./icons";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { defaultPcSearch, type PcSearchCriteria } from "./pcApi";
+import { defaultPcSearch, joinSearchTerms, splitSearchTerms, type PcSearchCriteria } from "./pcApi";
 import { DATE_FIELD_OPTIONS } from "@shared/dateFields";
 import { describeCondition, hasConditionToSave, relevanceLabel, sortGroups, sortLabels } from "./librarySort";
 
 /** 検索語を除いて、効いている条件を数える。上限と下限は合わせて一つと考える。 */
 export function activeFilterCount(criteria: PcSearchCriteria): number {
   const on = [
-    criteria.source, criteria.contentType, criteria.author, criteria.authorExclude, criteria.favorite,
-    criteria.tag, criteria.tagExclude, criteria.minChars || criteria.maxChars, criteria.minAssets || criteria.maxAssets,
+    criteria.source, criteria.contentType, criteria.author.length, criteria.authorExclude.length, criteria.favorite,
+    criteria.tag.length, criteria.tagExclude.length, criteria.minChars || criteria.maxChars, criteria.minAssets || criteria.maxAssets,
     criteria.revision, criteria.edit, criteria.cover, criteria.dateFrom || criteria.dateTo,
     criteria.sort !== "remembered" && criteria.sort !== "standard",
   ];
@@ -33,13 +33,22 @@ function problemOf(draft: PcSearchCriteria): string | null {
   if (draft.minAssets && draft.maxAssets && Number(draft.minAssets) > Number(draft.maxAssets)) return "添付数の下限は上限以下にしてください。";
   if (draft.dateFrom && draft.dateTo && draft.dateFrom > draft.dateTo) return "日付の開始日は終了日以前にしてください。";
   for (const value of [draft.author, draft.authorExclude, draft.tag, draft.tagExclude]) {
-    if (value.split(/[\n,、]+/).filter((part) => part.trim()).length > 10) return "作者とタグはそれぞれ 10 件まで指定できます。";
+    if (value.length > 10) return "作者とタグはそれぞれ 10 件まで指定できます。";
   }
   return null;
 }
 
+type TermKey = "author" | "authorExclude" | "tag" | "tagExclude";
+
+/** 入力欄の文字。触った欄だけを分け直す。札で選んだ区切り文字入りのタグは、触らなければそのまま。 */
+function withTexts(draft: PcSearchCriteria, texts: Partial<Record<TermKey, string>>): PcSearchCriteria {
+  const next = { ...draft };
+  for (const [key, text] of Object.entries(texts) as [TermKey, string][]) next[key] = splitSearchTerms(text);
+  return next;
+}
+
 function trimmed(draft: PcSearchCriteria): PcSearchCriteria {
-  return { ...draft, author: draft.author.trim(), authorExclude: draft.authorExclude.trim(), tag: draft.tag.trim(), tagExclude: draft.tagExclude.trim(), minChars: draft.minChars.trim(), maxChars: draft.maxChars.trim(), minAssets: draft.minAssets.trim(), maxAssets: draft.maxAssets.trim() };
+  return { ...draft, minChars: draft.minChars.trim(), maxChars: draft.maxChars.trim(), minAssets: draft.minAssets.trim(), maxAssets: draft.maxAssets.trim() };
 }
 
 /**
@@ -59,12 +68,14 @@ export function FilterSheet({ criteria, onApply, onSaveCondition, onClose, scope
   scope?: "person" | "series";
 }) {
   const [draft, setDraft] = useState(criteria);
+  const [texts, setTexts] = useState<Partial<Record<TermKey, string>>>({});
   const [problem, setProblem] = useState<string | null>(null);
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
   const [savedName, setSavedName] = useState<string | null>(null);
   const set = (patch: Partial<PcSearchCriteria>) => { setDraft((old) => ({ ...old, ...patch })); setProblem(null); setSavedName(null); };
-  const count = activeFilterCount(draft);
+  const resolved = withTexts(draft, texts);
+  const count = activeFilterCount(resolved);
   const sheet = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -84,15 +95,15 @@ export function FilterSheet({ criteria, onApply, onSaveCondition, onClose, scope
   }, [onClose]);
 
   const apply = () => {
-    const invalid = problemOf(draft);
+    const invalid = problemOf(resolved);
     if (invalid) { setProblem(invalid); return; }
-    onApply(trimmed(draft));
+    onApply(trimmed(resolved));
   };
 
   const saveCondition = () => {
-    const invalid = problemOf(draft);
+    const invalid = problemOf(resolved);
     if (invalid) { setProblem(invalid); return; }
-    const next = trimmed(draft);
+    const next = trimmed(resolved);
     const finalName = name.trim() || describeCondition(next);
     onSaveCondition?.(finalName, next);
     setSavedName(finalName);
@@ -100,7 +111,7 @@ export function FilterSheet({ criteria, onApply, onSaveCondition, onClose, scope
     setName("");
   };
 
-  const textField = (label: string, key: "author" | "authorExclude" | "tag" | "tagExclude") => <label>{label}<input value={draft[key]} maxLength={1000} placeholder="読点で区切って指定" onChange={(event) => set({ [key]: event.target.value })} /></label>;
+  const textField = (label: string, key: TermKey) => <label>{label}<input value={texts[key] ?? joinSearchTerms(draft[key])} maxLength={1000} placeholder="読点で区切って指定" onChange={(event) => { const text = event.target.value; setTexts((old) => ({ ...old, [key]: text })); setProblem(null); setSavedName(null); }} /></label>;
   const range = (label: string, minKey: "minChars" | "minAssets", maxKey: "maxChars" | "maxAssets", max: string) => <div className="filter-range"><span className="filter-label">{label}</span><input aria-label={`${label}の下限`} type="number" inputMode="numeric" min="0" max={max} value={draft[minKey]} placeholder="下限" onChange={(event) => set({ [minKey]: event.target.value })} /><span aria-hidden="true">〜</span><input aria-label={`${label}の上限`} type="number" inputMode="numeric" min="0" max={max} value={draft[maxKey]} placeholder="上限" onChange={(event) => set({ [maxKey]: event.target.value })} /></div>;
 
   return createPortal(<div className="filter-layer">
@@ -149,7 +160,7 @@ export function FilterSheet({ criteria, onApply, onSaveCondition, onClose, scope
       </div>
       <footer className="filter-footer">
         <span className="filter-summary">{count ? `${count} 個の条件` : "すべての作品"}</span>
-        <button type="button" className="secondary-button" onClick={() => { setDraft({ ...defaultPcSearch, text: draft.text }); setProblem(null); setSavedName(null); }}>リセット</button>
+        <button type="button" className="secondary-button" onClick={() => { setDraft({ ...defaultPcSearch, text: draft.text }); setTexts({}); setProblem(null); setSavedName(null); }}>リセット</button>
         <button type="button" className="primary-button" onClick={apply}>適用</button>
       </footer>
     </aside>

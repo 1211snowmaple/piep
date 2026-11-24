@@ -1,7 +1,7 @@
 //! 更新確認が見つけた、作品の属性ではない事実：まだ取り込んでいない改稿と、一部保存の補完。
 //!
 //! 補完は「今の版で一度だけ」試す。試した印は `incomplete_save_attempts` に書く。
-//! 版（現在の写し）が進めば、印は効かなくなる。
+//! 版（現在の写し）が進めば、前の版の印は保存と一緒に消える。
 
 use super::{Error, Library, LibraryId, Result};
 use rusqlite::params;
@@ -79,8 +79,9 @@ impl Library {
 
     /// 補完の保存ジョブへ渡した pixiv 作品を、候補として返した版（`incomplete_save_repairs`）で
     /// 試したと記録する。結果がどうであれ、同じ版では繰り返さない。印を付けるまでにジョブが
-    /// 新しい版を保存していても、その版には付けない（次の候補に残る）。棚に無い作品・その作品の
-    /// 版でないものは飛ばす。記録した件数を返す。
+    /// 新しい版を保存していたら、印は付けない（試した版はもう今の版でなく、新しい版は次の候補に
+    /// 残る）。棚に無い作品・その作品の今の版でないものは飛ばす。今の版を指していない古い印も
+    /// ここで消す。記録した件数を返す。
     pub fn record_incomplete_save_attempts(
         &self,
         attempts: &[(String, LibraryId)],
@@ -92,13 +93,19 @@ impl Library {
         for (key, snapshot) in attempts {
             count += tx.execute(
                 "INSERT INTO incomplete_save_attempts(work_id,snapshot_id,attempted_at)
-                 SELECT p.work_id,s.id,?3 FROM work_current_projection p
-                   JOIN revision_snapshots s ON s.entity_id=p.work_id AND s.id=?2
-                  WHERE p.provider='pixiv' AND p.external_key=?1
+                 SELECT p.work_id,p.snapshot_id,?3 FROM work_current_projection p
+                  WHERE p.provider='pixiv' AND p.external_key=?1 AND p.snapshot_id=?2
                  ON CONFLICT(work_id) DO UPDATE SET snapshot_id=excluded.snapshot_id,attempted_at=excluded.attempted_at",
                 params![key, snapshot.as_bytes().as_slice(), at],
             )?;
         }
+        tx.execute(
+            "DELETE FROM incomplete_save_attempts WHERE NOT EXISTS(
+               SELECT 1 FROM entity_current c
+                WHERE c.entity_id=incomplete_save_attempts.work_id
+                  AND c.snapshot_id=incomplete_save_attempts.snapshot_id)",
+            [],
+        )?;
         tx.commit()?;
         Ok(count)
     }

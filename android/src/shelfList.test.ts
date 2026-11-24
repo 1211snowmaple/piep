@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 const library = "0190a000-0000-7000-8000-000000000001";
 const work = "0190a000-0000-7000-8000-000000000002";
 const snapshot = "0190a000-0000-7000-8000-000000000003";
+const subject = "0190a000-0000-7000-8000-000000000004";
 const edit = "0190a000-0000-7000-8000-000000000006";
 
 const shelfItem = {
@@ -18,11 +19,11 @@ const shelfItem = {
   edited: true, editId: edit, favorite: false, favoriteGeneration: "3", seriesTitle: null, seriesId: null, sourceCreatedAt: null, savedAt: "2026-11-18T00:00:00.000Z",
 };
 
-function status(reachable = true) {
+function status(reachable = true, libraryId = library) {
   return {
     url: "https://server", reachable,
     shelf: {
-      scope: { libraryId: library, subjectId: "0190a000-0000-7000-8000-000000000004", syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
+      scope: { libraryId, subjectId: subject, syncEpoch: "0190a000-0000-7000-8000-000000000005", connectionGeneration: 1 },
       readerBundle: true,
     },
   } as never;
@@ -42,7 +43,7 @@ it("一覧・作品の画面・表紙を棚から引く", async () => {
     if (command === "pc_search") return { items: [shelfItem], nextCursor: "next", totalEstimate: 1, indexComplete: true };
     if (command === "pc_work") return { work: shelfItem, people: [], series: [], versions: [], editBaseVersion: 1 };
     if (command === "offline_save_shelf_work" || command === "offline_list_works") {
-      const saved = { work: shelfItem, shelfLibrary: library, savedAtMs: 1, savedVersion: 2, savedContentHash: null, savedEditHash: `edit:${edit}`, pageCount: 3 };
+      const saved = { work: shelfItem, readingScope: { libraryId: library, subjectId: subject }, savedAtMs: 1, pageCount: 3 };
       return command === "offline_list_works" ? [saved] : saved;
     }
     if (command === "pc_work_collections") return [];
@@ -60,8 +61,7 @@ it("一覧・作品の画面・表紙を棚から引く", async () => {
   const metadata = await pc.getPcMetadata(item.id);
   expect(api.invoke.mock.calls[1]).toEqual(["pc_work", { library: expect.objectContaining({ libraryId: library }), work }]);
   expect(metadata.work.edited).toBe(true);
-  // 編集の UUID で読書位置と保存版を分ける（端末に保存した版の印と同じ形）。
-  expect(metadata.activeEditHash).toBe(`edit:${edit}`);
+  expect(metadata.work).toMatchObject({ readingScope: { libraryId: library, subjectId: subject }, snapshotId: snapshot, editId: edit });
   expect(item).toMatchObject({ snapshotId: snapshot, edited: true, editId: edit, favoriteGeneration: "3" });
 
   // 端末への保存は、今つながっている棚から組む。返った保存版は一覧の一件と同じ形になる。
@@ -72,12 +72,14 @@ it("一覧・作品の画面・表紙を棚から引く", async () => {
   expect(pc.sameSavedVersion(item, saved)).toBe(true);
   expect(pc.sameSavedVersion({ ...item, editId: null }, saved)).toBe(false);
   expect(pc.sameSavedVersion({ ...item, snapshotId: work }, saved)).toBe(false);
+  // 同じ接続先で別の棚を配っても、保存済み作品には保存時の棚と読み手を使う。
+  shelf.adoptShelf(status(true, work));
   const listed = await pc.listOfflineWorks();
   expect(listed[0].work).toEqual(listedItem);
 
   await expect(pc.getPcWorkCollections(item.id)).resolves.toEqual([]);
   expect(api.invoke).toHaveBeenCalledTimes(5);
-  expect(shelf.connectedShelf()).toMatchObject({ libraryId: library });
+  expect(shelf.connectedShelf()).toMatchObject({ libraryId: work });
 });
 
 it("棚に届かない接続では、一覧を引かずに知らせる", async () => {
