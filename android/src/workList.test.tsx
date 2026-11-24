@@ -26,6 +26,7 @@ function WorkBrowser() {
 }
 
 const work: PcWork = {
+  readingScope: { libraryId: "l1", subjectId: "u1" },
   id: "w1", source: "pixiv", sourceId: "1", title: "最初の作品", authorName: "作者", authorId: "1",
   contentType: "novel", tags: [], excerpt: null, textLength: 1, assetCount: 0, hasCover: false,
   currentVersion: 1, favorite: false, seriesTitle: null, seriesId: null,
