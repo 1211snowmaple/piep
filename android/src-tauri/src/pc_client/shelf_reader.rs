@@ -96,12 +96,20 @@ pub struct OpenedShelfWork {
     outline: Vec<ReaderOutlineEntry>,
 }
 
-fn view_key(entity: Id, view: &ResourceScope) -> String {
+fn view_key(scope: ShelfScope, entity: Id, view: &ResourceScope) -> String {
     let (kind, id) = match view {
         ResourceScope::Snapshot(id) => ("snapshot", id),
         ResourceScope::Edit(id) => ("edit", id),
     };
-    format!("{}/{kind}/{}", entity.get(), id.get())
+    format!(
+        "{}/{}/{}/{}/{}/{kind}/{}",
+        scope.library_id().get(),
+        scope.subject_id().get(),
+        scope.sync_epoch().get(),
+        scope.connection_generation(),
+        entity.get(),
+        id.get()
+    )
 }
 
 /// 一式を組む。本文の画像の置き場（ファイルの識別子）を、一式に載った資産の番号に置き換える。
@@ -148,7 +156,7 @@ pub(crate) fn build(scope: ShelfScope, bundle: ReaderBundle) -> Result<ShelfDocu
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| ClientError::protocol())?;
     Ok(ShelfDocument {
-        key: view_key(bundle.entity_id, &bundle.scope),
+        key: view_key(scope, bundle.entity_id, &bundle.scope),
         scope,
         entity: bundle.entity_id,
         view: bundle.scope,
@@ -159,60 +167,26 @@ pub(crate) fn build(scope: ShelfScope, bundle: ReaderBundle) -> Result<ShelfDocu
     })
 }
 
-/// 取得元と作品の鍵から、この利用者が今読む版を開く。
+/// 画面が作品情報から確定した保存版または編集を開く。
 #[tauri::command]
 pub async fn pc_open(
     state: State<'_, PcClientState>,
     reader: State<'_, ShelfReaderState>,
     scope: ShelfScope,
-    provider: String,
-    key: String,
-) -> Result<OpenedShelfWork, ClientError> {
-    let found = shelf::lookup(&state, scope, &provider, &key).await?;
-    let view = match found.edit_id {
-        Some(edit) => ResourceScope::Edit(edit),
-        None => ResourceScope::Snapshot(found.snapshot_id),
-    };
-    open_view(&state, &reader, scope, found.entity_id, view).await
-}
-
-/// 作品の保存した版の一つ（版ごとの写し）を開く。作品の画面の版の一覧の `snapshotId`。
-#[tauri::command]
-pub async fn pc_open_snapshot(
-    state: State<'_, PcClientState>,
-    reader: State<'_, ShelfReaderState>,
-    scope: ShelfScope,
     work: Id,
-    snapshot: Id,
-) -> Result<OpenedShelfWork, ClientError> {
-    open_view(
-        &state,
-        &reader,
-        scope,
-        work,
-        ResourceScope::Snapshot(snapshot),
-    )
-    .await
-}
-
-async fn open_view(
-    state: &PcClientState,
-    reader: &ShelfReaderState,
-    scope: ShelfScope,
-    entity: Id,
     view: ResourceScope,
 ) -> Result<OpenedShelfWork, ClientError> {
-    let document_key = view_key(entity, &view);
+    let document_key = view_key(scope, work, &view);
     let document = match reader.find(&document_key) {
-        Some(document) if document.scope.same_as(&scope) => document,
-        _ => {
-            let bundle = shelf::bundle(state, scope, entity, view.clone()).await?;
+        Some(document) => document,
+        None => {
+            let bundle = shelf::bundle(&state, scope, work, view).await?;
             let document = Arc::new(build(scope, bundle)?);
             reader.keep(Arc::clone(&document));
             document
         }
     };
-    Ok(OpenedShelfWork {
+    let opened = OpenedShelfWork {
         key: document.key.clone(),
         entity_id: document.entity,
         view: document.view.clone(),
@@ -221,7 +195,8 @@ async fn open_view(
         source_page_starts: document.source_page_starts.clone(),
         total_plain_text_chars: document.text_chars,
         outline: reader_outline(&document.pages),
-    })
+    };
+    state.with_connection(scope.connection_generation(), || Ok(opened))
 }
 
 /// 開いた文書のページ（0 から）。
@@ -319,6 +294,49 @@ mod tests {
                 id: fingerprint,
                 length: bytes.len() as u64,
             }],
+        }
+    }
+
+    #[test]
+    fn documents_are_kept_separately_for_each_shelf_scope_and_view() {
+        let reader = ShelfReaderState::default();
+        let entity = id(4);
+        let view = ResourceScope::Snapshot(id(5));
+        let variants = [
+            (scope(), view.clone()),
+            (ShelfScope::for_tests(id(6), id(2), id(3), 7), view.clone()),
+            (ShelfScope::for_tests(id(1), id(2), id(8), 7), view),
+            (scope(), ResourceScope::Edit(id(5))),
+        ];
+        let documents: Vec<_> = variants
+            .into_iter()
+            .enumerate()
+            .map(|(index, (scope, view))| {
+                let document = Arc::new(
+                    build(
+                        scope,
+                        ReaderBundle {
+                            format: piep_library_protocol::BUNDLE_FORMAT.into(),
+                            library_id: scope.library_id(),
+                            entity_id: entity,
+                            scope: view,
+                            document: json!({
+                                "format": "piep-reader-v1",
+                                "body": { "kind": "pixiv_text", "value": format!("本文 {index}") },
+                                "bindings": [],
+                                "reading": { "provider": "pixiv", "text_chars": 4 }
+                            }),
+                            files: Vec::new(),
+                        },
+                    )
+                    .unwrap(),
+                );
+                reader.keep(Arc::clone(&document));
+                document
+            })
+            .collect();
+        for document in documents {
+            assert!(Arc::ptr_eq(&reader.find(&document.key).unwrap(), &document));
         }
     }
 

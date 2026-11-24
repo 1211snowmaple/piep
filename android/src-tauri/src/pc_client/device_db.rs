@@ -12,28 +12,28 @@ use rusqlite::{Connection, Transaction};
 use std::path::Path;
 
 const DB_FILE: &str = "piep.sqlite3";
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// 端末内の読書位置と「続きを読む」、保存した作品の本文の索引。
 ///
-/// 読書位置の作品は取得元と取得元の ID で見分け、棚に出すための接続先は別に持つ。
+/// 読書位置は棚・利用者・作品の UUID で見分ける。
 /// 本文の索引は日本語に語の切れ目が無いので、3 文字ずつの trigram で引く。置き場の名前
 /// （`shelf-{UUID}`）で作品を指す。
 const SCHEMA: &str = "CREATE TABLE readings (
-    key TEXT PRIMARY KEY,
-    source TEXT NOT NULL,
-    source_id TEXT NOT NULL,
-    version INTEGER NOT NULL,
-    edit_hash TEXT,
+    library_id TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    work_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    edit_id TEXT,
     page INTEGER NOT NULL,
     position TEXT,
     progress REAL NOT NULL,
     finished INTEGER NOT NULL,
     shelved INTEGER NOT NULL,
     read_at INTEGER NOT NULL,
-    server_url TEXT,
-    work TEXT);
-    CREATE INDEX readings_shelf ON readings(server_url, read_at DESC) WHERE shelved = 1 AND finished = 0;
+    work TEXT,
+    PRIMARY KEY (library_id, subject_id, work_id));
+    CREATE INDEX readings_shelf ON readings(library_id, subject_id, finished, read_at DESC) WHERE shelved = 1;
     CREATE TABLE offline_catalog (
     work_key TEXT PRIMARY KEY,
     generation TEXT NOT NULL,
@@ -191,8 +191,11 @@ pub(crate) mod tests {
         let dir = TempDir::new("older");
         {
             let old = Connection::open(dir.0.join(DB_FILE)).unwrap();
-            old.execute_batch("CREATE TABLE readings (key TEXT PRIMARY KEY, work_id INTEGER);")
-                .unwrap();
+            old.execute_batch(
+                "CREATE TABLE readings (key TEXT PRIMARY KEY, source_id TEXT);
+                INSERT INTO readings VALUES ('pixiv:42', '42');",
+            )
+            .unwrap();
             old.pragma_update(None, "user_version", SCHEMA_VERSION - 1)
                 .unwrap();
         }
@@ -200,7 +203,7 @@ pub(crate) mod tests {
         let old_columns: i64 = db
             .transaction(|tx| {
                 tx.query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('readings') WHERE name = 'work_id'",
+                    "SELECT COUNT(*) FROM pragma_table_info('readings') WHERE name = 'source_id'",
                     [],
                     |row| row.get(0),
                 )

@@ -10,7 +10,7 @@ import { WorkFacts, workFacts } from "./WorkFacts";
 import { defaultPcSearch, deleteOfflineWork, getPcMetadata, getPcWorkCollections, listOfflineWorks, pcErrorMessage, sameSavedVersion, sameWork, saveOfflineWork, type OfflineWork, type PcCollection, type PcWork } from "./pcApi";
 import { connectedShelfKey } from "./shelf";
 import { homePage, useAppNavigation } from "./appHistory";
-import { hasReadingPosition } from "./OnlineReader";
+import { hasLocalPosition } from "./localReading";
 import { plainText } from "./workText";
 
 export type SelectedWork = { work: PcWork; offline: false } | { work: PcWork; offline: true; snapshot: OfflineWork };
@@ -36,7 +36,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
   const metadataQuery = useQuery({ queryKey: ["metadata", selected.work.id], queryFn: () => getPcMetadata(selected.work.id), enabled: online });
   const collectionsQuery = useQuery({ queryKey: ["work-collections", selected.work.id, connectedShelfKey()], queryFn: () => getPcWorkCollections(selected.work.id), enabled: online });
   const savedQuery = useQuery({ queryKey: ["offline-works", savedRevision], queryFn: listOfflineWorks, enabled: online, staleTime: Infinity });
-  const metadata = metadataQuery.data;
+  const metadata = metadataQuery.data && sameWork(metadataQuery.data.work, selected.work) ? metadataQuery.data : undefined;
   const work = metadata?.work ?? selected.work;
   const collections: PcCollection[] = selected.offline ? selected.snapshot.collections ?? [] : collectionsQuery.data ?? [];
   const [justSaved, setJustSaved] = useState<OfflineWork | null>(null);
@@ -55,7 +55,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
   const series = seriesList?.length ? seriesList : work.seriesTitle ? [{ source: work.source, key: work.seriesId ?? "", title: work.seriesTitle, contentOrder: null }] : [];
   const description = useMemo(() => plainText(work.excerpt), [work.excerpt]);
   const tags = work.tags ?? [];
-  const resume = hasReadingPosition(work, selected.offline ? selected.snapshot.savedEditHash : metadata?.activeEditHash ?? null);
+  const resume = hasLocalPosition(work);
   // 版と編集の UUID で比べる。
   const outdated = Boolean(online && saved && !sameSavedVersion(work, saved));
 

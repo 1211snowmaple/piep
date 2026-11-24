@@ -9,5 +9,5 @@ export function readerMetadataForVersion(metadata: PcMetadata, selected: number 
   if (selected === null) return metadata;
   const version = readerVersions(metadata).find((entry) => entry.version === selected);
   if (!version) throw new Error("指定された版がありません");
-  return { ...metadata, work: { ...metadata.work, currentVersion: version.version, snapshotId: version.snapshotId, textLength: version.textLength ?? 0, edited: false, editId: null }, activeEditHash: null };
+  return { ...metadata, work: { ...metadata.work, currentVersion: version.version, snapshotId: version.snapshotId, textLength: version.textLength ?? 0, edited: false, editId: null } };
 }
