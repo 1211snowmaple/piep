@@ -841,10 +841,11 @@ async fn save_shelf_into(
         && let Ok(response) = get_pc_with_timeout(
             client,
             saved,
-            &format!(
-                "/api/libraries/{}/works/{}/cover?size=large",
+            &shelf::cover_endpoint(
                 library.library_id().get(),
-                work.id
+                found.entity_id.get(),
+                found.snapshot_id.get(),
+                true,
             ),
             ASSET_TIMEOUT,
         )

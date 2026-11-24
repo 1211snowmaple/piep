@@ -416,9 +416,10 @@ pub(super) async fn work(
 #[serde(deny_unknown_fields)]
 pub(super) struct CoverQuery {
     size: Option<String>,
+    snapshot: Option<Id>,
 }
 
-/// 作品の今の版の表紙を縮めて返す。作品から表紙を引くので、ファイルのハッシュだけでは取れない。
+/// 作品の指定した版の表紙を縮めて返す。版の指定がなければ今の版を使う。
 pub(super) async fn cover(
     State(ctx): State<Arc<Context>>,
     Extension(principal): Extension<Principal>,
@@ -426,7 +427,7 @@ pub(super) async fn cover(
     query: Result<Query<CoverQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Response, ApiError> {
     let Path(location) = path.map_err(|_| invalid())?;
-    let Query(CoverQuery { size }) = query.map_err(|_| invalid())?;
+    let Query(CoverQuery { size, snapshot }) = query.map_err(|_| invalid())?;
     if location.library != ctx.library_id {
         return Err(not_found());
     }
@@ -439,8 +440,11 @@ pub(super) async fn cover(
     let permit = read_permit(&ctx, &principal.device).await?;
     let (bytes, mime) = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let card = ctx.library.work_card(work).map_err(library_error)?;
-        let file = card.cover.ok_or_else(not_found)?;
+        let file = ctx
+            .library
+            .work_cover(work, snapshot.map(Id::get))
+            .map_err(library_error)?
+            .ok_or_else(not_found)?;
         shrunk_image(&ctx, file, size)
     })
     .await

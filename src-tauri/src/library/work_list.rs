@@ -1030,6 +1030,31 @@ impl Library {
         Self::card_of(&conn, self.id, work.as_bytes())
     }
 
+    /// 棚にある作品の指定した写しの表紙。写しを省くと今の版を使う。
+    pub fn work_cover(
+        &self,
+        work: LibraryId,
+        snapshot: Option<LibraryId>,
+    ) -> Result<Option<Fingerprint>> {
+        let conn = self.reader()?;
+        let snapshot = conn
+            .prepare_cached(
+                "SELECT s.id FROM work_current_projection w
+                 JOIN revision_snapshots s ON s.id=coalesce(?2,w.snapshot_id) AND s.entity_id=w.work_id
+                 WHERE w.work_id=?1 AND s.published=1",
+            )?
+            .query_row(
+                params![
+                    work.as_bytes().as_slice(),
+                    snapshot.as_ref().map(|id| id.as_bytes().as_slice())
+                ],
+                |r| r.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .ok_or(Error::ResourceUnavailable)?;
+        Self::snapshot_cover(&conn, &snapshot)
+    }
+
     /// 一覧の一件の形で、いくつかの作品をまとめて引く。棚に今の版の無い作品は `None`。
     pub fn work_cards(&self, works: &[LibraryId]) -> Result<Vec<Option<WorkCard>>> {
         let conn = self.reader()?;
@@ -1335,17 +1360,7 @@ impl Library {
             .collect::<std::result::Result<_, _>>()?;
         tags.dedup();
         card.tags = tags;
-        card.cover = conn
-            .prepare_cached("SELECT r.file_id FROM snapshot_media m JOIN media_renditions r ON r.id=m.rendition_id WHERE m.snapshot_id=?1 AND m.role='cover' ORDER BY m.slot LIMIT 1")?
-            .query_row([&snapshot], |r| r.get::<_, Vec<u8>>(0))
-            .optional()?
-            .map(|bytes| {
-                bytes
-                    .try_into()
-                    .map(Fingerprint)
-                    .map_err(|_| Error::Integrity("表紙のハッシュが不正です".into()))
-            })
-            .transpose()?;
+        card.cover = Self::snapshot_cover(conn, &snapshot)?;
         if let Some((title, position)) = conn
             .prepare_cached("SELECT title,position FROM snapshot_series WHERE snapshot_id=?1 ORDER BY series_id LIMIT 1")?
             .query_row([&snapshot], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -1355,6 +1370,20 @@ impl Library {
             card.series_position = position;
         }
         Ok(card)
+    }
+
+    fn snapshot_cover(conn: &Connection, snapshot: &[u8]) -> Result<Option<Fingerprint>> {
+        conn
+            .prepare_cached("SELECT r.file_id FROM snapshot_media m JOIN media_renditions r ON r.id=m.rendition_id WHERE m.snapshot_id=?1 AND m.role='cover' ORDER BY m.slot LIMIT 1")?
+            .query_row([snapshot], |r| r.get::<_, Vec<u8>>(0))
+            .optional()?
+            .map(|bytes| {
+                bytes
+                    .try_into()
+                    .map(Fingerprint)
+                    .map_err(|_| Error::Integrity("表紙のハッシュが不正です".into()))
+            })
+            .transpose()
     }
 }
 

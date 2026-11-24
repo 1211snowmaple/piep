@@ -450,6 +450,17 @@ pub async fn pc_work(
     work_detail(&state, library, work).await
 }
 
+/// 端末に覚える表紙は、本文や一覧が指す写しから引く。
+pub(super) fn cover_endpoint(
+    library: uuid::Uuid,
+    work: uuid::Uuid,
+    snapshot: uuid::Uuid,
+    large: bool,
+) -> String {
+    let size = if large { "&size=large" } else { "" };
+    format!("/api/libraries/{library}/works/{work}/cover?snapshot={snapshot}{size}")
+}
+
 pub(super) async fn work_detail(
     state: &PcClientState,
     library: ShelfScope,

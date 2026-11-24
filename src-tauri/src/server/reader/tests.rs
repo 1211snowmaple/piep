@@ -738,8 +738,12 @@ async fn the_works_list_pages_tied_dates_and_keeps_cursors_with_the_reader_and_e
 }
 
 fn png() -> Vec<u8> {
+    png_with_size(8, 12)
+}
+
+fn png_with_size(width: u32, height: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
-    image::RgbImage::from_pixel(8, 12, image::Rgb([200, 40, 40]))
+    image::RgbImage::from_pixel(width, height, image::Rgb([200, 40, 40]))
         .write_to(
             &mut std::io::Cursor::new(&mut bytes),
             image::ImageFormat::Png,
@@ -1009,6 +1013,65 @@ async fn the_work_screen_and_cover_come_from_the_current_version_of_a_shelved_wo
             StatusCode::NOT_FOUND
         );
     }
+}
+
+#[tokio::test]
+async fn work_cover_comes_from_the_requested_snapshot() {
+    let server = Server::start().await;
+    let old = save(&server.library, capture("covered", Some(&png())));
+    let mut update = capture("covered", Some(&png_with_size(12, 8)));
+    update.acquired_at = Some(124);
+    update.body = Some("changed body".into());
+    update.media[0].source_key = Some("updated-cover".into());
+    let current = save(&server.library, update);
+    assert_eq!(current.entity_id, old.entity_id);
+    assert!(current.created_revision);
+    let cover = server.shelf(&format!("/works/{}/cover", old.entity_id));
+
+    for (query, dimensions) in [
+        (String::new(), (12, 8)),
+        (format!("?snapshot={}", old.snapshot_id), (8, 12)),
+        (format!("?snapshot={}&size=large", old.snapshot_id), (8, 12)),
+    ] {
+        let response = server.get(&format!("{cover}{query}")).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        let bytes = response.bytes().await.unwrap();
+        assert_eq!(
+            image::load_from_memory(&bytes)
+                .unwrap()
+                .into_rgb8()
+                .dimensions(),
+            dimensions,
+            "{query}"
+        );
+    }
+
+    server
+        .library
+        .remove_work(uuid::Uuid::now_v7(), old.entity_id, 1)
+        .unwrap();
+    let response = server
+        .get(&format!("{cover}?snapshot={}", old.snapshot_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn work_cover_rejects_a_snapshot_from_another_work() {
+    let server = Server::start().await;
+    let work = save(&server.library, capture("covered", Some(&png())));
+    let other = save(&server.library, capture("other", Some(&png())));
+    let response = server
+        .get(&server.shelf(&format!(
+            "/works/{}/cover?snapshot={}",
+            work.entity_id, other.snapshot_id
+        )))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 impl Server {
