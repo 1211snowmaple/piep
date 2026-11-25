@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach } from "vitest";
 
 // One storage implementation on every Node version, installed unconditionally.
@@ -26,6 +26,13 @@ import { afterEach } from "vitest";
 }
 
 afterEach(() => cleanup());
+
+// `findBy*` と `waitFor` の既定の待ちは 1 秒。手元の空いた PC なら足りるが、CI の実行役が
+// 同じ PC で何本も走ると、画面を描くだけで 2〜3 秒かかり、表示されるべきものが出る前に
+// 「見つからない」で落ちた（AUD-024）。負荷をかけた手元の実行でも同じ形で 4〜5 件落ちる。
+// ここで見ているのは「出るべきものが出るか」で、速さではないので、待つ上限を広げる。
+// 本当に出ない不具合は、5 秒後に同じように落ちる。
+configure({ asyncUtilTimeout: 5_000 });
 
 Object.defineProperty(window, "matchMedia", {
   writable: true,
