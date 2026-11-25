@@ -2280,6 +2280,13 @@ textarea { scrollbar-gutter: stable; }
   padding-top: 62px;
 }
 
+/* 帯（.reader-toolbar）は本文の上に重ねてある。スクロールバーは器の一番上から引かれるので、
+   そのままでは上の 62px が帯の下に隠れ、先頭近くを読んでいるあいだつまみが見えなかった。
+   縦の溝を帯の下から始める。 */
+.reader-scroll > .mantine-ScrollArea-scrollbar[data-orientation="vertical"] {
+  top: 62px;
+}
+
 .reader-stage {
   min-height: calc(100vh - 120px);
   padding: clamp(28px, 4vw, 58px) 18px 100px;
