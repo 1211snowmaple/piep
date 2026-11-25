@@ -26,5 +26,11 @@ export default defineConfig({
     // 見逃されはしない。個々の `findBy*`・`waitFor` の待ちは `src/test/setup.ts` で決める。
     testTimeout: 20_000,
     hookTimeout: 20_000,
+    // 子プロセスは論理 CPU の半分まで。既定は「CPU 数 − 1」で、16 の PC だと 15 本になる。
+    // 実行役は同じ PC で visual-regression などのジョブも同時に回すので、15 本が一度に
+    // jsdom を立ち上げると、vitest が子の起動を待つ固定の 60 秒（設定では変えられない）を
+    // 超え、試験は全部通っても「Failed to start forks worker」で落ちた（2026-11-25、
+    // main と PR #153 の Quality）。
+    maxWorkers: "50%",
   },
 });
