@@ -1,4 +1,5 @@
 import { readingFinished, readingPercent } from "@shared/readingProgress";
+import { READER_SETTINGS_KEY } from "./readingFont";
 import { READER_FONTS, READER_TYPE_DEFAULTS, READER_TYPE_LIMITS, readerTypeFont, readerTypeNumber, type ReaderFont } from "@shared/readerType";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -292,7 +293,7 @@ function Reader({ source }: { source: ReaderSource }) {
   const requestedVersion = Number(searchParams.get("version"));
   const normalizedRequestedVersion = Number.isFinite(requestedVersion) && requestedVersion > 0 ? requestedVersion : null;
   const [version, setVersion] = useState<number | null>(normalizedRequestedVersion);
-  const [storedSettings, setSettings] = useLocalStorage<ReaderSettings>({ key: "piep.reader-settings", defaultValue: defaults });
+  const [storedSettings, setSettings] = useLocalStorage<ReaderSettings>({ key: READER_SETTINGS_KEY, defaultValue: defaults });
   const settings = useMemo(() => readerSettings(storedSettings), [storedSettings]);
   const [settingsOpened, settingsDrawer] = useDisclosure(false);
   const [searchOpened, searchDrawer] = useDisclosure(false);
@@ -343,6 +344,7 @@ function Reader({ source }: { source: ReaderSource }) {
   // 棚の位置が届くまでは位置を戻さない。ほかの端末で読み進めた位置を飛ばさない。
   const shelfReadingPending = Boolean(shelfReading) && shelfReadingQuery.isPending;
   const remoteReading = shelfReadingQuery.data ?? null;
+  const shelfQueueRef = useRef<Promise<void>>(Promise.resolve());
   const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(readingId ?? id, version);
   const contentQuery = useQuery({
     queryKey: ["reader-content-page", id, version, sourcePage - 1],
@@ -696,6 +698,10 @@ function Reader({ source }: { source: ReaderSource }) {
     let shelfPage = 0;
     let shelfDirty = false;
     let lastRatio = 0;
+    // 棚に読みかけの位置があるか（この画面で書いたか、開く前から棚にあったか）。無ければ消しに行かない。
+    let shelfInProgress = Boolean(remoteReading && !remoteReading.finished);
+    // 開く前から読了だった作品。読み返して先頭に戻ったら、読みかけでなく読了に戻す。
+    const openedFinished = Boolean(remoteReading?.finished);
     const finished = () => readingFinished(sourcePage - 1, pageCount, atFlowEdge(viewport, vertical, 1));
     const toShelf = (finished: boolean, force: boolean) => {
       if (!shelfReading) return;
@@ -707,7 +713,13 @@ function Reader({ source }: { source: ReaderSource }) {
       shelfAt = now;
       shelfPage = sourcePage;
       shelfDirty = false;
-      shelfReading.write(version, sourcePage, finished ? 1 : lastRatio, finished)
+      shelfInProgress = !finished;
+      queueShelf(() => shelfReading.write(version, sourcePage, finished ? 1 : lastRatio, finished));
+    };
+    // 棚へ書くのと消すのは、出した順に届ける。間引いた書き込みが、あとの消去を追い越さない。
+    const queueShelf = (operation: () => Promise<void>) => {
+      shelfQueueRef.current = shelfQueueRef.current
+        .then(operation)
         .catch((error: unknown) => console.warn("読書位置を棚へ書けません", error));
     };
     let saveTimer: number | null = null;
@@ -728,6 +740,22 @@ function Reader({ source }: { source: ReaderSource }) {
       if (finished()) {
         clearReadingPosition(readingId, version);
         toShelf(true, true);
+        pendingTop = null;
+        pendingPersist = false;
+        return;
+      }
+      // 読みかけかどうかは、閉じる直前にどこを開いていたかで決める。本の先頭に戻っていれば
+      // 位置を書かず、それまでに書いた位置も消す。開いただけ・少し動かして戻しただけで
+      // 読みかけの棚に載っていた。読み終えた作品は、開き直して先頭で閉じても読了のまま残す。
+      if (sourcePage === 1 && pendingTop <= 1) {
+        clearReadingPosition(readingId, version);
+        if (shelfReading && shelfInProgress) {
+          shelfInProgress = false;
+          queueShelf(openedFinished
+            ? () => shelfReading.write(version, pageCount, 1, true)
+            : () => shelfReading.clear());
+        }
+        shelfDirty = false;
         pendingTop = null;
         pendingPersist = false;
         return;
@@ -806,7 +834,7 @@ function Reader({ source }: { source: ReaderSource }) {
       flush();
       if (shelfDirty) toShelf(false, true);
     };
-  }, [contentReady, hasSourcePages, positionKey, readingId, shelfReading, sourcePage, pageCount, totalChars, version, vertical]);
+  }, [contentReady, hasSourcePages, positionKey, readingId, remoteReading, shelfReading, sourcePage, pageCount, totalChars, version, vertical]);
   // 手元にある作品・作者を指すリンクに印を付ける。押す前に、それがこの道具の
   // 中の場所だと分かる。
   useLibraryLinkMarks(articleRef, preparedHtml);

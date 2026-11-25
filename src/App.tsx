@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect } from "react";
+import { useReadingFontVariable } from "@/features/reader/readingFont";
 import { Center, Loader, Text, useMantineColorScheme } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { AppErrorBoundary } from "@/app/AppErrorBoundary";
@@ -85,6 +86,7 @@ function confirmDiscardOnNavigation(): Promise<boolean> {
 
 function AppContent() {
   useIncompleteSaveRepair();
+  useReadingFontVariable();
   const { pathname } = useAppRouter();
   const queryClient = useQueryClient();
   const { colorScheme } = useMantineColorScheme();
