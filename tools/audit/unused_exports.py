@@ -5,7 +5,8 @@
     python -I tools/audit/unused_exports.py rust  # src-tauri・crates・android/src-tauri の pub fn/struct/enum/const
 
 名前の一致で数えるだけなので、出てきた物は候補。消す前に呼び出しの関係（動的な呼び出し・IPC の名前・
-serde の名前・マクロ）で確かめる。同じ名前が別の物にも使われていると、漏れる（候補に出ない）。
+serde の名前・マクロ）で確かめる。`--production` を付けると試験からの参照を数えない（試験だけが呼ぶ物を拾う。
+Rust の `#[cfg(test)]` の中の参照は同じファイルに入るので数えてしまう）。同じ名前が別の物にも使われていると、漏れる（候補に出ない）。
 """
 
 from __future__ import annotations
@@ -28,6 +29,10 @@ def tracked(patterns: list[str]) -> list[str]:
     return [f for f in out.decode("utf-8").split("\0") if f]
 
 
+def is_test(path: str) -> bool:
+    return any(m in path for m in (".test.", "_tests.rs", "/tests/", "tests.rs", "e2e/", "/test/", "mocks/", "TestSource"))
+
+
 def main() -> int:
     kind = sys.argv[1] if len(sys.argv) > 1 else "ts"
     if kind == "ts":
@@ -37,6 +42,10 @@ def main() -> int:
         defs_files = [f for f in tracked(["src-tauri/src", "crates", "android/src-tauri/src", "tools"]) if f.endswith(".rs")]
         pattern = RS_PUB
     corpus_files = [f for f in tracked(["."]) if f.endswith((".ts", ".tsx", ".rs", ".mjs", ".js", ".json", ".html", ".sql", ".yml", ".ps1"))]
+    # `--production` では試験からの参照を数えない。試験だけが呼ぶ物（本番では死んでいる物）を拾う。
+    if "--production" in sys.argv:
+        corpus_files = [f for f in corpus_files if not is_test(f)]
+        defs_files = [f for f in defs_files if not is_test(f)]
 
     counts: dict[str, int] = defaultdict(int)
     per_file: dict[str, dict[str, int]] = {}
