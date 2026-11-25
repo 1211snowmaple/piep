@@ -49,22 +49,31 @@ jobs:
       - run: ./tools/check.ps1 -Stage docs
         shell: pwsh
 
-  # サイトを組んで GitHub Pages へ配置する。main だけ。
+  # サイトを組んで artifact に上げる。main だけ。配置は次の deploy がする。
   #
   # Windows で走らせるのは cargo doc のためである。このクレートは DirectML 版の
   # ort / fastembed を持ち、`cfg(windows)` の依存もある。Linux では依存の解決
   # そのものが通らない。
-  deploy:
+  #
+  # 組み立てと配置を同じジョブに置いてはいけない。deploy-pages は実行（run）の
+  # artifact を一覧して名前で一つに絞るが、上げた直後の一覧にはまだ載らない
+  # ことがある。2026-11-24 には上げて約1秒後の一覧が三回とも 0 件だった。
+  # しかも一覧は再実行の回をまたいで数えるので、流し直すたびに上げ直した分が
+  # 増え、今度は「2件ある」で落ち続けた。
+  #
+  # そこで二つ手を打つ。配置を別のジョブにして、一覧を引くのをジョブ一つ分
+  # 遅らせる。artifact の名前に回の番号を入れ、どの流し直し方でも名前が
+  # 重ならないようにする。名前は出力で deploy に渡す。「失敗したジョブを
+  # 再実行」で deploy だけが流れたときも、前の回の出力が引き継がれる。
+  build:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     needs: contract
     runs-on: windows-latest
     permissions:
       contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      pages: read
+    outputs:
+      artifact: github-pages-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -93,6 +102,22 @@ jobs:
         working-directory: docs-tools
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
+          name: github-pages-${{ github.run_attempt }}
           path: docs-tools/site/.vitepress/dist
+
+  # 上げた artifact を GitHub Pages へ配置する。手順は deploy-pages の一つだけ
+  # なので、軽い Linux で足りる。
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+        with:
+          artifact_name: ${{ needs.build.outputs.artifact }}
