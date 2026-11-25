@@ -1,4 +1,5 @@
 import { readingFinished, readingPercent } from "@shared/readingProgress";
+import { READER_SETTINGS_KEY } from "./readingFont";
 import { READER_FONTS, READER_TYPE_DEFAULTS, READER_TYPE_LIMITS, readerTypeFont, readerTypeNumber, type ReaderFont } from "@shared/readerType";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -292,7 +293,7 @@ function Reader({ source }: { source: ReaderSource }) {
   const requestedVersion = Number(searchParams.get("version"));
   const normalizedRequestedVersion = Number.isFinite(requestedVersion) && requestedVersion > 0 ? requestedVersion : null;
   const [version, setVersion] = useState<number | null>(normalizedRequestedVersion);
-  const [storedSettings, setSettings] = useLocalStorage<ReaderSettings>({ key: "piep.reader-settings", defaultValue: defaults });
+  const [storedSettings, setSettings] = useLocalStorage<ReaderSettings>({ key: READER_SETTINGS_KEY, defaultValue: defaults });
   const settings = useMemo(() => readerSettings(storedSettings), [storedSettings]);
   const [settingsOpened, settingsDrawer] = useDisclosure(false);
   const [searchOpened, searchDrawer] = useDisclosure(false);
