@@ -238,10 +238,37 @@ export function pageWorkItems(source: "pixiv" | "fanbox", works: PageWorkCandida
   });
 }
 
-/** 同じ一覧の続きを足す。行の状態と選択は、すでにある行のものを残す。 */
+/**
+ * 同じ一覧の読み直しと続きを足す。行の状態と選択は、すでにある行のものを残す。
+ *
+ * 新しい行は**一覧の並びどおりの場所**に入れる。新着は一覧の上に出るので、
+ * 読み直しで見つかった行を末尾に足すと、何十件もの下に隠れて候補が変わらない
+ * ように見えていた。一覧で後ろに既知の行がある新しい行はその前へ、無いもの
+ * （続きのページ）は末尾へ置く。棚に入ったと分かった行は保存済みに改める。
+ */
 export function mergePageWorkItems(current: SidebarItem[], incoming: SidebarItem[]): SidebarItem[] {
-  const known = new Set(current.map((item) => item.id));
-  return [...current, ...incoming.filter((item) => !known.has(item.id))];
+  const existing = new Set(current.map((item) => item.id));
+  const added = new Set<string>();
+  const fresh = new Map(incoming.map((item) => [item.id, item]));
+  const before = new Map<string, SidebarItem[]>();
+  let pending: SidebarItem[] = [];
+  for (const item of incoming) {
+    if (existing.has(item.id)) {
+      if (pending.length) before.set(item.id, [...(before.get(item.id) ?? []), ...pending]);
+      pending = [];
+    } else if (!added.has(item.id)) {
+      added.add(item.id);
+      pending.push(item);
+    }
+  }
+  const rows = current.flatMap((row) => {
+    const seen = fresh.get(row.id);
+    const updated = seen?.status === "skipped" && row.status === undefined
+      ? { ...row, status: "skipped" as const, selected: false }
+      : row;
+    return [...(before.get(row.id) ?? []), updated];
+  });
+  return [...rows, ...pending];
 }
 
 export function detectDownloadTarget(url: string): DownloadTargetKind {

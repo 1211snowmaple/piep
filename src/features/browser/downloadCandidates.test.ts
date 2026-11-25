@@ -94,6 +94,25 @@ describe("一覧ページからの読み取り", () => {
     expect(merged.map((item) => [item.id, item.selected])).toEqual([["1", false], ["2", true], ["3", true]]);
   });
 
+  it("読み直しで見つかった新着は、末尾でなく一覧の並びどおりの場所に入る", () => {
+    const row = (id: string) => pageWorkItems("pixiv", [{ sourceId: id, title: id, author: "", saved: false }])[0];
+    const merged = mergePageWorkItems([row("3"), row("4"), row("5")], [row("1"), row("2"), row("3"), row("4"), row("9"), row("5"), row("6")]);
+    expect(merged.map((item) => item.id)).toEqual(["1", "2", "3", "4", "9", "5", "6"]);
+  });
+
+  it("読み直しで棚にあると分かった行は保存済みにする。保存の結果は上書きしない", () => {
+    const work = (id: string, saved: boolean) => pageWorkItems("pixiv", [{ sourceId: id, title: id, author: "", saved }])[0];
+    const merged = mergePageWorkItems(
+      [work("1", false), { ...work("2", false), status: "success" as const }, { ...work("3", false), status: "failed" as const }],
+      [work("1", true), work("2", true), work("3", true)],
+    );
+    expect(merged.map((item) => [item.id, item.status, item.selected])).toEqual([
+      ["1", "skipped", false],
+      ["2", "success", true],
+      ["3", "failed", true],
+    ]);
+  });
+
   it("棚にある作品は選ばず、題名が読めなければ ID で名乗る", () => {
     const [unsaved, saved] = pageWorkItems("pixiv", [
       { sourceId: "1", title: "", author: "", saved: false },
