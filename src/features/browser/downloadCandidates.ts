@@ -190,11 +190,20 @@ const PAGED_PIXIV_LISTS = [
   /^\/users\/\d+\/following\/?$/,
 ];
 
-/** pixiv のフォロー一覧か。ここからは作品でなく作者を読む。 */
-export function isFollowingListUrl(url: string): boolean {
-  const parsed = sourceUrl(url);
-  return pageListSource(url) === "pixiv" && /^\/users\/\d+\/following\/?$/.test(sourcePath(parsed?.pathname ?? ""));
+/**
+ * フォローしている人の一覧の取得元。ここからは作品でなく作者を読む。
+ *
+ * pixiv はフォロー一覧（`/users/{id}/following`）、FANBOX はフォロー中と
+ * 支援中のクリエイター（`/creators/following`・`/creators/supporting`）。
+ */
+export function followingListSource(url: string): "pixiv" | "fanbox" | null {
+  const source = pageListSource(url);
+  const path = sourcePath(sourceUrl(url)?.pathname ?? "");
+  if (source === "pixiv" && /^\/users\/\d+\/following\/?$/.test(path)) return "pixiv";
+  if (source === "fanbox" && /^\/creators\/(?:following|supporting)\/?$/.test(path)) return "fanbox";
+  return null;
 }
+
 
 /** 一覧の何ページ目か。URL に無ければ 1 ページ目である。 */
 export function listPageNumber(url: string): number {

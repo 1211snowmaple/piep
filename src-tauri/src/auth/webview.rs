@@ -1951,7 +1951,7 @@ const PAGE_WORKS_SCRIPT: &str = r#"
     })()
 "#;
 
-/// 表示中の文書から、作者のリンクと名前を集める。文書には何も書き込まない。
+/// 表示中の文書から、pixiv の作者のリンクと名前を集める。文書には何も書き込まない。
 const PAGE_USERS_SCRIPT: &str = r#"
     (function() {
         const rows = new Map();
@@ -1959,6 +1959,26 @@ const PAGE_USERS_SCRIPT: &str = r#"
             const name = (link.textContent || '').trim();
             const row = rows.get(link.href) || { href: link.href, name: '' };
             if (name.length > row.name.length) row.name = name;
+            rows.set(link.href, row);
+            if (rows.size >= 2000) break;
+        }
+        return [...rows.values()];
+    })()
+"#;
+
+/// 表示中の文書から、FANBOX のクリエイターのリンクと名前を集める。
+///
+/// クリエイターのカードは、名前と紹介文をまとめて包むリンクと、名前だけの
+/// リンクを両方持つ（2026-11 に「クリエイターを探す」で確かめた）。長いほうを
+/// 取ると紹介文まで名前になるので、空でない**いちばん短い**文字を名前にする。
+const FANBOX_PAGE_USERS_SCRIPT: &str = r#"
+    (function() {
+        const rows = new Map();
+        for (const link of document.querySelectorAll('a[href]')) {
+            if (!/fanbox\.cc/.test(link.href)) continue;
+            const name = (link.textContent || '').trim();
+            const row = rows.get(link.href) || { href: link.href, name: '' };
+            if (name && (!row.name || name.length < row.name.length)) row.name = name;
             rows.set(link.href, row);
             if (rows.size >= 2000) break;
         }
@@ -2056,6 +2076,59 @@ fn page_user_id(href: &str) -> Option<String> {
     }
 }
 
+/// FANBOX のクリエイターの ID として通す文字。英数字と `-`・`_` だけ。
+fn is_fanbox_creator_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// リンクが指す FANBOX のクリエイターの ID。クリエイターのトップでなければ `None`。
+///
+/// `https://{id}.fanbox.cc/` と `https://www.fanbox.cc/@{id}` の二つの形がある。
+/// 投稿やプランのページ、FANBOX 自身の案内（`www`・`api` など）は通さない。
+fn page_creator_id(href: &str) -> Option<String> {
+    let url = Url::parse(href).ok()?;
+    if !is_page_work_source(&url, "fanbox") {
+        return None;
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
+    let segments = page_path_segments(&url)?;
+    let id = match (host.as_str(), segments.as_slice()) {
+        ("www.fanbox.cc" | "fanbox.cc", [handle]) => handle.strip_prefix('@')?.to_string(),
+        (host, []) => {
+            let sub = host.strip_suffix(".fanbox.cc")?;
+            if sub.contains('.') || ["www", "api", "downloads", "help", "official"].contains(&sub) {
+                return None;
+            }
+            sub.to_string()
+        }
+        _ => return None,
+    };
+    is_fanbox_creator_id(&id).then_some(id)
+}
+
+/// 作者を読んでよいページか。読んでよければ、一覧の持ち主（分からなければ空）。
+///
+/// pixiv は `/users/{id}/following`、FANBOX は `/creators/following` と
+/// `/creators/supporting`。FANBOX の一覧には持ち主の ID が出ない。
+fn page_following_list(url: &Url, source: &str) -> Option<String> {
+    match source {
+        "pixiv" => page_following_owner(url),
+        "fanbox" => {
+            let host = url.host_str()?.to_ascii_lowercase();
+            let is_top = is_page_work_source(url, "fanbox")
+                && (host == "www.fanbox.cc" || host == "fanbox.cc");
+            match page_path_segments(url)?.as_slice() {
+                ["creators", "following" | "supporting"] if is_top => Some(String::new()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// 開いているのが `/users/{id}/following` なら、その `id`。
 fn page_following_owner(url: &Url) -> Option<String> {
     if !is_page_work_source(url, "pixiv") {
@@ -2132,9 +2205,14 @@ fn parse_page_works(source: &str, raw: &str) -> Result<(Vec<BrowserPageWork>, bo
 
 /// ページから戻った値を作者の一覧にする。作品と同じくページの中身は信用しない。
 ///
-/// 通すのは pixiv の作者リンクの数字の ID だけである。名前の無いリンクは、顔の
-/// 画像や案内の飾りなので落とす。一覧の持ち主は自分のフォローに入らない。
-fn parse_page_users(owner: &str, raw: &str) -> Result<(Vec<BrowserPageUser>, bool), String> {
+/// 通すのは、pixiv なら作者リンクの数字の ID、FANBOX ならクリエイターのトップの
+/// ID だけである。名前の無いリンクは、顔の画像や案内の飾りなので落とす。一覧の
+/// 持ち主は自分のフォローに入らない。
+fn parse_page_users(
+    source: &str,
+    owner: &str,
+    raw: &str,
+) -> Result<(Vec<BrowserPageUser>, bool), String> {
     if raw.len() > MAX_PAGE_WORKS_RESULT_BYTES {
         return Err("ページの内容が大きすぎて読み取れません".to_string());
     }
@@ -2144,7 +2222,12 @@ fn parse_page_users(owner: &str, raw: &str) -> Result<(Vec<BrowserPageUser>, boo
     let mut users = Vec::new();
     let mut truncated = false;
     for row in rows {
-        let Some(user_id) = page_user_id(&row.href) else {
+        let user_id = match source {
+            "pixiv" => page_user_id(&row.href),
+            "fanbox" => page_creator_id(&row.href),
+            _ => None,
+        };
+        let Some(user_id) = user_id else {
             continue;
         };
         let name = clean_page_label(&row.name);
@@ -2223,16 +2306,23 @@ pub async fn read_browser_page_works(
 
 /// 内蔵ブラウザで表示中のフォロー一覧から、作者を読み取る。
 ///
-/// pixiv の `/users/{id}/following` でだけ走らせる。作品と同じく、読み込み済みの
-/// 文書を読むだけで、取得元への通信は増えない。
+/// pixiv の `/users/{id}/following` と、FANBOX の `/creators/following`・
+/// `/creators/supporting` でだけ走らせる。作品と同じく、読み込み済みの文書を
+/// 読むだけで、取得元への通信は増えない。
 pub async fn read_browser_page_users(
     app: AppHandle,
     browser: String,
+    source: String,
 ) -> Result<BrowserPageUsers, String> {
-    let (url, raw) = read_page_document(&app, &browser, "pixiv", PAGE_USERS_SCRIPT).await?;
-    let owner =
-        page_following_owner(&url).ok_or_else(|| "フォロー一覧を開いてください".to_string())?;
-    let (users, truncated) = parse_page_users(&owner, &raw)?;
+    let script = match source.as_str() {
+        "pixiv" => PAGE_USERS_SCRIPT,
+        "fanbox" => FANBOX_PAGE_USERS_SCRIPT,
+        _ => return Err("このページからは読み取れません".to_string()),
+    };
+    let (url, raw) = read_page_document(&app, &browser, &source, script).await?;
+    let owner = page_following_list(&url, &source)
+        .ok_or_else(|| "フォロー一覧を開いてください".to_string())?;
+    let (users, truncated) = parse_page_users(&source, &owner, &raw)?;
     Ok(BrowserPageUsers {
         url: url.to_string(),
         users,
@@ -2400,7 +2490,7 @@ mod tests {
             {"href":"https://evil.example/users/3","name":"外"},
             {"href":"https://www.pixiv.net/users/4/following","name":"案内"}
         ]"#;
-        let (users, truncated) = parse_page_users("7", raw).unwrap();
+        let (users, truncated) = parse_page_users("pixiv", "7", raw).unwrap();
         assert!(!truncated);
         assert_eq!(
             users,
@@ -2409,7 +2499,77 @@ mod tests {
                 name: "作者 二".to_string(),
             }]
         );
-        assert!(parse_page_users("7", "null").is_err());
+        assert!(parse_page_users("pixiv", "7", "null").is_err());
+    }
+
+    #[test]
+    fn page_creator_id_accepts_only_creator_tops() {
+        for href in [
+            "https://chon.fanbox.cc/",
+            "https://chon.fanbox.cc",
+            "https://www.fanbox.cc/@chon",
+            "https://www.fanbox.cc/@chon/",
+        ] {
+            assert_eq!(page_creator_id(href).as_deref(), Some("chon"), "{href}");
+        }
+        for href in [
+            "https://chon.fanbox.cc/posts/1",
+            "https://www.fanbox.cc/@chon/posts/1",
+            "https://www.fanbox.cc/",
+            "https://official.fanbox.cc/",
+            "https://api.fanbox.cc/",
+            "https://a.b.fanbox.cc/",
+            "http://chon.fanbox.cc/",
+            "https://chon.fanbox.cc.evil.example/",
+            "https://www.fanbox.cc/creators/find",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(page_creator_id(href), None, "{href}");
+        }
+    }
+
+    #[test]
+    fn fanbox_following_list_is_the_creators_pages() {
+        let list = |raw: &str| page_following_list(&Url::parse(raw).unwrap(), "fanbox");
+        assert_eq!(
+            list("https://www.fanbox.cc/creators/following").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            list("https://www.fanbox.cc/creators/supporting").as_deref(),
+            Some("")
+        );
+        assert_eq!(list("https://www.fanbox.cc/creators/find"), None);
+        assert_eq!(list("https://chon.fanbox.cc/creators/following"), None);
+        assert_eq!(
+            page_following_list(
+                &Url::parse("https://www.pixiv.net/users/7/following").unwrap(),
+                "pixiv"
+            )
+            .as_deref(),
+            Some("7")
+        );
+    }
+
+    #[test]
+    fn fanbox_page_users_take_creator_tops_once() {
+        let raw = r#"[
+            {"href":"https://chon.fanbox.cc/","name":"ちょん＊"},
+            {"href":"https://www.fanbox.cc/@chon","name":"重複"},
+            {"href":"https://namie.fanbox.cc/","name":""},
+            {"href":"https://official.fanbox.cc/posts","name":"お知らせ"},
+            {"href":"https://www.fanbox.cc/","name":"ホーム"},
+            {"href":"https://www.pixiv.net/users/2","name":"pixiv"}
+        ]"#;
+        let (users, truncated) = parse_page_users("fanbox", "", raw).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            users,
+            vec![BrowserPageUser {
+                user_id: "chon".to_string(),
+                name: "ちょん＊".to_string(),
+            }]
+        );
     }
 
     #[test]

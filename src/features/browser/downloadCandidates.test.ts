@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { downloadTargetKey, isFollowingListUrl, listPageNumber, mergePageWorkItems, nextPagedListUrl, pageListSource, pageWorkItems, detectDownloadTarget, extractSavedSourceTarget, getFanboxCreatorId, normalizeContentLinkUrl } from "@/features/browser/downloadCandidates";
+import { downloadTargetKey, followingListSource, listPageNumber, mergePageWorkItems, nextPagedListUrl, pageListSource, pageWorkItems, detectDownloadTarget, extractSavedSourceTarget, getFanboxCreatorId, normalizeContentLinkUrl } from "@/features/browser/downloadCandidates";
 
 describe("download candidate URL detection", () => {
   it.each([
@@ -74,10 +74,15 @@ describe("一覧ページからの読み取り", () => {
   });
 
   it("フォロー一覧を見分けて、続きも開ける", () => {
-    expect(isFollowingListUrl("https://www.pixiv.net/users/1/following")).toBe(true);
-    expect(isFollowingListUrl("https://www.pixiv.net/en/users/1/following?rest=hide")).toBe(true);
-    expect(isFollowingListUrl("https://www.pixiv.net/users/1/novels")).toBe(false);
-    expect(isFollowingListUrl("https://evil.example/users/1/following")).toBe(false);
+    expect(followingListSource("https://www.pixiv.net/users/1/following")).toBe("pixiv");
+    expect(followingListSource("https://www.pixiv.net/en/users/1/following?rest=hide")).toBe("pixiv");
+    expect(followingListSource("https://www.pixiv.net/users/1/novels")).toBeNull();
+    expect(followingListSource("https://evil.example/users/1/following")).toBeNull();
+    expect(followingListSource("https://www.pixiv.net/users/1/following")).toBe("pixiv");
+    expect(followingListSource("https://www.fanbox.cc/creators/following")).toBe("fanbox");
+    expect(followingListSource("https://www.fanbox.cc/creators/supporting")).toBe("fanbox");
+    expect(followingListSource("https://www.fanbox.cc/creators/find")).toBeNull();
+    expect(followingListSource("https://www.pixiv.net/creators/following")).toBeNull();
     expect(nextPagedListUrl("https://www.pixiv.net/users/1/following?rest=hide")).toBe("https://www.pixiv.net/users/1/following?rest=hide&p=2");
   });
 

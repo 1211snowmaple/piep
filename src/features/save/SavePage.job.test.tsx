@@ -270,6 +270,37 @@ describe("SavePage の Rust 保存ジョブ", () => {
     expect(await screen.findByRole("checkbox", { name: "作者一を監視に追加する" })).toBeDisabled();
   });
 
+  it("FANBOX のフォロー中のクリエイターも読み、FANBOX の監視に足す", async () => {
+    window.location.hash = "#/save/fanbox";
+    const page = "https://www.fanbox.cc/creators/following";
+    upsertTarget.mockReset().mockResolvedValue(undefined);
+    browserApi.readBrowserPageUserCandidates.mockReset().mockResolvedValue({
+      url: page,
+      truncated: false,
+      users: [{ userId: "mizu-atelier", name: "mizu atelier", watched: false }],
+    });
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: page } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+    fireEvent.click(await screen.findByRole("button", { name: "クリエイターを読み取る" }));
+    fireEvent.click(await screen.findByRole("button", { name: "1人を監視に追加" }));
+
+    await waitFor(() => expect(upsertTarget).toHaveBeenCalledTimes(1));
+    expect(browserApi.readBrowserPageUserCandidates).toHaveBeenCalledWith("embedded", "fanbox");
+    expect(upsertTarget).toHaveBeenCalledWith({ targetType: "author", source: "fanbox", sourceKey: "mizu-atelier", displayName: "mizu atelier", enabled: true, metadataJson: null });
+  });
+
+  it("別の取得元の作品のページでは候補を取得しない", async () => {
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: "https://www.fanbox.cc/@creator/posts/100" } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+
+    expect(await screen.findByText("作品・シリーズ・作者・一覧のページを開いてください")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "候補を取得" })).toBeDisabled();
+  });
+
   it("読み取れる作品が無いページでは候補を置き換えない", async () => {
     const page = "https://www.pixiv.net/novel/bookmark_new.php";
     browserApi.readBrowserPageWorkCandidates.mockReset().mockResolvedValue({ url: page, truncated: false, works: [] });
