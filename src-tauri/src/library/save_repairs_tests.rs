@@ -1,3 +1,4 @@
+use super::repair_attempts::DEFAULT_REPAIR_ATTEMPTS;
 use super::*;
 use crate::library::{DiscoveryInput, WorkSave};
 use serde_json::{json, Value};
@@ -110,14 +111,32 @@ fn incomplete_saves_are_tried_once_per_snapshot() {
     // 保存していない作品は取り直しの対象にしない。
     discover(&library, "9", "new", Some("incomplete"));
     assert_eq!(
-        keys(library.incomplete_save_repairs(50).unwrap()),
+        keys(
+            library
+                .incomplete_save_repairs(50, DEFAULT_REPAIR_ATTEMPTS)
+                .unwrap()
+        ),
         ["1", "2"]
     );
-    assert_eq!(library.incomplete_save_repairs(0).unwrap().len(), 1);
-    assert_eq!(library.incomplete_save_repairs(1).unwrap()[0].1, "題");
+    assert_eq!(
+        library
+            .incomplete_save_repairs(0, DEFAULT_REPAIR_ATTEMPTS)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        library
+            .incomplete_save_repairs(1, DEFAULT_REPAIR_ATTEMPTS)
+            .unwrap()[0]
+            .1,
+        "題"
+    );
 
     // 棚に無い作品・その作品の版でないものは記録しない。同じ版の記録は重ねても一件。
-    let listed = library.incomplete_save_repairs(50).unwrap();
+    let listed = library
+        .incomplete_save_repairs(50, DEFAULT_REPAIR_ATTEMPTS)
+        .unwrap();
     let first = listed.iter().find(|(key, ..)| key == "1").unwrap().2;
     let second = listed.iter().find(|(key, ..)| key == "2").unwrap().2;
     let keys_tried = [
@@ -139,13 +158,24 @@ fn incomplete_saves_are_tried_once_per_snapshot() {
             .unwrap(),
         1
     );
-    assert_eq!(keys(library.incomplete_save_repairs(50).unwrap()), ["2"]);
+    assert_eq!(
+        keys(
+            library
+                .incomplete_save_repairs(50, DEFAULT_REPAIR_ATTEMPTS)
+                .unwrap()
+        ),
+        ["2"]
+    );
 
     // 版が進めば、もう一度だけ試す。
     save(&library, "1", "直した本文");
     discover(&library, "1", "revision", Some("incomplete"));
     assert_eq!(
-        keys(library.incomplete_save_repairs(50).unwrap()),
+        keys(
+            library
+                .incomplete_save_repairs(50, DEFAULT_REPAIR_ATTEMPTS)
+                .unwrap()
+        ),
         ["1", "2"]
     );
     library.verify().unwrap();
@@ -158,7 +188,9 @@ fn an_attempt_on_a_version_that_is_no_longer_current_is_not_kept() {
     let (_temp, library) = fixture();
     save(&library, "1", "本文");
     discover(&library, "1", "revision", Some("incomplete"));
-    let listed = library.incomplete_save_repairs(50).unwrap();
+    let listed = library
+        .incomplete_save_repairs(50, DEFAULT_REPAIR_ATTEMPTS)
+        .unwrap();
     assert_eq!(keys(listed.clone()), ["1"]);
     let tried = listed[0].2;
     // ジョブが先に保存を確定した（まだ一部保存のまま）。
@@ -171,7 +203,14 @@ fn an_attempt_on_a_version_that_is_no_longer_current_is_not_kept() {
         0
     );
     assert_eq!(rows(&library), 0);
-    assert_eq!(keys(library.incomplete_save_repairs(50).unwrap()), ["1"]);
+    assert_eq!(
+        keys(
+            library
+                .incomplete_save_repairs(50, DEFAULT_REPAIR_ATTEMPTS)
+                .unwrap()
+        ),
+        ["1"]
+    );
     library.verify().unwrap();
 }
 
@@ -189,7 +228,10 @@ fn saving_a_new_version_drops_the_attempts_on_the_previous_one() {
     let (_temp, library) = fixture();
     save(&library, "1", "本文");
     discover(&library, "1", "revision", Some("incomplete"));
-    let tried = library.incomplete_save_repairs(50).unwrap()[0].2;
+    let tried = library
+        .incomplete_save_repairs(50, DEFAULT_REPAIR_ATTEMPTS)
+        .unwrap()[0]
+        .2;
     library
         .record_incomplete_save_attempts(&[("1".to_owned(), tried)], 10)
         .unwrap();
@@ -209,7 +251,10 @@ fn pixiv_attempts_count_the_save_that_left_the_gap() {
     let (_temp, library) = fixture();
     let saved = save(&library, "1", "前[pixivimage:123]後");
     discover(&library, "1", "revision", Some("incomplete"));
-    let tried = library.incomplete_save_repairs(50).unwrap()[0].2;
+    let tried = library
+        .incomplete_save_repairs(50, DEFAULT_REPAIR_ATTEMPTS)
+        .unwrap()[0]
+        .2;
     library
         .record_incomplete_save_attempts(&[("1".to_owned(), tried)], 10)
         .unwrap();
@@ -231,7 +276,36 @@ fn pixiv_attempts_count_the_save_that_left_the_gap() {
     )
     .unwrap();
     assert_eq!(fingerprint, expected.0.to_vec());
-    assert!(attempts >= repair_attempts::MAX_REPAIR_ATTEMPTS);
-    assert!(library.incomplete_save_repairs(50).unwrap().is_empty());
+    assert!(attempts >= repair_attempts::DEFAULT_REPAIR_ATTEMPTS);
+    assert!(library
+        .incomplete_save_repairs(50, DEFAULT_REPAIR_ATTEMPTS)
+        .unwrap()
+        .is_empty());
     library.verify().unwrap();
+}
+
+/// 上限は呼ぶ側（詳細設定）が渡す。上げれば、上限に届いていた作品もまた候補に戻る。
+#[test]
+fn the_attempt_limit_comes_from_the_caller() {
+    let (_temp, library) = fixture();
+    save(&library, "1", "本文");
+    discover(&library, "1", "revision", Some("incomplete"));
+    let tried = library
+        .incomplete_save_repairs(50, DEFAULT_REPAIR_ATTEMPTS)
+        .unwrap()[0]
+        .2;
+    library
+        .record_incomplete_save_attempts(&[("1".to_owned(), tried)], 10)
+        .unwrap();
+    assert!(library.incomplete_save_repairs(50, 2).unwrap().is_empty());
+    assert_eq!(keys(library.incomplete_save_repairs(50, 3).unwrap()), ["1"]);
+    // 1 は「取り直さない」：最初の保存だけで上限に届く。
+    save(&library, "2", "本文");
+    discover(&library, "2", "revision", Some("incomplete"));
+    assert_eq!(
+        keys(library.incomplete_save_repairs(50, 3).unwrap()),
+        ["1", "2"]
+    );
+    let none: Vec<String> = Vec::new();
+    assert_eq!(keys(library.incomplete_save_repairs(50, 1).unwrap()), none);
 }

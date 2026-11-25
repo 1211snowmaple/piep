@@ -245,7 +245,7 @@ fn skip_save_on_shelf(
             .asset_repair_plan(work, snapshot, &urls)
             .map_err(fail)?
             .attempts
-            >= crate::library::asset_repairs::MAX_REPAIR_ATTEMPTS;
+            >= crate::advanced_settings::repair_attempts();
         if exhausted {
             for info in &resources {
                 if let Some(file) = &info.file {

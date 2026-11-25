@@ -1522,7 +1522,10 @@ pub async fn list_incomplete_save_repair_works(
     let library = state.shelf.library()?;
     tokio::task::spawn_blocking(move || {
         library
-            .incomplete_save_repairs(limit.clamp(1, 500) as usize)
+            .incomplete_save_repairs(
+                limit.clamp(1, 500) as usize,
+                crate::advanced_settings::repair_attempts(),
+            )
             .map_err(|error| error.to_string())
     })
     .await

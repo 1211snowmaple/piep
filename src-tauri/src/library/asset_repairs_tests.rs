@@ -1,4 +1,5 @@
 use super::*;
+use crate::library::repair_attempts::DEFAULT_REPAIR_ATTEMPTS as MAX_REPAIR_ATTEMPTS;
 use crate::library::{AcquisitionState, StagedAsset, WorkSave};
 use serde_json::json;
 use std::{fs, path::PathBuf};
