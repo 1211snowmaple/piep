@@ -698,8 +698,10 @@ function Reader({ source }: { source: ReaderSource }) {
     let shelfPage = 0;
     let shelfDirty = false;
     let lastRatio = 0;
-    // 棚に位置があるか（この画面で書いたか、開く前から棚にあったか）。無ければ消しに行かない。
-    let shelfWritten = Boolean(remoteReading && !remoteReading.finished);
+    // 棚に読みかけの位置があるか（この画面で書いたか、開く前から棚にあったか）。無ければ消しに行かない。
+    let shelfInProgress = Boolean(remoteReading && !remoteReading.finished);
+    // 開く前から読了だった作品。読み返して先頭に戻ったら、読みかけでなく読了に戻す。
+    const openedFinished = Boolean(remoteReading?.finished);
     const finished = () => readingFinished(sourcePage - 1, pageCount, atFlowEdge(viewport, vertical, 1));
     const toShelf = (finished: boolean, force: boolean) => {
       if (!shelfReading) return;
@@ -711,7 +713,7 @@ function Reader({ source }: { source: ReaderSource }) {
       shelfAt = now;
       shelfPage = sourcePage;
       shelfDirty = false;
-      shelfWritten = true;
+      shelfInProgress = !finished;
       queueShelf(() => shelfReading.write(version, sourcePage, finished ? 1 : lastRatio, finished));
     };
     // 棚へ書くのと消すのは、出した順に届ける。間引いた書き込みが、あとの消去を追い越さない。
@@ -746,9 +748,12 @@ function Reader({ source }: { source: ReaderSource }) {
       // 位置を書かず、それまでに書いた位置も消す。開いただけ・少し動かして戻しただけで
       // 読みかけの棚に載っていた。読み終えた作品は、開き直して先頭で閉じても読了のまま残す。
       if (sourcePage === 1 && pendingTop <= 1) {
-        if (!remoteReading?.finished) {
-          clearReadingPosition(readingId, version);
-          if (shelfReading && shelfWritten) queueShelf(() => shelfReading.clear());
+        clearReadingPosition(readingId, version);
+        if (shelfReading && shelfInProgress) {
+          shelfInProgress = false;
+          queueShelf(openedFinished
+            ? () => shelfReading.write(version, pageCount, 1, true)
+            : () => shelfReading.clear());
         }
         shelfDirty = false;
         pendingTop = null;

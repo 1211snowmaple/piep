@@ -271,19 +271,26 @@ describe("ReaderPage on the shelf", () => {
       await scrollTo(viewport, 300);
       await waitFor(() => expect(api.shelfSetReadingPosition).toHaveBeenCalled());
       await scrollTo(viewport, 0);
+      await scrollTo(viewport, 1);
       view.unmount();
       expect(readReadingPosition(WORK, null)).toBeNull();
       await waitFor(() => expect(api.shelfClearReadingPositions).toHaveBeenCalledWith([WORK]));
+      // 先頭にいるあいだ動かしても、消しに行くのは一度だけ。
+      expect(api.shelfClearReadingPositions).toHaveBeenCalledTimes(1);
     });
 
     it("keeps a finished work finished when it is reopened and closed at the start", async () => {
       api.shelfReadingPosition.mockResolvedValue({ page: 1, ratio: 1, finished: true, mine: true, updatedAt: 1 });
       const { view, viewport } = await openViewport();
       await scrollTo(viewport, 300);
+      // 読み返すと、いったん読みかけとして書く。
+      await waitFor(() => expect(api.shelfSetReadingPosition).toHaveBeenLastCalledWith(WORK, null, 1, expect.any(Number), false));
       await scrollTo(viewport, 0);
       view.unmount();
-      await new Promise((done) => setTimeout(done, 50));
+      // 先頭に戻って閉じたら、読みかけを消すのでなく読了に戻す。
+      await waitFor(() => expect(api.shelfSetReadingPosition).toHaveBeenLastCalledWith(WORK, null, 1, 1, true));
       expect(api.shelfClearReadingPositions).not.toHaveBeenCalled();
+      expect(readReadingPosition(WORK, null)).toBeNull();
     });
   });
 });
