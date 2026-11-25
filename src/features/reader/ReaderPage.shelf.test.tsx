@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import type { ShelfCard, ShelfNeighbors, ShelfWork } from "@/services/shelfApi";
-import { writeReadingPosition } from "@/features/library/readingShelf";
+import { readReadingPosition, writeReadingPosition } from "@/features/library/readingShelf";
 import ReaderPage from "./ReaderPage";
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
@@ -19,6 +19,9 @@ const api = vi.hoisted(() => ({
   shelfSearchContent: vi.fn(),
   shelfNeighbors: vi.fn(),
   shelfRenderPdfPage: vi.fn(),
+  shelfReadingPosition: vi.fn(),
+  shelfSetReadingPosition: vi.fn(),
+  shelfClearReadingPositions: vi.fn(),
 }));
 vi.mock("@/services/shelfApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/shelfApi")>()),
@@ -100,6 +103,9 @@ describe("ReaderPage on the shelf", () => {
     api.shelfOutline.mockResolvedValue([]);
     api.shelfSearchContent.mockResolvedValue([]);
     api.shelfNeighbors.mockResolvedValue([]);
+    api.shelfReadingPosition.mockResolvedValue(null);
+    api.shelfSetReadingPosition.mockResolvedValue(undefined);
+    api.shelfClearReadingPositions.mockResolvedValue(1);
   });
 
   it("reads the body, images and outline from the shelf and opens the shelf editor", async () => {
@@ -232,5 +238,52 @@ describe("ReaderPage on the shelf", () => {
     expect(await screen.findByText("古い版の本文")).toBeInTheDocument();
     await waitFor(() => expect(api.shelfContent).toHaveBeenCalledWith(WORK, FIRST, 0));
     expect(api.shelfContent).not.toHaveBeenCalledWith(WORK, null, 0);
+  });
+
+  /** 読みかけかどうかは、閉じる直前にどこを開いていたかで決める。先頭なら読みかけにしない。 */
+  describe("where the reader was when it closed", () => {
+    const scrollTo = async (viewport: HTMLElement, top: number) => {
+      viewport.scrollTop = top;
+      fireEvent.scroll(viewport);
+      await new Promise((done) => setTimeout(done, 450));
+    };
+    const openViewport = async () => {
+      const view = renderReader(`#/reader/${WORK}`);
+      expect(await screen.findByText("今の本文")).toBeInTheDocument();
+      const viewport = view.container.querySelector<HTMLElement>(".reader-scroll .mantine-ScrollArea-viewport")!;
+      Object.defineProperties(viewport, {
+        scrollHeight: { configurable: true, value: 2_000 },
+        clientHeight: { configurable: true, value: 400 },
+      });
+      await waitFor(() => expect(api.shelfReadingPosition).toHaveBeenCalled());
+      return { view, viewport };
+    };
+
+    it("does not record anything for a work that was only opened", async () => {
+      const { view } = await openViewport();
+      view.unmount();
+      expect(api.shelfSetReadingPosition).not.toHaveBeenCalled();
+      expect(readReadingPosition(WORK, null)).toBeNull();
+    });
+
+    it("forgets the place when the reader scrolled a little and came back to the start", async () => {
+      const { view, viewport } = await openViewport();
+      await scrollTo(viewport, 300);
+      await waitFor(() => expect(api.shelfSetReadingPosition).toHaveBeenCalled());
+      await scrollTo(viewport, 0);
+      view.unmount();
+      expect(readReadingPosition(WORK, null)).toBeNull();
+      await waitFor(() => expect(api.shelfClearReadingPositions).toHaveBeenCalledWith([WORK]));
+    });
+
+    it("keeps a finished work finished when it is reopened and closed at the start", async () => {
+      api.shelfReadingPosition.mockResolvedValue({ page: 1, ratio: 1, finished: true, mine: true, updatedAt: 1 });
+      const { view, viewport } = await openViewport();
+      await scrollTo(viewport, 300);
+      await scrollTo(viewport, 0);
+      view.unmount();
+      await new Promise((done) => setTimeout(done, 50));
+      expect(api.shelfClearReadingPositions).not.toHaveBeenCalled();
+    });
   });
 });
