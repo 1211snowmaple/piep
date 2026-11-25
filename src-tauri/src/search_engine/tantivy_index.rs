@@ -287,10 +287,20 @@ fn is_transient_sharing_failure(error: &std::io::Error) -> bool {
 
 impl Directory for ScanTolerantDirectory {
     fn atomic_write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
-        let deadline = Instant::now() + ATOMIC_WRITE_RETRY_BUDGET;
+        let started = Instant::now();
+        let deadline = started + ATOMIC_WRITE_RETRY_BUDGET;
         let mut backoff = Duration::from_millis(1);
         loop {
             let Err(error) = self.inner.atomic_write(path, data) else {
+                // 上限まで待てるので黙って通る。長く掴まれたことは記録に残す。
+                let waited = started.elapsed();
+                if waited >= Duration::from_secs(1) {
+                    log::warn!(
+                        "索引の {} の書き込みを、ほかのプロセスが掴んでいたため {} ms 待ちました",
+                        path.display(),
+                        waited.as_millis()
+                    );
+                }
                 return Ok(());
             };
             if !is_transient_sharing_failure(&error) || Instant::now() >= deadline {

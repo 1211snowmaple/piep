@@ -22,8 +22,8 @@ export default defineConfig({
     // 大きな画面を描く試験は、待ち時間ではなく**描画そのもの**で数秒を使う。
     // 手元では 5/5 通るのに CI だけが「5000ms で時間切れ」になっていた。
     //
-    // 本当に止まっている試験は、遅れて報されるだけで見逃されはしない。
-    // 個々の `findBy*`・`waitFor` の待ちは `src/test/setup.ts` で決める。
+    // 上げたのは試験ぜんぶの budget で、本当に止まっている試験は、遅れて報されるだけで
+    // 見逃されはしない。個々の `findBy*`・`waitFor` の待ちは `src/test/setup.ts` で決める。
     testTimeout: 20_000,
     hookTimeout: 20_000,
   },
