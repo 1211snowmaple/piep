@@ -310,6 +310,12 @@ jobs:
             gh release create $tag --draft --verify-tag --title "piep v$version" --notes $notes
             if ($LASTEXITCODE -ne 0) { throw 'Could not create the draft release' }
           }
+          # 上書き（--clobber）してよいのは下書きだけ。公開済みのタグで流し直しても、
+          # 公開した資産を同じ版の別物に差し替えない（AGENTS.md「公開済みの版を同じ番号で作り直さない」）。
+          $existing = gh release view $tag --json tagName,isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Could not read the release before uploading' }
+          if ($existing.tagName -ne $tag) { throw "Release is attached to $($existing.tagName), not $tag" }
+          if (-not $existing.isDraft) { throw "Release $tag is already published; refusing to overwrite its assets" }
           gh release upload $tag @assets --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Could not upload the release assets' }
 
