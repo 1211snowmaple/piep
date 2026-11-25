@@ -1794,7 +1794,7 @@ textarea { scrollbar-gutter: stable; }
 .content-preview {
   max-width: 880px;
   margin-inline: auto;
-  font-family: "Noto Serif JP", "Yu Mincho", serif;
+  font-family: var(--piep-reading-font, "Noto Sans JP", "Yu Gothic UI", sans-serif);
   font-size: 17px;
   line-height: 2;
   overflow-x: clip;
@@ -2010,13 +2010,13 @@ textarea { scrollbar-gutter: stable; }
   .history-layout__versions .version-row { flex: 0 0 176px; }
 }
 .version-preview { position: sticky; top: 82px; min-height: 310px; }
-.version-preview__text { max-height: max(320px, calc(100vh - 280px)); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "Noto Serif JP", "Yu Mincho", serif; line-height: 1.9; }
+.version-preview__text { max-height: max(320px, calc(100vh - 280px)); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--piep-reading-font, "Noto Sans JP", "Yu Gothic UI", sans-serif); line-height: 1.9; }
 .revision-diff__content {
   max-height: max(320px, calc(100vh - 280px));
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-family: "Noto Serif JP", "Yu Mincho", serif;
+  font-family: var(--piep-reading-font, "Noto Sans JP", "Yu Gothic UI", sans-serif);
   line-height: 1.9;
 }
 /* 左右は同じ行の中で揃える。段落の先頭が同じ高さにあると、どこが違うのかを
@@ -2278,6 +2278,13 @@ textarea { scrollbar-gutter: stable; }
 .reader-scroll {
   height: 100%;
   padding-top: 62px;
+}
+
+/* 帯（.reader-toolbar）は本文の上に重ねてある。スクロールバーは器の一番上から引かれるので、
+   そのままでは上の 62px が帯の下に隠れ、先頭近くを読んでいるあいだつまみが見えなかった。
+   縦の溝を帯の下から始める。 */
+.reader-scroll > .mantine-ScrollArea-scrollbar[data-orientation="vertical"] {
+  top: 62px;
 }
 
 .reader-stage {
@@ -2639,7 +2646,7 @@ textarea { scrollbar-gutter: stable; }
   color: light-dark(#24272b, #dde3ea);
   background: light-dark(#fff, #151a22);
   box-shadow: light-dark(0 16px 44px rgb(30 42 55 / 7%), 0 16px 44px rgb(0 0 0 / 20%));
-  font-family: "Noto Serif JP", "Yu Mincho", serif;
+  font-family: var(--piep-reading-font, "Noto Sans JP", "Yu Gothic UI", sans-serif);
   font-size: 16px;
   line-height: 1.95;
   overflow-wrap: anywhere;

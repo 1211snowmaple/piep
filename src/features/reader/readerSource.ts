@@ -1,5 +1,5 @@
 import { getAssetUrl } from "@/services/dbApi";
-import { shelfContent, shelfOutline, shelfReadingPosition, shelfSearchContent, shelfSetReadingPosition, shelfWork, shelfBodyUrl, staleEditBaseOf, type ShelfReading, type ShelfWork } from "@/services/shelfApi";
+import { shelfContent, shelfOutline, shelfReadingPosition, shelfSearchContent, shelfSetReadingPosition, shelfClearReadingPositions, shelfWork, shelfBodyUrl, staleEditBaseOf, type ShelfReading, type ShelfWork } from "@/services/shelfApi";
 export { SHELF_WORK_ID } from "@/services/shelfApi";
 import { getDemoReader } from "@/mocks/demoData";
 import type { ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit } from "@/types/library";
@@ -67,6 +67,8 @@ export interface ReaderSource {
   shelfReading?: {
     read(version: number | null): Promise<ShelfReading | null>;
     write(version: number | null, page: number, ratio: number, finished: boolean): Promise<void>;
+    /** 読書位置を消す（先頭で閉じたとき。読みかけにしない）。 */
+    clear(): Promise<void>;
   };
 }
 
@@ -164,6 +166,7 @@ export function shelfReaderSource(id: string): ReaderSource {
     shelfReading: {
       read: async (version) => shelfReadingPosition(id, await snapshotOf(version)),
       write: async (version, page, ratio, finished) => shelfSetReadingPosition(id, await snapshotOf(version), page, ratio, finished),
+      clear: async () => { await shelfClearReadingPositions([id]); },
     },
   };
 }
