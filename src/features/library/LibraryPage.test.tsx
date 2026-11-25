@@ -60,7 +60,7 @@ describe("LibraryPage search", () => {
     fireEvent.change(input, { target: { value: "日本" } });
     fireEvent.compositionEnd(input, { data: "日本" });
     expect(input).toHaveValue("日本");
-    await waitFor(() => expect(window.location.hash).toContain("q=%E6%97%A5%E6%9C%AC"), { timeout: 1500 });
+    await waitFor(() => expect(window.location.hash).toContain("q=%E6%97%A5%E6%9C%AC"));
     expect(screen.getByLabelText("ライブラリを検索")).toBe(input);
     // Searching defaults to relevance, but the control stays usable so the
     // results can be reordered by any library column.
@@ -172,7 +172,7 @@ describe("LibraryPage search", () => {
 
     const input = screen.getByLabelText("ライブラリを検索");
     fireEvent.change(input, { target: { value: "" } });
-    await waitFor(() => expect(window.location.hash).not.toContain("q="), { timeout: 1500 });
+    await waitFor(() => expect(window.location.hash).not.toContain("q="));
     // Relevance has no meaning without a query, but an explicit column sort does.
     expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("タイトル：昇順（あ→ん）");
   });
@@ -184,7 +184,7 @@ describe("LibraryPage search", () => {
 
     expect(await screen.findByRole("combobox", { name: "並び順" })).toHaveValue("関連度：高い順");
     fireEvent.change(screen.getByLabelText("ライブラリを検索"), { target: { value: "" } });
-    await waitFor(() => expect(window.location.hash).not.toContain("q="), { timeout: 1500 });
+    await waitFor(() => expect(window.location.hash).not.toContain("q="));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("保存日：新しい順"));
   });
 

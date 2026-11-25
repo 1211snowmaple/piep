@@ -538,7 +538,7 @@ async fn serve(
     String,
     Arc<ServerStore>,
     Option<Arc<crate::server::reader::Context>>,
-    tokio::task::JoinHandle<()>,
+    Serving,
 ) {
     apply_pending(paths);
     let config = load_config(paths).unwrap();
@@ -557,19 +557,33 @@ async fn serve(
     let router = crate::server::http::combined_router(Arc::clone(&parts.context));
     let listener = tokio::net::TcpListener::bind(address).await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
-    let serving = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    (base, store, shelf, serving)
+    let (shutdown, closed) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = closed.await;
+            })
+            .await
+            .unwrap()
+    });
+    (base, store, shelf, Serving { shutdown, task })
+}
+
+/// 試験の中で動かしている単独サーバー。
+struct Serving {
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 async fn restart_when_pending(
     paths: &ServerPaths,
     base: &str,
-    serving: tokio::task::JoinHandle<()>,
+    serving: Serving,
 ) -> (
     String,
     Arc<ServerStore>,
     Option<Arc<crate::server::reader::Context>>,
-    tokio::task::JoinHandle<()>,
+    Serving,
 ) {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while !paths.root.join(PENDING).is_file() {
@@ -582,11 +596,19 @@ async fn restart_when_pending(
     serve(paths, base.strip_prefix("http://").unwrap()).await
 }
 
-/// 止めて、開いていた棚を手放すまで待つ（つないだままの接続も閉じる）。
-async fn stop(serving: tokio::task::JoinHandle<()>) {
-    serving.abort();
-    let _ = serving.await;
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+/// 止めて、開いていた棚を手放すまで待つ。
+///
+/// 本番は再起動でプロセスを抜けるので、棚の錠はそこで外れる。試験は同じプロセスで立て直すので、
+/// つないだままの接続のタスクが棚を掴み終えるまで待つ必要がある。以前は待ち受けを abort して
+/// 300ms 眠るだけで、abort は接続のタスクを止めないため、混んだ PC では前の棚が掴まれたまま
+/// 次の起動の引き継ぎが「このライブラリは別の処理で使用中です」で落ちた（AUD-024）。
+/// 穏やかな停止は接続を閉じ、全部の接続のタスクが終わってから返る。
+async fn stop(serving: Serving) {
+    let _ = serving.shutdown.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(30), serving.task)
+        .await
+        .expect("待ち受けが止まりません")
+        .unwrap();
 }
 
 #[tokio::test]
@@ -794,7 +816,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
             .favorite,
         "携帯が前の世代で付けたお気に入りも残る"
     );
-    serving.abort();
+    stop(serving).await;
 }
 
 /// 実データでの確認（手で動かす）。`PIEP_SHIP_PROBE` に、稼働棚の台帳の写しと一人の作者の

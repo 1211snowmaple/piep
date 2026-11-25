@@ -271,7 +271,7 @@ describe("author page", () => {
     const search = await screen.findByRole("textbox", { name: "この作者のシリーズを検索" });
     expect(screen.getByText("保存済みシリーズ全体を名前・説明から検索します")).toBeInTheDocument();
     fireEvent.change(search, { target: { value: "目当て" } });
-    await waitFor(() => expect(window.location.hash).toContain("series_q=%E7%9B%AE%E5%BD%93%E3%81%A6"), { timeout: 1500 });
+    await waitFor(() => expect(window.location.hash).toContain("series_q=%E7%9B%AE%E5%BD%93%E3%81%A6"));
     await waitFor(() => expect(api.shelfPersonSeries).toHaveBeenCalledWith(PERSON, expect.objectContaining({ query: "目当て", offset: 0 })));
     expect(await screen.findByText("目当ての長編")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "シリーズの検索語を消す" })).toHaveAccessibleName();
@@ -302,7 +302,7 @@ describe("author page", () => {
     fireEvent.click(await screen.findByRole("option", { name: "合計容量：小さい順", hidden: true }));
 
     expect(search).toHaveValue("目当て");
-    await waitFor(() => expect(window.location.hash).toContain("series_q=%E7%9B%AE%E5%BD%93%E3%81%A6"), { timeout: 1500 });
+    await waitFor(() => expect(window.location.hash).toContain("series_q=%E7%9B%AE%E5%BD%93%E3%81%A6"));
     expect(window.location.hash).toContain("series_sort=size");
   });
 
