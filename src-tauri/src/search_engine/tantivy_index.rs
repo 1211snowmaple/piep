@@ -230,12 +230,14 @@ const ERROR_ACCESS_DENIED: i32 = 5;
 /// conflicts, so both are treated alike.
 const ERROR_SHARING_VIOLATION: i32 = 32;
 
-/// How long `atomic_write` keeps retrying a rename Windows refuses.
+/// Windows が断った名前の付け替えを、`atomic_write` が再試行し続ける長さ。
 ///
-/// Observed conflicts cleared on the first retry a millisecond later, so this
-/// is far longer than needed; it is sized to outlast a scanner that is having a
-/// bad day rather than to be hit.
-const ATOMIC_WRITE_RETRY_BUDGET: Duration = Duration::from_millis(250);
+/// 空いた PC では、1ms 後の最初の再試行で通っていた。混んだ PC ではそうならない。
+/// CI のジョブが何本も同じ PC で走ると、以前の上限 250ms を待っても os error 5 で
+/// 確定が落ちた（AUD-024）。走査の道具がそれより長く掴んでいたことになる。確定は
+/// 画面の外のスレッドで走るので、数秒待つほうが落ちるよりずっと良い。上限は混んだ
+/// PC に合わせる。
+const ATOMIC_WRITE_RETRY_BUDGET: Duration = Duration::from_secs(5);
 
 /// `MmapDirectory` that retries an `atomic_write` the filesystem refuses.
 ///
@@ -295,7 +297,7 @@ impl Directory for ScanTolerantDirectory {
                 return Err(error);
             }
             std::thread::sleep(backoff);
-            backoff = (backoff * 2).min(Duration::from_millis(16));
+            backoff = (backoff * 2).min(Duration::from_millis(50));
         }
     }
 
@@ -2250,5 +2252,41 @@ mod ngram_position_regression {
             1,
             "並びどおりの本文は当たる"
         );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod scan_tolerant_directory_tests {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    /// 検査の道具が書いたばかりの meta.json を長く掴んでも、確定の書き込みは待って通る。
+    ///
+    /// CI の実行役が混んでいるとき、索引の確定が「アクセスが拒否されました（os error 5）」で
+    /// 落ちた（AUD-024）。名前の付け替えは再試行していたが、待つのは 250ms までだった。
+    /// 負荷の高い PC ではウイルス対策の走査がそれより長く掴むので、ここでは 1 秒掴む。
+    #[test]
+    fn a_rename_waits_out_a_scanner_that_holds_the_file_for_a_second() {
+        let root = std::env::temp_dir().join(format!("piep-scan-hold-{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&root).unwrap();
+        let directory = ScanTolerantDirectory::open(&root).unwrap();
+        let meta = Path::new("meta.json");
+        directory.atomic_write(meta, b"first").unwrap();
+        // 走査の道具と同じく、削除（置き換え）を許さずに開く。
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1) // FILE_SHARE_READ だけ
+            .open(root.join(meta))
+            .unwrap();
+        let releasing = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            drop(held);
+        });
+        let written = directory.atomic_write(meta, b"second");
+        releasing.join().unwrap();
+        let read = std::fs::read(root.join(meta));
+        let _ = std::fs::remove_dir_all(&root);
+        written.expect("掴まれているあいだ待ってから書ける");
+        assert_eq!(read.unwrap(), b"second");
     }
 }
