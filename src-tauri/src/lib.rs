@@ -365,6 +365,7 @@ pub fn run() -> tauri::Result<()> {
             commands::auth::login_fanbox_webview,
             commands::auth::connect_fanbox_session,
             commands::auth::disconnect_account,
+            commands::auth::activate_account,
             // ブラウザ (commands::browser)
             commands::browser::open_embedded_browser,
             commands::browser::set_embedded_browser_bounds,

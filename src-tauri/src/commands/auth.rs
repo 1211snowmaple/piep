@@ -10,6 +10,9 @@
 //! **鍵は画面へ返さない。** どの入口も、返すのは接続の様子（繋がっているか
 //! と利用者の名前）だけである。保存や更新確認は、Rust の中で鍵を読む。
 //!
+//! **アカウントは取得元ごとに複数登録でき、使うのはそのうち一つ。** ログインは
+//! 登録を一つ足し（同じ人なら差し替え）、足したものを使うアカウントにする。
+//!
 //! 持ち帰るものは取得元で違う。pixiv は OAuth の更新用トークンで、web の
 //! セッション Cookie は**付け足しであって接続の条件ではない**。FANBOX は
 //! セッション Cookie そのものが鍵になる。どちらも UA と対でだけ意味を持つ
@@ -44,11 +47,14 @@ pub fn connection_status() -> Result<ConnectionStatus, String> {
 pub async fn login_pixiv_webview(app: tauri::AppHandle) -> Result<ConnectionStatus, String> {
     let connection = open_pixiv_login(app).await?;
     let vault = Vault::app();
-    vault.set_pixiv(&PixivAccount {
-        refresh_token: connection.refresh_token,
-        web_session: WebSession::pair(connection.cookie, connection.user_agent),
-        user_name: connection.user.name,
-    })?;
+    vault.add_pixiv(
+        &connection.user.id,
+        &PixivAccount {
+            refresh_token: connection.refresh_token,
+            web_session: WebSession::pair(connection.cookie, connection.user_agent),
+            user_name: connection.user.name,
+        },
+    )?;
     Ok(vault.status())
 }
 
@@ -65,11 +71,14 @@ pub async fn connect_pixiv_token(refresh_token: String) -> Result<ConnectionStat
         .user
         .ok_or_else(|| "Login success, but user data not found".to_string())?;
     let vault = Vault::app();
-    vault.set_pixiv(&PixivAccount {
-        refresh_token,
-        web_session: None,
-        user_name: user.name,
-    })?;
+    vault.add_pixiv(
+        &user.id,
+        &PixivAccount {
+            refresh_token,
+            web_session: None,
+            user_name: user.name,
+        },
+    )?;
     Ok(vault.status())
 }
 
@@ -83,11 +92,14 @@ pub async fn connect_pixiv_token(refresh_token: String) -> Result<ConnectionStat
 pub async fn login_fanbox_webview(app: tauri::AppHandle) -> Result<ConnectionStatus, String> {
     let (session_id, user, user_agent) = open_fanbox_login(app).await?;
     let vault = Vault::app();
-    vault.set_fanbox(&FanboxAccount {
-        session_id,
-        user_agent,
-        user_name: user.name,
-    })?;
+    vault.add_fanbox(
+        &user.user_id,
+        &FanboxAccount {
+            session_id,
+            user_agent,
+            user_name: user.name,
+        },
+    )?;
     Ok(vault.status())
 }
 
@@ -109,18 +121,34 @@ pub async fn connect_fanbox_session(
         .await
         .map_err(|e| e.to_string())?;
     let vault = Vault::app();
-    vault.set_fanbox(&FanboxAccount {
-        session_id,
-        user_agent,
-        user_name: user.name,
-    })?;
+    vault.add_fanbox(
+        &user.user_id,
+        &FanboxAccount {
+            session_id,
+            user_agent,
+            user_name: user.name,
+        },
+    )?;
     Ok(vault.status())
 }
 
-/// 接続を解く。保存済みの作品には触れない。
+/// 登録したアカウントひとつの接続を解く。保存済みの作品には触れない。
+///
+/// 使っていたアカウントを解いたときは、残りの最初のアカウントを使う。
+/// `key` は接続の様子の `accounts` に載っている印。
 #[tauri::command]
-pub fn disconnect_account(source: String) -> Result<ConnectionStatus, String> {
+pub fn disconnect_account(source: String, key: String) -> Result<ConnectionStatus, String> {
     let vault = Vault::app();
-    vault.forget(&source)?;
+    vault.forget(&source, &key)?;
+    Ok(vault.status())
+}
+
+/// 保存・更新確認に使うアカウントを切り替える。
+///
+/// 走っている仕事は始めたときの鍵で最後まで進み、次の仕事から切り替わる。
+#[tauri::command]
+pub fn activate_account(source: String, key: String) -> Result<ConnectionStatus, String> {
+    let vault = Vault::app();
+    vault.activate(&source, &key)?;
     Ok(vault.status())
 }

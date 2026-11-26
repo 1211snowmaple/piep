@@ -9,6 +9,7 @@ import { theme } from "@/theme";
 const authApi = vi.hoisted(() => ({
   getConnectionStatus: vi.fn(),
   disconnectAccount: vi.fn(),
+  activateAccount: vi.fn(),
   loginPixivWebview: vi.fn(),
   connectPixivToken: vi.fn(),
   loginFanboxWebview: vi.fn(),
@@ -48,20 +49,41 @@ function renderConnectionSettings() {
 describe("SettingsPage connection flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    authApi.getConnectionStatus.mockResolvedValue({ pixiv: null, fanbox: { name: "FANBOX利用者" } });
-    authApi.disconnectAccount.mockResolvedValue({ pixiv: null, fanbox: null });
+    authApi.getConnectionStatus.mockResolvedValue({ pixiv: null, fanbox: { name: "FANBOX利用者" }, accounts: { pixiv: [], fanbox: [{ key: "f1", name: "FANBOX利用者", active: true }] } });
+    authApi.disconnectAccount.mockResolvedValue({ pixiv: null, fanbox: null, accounts: { pixiv: [], fanbox: [] } });
   });
 
   it("asks the backend to forget the FANBOX connection", async () => {
     renderConnectionSettings();
 
-    expect(await screen.findByText("FANBOX利用者")).toBeInTheDocument();
-    fireEvent.click(await screen.findByRole("button", { name: "接続解除" }));
-    expect(await screen.findByRole("dialog", { name: "FANBOXとの接続を解除しますか？" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "FANBOX利用者の接続を解除" }));
+    expect(await screen.findByRole("dialog", { name: "FANBOX利用者の接続を解除しますか？" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "接続を解除" }));
 
-    await waitFor(() => expect(authApi.disconnectAccount).toHaveBeenCalledWith("fanbox"));
-    await waitFor(() => expect(screen.queryByRole("button", { name: "接続解除" })).not.toBeInTheDocument());
+    await waitFor(() => expect(authApi.disconnectAccount).toHaveBeenCalledWith("fanbox", "f1"));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "FANBOX利用者の接続を解除" })).not.toBeInTheDocument());
+  });
+
+  it("switches the account used for saving without asking", async () => {
+    authApi.getConnectionStatus.mockResolvedValue({
+      pixiv: { name: "表", webSession: true },
+      fanbox: null,
+      accounts: { pixiv: [{ key: "p1", name: "表", active: true }, { key: "p2", name: "裏", active: false }], fanbox: [] },
+    });
+    authApi.activateAccount.mockResolvedValue({
+      pixiv: { name: "裏", webSession: true },
+      fanbox: null,
+      accounts: { pixiv: [{ key: "p1", name: "表", active: false }, { key: "p2", name: "裏", active: true }], fanbox: [] },
+    });
+    renderConnectionSettings();
+
+    expect(await screen.findByText("使用中")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "アカウントを追加" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "裏を使う" }));
+
+    await waitFor(() => expect(authApi.activateAccount).toHaveBeenCalledWith("pixiv", "p2"));
+    expect(await screen.findByRole("button", { name: "表を使う" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("says which saved connection could not be read, and keeps the other one", async () => {
