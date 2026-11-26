@@ -1,9 +1,8 @@
-import type { SidebarDownloadType, SidebarItem } from "@/features/browser/downloadCandidates";
+import type { PageRows, SidebarDownloadType, SidebarItem } from "@/features/browser/downloadCandidates";
 
 export type SaveSource = "pixiv" | "fanbox";
 
-export interface SaveDraft {
-  items: SidebarItem[];
+export interface SaveDraft extends PageRows<SidebarItem> {
   downloadType: SidebarDownloadType | null;
   lastAnalysisUrl: string | null;
   lastAnalysisKey: string | null;
@@ -12,6 +11,7 @@ export interface SaveDraft {
 
 const emptyDraft = (): SaveDraft => ({
   items: [],
+  pageOrder: new Map(),
   downloadType: null,
   lastAnalysisUrl: null,
   lastAnalysisKey: null,

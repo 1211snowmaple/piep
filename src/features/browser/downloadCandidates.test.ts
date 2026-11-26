@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { downloadTargetKey, isFollowingListUrl, listPageNumber, mergePageWorkItems, nextPagedListUrl, pageListSource, pageWorkItems, detectDownloadTarget, extractSavedSourceTarget, getFanboxCreatorId, normalizeContentLinkUrl } from "@/features/browser/downloadCandidates";
+import { downloadTargetKey, isFollowingListUrl, listPageNumber, mergePageWorkItems, nextPagedListUrl, pageListSource, pageWorkItems, detectDownloadTarget, extractSavedSourceTarget, getFanboxCreatorId, normalizeContentLinkUrl, type SidebarItem } from "@/features/browser/downloadCandidates";
+
+function firstPage(items: SidebarItem[]) {
+  return mergePageWorkItems(undefined, items, 1);
+}
 
 describe("download candidate URL detection", () => {
   it.each([
@@ -90,27 +94,57 @@ describe("一覧ページからの読み取り", () => {
 
   it("続きを足すときは、すでにある行の選択と状態を残す", () => {
     const row = (id: string, selected: boolean) => ({ ...pageWorkItems("pixiv", [{ sourceId: id, title: id, author: "", saved: false }])[0], selected });
-    const merged = mergePageWorkItems([row("1", false), row("2", true)], [row("2", false), row("3", true)]);
-    expect(merged.map((item) => [item.id, item.selected])).toEqual([["1", false], ["2", true], ["3", true]]);
+    const merged = mergePageWorkItems(firstPage([row("1", false), row("2", true)]), [row("2", false), row("3", true)], 2);
+    expect(merged.items.map((item) => [item.id, item.selected])).toEqual([["1", false], ["2", true], ["3", true]]);
   });
 
   it("読み直しで見つかった新着は、末尾でなく一覧の並びどおりの場所に入る", () => {
     const row = (id: string) => pageWorkItems("pixiv", [{ sourceId: id, title: id, author: "", saved: false }])[0];
-    const merged = mergePageWorkItems([row("3"), row("4"), row("5")], [row("1"), row("2"), row("3"), row("4"), row("9"), row("5"), row("6")]);
-    expect(merged.map((item) => item.id)).toEqual(["1", "2", "3", "4", "9", "5", "6"]);
+    const merged = mergePageWorkItems(firstPage([row("3"), row("4"), row("5")]), [row("1"), row("2"), row("3"), row("4"), row("9"), row("5"), row("6")], 1);
+    expect(merged.items.map((item) => item.id)).toEqual(["1", "2", "3", "4", "9", "5", "6"]);
+  });
+
+  it("読み直したページでは既知の行も並べ直し、見つからなかった行は後ろに残す", () => {
+    const rows = (...ids: string[]) => pageWorkItems("pixiv", ids.map((sourceId) => ({ sourceId, title: sourceId, author: "", saved: false })));
+    const [first, second, missing] = rows("1", "2", "3");
+    const merged = mergePageWorkItems(
+      firstPage([{ ...first, status: "failed", error: "保存できませんでした" }, { ...second, selected: false }, missing]),
+      rows("4", "2", "5", "1"),
+      1,
+    );
+    expect(merged.items.map((item) => item.id)).toEqual(["4", "2", "5", "1", "3"]);
+    expect(merged.items[1].selected).toBe(false);
+    expect(merged.items[3]).toMatchObject({ status: "failed", error: "保存できませんでした" });
+  });
+
+  it("前の行と重ならない先頭ページを読み直しても、続きの前に並べる", () => {
+    const rows = (...ids: string[]) => pageWorkItems("pixiv", ids.map((sourceId) => ({ sourceId, title: sourceId, author: "", saved: false })));
+    const current = mergePageWorkItems(firstPage(rows("1", "2")), rows("3", "1", "4"), 2);
+    const reread = mergePageWorkItems(current, rows("5", "6"), 1);
+    expect(reread.items.map((item) => item.id)).toEqual(["5", "6", "3", "1", "4", "2"]);
   });
 
   it("読み直しで棚にあると分かった行は保存済みにする。保存の結果は上書きしない", () => {
     const work = (id: string, saved: boolean) => pageWorkItems("pixiv", [{ sourceId: id, title: id, author: "", saved }])[0];
     const merged = mergePageWorkItems(
-      [work("1", false), { ...work("2", false), status: "success" as const }, { ...work("3", false), status: "failed" as const }],
+      firstPage([work("1", false), { ...work("2", false), status: "success" }, { ...work("3", false), status: "failed" }]),
       [work("1", true), work("2", true), work("3", true)],
+      1,
     );
-    expect(merged.map((item) => [item.id, item.status, item.selected])).toEqual([
+    expect(merged.items.map((item) => [item.id, item.status, item.selected])).toEqual([
       ["1", "skipped", false],
       ["2", "success", true],
       ["3", "failed", true],
     ]);
+  });
+
+  it("棚から外れた作品の保存済みを解除し、ジョブの保存済みは残す", () => {
+    const work = (id: string, saved: boolean) => pageWorkItems("pixiv", [{ sourceId: id, title: id, author: "", saved }])[0];
+    const current = firstPage([work("1", true), { ...work("2", false), status: "skipped" }, work("3", false)]);
+    const merged = mergePageWorkItems(current, [work("1", false), work("2", false), work("3", true)], 1);
+    expect(merged.items.map((item) => item.status)).toEqual([undefined, "skipped", "skipped"]);
+    const reread = mergePageWorkItems(merged, [work("3", false)], 1);
+    expect(reread.items[0].status).toBeUndefined();
   });
 
   it("棚にある作品は選ばず、題名が読めなければ ID で名乗る", () => {

@@ -98,13 +98,16 @@ describe("一覧を順に読む", () => {
     expect(result).toMatchObject({ stop: "complete", pagesRead: 3 });
   });
 
-  it("新しい作品が無くなったら止める", async () => {
-    const { deps, navigate } = browser({
-      [base]: listPage(base, ["1"]),
-      [`${base}?p=2`]: listPage(`${base}?p=2`, ["1"]),
+  it("全件が既出でも棚の照会結果を反映してから止める", async () => {
+    const next = `${base}?p=2`;
+    const duplicate = listPage(next, ["1", "2", "3"], ["2"]);
+    const { deps, navigate, onPage } = browser({
+      [base]: listPage(base, ["1", "2", "3"], ["1", "3"]),
+      [next]: duplicate,
     });
     const result = await readListPages(options, deps);
-    expect(result).toMatchObject({ stop: "end", pagesRead: 1, total: 1 });
+    expect(onPage).toHaveBeenLastCalledWith(duplicate, 2, 3);
+    expect(result).toMatchObject({ stop: "end", pagesRead: 2, total: 3, saved: 1 });
     expect(navigate).toHaveBeenCalledTimes(1);
   });
 
