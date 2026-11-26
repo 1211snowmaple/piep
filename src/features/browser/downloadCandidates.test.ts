@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { downloadTargetKey, followingListSource, listPageNumber, mergePageWorkItems, nextPagedListUrl, pageListSource, pageWorkItems, detectDownloadTarget, extractSavedSourceTarget, getFanboxCreatorId, normalizeContentLinkUrl } from "@/features/browser/downloadCandidates";
+import followingListUrls from "@shared/followingListUrls.test.json";
 
 describe("download candidate URL detection", () => {
   it.each([
@@ -38,7 +39,9 @@ describe("download candidate URL detection", () => {
 
   it("extracts both FANBOX creator URL styles", () => {
     expect(getFanboxCreatorId("https://artist.fanbox.cc/posts/1")).toBe("artist");
-    expect(getFanboxCreatorId("https://www.fanbox.cc/@artist")).toBe("artist");
+    expect(getFanboxCreatorId("https://www.fanbox.cc/@ArTiSt")).toBe("artist");
+    expect(getFanboxCreatorId("https://www.fanbox.cc/zh-tw/@ArTiSt")).toBe("artist");
+    expect(detectDownloadTarget("https://artist.fanbox.cc/xy/")).toBe("unsupported");
   });
 });
 
@@ -74,15 +77,9 @@ describe("一覧ページからの読み取り", () => {
   });
 
   it("フォロー一覧を見分けて、続きも開ける", () => {
-    expect(followingListSource("https://www.pixiv.net/users/1/following")).toBe("pixiv");
-    expect(followingListSource("https://www.pixiv.net/en/users/1/following?rest=hide")).toBe("pixiv");
-    expect(followingListSource("https://www.pixiv.net/users/1/novels")).toBeNull();
-    expect(followingListSource("https://evil.example/users/1/following")).toBeNull();
-    expect(followingListSource("https://www.pixiv.net/users/1/following")).toBe("pixiv");
-    expect(followingListSource("https://www.fanbox.cc/creators/following")).toBe("fanbox");
-    expect(followingListSource("https://www.fanbox.cc/creators/supporting")).toBe("fanbox");
-    expect(followingListSource("https://www.fanbox.cc/creators/find")).toBeNull();
-    expect(followingListSource("https://www.pixiv.net/creators/following")).toBeNull();
+    for (const [url, source] of followingListUrls as [string, string | null][]) {
+      expect(followingListSource(url), url).toBe(source);
+    }
     expect(nextPagedListUrl("https://www.pixiv.net/users/1/following?rest=hide")).toBe("https://www.pixiv.net/users/1/following?rest=hide&p=2");
   });
 

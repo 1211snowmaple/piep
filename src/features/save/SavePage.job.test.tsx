@@ -1,4 +1,5 @@
 import { MantineProvider } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +7,7 @@ import { AppRouter } from "@/app/router";
 import { hasUnsavedWork } from "@/lib/unsavedGuard";
 import SavePage from "./SavePage";
 import { readSaveDraft, resetSaveDraftsForTest } from "./saveDraft";
+import { summarizeSaveJob } from "./saveJobRows";
 
 const browserApi = vi.hoisted(() => ({
   openEmbeddedBrowser: vi.fn().mockResolvedValue(undefined),
@@ -270,15 +272,25 @@ describe("SavePage の Rust 保存ジョブ", () => {
     expect(await screen.findByRole("checkbox", { name: "作者一を監視に追加する" })).toBeDisabled();
   });
 
-  it("FANBOX のフォロー中のクリエイターも読み、FANBOX の監視に足す", async () => {
+  it("保存ジョブの集計は画面で使う項目を返す", () => {
+    expect(summarizeSaveJob(summary("completed"))).toEqual({
+      outcome: "completed",
+      tally: "保存 2 · 保存済み 0 · 失敗 0",
+      failed: 0,
+      held: 0,
+    });
+  });
+
+  it("フォロー中の候補から監視に追加でき、上限での打ち切りを知らせる", async () => {
     window.location.hash = "#/save/fanbox";
     const page = "https://www.fanbox.cc/creators/following";
     upsertTarget.mockReset().mockResolvedValue(undefined);
     browserApi.readBrowserPageUserCandidates.mockReset().mockResolvedValue({
       url: page,
-      truncated: false,
+      truncated: true,
       users: [{ userId: "mizu-atelier", name: "mizu atelier", watched: false }],
     });
+    const show = vi.spyOn(notifications, "show");
     renderSavePage();
     const address = await screen.findByLabelText("ブラウザのアドレス");
     fireEvent.change(address, { target: { value: page } });
@@ -287,6 +299,8 @@ describe("SavePage の Rust 保存ジョブ", () => {
     fireEvent.click(await screen.findByRole("button", { name: "1人を監視に追加" }));
 
     await waitFor(() => expect(upsertTarget).toHaveBeenCalledTimes(1));
+    expect(show).toHaveBeenCalledWith(expect.objectContaining({ message: "件数の上限で打ち切ったページがあります。" }));
+    show.mockRestore();
     expect(browserApi.readBrowserPageUserCandidates).toHaveBeenCalledWith("embedded", "fanbox");
     expect(upsertTarget).toHaveBeenCalledWith({ targetType: "author", source: "fanbox", sourceKey: "mizu-atelier", displayName: "mizu atelier", enabled: true, metadataJson: null });
   });

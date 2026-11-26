@@ -101,7 +101,7 @@ function isSourceHost(hostname: string, domain: string): boolean {
 }
 
 function sourcePath(pathname: string): string {
-  return pathname.replace(/^\/[a-z]{2}\//i, "/");
+  return pathname.replace(/^\/(?:ja|en|ko|zh-cn|zh-tw)\//, "/");
 }
 
 function isSourceId(value: string | null | undefined): value is string {
@@ -120,7 +120,7 @@ export function getFanboxCreatorId(url: string): string | null {
   if (!parsed || !isSourceHost(parsed.hostname, "fanbox.cc")) return null;
   const labels = parsed.hostname.split(".");
   if (labels.length === 3 && labels[0] !== "www" && labels[0] !== "api") return labels[0];
-  return parsed.pathname.match(/^\/@([^/]+)(?:\/|$)/)?.[1] ?? null;
+  return sourcePath(parsed.pathname).match(/^\/@([^/]+)(?:\/|$)/)?.[1].toLowerCase() ?? null;
 }
 
 /** そのページが指している相手。作品ID・シリーズID・作者ID・クリエイター名。 */
@@ -197,10 +197,17 @@ const PAGED_PIXIV_LISTS = [
  * 支援中のクリエイター（`/creators/following`・`/creators/supporting`）。
  */
 export function followingListSource(url: string): "pixiv" | "fanbox" | null {
-  const source = pageListSource(url);
-  const path = sourcePath(sourceUrl(url)?.pathname ?? "");
-  if (source === "pixiv" && /^\/users\/\d+\/following\/?$/.test(path)) return "pixiv";
-  if (source === "fanbox" && /^\/creators\/(?:following|supporting)\/?$/.test(path)) return "fanbox";
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:") return null;
+  const { hostname, pathname } = parsed;
+  const path = sourcePath(pathname);
+  if (isSourceHost(hostname, "pixiv.net") && /^\/users\/\d{1,20}\/following\/?$/.test(path)) return "pixiv";
+  if ((hostname === "fanbox.cc" || hostname === "www.fanbox.cc") && /^\/creators\/(?:following|supporting)\/?$/.test(path)) return "fanbox";
   return null;
 }
 

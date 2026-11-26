@@ -740,7 +740,7 @@ export default function SavePage() {
         message: "候補の取得はデスクトップアプリで使えます",
       });
     const described = describeDownloadTarget(analysisUrl);
-    const fetcher = SAVE_SOURCES[source].targets[described.kind];
+    const fetcher = profile.targets[described.kind];
     const target = fetcher ? described.kind : "unsupported";
     const readsPage = target === "unsupported" && pageListSource(analysisUrl) === source;
     // 一覧の読み取りは開いている画面を読むだけなので、取得用の接続を使わない。
@@ -767,7 +767,7 @@ export default function SavePage() {
     setProgress(null);
     try {
       if (readsPage) {
-        const { pageType, person } = SAVE_SOURCES[source];
+        const { pageType, person } = profile;
         const browser = detachedRef.current ? "standalone" : "embedded";
         const options = nextPagedListUrl(analysisUrl) ? listRead : { ...listRead, pages: 1 };
         const readsUsers = followingListSource(analysisUrl) === source;

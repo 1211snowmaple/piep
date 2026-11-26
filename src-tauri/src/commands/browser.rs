@@ -109,7 +109,13 @@ pub async fn read_browser_page_user_candidates(
             super::watching::targets(&library, Some("author"), false)?
                 .into_iter()
                 .filter(|target| target.source == source)
-                .map(|target| target.source_key)
+                .map(|target| {
+                    if source == "fanbox" {
+                        target.source_key.to_ascii_lowercase()
+                    } else {
+                        target.source_key
+                    }
+                })
                 .collect();
         let users = page
             .users

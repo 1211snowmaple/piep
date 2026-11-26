@@ -67,7 +67,6 @@ export type SaveJobOutcome = "canceled" | "paused" | "failed" | "completed";
 export function summarizeSaveJob(final: UpdateJobSnapshot): {
   outcome: SaveJobOutcome;
   tally: string;
-  saved: number;
   failed: number;
   held: number;
 } {
@@ -84,5 +83,5 @@ export function summarizeSaveJob(final: UpdateJobSnapshot): {
         : saved === 0 && failed > 0
           ? "failed"
           : "completed";
-  return { outcome, tally, saved, failed, held };
+  return { outcome, tally, failed, held };
 }

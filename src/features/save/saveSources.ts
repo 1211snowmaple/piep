@@ -27,7 +27,6 @@ import type { SaveSource } from "./saveDraft";
 type CandidateFetcher = (id: string, url: string) => Promise<SidebarItem[]>;
 
 export interface SaveSourceProfile {
-  source: SaveSource;
   /** 開いている一覧から読み取った候補の種類。 */
   pageType: Extract<SidebarDownloadType, "pixiv_page" | "fanbox_page">;
   /** 候補が無いときの案内に出す、対応しているページ。 */
@@ -52,19 +51,18 @@ const postRow = (post: FanboxPost) => row(post.id, post.title, post.user?.name, 
 
 export const SAVE_SOURCES: Record<SaveSource, SaveSourceProfile> = {
   pixiv: {
-    source: "pixiv",
     pageType: "pixiv_page",
     supportedPages: "小説、シリーズ、作者、一覧のページ",
     person: "作者",
     followingAction: "フォローユーザーを読み取る",
     targets: {
       pixiv_single: {
-        label: "pixiv小説を保存できます",
+        label: "小説を保存できます",
         fetch: async (_id, url) => {
           const data = await fetchPixivNovelByUrl<PixivNovel>(url);
           return [row(
             data.id ?? data.detail?.id ?? "",
-            data.title || data.detail?.title || "Pixiv novel",
+            data.title || data.detail?.title || "題名のない小説",
             data.user?.name || data.detail?.user?.name,
             data,
           )];
@@ -81,17 +79,16 @@ export const SAVE_SOURCES: Record<SaveSource, SaveSourceProfile> = {
     },
   },
   fanbox: {
-    source: "fanbox",
     pageType: "fanbox_page",
     supportedPages: "投稿、クリエイター、一覧のページ",
     person: "クリエイター",
     followingAction: "クリエイターを読み取る",
     targets: {
       fanbox_single: {
-        label: "FANBOX投稿を保存できます",
+        label: "投稿を保存できます",
         fetch: async (id) => {
           const data = normalizeFanboxPostPayload<FanboxPost>(await fetchFanboxPost<unknown>(id));
-          return [row(id, data.title || "FANBOX投稿", data.user?.name, data)];
+          return [row(id, data.title || "題名のない投稿", data.user?.name, data)];
         },
       },
       fanbox_creator: {
