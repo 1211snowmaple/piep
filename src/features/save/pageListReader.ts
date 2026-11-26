@@ -133,14 +133,16 @@ export async function readListPages(options: ListReadOptions, deps: ListReadDeps
   for (;;) {
     if (deps.cancelled()) return finish("cancelled");
     if (!page.works.length) return finish("end");
-    if (pagesRead > 0 && page.works.every((work) => seen.has(work.sourceId))) return finish("end");
+    const allSeen = page.works.every((work) => seen.has(work.sourceId));
     for (const work of page.works) {
       seen.add(work.sourceId);
       if (work.saved) savedIds.add(work.sourceId);
+      else savedIds.delete(work.sourceId);
     }
     truncated ||= page.truncated;
     pagesRead += 1;
     deps.onPage(page, pagesRead, seen.size);
+    if (allSeen) return finish("end");
     if (pagesRead >= options.pages) return finish("complete");
     if (options.stopAtSaved && page.works.every((work) => work.saved)) return finish("saved");
     const nextUrl = nextPagedListUrl(page.url);

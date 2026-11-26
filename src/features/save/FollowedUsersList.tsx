@@ -1,4 +1,5 @@
 import { Badge, Button, Checkbox, Group, Stack, Text } from "@mantine/core";
+import { mergePageRows, type PageRows } from "@/features/browser/downloadCandidates";
 
 /** フォロー一覧から読み取った作者の行。`watched` は監視に登録済みかどうか。 */
 export interface FollowedUserRow {
@@ -8,10 +9,15 @@ export interface FollowedUserRow {
   selected: boolean;
 }
 
-/** 同じ一覧の続きを足す。すでにある行の選択は残す。 */
-export function mergeFollowedUsers(current: FollowedUserRow[], incoming: FollowedUserRow[]): FollowedUserRow[] {
-  const known = new Set(current.map((row) => row.userId));
-  return [...current, ...incoming.filter((row) => !known.has(row.userId))];
+/** すでにある行の選択を引き継ぎ、監視への登録状態を更新する。 */
+export function mergeFollowedUsers(
+  current: PageRows<FollowedUserRow> | undefined,
+  incoming: FollowedUserRow[],
+  pageNumber: number,
+): PageRows<FollowedUserRow> {
+  return mergePageRows(current, incoming, pageNumber, (row) => row.userId, (row, fresh) => (
+    row.watched === fresh.watched ? row : { ...row, watched: fresh.watched }
+  ));
 }
 
 export function FollowedUsersList({ rows, adding, onToggle, onAdd }: {
