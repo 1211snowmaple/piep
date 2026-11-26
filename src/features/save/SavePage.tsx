@@ -34,10 +34,12 @@ import {
   describeDownloadTarget,
   downloadTargetKey,
   followingListSource,
+  listPageNumber,
   mergePageWorkItems,
   nextPagedListUrl,
   pageListSource,
   pageWorkItems,
+  type PageRows,
   type SidebarItem,
 } from "@/features/browser/downloadCandidates";
 import { CandidateRow, EmptyCandidates } from "./CandidateRow";
@@ -152,7 +154,7 @@ export default function SavePage() {
     defaultValue: DEFAULT_LIST_READ_OPTIONS,
   });
   const [listProgress, setListProgress] = useState<{ page: number; pages: number; works: number } | null>(null);
-  const [followedUsers, setFollowedUsers] = useState<{ key: string; rows: FollowedUserRow[] }>({ key: "", rows: [] });
+  const [followedUsers, setFollowedUsers] = useState<PageRows<FollowedUserRow> & { key: string }>({ key: "", items: [], pageOrder: new Map() });
   const [addingToWatch, setAddingToWatch] = useState(false);
   const [listOptionsOpen, setListOptionsOpen] = useState(false);
   // While the large window is open the in-app pane hands its job over to it:
@@ -546,7 +548,7 @@ export default function SavePage() {
   const canAnalyze = targetKind !== "unsupported" || canReadPage;
   const canReadNextPages = canReadPage && nextPagedListUrl(currentUrl) !== null;
   const readsFollowing = followingListSource(currentUrl) === source;
-  const followedRows = readsFollowing && followedUsers.key === downloadTargetKey(currentUrl) ? followedUsers.rows : [];
+  const followedRows = readsFollowing && followedUsers.key === downloadTargetKey(currentUrl) ? followedUsers.items : [];
   const listRead = normalizeListReadOptions(listReadSettings);
   // 古いのは一覧のほう。一覧が無いうちは、古くなりようがない。
   const analyzeLabel = readsFollowing ? (canReadNextPages && listRead.pages > 1 ? `${listRead.pages}ページの${profile.followingAction}` : profile.followingAction) : canReadNextPages && listRead.pages > 1 ? `${listRead.pages}ページ読み取る` : canReadPage ? "このページから読み取る" : lastAnalysisKey && lastAnalysisKey !== downloadTargetKey(currentUrl) ? "候補を再取得" : "候補を取得";
@@ -584,7 +586,7 @@ export default function SavePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [source]);
   const addFollowedUsersToWatch = async () => {
-    const rows = followedUsers.rows.filter((row) => row.selected && !row.watched);
+    const rows = followedUsers.items.filter((row) => row.selected && !row.watched);
     if (!rows.length || addingToWatch) return;
     setAddingToWatch(true);
     const added = new Set<string>();
@@ -597,7 +599,7 @@ export default function SavePage() {
     } catch (error) {
       notifications.show({ color: "red", title: `${added.size} / ${rows.length}人まで追加しました`, message: errorMessage(error) });
     } finally {
-      setFollowedUsers((current) => ({ ...current, rows: current.rows.map((row) => added.has(row.userId) ? { ...row, watched: true, selected: false } : row) }));
+      setFollowedUsers((current) => ({ ...current, items: current.items.map((row) => added.has(row.userId) ? { ...row, watched: true, selected: false } : row) }));
       queryClient.invalidateQueries({ queryKey: ["update-targets"] });
       setAddingToWatch(false);
     }
@@ -785,17 +787,20 @@ export default function SavePage() {
           onPage: (page, pagesRead, total) => {
             if (!isCurrent()) return;
             const key = downloadTargetKey(page.url);
+            const pageNumber = listPageNumber(page.url);
             if (options.pages > 1) setListProgress({ page: pagesRead, pages: options.pages, works: total });
-            // 同じ一覧の続きなら足す。手で次のページへ進んで読んだときも同じである。
             if (readsUsers) {
               const incoming = page.works.map((work) => ({ userId: work.sourceId, name: work.title, watched: work.saved, selected: !work.saved }));
-              setFollowedUsers((current) => ({ key, rows: current.key === key ? mergeFollowedUsers(current.rows, incoming) : incoming }));
+              setFollowedUsers((current) => ({
+                key,
+                ...mergeFollowedUsers(current.key === key ? current : undefined, incoming, pageNumber),
+              }));
               return;
             }
             const incoming = pageWorkItems(source, page.works);
             updateSaveDraft(source, (current) => ({
               ...current,
-              items: current.downloadType === pageType && current.lastAnalysisKey === key ? mergePageWorkItems(current.items, incoming) : incoming,
+              ...mergePageWorkItems(current.downloadType === pageType && current.lastAnalysisKey === key ? current : undefined, incoming, pageNumber),
               downloadType: pageType,
               lastAnalysisUrl: page.url,
               lastAnalysisKey: key,
@@ -833,6 +838,7 @@ export default function SavePage() {
       updateSaveDraft(source, (current) => ({
         ...current,
         items: next,
+        pageOrder: new Map(),
         downloadType: target,
         lastAnalysisUrl: analysisUrl,
         lastAnalysisKey: downloadTargetKey(analysisUrl),
@@ -1723,7 +1729,7 @@ export default function SavePage() {
                     rows={followedRows}
                     adding={addingToWatch}
                     person={profile.person}
-                    onToggle={(userId, selected) => setFollowedUsers((current) => ({ ...current, rows: current.rows.map((row) => row.userId === userId ? { ...row, selected } : row) }))}
+                    onToggle={(userId, selected) => setFollowedUsers((current) => ({ ...current, items: current.items.map((row) => row.userId === userId ? { ...row, selected } : row) }))}
                     onAdd={addFollowedUsersToWatch}
                   />
                 ) : (

@@ -65,6 +65,7 @@ export interface SidebarItem {
   selected: boolean;
   originalData: PixivNovel | FanboxPost;
   status?: "pending" | "downloading" | "success" | "skipped" | "failed" | "held";
+  shelfSkipped?: true;
   error?: string;
 }
 
@@ -246,7 +247,7 @@ export function pageWorkItems(source: "pixiv" | "fanbox", works: PageWorkCandida
       title,
       subtitle: work.author || undefined,
       selected: !work.saved,
-      ...(work.saved ? { status: "skipped" as const } : {}),
+      ...(work.saved ? { status: "skipped" as const, shelfSkipped: true as const } : {}),
       originalData: source === "pixiv"
         ? { id: work.sourceId, title, characterCount: 0, createDate: "", user: { id: "", name: work.author } }
         : { id: work.sourceId, title, type: "", publishedDatetime: "", user: { userId: "", name: work.author } },
@@ -254,37 +255,55 @@ export function pageWorkItems(source: "pixiv" | "fanbox", works: PageWorkCandida
   });
 }
 
-/**
- * 同じ一覧の読み直しと続きを足す。行の状態と選択は、すでにある行のものを残す。
- *
- * 新しい行は**一覧の並びどおりの場所**に入れる。新着は一覧の上に出るので、
- * 読み直しで見つかった行を末尾に足すと、何十件もの下に隠れて候補が変わらない
- * ように見えていた。一覧で後ろに既知の行がある新しい行はその前へ、無いもの
- * （続きのページ）は末尾へ置く。棚に入ったと分かった行は保存済みに改める。
- */
-export function mergePageWorkItems(current: SidebarItem[], incoming: SidebarItem[]): SidebarItem[] {
-  const existing = new Set(current.map((item) => item.id));
-  const added = new Set<string>();
-  const fresh = new Map(incoming.map((item) => [item.id, item]));
-  const before = new Map<string, SidebarItem[]>();
-  let pending: SidebarItem[] = [];
-  for (const item of incoming) {
-    if (existing.has(item.id)) {
-      if (pending.length) before.set(item.id, [...(before.get(item.id) ?? []), ...pending]);
-      pending = [];
-    } else if (!added.has(item.id)) {
-      added.add(item.id);
-      pending.push(item);
+export interface PageRows<Row> {
+  items: Row[];
+  pageOrder: ReadonlyMap<number, readonly string[]>;
+}
+
+/** ページ順に並べ、重複する行は最初に載るページに置く。見つからなくなった行は末尾に残す。 */
+export function mergePageRows<Row>(
+  current: PageRows<Row> | undefined,
+  incoming: Row[],
+  pageNumber: number,
+  getId: (row: Row) => string,
+  updateRow: (current: Row, incoming: Row) => Row,
+): PageRows<Row> {
+  const pageOrder = new Map(current?.pageOrder);
+  const byId = new Map(current?.items.map((row) => [getId(row), row]));
+  const fresh = new Map(incoming.map((row) => [getId(row), row]));
+  pageOrder.set(pageNumber, [...fresh.keys()]);
+  for (const [id, row] of fresh) {
+    const previous = byId.get(id);
+    byId.set(id, previous === undefined ? row : updateRow(previous, row));
+  }
+
+  const items: Row[] = [];
+  for (const [, ids] of [...pageOrder].sort(([a], [b]) => a - b)) {
+    for (const id of ids) {
+      const row = byId.get(id);
+      if (row === undefined) continue;
+      items.push(row);
+      byId.delete(id);
     }
   }
-  const rows = current.flatMap((row) => {
-    const seen = fresh.get(row.id);
-    const updated = seen?.status === "skipped" && row.status === undefined
-      ? { ...row, status: "skipped" as const, selected: false }
-      : row;
-    return [...(before.get(row.id) ?? []), updated];
+  return { items: [...items, ...byId.values()], pageOrder };
+}
+
+/** 選択とジョブの状態を引き継ぎ、棚の照会による保存済み表示を更新する。 */
+export function mergePageWorkItems(
+  current: PageRows<SidebarItem> | undefined,
+  incoming: SidebarItem[],
+  pageNumber: number,
+): PageRows<SidebarItem> {
+  return mergePageRows(current, incoming, pageNumber, (row) => row.id, (row, fresh) => {
+    if (row.shelfSkipped && !fresh.shelfSkipped) {
+      return { ...row, status: undefined, shelfSkipped: undefined };
+    }
+    if (row.status === undefined && fresh.shelfSkipped) {
+      return { ...row, status: "skipped", shelfSkipped: true, selected: false };
+    }
+    return row;
   });
-  return [...rows, ...pending];
 }
 
 export function detectDownloadTarget(url: string): DownloadTargetKind {

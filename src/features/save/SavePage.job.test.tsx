@@ -225,6 +225,37 @@ describe("SavePage の Rust 保存ジョブ", () => {
     expect(browserApi.navigateEmbeddedBrowser).not.toHaveBeenCalledWith(`${first}?p=3`);
   });
 
+  it("重複する続きのページは後ろに足し、読み直すと棚から外れた作品を選べる", async () => {
+    const first = "https://www.pixiv.net/tags/x/novels";
+    const second = `${first}?p=2`;
+    const work = (sourceId: string, saved = false) => ({ sourceId, title: `作品${sourceId}`, author: "", saved });
+    browserApi.readBrowserPageWorkCandidates.mockReset()
+      .mockResolvedValueOnce({ url: first, truncated: false, works: [work("1"), work("2")] })
+      .mockResolvedValueOnce({ url: second, truncated: false, works: [work("3"), work("1", true), work("4")] })
+      .mockResolvedValueOnce({ url: first, truncated: false, works: [work("2"), work("1")] });
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    const read = async (url: string) => {
+      fireEvent.change(address, { target: { value: url } });
+      fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "このページから読み取る" })));
+    };
+
+    await read(first);
+    await read(second);
+    const checkboxes = () => screen.getAllByRole("checkbox", { name: /を保存対象にする$/ });
+    expect(checkboxes().map((box) => box.getAttribute("aria-label"))).toEqual(["作品1を保存対象にする", "作品2を保存対象にする", "作品3を保存対象にする", "作品4を保存対象にする"]);
+    expect(checkboxes()[0]).toBeDisabled();
+
+    await read(first);
+    const unsaved = screen.getByRole("checkbox", { name: "作品1を保存対象にする" });
+    expect(checkboxes()[1]).toBe(unsaved);
+    expect(unsaved).toBeEnabled();
+    expect(unsaved).not.toBeChecked();
+    fireEvent.click(unsaved);
+    expect(unsaved).toBeChecked();
+  });
+
   it("続きを開ける一覧でだけ、読み取りの設定を開ける", async () => {
     renderSavePage();
     const address = await screen.findByLabelText("ブラウザのアドレス");
@@ -313,6 +344,29 @@ describe("SavePage の Rust 保存ジョブ", () => {
 
     expect(await screen.findByText("作品・シリーズ・作者・一覧のページを開いてください")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "候補を取得" })).toBeDisabled();
+  });
+
+  it("フォロー一覧の再読込で作者を並べ直し、選択を引き継いで監視状態を更新する", async () => {
+    const page = "https://www.pixiv.net/users/7/following";
+    const user = (userId: string, watched = false) => ({ userId, name: `作者${userId}`, watched });
+    browserApi.readBrowserPageUserCandidates.mockReset()
+      .mockResolvedValueOnce({ url: page, truncated: false, users: [user("1", true), user("2"), user("3")] })
+      .mockResolvedValueOnce({ url: page, truncated: false, users: [user("4"), user("3"), user("2", true), user("1")] });
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: page } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+    const read = await screen.findByRole("button", { name: "フォローユーザーを読み取る" });
+    fireEvent.click(read);
+    fireEvent.click(await screen.findByRole("checkbox", { name: "作者3を監視に追加する" }));
+    fireEvent.click(read);
+    await screen.findByRole("checkbox", { name: "作者4を監視に追加する" });
+
+    const checkboxes = screen.getAllByRole("checkbox", { name: /を監視に追加する$/ });
+    expect(checkboxes.map((box) => box.getAttribute("aria-label"))).toEqual(["作者4を監視に追加する", "作者3を監視に追加する", "作者2を監視に追加する", "作者1を監視に追加する"]);
+    expect(checkboxes[1]).not.toBeChecked();
+    expect(checkboxes[2]).toBeDisabled();
+    expect(checkboxes[3]).toBeEnabled();
   });
 
   it("読み取れる作品が無いページでは候補を置き換えない", async () => {

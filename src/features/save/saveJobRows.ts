@@ -37,16 +37,19 @@ export function isPendingSave(item: SidebarItem): boolean {
  * ジョブの項目ひとつの状態を行に当てる。変わらなければ同じ行を返す。
  *
  * 状態の取得は複数回が重なりうる。古い応答があとから戻っても、済んだ行を
- * 「処理中」へ巻き戻さない。
+ * 「処理中」へ巻き戻さない。棚の照会で付いた「保存済み」よりはジョブを優先する。
  */
 export function applyJobItemState(row: SidebarItem, state: UpdateJobItemState): SidebarItem {
   const status = ROW_STATUS[state.status];
   if (!status) return row;
-  if ((row.status ? STATUS_RANK[row.status] : 0) > STATUS_RANK[status]) return row;
-  if (row.status === status && (row.error ?? null) === state.error) return row;
+  if (!row.shelfSkipped && row.status) {
+    if (STATUS_RANK[row.status] > STATUS_RANK[status]) return row;
+    if (row.status === status && (row.error ?? null) === state.error) return row;
+  }
   return {
     ...row,
     status,
+    shelfSkipped: undefined,
     selected: status === "held" ? false : row.selected,
     error: state.error ?? undefined,
   };
