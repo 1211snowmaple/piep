@@ -1341,9 +1341,8 @@ use tauri::{LogicalPosition, LogicalSize};
 static EMBEDDED_BROWSER_OPEN_LOCK: Mutex<()> = Mutex::new(());
 static STANDALONE_BROWSER_OPEN_LOCK: Mutex<()> = Mutex::new(());
 
-// Browsing in the app has its own WebView2 profile. Login windows used to
-// obtain acquisition credentials keep the default profile, so signing in or
-// out in the reader never changes the account used by update/download jobs.
+// 内蔵ブラウザには専用の WebView2 プロファイルを使う。取得用のログイン窓は
+// プライベートモードで開き、保存・更新確認の接続は設定で管理する。
 fn browsing_data_directory(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     app.path()
         .app_data_dir()

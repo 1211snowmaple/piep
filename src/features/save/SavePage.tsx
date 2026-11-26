@@ -888,9 +888,8 @@ export default function SavePage() {
           originalData: novel,
         }));
       } else if (target === "fanbox_single") {
-        const data = normalizeFanboxPostPayload<FanboxPost>(
-          await fetchFanboxPost<unknown>(targetId),
-        );
+        const result = await fetchFanboxPost<unknown>(targetId);
+        const data = normalizeFanboxPostPayload<FanboxPost>(result.data);
         next = [
           {
             id: targetId,
@@ -898,17 +897,18 @@ export default function SavePage() {
             subtitle: data.user?.name,
             selected: true,
             originalData: data,
+            restrictionAccountKey: result.accountKey,
           },
         ];
       } else if (target === "fanbox_creator") {
-        next = (
-          await fetchFanboxCreatorPosts<FanboxPost[]>(targetId)
-        ).map((post) => ({
+        const result = await fetchFanboxCreatorPosts<FanboxPost[]>(targetId);
+        next = result.data.map((post) => ({
           id: String(post.id),
           title: post.title,
           subtitle: post.user?.name,
           selected: true,
           originalData: post,
+          restrictionAccountKey: result.accountKey,
         }));
       }
       if (!isCurrent()) return;
@@ -1166,8 +1166,9 @@ export default function SavePage() {
           source: itemSource,
           sourceId: item.id,
           title: item.title,
-          ...(itemSource === "fanbox" && "isRestricted" in item.originalData ? { fanboxAccess: {
+          ...(itemSource === "fanbox" && item.restrictionAccountKey && "isRestricted" in item.originalData ? { fanboxAccess: {
             isRestricted: item.originalData.isRestricted === true,
+            accountKey: item.restrictionAccountKey,
             feeRequired: item.originalData.feeRequired,
             creatorId: item.originalData.creatorId,
           } } : {}),

@@ -64,6 +64,7 @@ export interface SidebarItem {
   subtitle?: string;
   selected: boolean;
   originalData: PixivNovel | FanboxPost;
+  restrictionAccountKey?: string;
   status?: "pending" | "downloading" | "success" | "skipped" | "failed" | "held";
   error?: string;
 }

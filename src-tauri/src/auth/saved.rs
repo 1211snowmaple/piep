@@ -1,8 +1,8 @@
 //! 取得用の接続（pixiv と FANBOX）の置き場。
 //!
 //! **鍵は Windows の資格情報マネージャーにだけ置き、画面へは渡さない。**
-//! 画面が知るのは、繋がっているかどうかと、繋がっている利用者の名前だけで
-//! ある。保存や更新確認は、ここから鍵を読んで Rust の中で取得元へ行く。
+//! 画面に返すのは接続状態・名前・アカウントの識別子である。保存や更新確認は、
+//! ここから鍵を読んで Rust の中で取得元へ行く。
 //!
 //! 取得元ごとに**複数のアカウントを登録でき、使うのはそのうち一つ**である。
 //! 保存・更新確認・候補の取得は、どれも「使うアカウント」だけを読む。
@@ -12,6 +12,7 @@
 //! 登録の一覧（名前と、どれを使うか）は取得元ごとに別の資格情報に置く。一つの
 //! 資格情報は 2,560 バイトまでなので、鍵を一覧へまとめると数件で溢れる。
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::credential_manager;
 use crate::models::UpdateCredentials;
@@ -90,11 +91,20 @@ pub struct FanboxStatus {
 /// 一つの取得元に登録できるアカウントの数。一覧を一つの資格情報に収めるため。
 pub const MAX_ACCOUNTS: usize = 8;
 
-/// 一覧に置く名前の長さ。画面に出すのにも十分な長さ。
-const MAX_NAME_CHARS: usize = 60;
+/// 一覧の名前に使えるバイト数。JSON のエスケープを含め、128 バイトの ID が
+/// 8 件あっても収まるようにする。
+const MAX_NAME_BYTES: usize = 112;
+const MIGRATED_KEY: &str = "migrated";
+static ACCOUNTS_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_accounts() -> MutexGuard<'static, ()> {
+    ACCOUNTS_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
 
 /// 取得元ごとの、登録したアカウントの一覧。鍵は含まない。
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AccountIndex {
     /// 保存・更新確認に使うアカウントの `key`。
@@ -102,12 +112,11 @@ struct AccountIndex {
     accounts: Vec<IndexEntry>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct IndexEntry {
     key: String,
     /// 取得元での利用者 ID。同じ人を繋ぎ直したとき、項目を増やさず差し替える。
-    #[serde(default)]
     user_id: String,
     name: String,
 }
@@ -147,7 +156,13 @@ fn known_source(source: &str) -> Result<&'static str, String> {
 pub struct Vault {
     prefix: String,
     #[cfg(test)]
-    memory: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    memory: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    #[cfg(test)]
+    write_failure: Mutex<Option<String>>,
+    #[cfg(test)]
+    delete_failure: Mutex<Option<String>>,
+    #[cfg(test)]
+    write_pause: Mutex<Option<(String, std::sync::Arc<std::sync::Barrier>)>>,
 }
 
 impl Vault {
@@ -157,6 +172,12 @@ impl Vault {
             prefix: credential_manager::PREFIX.to_string(),
             #[cfg(test)]
             memory: Default::default(),
+            #[cfg(test)]
+            write_failure: Default::default(),
+            #[cfg(test)]
+            delete_failure: Default::default(),
+            #[cfg(test)]
+            write_pause: Default::default(),
         }
     }
 
@@ -190,6 +211,24 @@ impl Vault {
         credential_manager::delete(name)
     }
 
+    #[cfg(not(test))]
+    fn account_names(&self, source: &str) -> Result<Vec<String>, String> {
+        credential_manager::names_with_prefix(&self.account_name(source, ""))
+    }
+
+    #[cfg(test)]
+    fn account_names(&self, source: &str) -> Result<Vec<String>, String> {
+        let prefix = self.account_name(source, "");
+        Ok(self
+            .memory
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|name| name.starts_with(&prefix))
+            .cloned()
+            .collect())
+    }
+
     #[cfg(test)]
     fn load(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
         Ok(self.memory.lock().unwrap().get(name).cloned())
@@ -197,6 +236,23 @@ impl Vault {
 
     #[cfg(test)]
     fn store(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
+        let pause = {
+            let mut pause = self.write_pause.lock().unwrap();
+            if pause.as_ref().is_some_and(|(target, _)| target == name) {
+                pause.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, barrier)) = pause {
+            barrier.wait();
+            barrier.wait();
+        }
+        let mut failure = self.write_failure.lock().unwrap();
+        if failure.as_deref() == Some(name) {
+            failure.take();
+            return Err("書き込みの試験用エラー".into());
+        }
         if bytes.len() > credential_manager::MAX_BLOB {
             return Err("資格情報マネージャーに置ける大きさを超えています".into());
         }
@@ -209,6 +265,11 @@ impl Vault {
 
     #[cfg(test)]
     fn remove(&self, name: &str) -> Result<(), String> {
+        let mut failure = self.delete_failure.lock().unwrap();
+        if failure.as_deref() == Some(name) {
+            failure.take();
+            return Err("削除の試験用エラー".into());
+        }
         self.memory.lock().unwrap().remove(name);
         Ok(())
     }
@@ -222,140 +283,235 @@ impl Vault {
             .map_err(|_| "保存された接続を読み取れません".to_string())
     }
 
-    fn write_json<T: Serialize>(&self, name: &str, value: &T) -> Result<(), String> {
-        let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-        self.store(name, &bytes)
-    }
-
-    /// 登録の一覧。一つだけの置き場が残っていれば、ここで一覧の一件目へ移す。
-    fn index(&self, source: &str) -> Result<AccountIndex, String> {
-        if let Some(index) = self.read_json(&self.index_name(source))? {
-            return Ok(index);
+    fn migrate(&self, source: &str, bytes: &[u8]) -> Result<AccountIndex, String> {
+        let name = match source {
+            "pixiv" => {
+                serde_json::from_slice::<PixivAccount>(bytes).map(|account| account.user_name)
+            }
+            _ => serde_json::from_slice::<FanboxAccount>(bytes).map(|account| account.user_name),
         }
-        let single = self.single_name(source);
-        let Some(bytes) = self.load(&single)? else {
-            return Ok(AccountIndex::default());
-        };
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
-            .map_err(|_| "保存された接続を読み取れません".to_string())?;
-        let name = value
-            .get("userName")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let key = new_key();
-        self.store(&self.account_name(source, &key), &bytes)?;
+        .map_err(|_| "保存された接続を読み取れません".to_string())?;
         let index = AccountIndex {
-            active: Some(key.clone()),
+            active: Some(MIGRATED_KEY.to_string()),
             accounts: vec![IndexEntry {
-                key,
+                key: MIGRATED_KEY.to_string(),
                 user_id: String::new(),
-                name,
+                name: shorten_name(&name),
             }],
         };
-        self.write_json(&self.index_name(source), &index)?;
-        self.remove(&single)?;
+        let index_bytes = encode_index(&index)?;
+        // 途中で止まっても、同じ資格情報に書き直してから一覧を確定する。
+        self.store(&self.account_name(source, MIGRATED_KEY), bytes)?;
+        self.store(&self.index_name(source), &index_bytes)?;
         Ok(index)
     }
 
+    /// 一覧を読み、中断した書き込みの後始末をする。呼び出し元が一覧のロックを持つ。
+    fn index(&self, source: &str) -> Result<AccountIndex, String> {
+        let index_name = self.index_name(source);
+        let single = self.single_name(source);
+        let saved_index = self.read_json(&index_name)?;
+        let needs_migration = saved_index.is_none();
+        let mut index = match saved_index {
+            Some(index) => index,
+            None => match self.load(&single)? {
+                Some(bytes) => self.migrate(source, &bytes)?,
+                None => AccountIndex::default(),
+            },
+        };
+        let names = self.account_names(source)?;
+        let count = index.accounts.len();
+        let active = index.active.clone();
+        index
+            .accounts
+            .retain(|entry| names.contains(&self.account_name(source, &entry.key)));
+        if !index
+            .accounts
+            .iter()
+            .any(|entry| Some(&entry.key) == index.active.as_ref())
+        {
+            index.active = index.accounts.first().map(|entry| entry.key.clone());
+        }
+        if index.accounts.len() != count || index.active != active {
+            self.store(&index_name, &encode_index(&index)?)?;
+        }
+        if let Err(error) = self.remove_orphans(source, &index, names) {
+            log::warn!("{source} の不要な資格情報を削除できません: {error}");
+        }
+        // 一覧が確定した直後に止まった場合も、古い一件をここで消す。
+        if !needs_migration || index.accounts.iter().any(|entry| entry.key == MIGRATED_KEY) {
+            if let Err(error) = self.remove(&single) {
+                log::warn!("{source} の移行前の資格情報を削除できません: {error}");
+            }
+        }
+        Ok(index)
+    }
+
+    fn remove_orphans(
+        &self,
+        source: &str,
+        index: &AccountIndex,
+        names: Vec<String>,
+    ) -> Result<(), String> {
+        for name in names {
+            if !index
+                .accounts
+                .iter()
+                .any(|entry| self.account_name(source, &entry.key) == name)
+            {
+                self.remove(&name)?;
+            }
+        }
+        Ok(())
+    }
+
     /// 使っているアカウントの鍵。登録が無ければ `None`。
-    fn active<T: for<'de> Deserialize<'de>>(&self, source: &str) -> Result<Option<T>, String> {
-        let index = self.index(source)?;
-        let Some(key) = index.active else {
+    fn read_active<T: for<'de> Deserialize<'de>>(
+        &self,
+        source: &str,
+        index: &AccountIndex,
+    ) -> Result<Option<(String, T)>, String> {
+        let Some(key) = &index.active else {
             return Ok(None);
         };
-        self.read_json(&self.account_name(source, &key))
+        Ok(self
+            .read_json(&self.account_name(source, key))?
+            .map(|account| (key.clone(), account)))
+    }
+
+    fn active<T: for<'de> Deserialize<'de>>(
+        &self,
+        source: &str,
+    ) -> Result<Option<(String, T)>, String> {
+        let _lock = lock_accounts();
+        self.read_active(source, &self.index(source)?)
     }
 
     /// アカウントを登録し、使うアカウントにする。
     ///
     /// 同じ利用者 ID がすでにあれば、その項目の鍵を差し替える（繋ぎ直し）。
-    fn add<T: Serialize>(
+    fn add<T: Serialize + for<'de> Deserialize<'de>>(
         &self,
         source: &str,
         user_id: &str,
         name: &str,
         account: &T,
+        same_session: impl FnOnce(&T, &T) -> bool,
     ) -> Result<(), String> {
-        // 名前は一覧に入る。長い名前で一覧が一つの資格情報から溢れないよう切る。
-        let name: String = name.chars().take(MAX_NAME_CHARS).collect();
-        let name = name.as_str();
+        let _lock = lock_accounts();
         let mut index = self.index(source)?;
-        let existing = index
+        let mut existing = index
             .accounts
-            .iter_mut()
-            .find(|entry| !user_id.is_empty() && entry.user_id == user_id);
-        let key = match existing {
-            Some(entry) => {
-                entry.name = name.to_string();
-                entry.key.clone()
-            }
-            None => {
-                if index.accounts.len() >= MAX_ACCOUNTS {
-                    return Err(format!(
-                        "登録できるアカウントは{MAX_ACCOUNTS}件までです。使わないものを解除してください"
-                    ));
+            .iter()
+            .position(|entry| !user_id.is_empty() && entry.user_id == user_id);
+        // 移行した接続には利用者 ID が無い。同じ鍵で本人を確認できたときに ID を記録する。
+        if existing.is_none() && !user_id.is_empty() {
+            if let Some(position) = index
+                .accounts
+                .iter()
+                .position(|entry| entry.key == MIGRATED_KEY)
+            {
+                let previous = self.read_json(&self.account_name(source, MIGRATED_KEY))?;
+                if previous.is_some_and(|previous| same_session(&previous, account)) {
+                    existing = Some(position);
                 }
-                let key = new_key();
-                index.accounts.push(IndexEntry {
-                    key: key.clone(),
-                    user_id: user_id.to_string(),
-                    name: name.to_string(),
-                });
-                key
+            }
+        }
+        if existing.is_none() && index.accounts.len() >= MAX_ACCOUNTS {
+            return Err(format!(
+                "登録できるアカウントは{MAX_ACCOUNTS}件までです。使わないものを解除してください"
+            ));
+        }
+        for entry in &mut index.accounts {
+            entry.name = shorten_name(&entry.name);
+        }
+        let key = new_key();
+        let entry = IndexEntry {
+            key: key.clone(),
+            user_id: user_id.to_string(),
+            name: shorten_name(name),
+        };
+        let previous = match existing {
+            Some(position) => Some(std::mem::replace(&mut index.accounts[position], entry)),
+            None => {
+                index.accounts.push(entry);
+                None
             }
         };
-        // 鍵を先に書く。一覧だけが先に書けると、鍵の無い項目を「使う」ことになる。
-        self.write_json(&self.account_name(source, &key), account)?;
-        index.active = Some(key);
-        self.write_json(&self.index_name(source), &index)
+        index.active = Some(key.clone());
+        let index_bytes = encode_index(&index)?;
+        let account_bytes =
+            serde_json::to_vec(account).map_err(|_| "接続を保存できません".to_string())?;
+        // 新しい鍵を用意してから一覧を切り替え、最後に古い鍵を片付ける。
+        self.store(&self.account_name(source, &key), &account_bytes)?;
+        self.store(&self.index_name(source), &index_bytes)?;
+        if let Some(previous) = previous {
+            self.remove(&self.account_name(source, &previous.key))?;
+        }
+        Ok(())
     }
 
     pub fn pixiv(&self) -> Result<Option<PixivAccount>, String> {
-        self.active("pixiv")
-    }
-
-    pub fn fanbox(&self) -> Result<Option<FanboxAccount>, String> {
-        self.active("fanbox")
+        Ok(self.active("pixiv")?.map(|(_, account)| account))
     }
 
     /// pixiv のアカウントを登録して使う。`user_id` は pixiv の利用者 ID。
     pub fn add_pixiv(&self, user_id: &str, account: &PixivAccount) -> Result<(), String> {
-        self.add("pixiv", user_id, &account.user_name, account)
+        self.add("pixiv", user_id, &account.user_name, account, |old, new| {
+            old.refresh_token == new.refresh_token
+        })
     }
 
     /// FANBOX のアカウントを登録して使う。`user_id` は FANBOX の利用者 ID。
     pub fn add_fanbox(&self, user_id: &str, account: &FanboxAccount) -> Result<(), String> {
-        self.add("fanbox", user_id, &account.user_name, account)
+        self.add(
+            "fanbox",
+            user_id,
+            &account.user_name,
+            account,
+            |old, new| old.session_id == new.session_id,
+        )
     }
 
     /// 使うアカウントを切り替える。
     pub fn activate(&self, source: &str, key: &str) -> Result<(), String> {
         let source = known_source(source)?;
+        let _lock = lock_accounts();
         let mut index = self.index(source)?;
         if !index.accounts.iter().any(|entry| entry.key == key) {
             return Err("そのアカウントは登録されていません".to_string());
         }
         index.active = Some(key.to_string());
-        self.write_json(&self.index_name(source), &index)
+        self.store(&self.index_name(source), &encode_index(&index)?)
     }
 
     /// アカウントひとつの登録を解く。使っていたものなら、残りの最初を使う。
     pub fn forget(&self, source: &str, key: &str) -> Result<(), String> {
         let source = known_source(source)?;
+        let _lock = lock_accounts();
         let mut index = self.index(source)?;
+        let count = index.accounts.len();
         index.accounts.retain(|entry| entry.key != key);
+        if index.accounts.len() == count {
+            return Ok(());
+        }
         if index.active.as_deref() == Some(key) {
             index.active = index.accounts.first().map(|entry| entry.key.clone());
         }
         // 一覧から先に外す。鍵だけが先に消えると、一覧に読めない項目が残る。
-        self.write_json(&self.index_name(source), &index)?;
+        self.store(&self.index_name(source), &encode_index(&index)?)?;
         self.remove(&self.account_name(source, key))
     }
 
-    fn summaries(&self, source: &str) -> Result<Vec<AccountSummary>, String> {
+    fn source_status<T: for<'de> Deserialize<'de>>(
+        &self,
+        source: &str,
+    ) -> Result<(Option<T>, Vec<AccountSummary>), String> {
         let index = self.index(source)?;
-        Ok(index
+        let active = self
+            .read_active(source, &index)?
+            .map(|(_, account)| account);
+        let accounts = index
             .accounts
             .into_iter()
             .map(|entry| AccountSummary {
@@ -363,7 +519,28 @@ impl Vault {
                 key: entry.key,
                 name: entry.name,
             })
-            .collect())
+            .collect();
+        Ok((active, accounts))
+    }
+
+    /// 読めなくなった一覧と、その取得元に属する資格情報を消す。
+    pub fn clear_unreadable(&self, source: &str) -> Result<(), String> {
+        let source = known_source(source)?;
+        let _lock = lock_accounts();
+        let readable = match source {
+            "pixiv" => self.source_status::<PixivAccount>(source).is_ok(),
+            _ => self.source_status::<FanboxAccount>(source).is_ok(),
+        };
+        if readable {
+            return Err("接続一覧は読み取れます。個別に接続を解除してください".into());
+        }
+        self.remove_orphans(
+            source,
+            &AccountIndex::default(),
+            self.account_names(source)?,
+        )?;
+        self.remove(&self.single_name(source))?;
+        self.remove(&self.index_name(source))
     }
 
     /// 取得元ごとの接続の様子。片方の保存された接続が読めなくても、もう片方の様子は返す
@@ -371,25 +548,32 @@ impl Vault {
     pub fn status(&self) -> ConnectionStatus {
         fn readable<T>(
             source: &'static str,
-            read: Result<Option<T>, String>,
+            read: Result<(Option<T>, Vec<AccountSummary>), String>,
             unreadable: &mut Vec<&'static str>,
-        ) -> Option<T> {
+        ) -> (Option<T>, Vec<AccountSummary>) {
             read.unwrap_or_else(|error| {
                 log::warn!("{source} の保存された接続を読めません: {error}");
                 unreadable.push(source);
-                None
+                (None, Vec::new())
             })
         }
+        let _lock = lock_accounts();
         let mut unreadable = Vec::new();
-        let pixiv = readable("pixiv", self.pixiv(), &mut unreadable);
-        let fanbox = readable("fanbox", self.fanbox(), &mut unreadable);
-        // 一覧が読めない取得元は、もう読めないと載せてあるので、空の一覧にする。
-        let accounts = AccountLists {
-            pixiv: self.summaries("pixiv").unwrap_or_default(),
-            fanbox: self.summaries("fanbox").unwrap_or_default(),
-        };
+        let (pixiv, pixiv_accounts) = readable(
+            "pixiv",
+            self.source_status::<PixivAccount>("pixiv"),
+            &mut unreadable,
+        );
+        let (fanbox, fanbox_accounts) = readable(
+            "fanbox",
+            self.source_status::<FanboxAccount>("fanbox"),
+            &mut unreadable,
+        );
         ConnectionStatus {
-            accounts,
+            accounts: AccountLists {
+                pixiv: pixiv_accounts,
+                fanbox: fanbox_accounts,
+            },
             pixiv: pixiv.map(|account| PixivStatus {
                 name: account.user_name,
                 web_session: account.web_session.is_some(),
@@ -409,9 +593,8 @@ impl Vault {
     }
 
     /// 画面から始まる取得に使う FANBOX のセッションと UA。無ければ繋ぐよう言う。
-    pub fn fanbox_session(&self) -> Result<(String, String), String> {
-        self.fanbox()?
-            .map(|account| (account.session_id, account.user_agent))
+    pub fn fanbox_session(&self) -> Result<(String, FanboxAccount), String> {
+        self.active("fanbox")?
             .ok_or_else(|| "設定でFANBOXに接続してください".to_string())
     }
 
@@ -424,18 +607,22 @@ impl Vault {
             log::warn!("pixiv の接続を読めません: {error}");
             None
         });
-        let fanbox = self.fanbox().unwrap_or_else(|error| {
-            log::warn!("FANBOX の接続を読めません: {error}");
-            None
-        });
+        let fanbox = self
+            .active::<FanboxAccount>("fanbox")
+            .unwrap_or_else(|error| {
+                log::warn!("FANBOX の接続を読めません: {error}");
+                None
+            });
         let web = pixiv
             .as_ref()
             .and_then(|account| account.web_session.clone());
+        let (fanbox_account_key, fanbox) = fanbox.unzip();
         UpdateCredentials {
             pixiv_refresh_token: pixiv.map(|account| account.refresh_token),
             pixiv_cookie: web.as_ref().map(|session| session.cookie.clone()),
             pixiv_user_agent: web.map(|session| session.user_agent),
             fanbox_cookie: fanbox.as_ref().map(|account| account.session_id.clone()),
+            fanbox_account_key,
             fanbox_user_agent: Some(
                 fanbox
                     .map(|account| account.user_agent)
@@ -443,6 +630,27 @@ impl Vault {
             ),
         }
     }
+}
+
+fn encode_index(index: &AccountIndex) -> Result<Vec<u8>, String> {
+    let bytes = serde_json::to_vec(index).map_err(|_| "接続一覧を保存できません".to_string())?;
+    if bytes.len() > credential_manager::MAX_BLOB {
+        return Err("接続一覧が保存できる大きさを超えています".into());
+    }
+    Ok(bytes)
+}
+
+fn shorten_name(name: &str) -> String {
+    let mut end = name.floor_char_boundary(MAX_NAME_BYTES);
+    // JSON の引用符二つは名前の外側として数える。
+    while serde_json::to_string(&name[..end])
+        .expect("文字列は JSON に変換できる")
+        .len()
+        > MAX_NAME_BYTES + 2
+    {
+        end = name.floor_char_boundary(end - 1);
+    }
+    name[..end].to_string()
 }
 
 /// アカウントの項目の名前に使う、推測されにくい印。
@@ -672,19 +880,216 @@ mod tests {
     #[test]
     fn a_full_list_fits_in_one_credential() {
         let vault = Vault::app();
-        let long_name = "名".repeat(60);
+        let emoji_name = format!("a{}", "🦉".repeat(60));
+        let escaped_name = "\u{0000}\"\\".repeat(40);
         for id in 0..MAX_ACCOUNTS {
             vault
                 .add_fanbox(
-                    &format!("{id:020}"),
+                    &format!("{id:0128}"),
                     &FanboxAccount {
                         session_id: "s".into(),
                         user_agent: "UA".into(),
-                        user_name: long_name.clone(),
+                        user_name: if id % 2 == 0 {
+                            emoji_name.clone()
+                        } else {
+                            escaped_name.clone()
+                        },
                     },
                 )
                 .unwrap();
         }
-        assert_eq!(vault.status().accounts.fanbox.len(), MAX_ACCOUNTS);
+        let accounts = vault.status().accounts.fanbox;
+        assert_eq!(accounts.len(), MAX_ACCOUNTS);
+        for (id, account) in accounts.iter().enumerate() {
+            let name = if id % 2 == 0 {
+                &emoji_name
+            } else {
+                &escaped_name
+            };
+            assert!(name.starts_with(&account.name));
+            assert!(serde_json::to_string(&account.name).unwrap().len() <= MAX_NAME_BYTES + 2);
+        }
+        assert_eq!(accounts[0].name, format!("a{}", "🦉".repeat(27)));
+        assert_eq!(accounts[1].name, "\u{0000}\"\\".repeat(11));
+        vault
+            .add_fanbox(
+                &format!("{:0128}", 1),
+                &FanboxAccount {
+                    session_id: "new".into(),
+                    user_agent: "UA".into(),
+                    user_name: emoji_name,
+                },
+            )
+            .unwrap();
+        let replacement = vault.status().accounts.fanbox;
+        assert_eq!(replacement.len(), MAX_ACCOUNTS);
+        assert_ne!(replacement[1].key, accounts[1].key);
+        assert_eq!(vault.fanbox_session().unwrap().1.session_id, "new");
+        assert!(!vault
+            .account_names("fanbox")
+            .unwrap()
+            .contains(&vault.account_name("fanbox", &accounts[1].key)));
+    }
+
+    #[test]
+    fn a_list_at_the_byte_limit_fits_and_a_larger_list_writes_nothing() {
+        let vault = Vault::app();
+        let empty_id = AccountIndex {
+            active: Some("0".repeat(32)),
+            accounts: vec![IndexEntry {
+                key: "0".repeat(32),
+                user_id: String::new(),
+                name: "人".into(),
+            }],
+        };
+        let id = "1".repeat(credential_manager::MAX_BLOB - encode_index(&empty_id).unwrap().len());
+        let account = pixiv_account("t", "人");
+        assert!(vault.add_pixiv(&format!("{id}1"), &account).is_err());
+        assert!(vault.account_names("pixiv").unwrap().is_empty());
+        assert!(vault.load(&vault.index_name("pixiv")).unwrap().is_none());
+        vault.add_pixiv(&id, &account).unwrap();
+        assert_eq!(
+            vault
+                .load(&vault.index_name("pixiv"))
+                .unwrap()
+                .unwrap()
+                .len(),
+            credential_manager::MAX_BLOB
+        );
+    }
+
+    #[test]
+    fn interrupted_add_and_replacement_leave_the_old_account_intact() {
+        let vault = Vault::app();
+        vault.add_pixiv("1", &pixiv_account("old", "表")).unwrap();
+        let old = vault.status().accounts.pixiv;
+        for id in ["2", "1"] {
+            *vault.write_failure.lock().unwrap() = Some(vault.index_name("pixiv"));
+            assert!(vault.add_pixiv(id, &pixiv_account("new", "裏")).is_err());
+            assert_eq!(vault.account_names("pixiv").unwrap().len(), 2);
+            assert_eq!(vault.status().accounts.pixiv, old);
+            assert_eq!(vault.pixiv_token().unwrap(), "old");
+            assert_eq!(vault.account_names("pixiv").unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn interrupted_delete_is_completed_after_replacement_or_removal() {
+        let vault = Vault::app();
+        vault.add_pixiv("1", &pixiv_account("old", "表")).unwrap();
+        let old = vault.status().accounts.pixiv[0].key.clone();
+        let old_name = vault.account_name("pixiv", &old);
+        *vault.delete_failure.lock().unwrap() = Some(old_name.clone());
+        assert!(vault.add_pixiv("1", &pixiv_account("new", "裏")).is_err());
+        assert!(vault.load(&old_name).unwrap().is_some());
+        assert_eq!(vault.pixiv_token().unwrap(), "new");
+        assert!(vault.load(&old_name).unwrap().is_none());
+
+        let new = vault.status().accounts.pixiv[0].key.clone();
+        let new_name = vault.account_name("pixiv", &new);
+        *vault.write_failure.lock().unwrap() = Some(vault.index_name("pixiv"));
+        assert!(vault.forget("pixiv", &new).is_err());
+        assert_eq!(vault.pixiv_token().unwrap(), "new");
+        *vault.delete_failure.lock().unwrap() = Some(new_name.clone());
+        assert!(vault.forget("pixiv", &new).is_err());
+        assert!(vault.load(&new_name).unwrap().is_some());
+        assert!(vault.status().accounts.pixiv.is_empty());
+        assert!(vault.load(&new_name).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_missing_secret_is_dropped_and_status_uses_the_repaired_active_account() {
+        let vault = Vault::app();
+        vault.add_pixiv("1", &pixiv_account("one", "表")).unwrap();
+        vault.add_pixiv("2", &pixiv_account("two", "裏")).unwrap();
+        let rows = vault.status().accounts.pixiv;
+        vault
+            .remove(&vault.account_name("pixiv", &rows[1].key))
+            .unwrap();
+        let status = vault.status();
+        assert_eq!(status.pixiv.unwrap().name, "表");
+        assert_eq!(
+            status.accounts.pixiv,
+            vec![AccountSummary {
+                active: true,
+                ..rows[0].clone()
+            }]
+        );
+        let repaired: AccountIndex = vault
+            .read_json(&vault.index_name("pixiv"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(repaired.accounts.len(), 1);
+        assert_eq!(repaired.active.as_ref(), Some(&rows[0].key));
+    }
+
+    #[test]
+    fn migration_resumes_on_both_sides_of_the_index_write() {
+        let vault = Vault::app();
+        let single = vault.single_name("pixiv");
+        let bytes = serde_json::to_vec(&pixiv_account("old", "表")).unwrap();
+        vault.store(&single, &bytes).unwrap();
+        *vault.write_failure.lock().unwrap() = Some(vault.index_name("pixiv"));
+        assert!(vault.pixiv().is_err());
+        let names = vault.account_names("pixiv").unwrap();
+        assert_eq!(names.len(), 1);
+        *vault.delete_failure.lock().unwrap() = Some(single.clone());
+        assert_eq!(vault.pixiv_token().unwrap(), "old");
+        assert_eq!(vault.account_names("pixiv").unwrap(), names);
+        assert!(vault.load(&single).unwrap().is_some());
+        assert_eq!(vault.pixiv_token().unwrap(), "old");
+        assert!(vault.load(&single).unwrap().is_none());
+    }
+
+    #[test]
+    fn reconnecting_with_the_migrated_secret_records_the_confirmed_id() {
+        let vault = Vault::app();
+        let old = pixiv_account("old", "表");
+        vault
+            .store(
+                &vault.single_name("pixiv"),
+                &serde_json::to_vec(&old).unwrap(),
+            )
+            .unwrap();
+        vault.add_pixiv("1", &old).unwrap();
+        vault.add_pixiv("1", &pixiv_account("new", "裏")).unwrap();
+        assert_eq!(vault.status().accounts.pixiv.len(), 1);
+        assert_eq!(vault.pixiv_token().unwrap(), "new");
+    }
+
+    #[test]
+    fn clearing_a_broken_list_clears_only_its_own_credentials() {
+        let vault = Vault::app();
+        vault.add_pixiv("1", &pixiv_account("kept", "表")).unwrap();
+        assert!(vault.clear_unreadable("pixiv").is_err());
+        vault.store(&vault.index_name("fanbox"), b"{").unwrap();
+        vault
+            .store(&vault.account_name("fanbox", "orphan"), b"secret")
+            .unwrap();
+        vault.store(&vault.single_name("fanbox"), b"old").unwrap();
+        vault.clear_unreadable("fanbox").unwrap();
+        assert!(vault.account_names("fanbox").unwrap().is_empty());
+        assert!(vault.load(&vault.single_name("fanbox")).unwrap().is_none());
+        assert!(vault.status().unreadable.is_empty());
+        assert_eq!(vault.pixiv_token().unwrap(), "kept");
+    }
+
+    #[test]
+    fn concurrent_adds_serialize_the_read_and_write() {
+        let vault = Vault::app();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        *vault.write_pause.lock().unwrap() = Some((vault.index_name("pixiv"), barrier.clone()));
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| vault.add_pixiv("1", &pixiv_account("one", "表")));
+            barrier.wait();
+            let locked = ACCOUNTS_LOCK.try_lock().is_err();
+            let second = scope.spawn(|| vault.add_pixiv("2", &pixiv_account("two", "裏")));
+            barrier.wait();
+            assert!(locked);
+            first.join().unwrap().unwrap();
+            second.join().unwrap().unwrap();
+        });
+        assert_eq!(vault.status().accounts.pixiv.len(), 2);
+        assert_eq!(vault.pixiv_token().unwrap(), "two");
     }
 }

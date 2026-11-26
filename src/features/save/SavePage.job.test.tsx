@@ -26,7 +26,7 @@ const browserApi = vi.hoisted(() => ({
 }));
 
 const upsertTarget = vi.hoisted(() => vi.fn());
-const downloadApi = vi.hoisted(() => ({ fetchPixivSeriesNovels: vi.fn() }));
+const downloadApi = vi.hoisted(() => ({ fetchPixivSeriesNovels: vi.fn(), fetchFanboxCreatorPosts: vi.fn() }));
 const jobs = vi.hoisted(() => ({
   start: vi.fn(),
   states: vi.fn(),
@@ -132,6 +132,24 @@ describe("SavePage の Rust 保存ジョブ", () => {
       { source: "pixiv", sourceId: "2", title: "第二話" },
     ], expect.any(Boolean));
     await waitFor(() => expect(screen.getByRole("button", { name: "選択したものは保存済みです" })).toBeDisabled());
+  });
+
+  it("閲覧制限を候補取得時のアカウントと一緒に Rust へ預ける", async () => {
+    window.location.hash = "#/save/fanbox";
+    downloadApi.fetchFanboxCreatorPosts.mockResolvedValue({
+      accountKey: "取得時",
+      data: [{ id: "9", title: "限定投稿", isRestricted: true, feeRequired: 500, creatorId: "creator" }],
+    });
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: "https://creator.fanbox.cc/" } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+    fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
+    expect(await screen.findByText("限定投稿")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "1件をライブラリに保存" }));
+    await waitFor(() => expect(jobs.start).toHaveBeenCalledWith([
+      { source: "fanbox", sourceId: "9", title: "限定投稿", fanboxAccess: { accountKey: "取得時", isRestricted: true, feeRequired: 500, creatorId: "creator" } },
+    ], expect.any(Boolean)));
   });
 
   it("保存中に画面を離れて戻っても同じ候補を再送しない", async () => {

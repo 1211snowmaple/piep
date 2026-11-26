@@ -8,7 +8,7 @@
 //! サービス自身のログイン画面に入力し、piep はその結果だけを持ち帰る。
 //!
 //! **鍵は画面へ返さない。** どの入口も、返すのは接続の様子（繋がっているか
-//! と利用者の名前）だけである。保存や更新確認は、Rust の中で鍵を読む。
+//! と利用者の名前）とアカウントの識別子である。保存や更新確認は Rust の中で鍵を読む。
 //!
 //! **アカウントは取得元ごとに複数登録でき、使うのはそのうち一つ。** ログインは
 //! 登録を一つ足し（同じ人なら差し替え）、足したものを使うアカウントにする。
@@ -69,7 +69,7 @@ pub async fn connect_pixiv_token(refresh_token: String) -> Result<ConnectionStat
         .await
         .map_err(|e| e.to_string())?
         .user
-        .ok_or_else(|| "Login success, but user data not found".to_string())?;
+        .ok_or_else(|| "接続した利用者の情報を取得できません".to_string())?;
     let vault = Vault::app();
     vault.add_pixiv(
         &user.id,
@@ -140,6 +140,14 @@ pub async fn connect_fanbox_session(
 pub fn disconnect_account(source: String, key: String) -> Result<ConnectionStatus, String> {
     let vault = Vault::app();
     vault.forget(&source, &key)?;
+    Ok(vault.status())
+}
+
+/// 読み取れない取得元の接続を消し、設定から登録し直せるようにする。
+#[tauri::command]
+pub fn clear_unreadable_accounts(source: String) -> Result<ConnectionStatus, String> {
+    let vault = Vault::app();
+    vault.clear_unreadable(&source)?;
     Ok(vault.status())
 }
 

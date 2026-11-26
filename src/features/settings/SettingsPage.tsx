@@ -28,7 +28,7 @@ import {
 import { useForm, isNotEmpty, type UseFormReturnType } from "@mantine/form";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
 import { Note } from "@/components/Note";
 import { PiepLockup } from "@/components/PiepLockup";
@@ -42,7 +42,7 @@ import { PAGE_SIZE_OPTIONS, PAGING_SCOPES, useDefaultPagingMode, usePageSize, us
 import { VIEW_SCOPES, useDefaultViewMode, useScopedViewPreference, type ViewMode, type ViewPreference, type ViewScope } from "@/lib/viewMode";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getProvider, providers } from "@/lib/providers";
-import { activateAccount, connectFanboxSession, connectPixivToken, disconnectAccount, getConnectionStatus, loginFanboxWebview, loginPixivWebview } from "@/services/authApi";
+import { activateAccount, clearUnreadableAccounts, connectFanboxSession, connectPixivToken, disconnectAccount, getConnectionStatus, loginFanboxWebview, loginPixivWebview } from "@/services/authApi";
 import type { ConnectedAccount, ConnectionStatus } from "@/services/authApi";
 import { getSearchIndexStatus, isTauriRuntime } from "@/services/dbApi";
 import { shelfDashboard } from "@/services/shelfHealthApi";
@@ -91,8 +91,7 @@ function isSection(value: string | null): value is Section {
   return value !== null && (SECTIONS as readonly string[]).includes(value);
 }
 type ConnectionState = ConnectionStatus;
-/** 保存された接続が壊れていて読めなかったとき。繋がっていないものとして扱う。 */
-const UNREADABLE_NOTE = "保存された接続を読み取れませんでした。接続し直してください";
+const CONNECTION_MUTATION_KEY = ["change-connection"];
 
 /** ブラウザプレビュー用の索引の様子。追いついた棚を見せる。 */
 const PREVIEW_INDEX_STATUS: SearchIndexStatus = {
@@ -176,41 +175,58 @@ export default function SettingsPage() {
   const index = useQuery({ queryKey: ["search-index-status"], queryFn: () => runtime ? getSearchIndexStatus() : Promise.resolve(PREVIEW_INDEX_STATUS) });
   const pixivForm = useForm({ initialValues: { token: "" }, validate: { token: isNotEmpty("リフレッシュトークンを入力してください") } });
   const fanboxForm = useForm({ initialValues: { session: "", userAgent: "Mozilla/5.0" }, validate: { session: isNotEmpty("FANBOXSESSIDを入力してください") } });
+  const connectionPending = useIsMutating({ mutationKey: CONNECTION_MUTATION_KEY }) > 0;
   const connectionMutation = useMutation({
-    mutationFn: async (input: { source: "pixiv" | "fanbox"; mode: "web" | "manual"; values?: Record<string, string> }) => {
+    mutationKey: CONNECTION_MUTATION_KEY,
+    mutationFn: async (input: ConnectionInput) => {
       if (!runtime) throw new Error("接続はデスクトップアプリで利用できます");
-      // 鍵はバックエンドが資格情報マネージャーに置く。画面へ返るのは接続の様子だけ。
-      // ブラウザ経由の接続だけが web のセッションを持ち帰る。手動でトークンを
-      // 貼った場合は Cookie が無いので、更新確認は従来の経路になる。
-      if (input.source === "pixiv") return input.mode === "web" ? loginPixivWebview() : connectPixivToken(input.values?.token ?? "");
-      return input.mode === "web" ? loginFanboxWebview() : connectFanboxSession(input.values?.session ?? "", input.values?.userAgent || "Mozilla/5.0");
+      switch (input.mode) {
+        case "clear": return clearUnreadableAccounts(input.source);
+        case "disconnect": return disconnectAccount(input.source, input.key);
+        case "activate": return activateAccount(input.source, input.key);
+        case "web": return input.source === "pixiv" ? loginPixivWebview() : loginFanboxWebview();
+        case "manual": return input.source === "pixiv"
+          ? connectPixivToken(input.values.token)
+          : connectFanboxSession(input.values.session, input.values.userAgent || "Mozilla/5.0");
+      }
     },
-    onSuccess: (status, input) => { notifications.show({ color: "green", title: "接続しました", message: getProvider(input.source).label }); queryClient.setQueryData(["settings-auth"], status); queryClient.invalidateQueries({ queryKey: ["auth-status"] }); pixivForm.reset(); fanboxForm.reset(); },
-    onError: (error) => notifications.show({ color: "red", title: "接続できません", message: errorMessage(error) }),
+    onSuccess: async (status, input) => {
+      await queryClient.cancelQueries({ queryKey: ["settings-auth"] });
+      queryClient.setQueryData(["settings-auth"], status);
+      queryClient.invalidateQueries({ queryKey: ["auth-status"] });
+      if (input.mode === "web" || input.mode === "manual") {
+        notifications.show({ color: "green", title: "接続しました", message: getProvider(input.source).label });
+        if (input.source === "pixiv") pixivForm.reset(); else fanboxForm.reset();
+      }
+    },
+    onError: (error, input) => {
+      queryClient.invalidateQueries({ queryKey: ["settings-auth"] });
+      queryClient.invalidateQueries({ queryKey: ["auth-status"] });
+      const title = {
+        clear: "接続一覧を削除できません",
+        disconnect: "接続を解除できません",
+        activate: "アカウントを切り替えられません",
+        web: "接続できません",
+        manual: "接続できません",
+      }[input.mode];
+      notifications.show({ color: "red", title, message: errorMessage(error) });
+    },
   });
-  const disconnect = (source: "pixiv" | "fanbox", account: ConnectedAccount, others: number) => modals.openConfirmModal({
+  const changeConnection = (input: ConnectionInput) => {
+    if (queryClient.isMutating({ mutationKey: CONNECTION_MUTATION_KEY }) === 0) connectionMutation.mutate(input);
+  };
+  const disconnect = (source: ConnectionSource, account: ConnectedAccount, others: number) => modals.openConfirmModal({
     title: `${account.name || getProvider(source).label}の接続を解除しますか？`,
     children: <Text size="sm">保存済みの作品は削除されません。{account.active ? (others ? "解除すると、残りの一つ目のアカウントを使います。" : "再度保存・更新するには接続が必要です。") : ""}</Text>,
     labels: { confirm: "接続を解除", cancel: "キャンセル" }, confirmProps: DANGER_CONFIRM,
-    onConfirm: async () => {
-      try {
-        queryClient.setQueryData(["settings-auth"], await disconnectAccount(source, account.key));
-        queryClient.invalidateQueries({ queryKey: ["auth-status"] });
-      } catch (error) {
-        notifications.show({ color: "red", title: "接続を解除できません", message: errorMessage(error) });
-      }
-    },
+    onConfirm: () => changeConnection({ source, mode: "disconnect", key: account.key }),
   });
-  // 切り替えは確かめない。いつでも戻せ、何も消えない。走っている仕事は
-  // 始めたときのアカウントのまま進み、次の仕事から切り替わる。
-  const activate = async (source: "pixiv" | "fanbox", account: ConnectedAccount) => {
-    try {
-      queryClient.setQueryData(["settings-auth"], await activateAccount(source, account.key));
-      queryClient.invalidateQueries({ queryKey: ["auth-status"] });
-    } catch (error) {
-      notifications.show({ color: "red", title: "アカウントを切り替えられません", message: errorMessage(error) });
-    }
-  };
+  const clear = (source: ConnectionSource) => modals.openConfirmModal({
+    title: "保存された接続一覧を削除しますか？",
+    children: <Text size="sm">この取得元の接続情報をすべて削除します。保存済みの作品は残ります。削除後にアカウントを登録し直してください。</Text>,
+    labels: { confirm: "一覧を削除", cancel: "キャンセル" }, confirmProps: DANGER_CONFIRM,
+    onConfirm: () => changeConnection({ source, mode: "clear" }),
+  });
   const maintenanceMutation = useMutation({
     mutationFn: async () => {
       if (!runtime) throw new Error("デスクトップアプリで利用できます");
@@ -328,7 +344,7 @@ export default function SettingsPage() {
       <Grid gap="xl" mt="lg" align="flex-start">
         <Grid.Col span={{ base: 12, md: 4, lg: 3 }} className="settings-nav-column"><div className="settings-nav-scroller"><SettingsNavigation items={nav} active={section} onSelect={(next) => { if (isSection(next)) setSection(next); }} /></div></Grid.Col>
         <Grid.Col span={{ base: 12, md: 8, lg: 9 }} className="settings-content">
-          {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} runtime={runtime} pixivForm={pixivForm} fanboxForm={fanboxForm} mutation={connectionMutation} disconnect={disconnect} activate={activate} />)}
+          {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} disabled={!runtime || connectionPending} opening={connectionPending && connectionMutation.variables?.mode === "web" ? connectionMutation.variables.source : undefined} pixivForm={pixivForm} fanboxForm={fanboxForm} change={changeConnection} disconnect={disconnect} clear={clear} />)}
           {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} busy={libraryOperationRunning} reimport={() => maintenanceMutation.mutate()} />)}
           {section === "server" && <ServerSection runtime={runtime} />}
           {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => startRebuild(includeSemantic)} cancel={() => { if (rebuildOperationRef.current) { void requestOperationCancel(rebuildOperationRef.current.id); return; } if (rebuild) reportJobAction(cancelSearchRebuildIndex(rebuild.jobId), "索引の作り直しを中止できません"); }} />)}
@@ -343,22 +359,104 @@ export default function SettingsPage() {
   );
 }
 
-type ConnectionInput = { source: "pixiv" | "fanbox"; mode: "web" | "manual"; values?: Record<string, string> };
+type ConnectionSource = "pixiv" | "fanbox";
+type ConnectionInput =
+  | { source: ConnectionSource; mode: "web" | "clear" }
+  | { source: ConnectionSource; mode: "activate" | "disconnect"; key: string }
+  | { source: "pixiv"; mode: "manual"; values: { token: string } }
+  | { source: "fanbox"; mode: "manual"; values: { session: string; userAgent: string } };
 
-function ConnectionsSection({ auth, runtime, pixivForm, fanboxForm, mutation, disconnect, activate }: { auth: ConnectionState; runtime: boolean; pixivForm: UseFormReturnType<{ token: string }, { token: string }, any>; fanboxForm: UseFormReturnType<{ session: string; userAgent: string }, { session: string; userAgent: string }, any>; mutation: { mutate: (input: ConnectionInput) => void; isPending: boolean }; disconnect: (source: "pixiv" | "fanbox", account: ConnectedAccount, others: number) => void; activate: (source: "pixiv" | "fanbox", account: ConnectedAccount) => void }) {
-  // web のセッションは「二つ目の接続」ではなく、この接続の内訳である。
-  // 揃っていることは既定なので何も言わない。欠けているときだけ、何が
-  // できないのかと、どうすれば戻るのかを言う。
-  return <Stack gap="lg"><SectionIntro title="取得用の接続" description="作品の保存・更新確認に使うアカウントです。取得元ごとに複数登録でき、使うのはそのうち一つです。内蔵ブラウザで表示するアカウントとは独立しています。" /><ConnectionCard source="pixiv" user={auth.pixiv} note={auth.unreadable?.includes("pixiv") ? UNREADABLE_NOTE : auth.pixiv && !auth.pixiv.webSession ? "一覧を使った高速確認には、ブラウザでの再接続が必要です" : null} runtime={runtime} loading={mutation.isPending} onWeb={() => mutation.mutate({ source: "pixiv", mode: "web" })} accounts={auth.accounts?.pixiv ?? []} onDisconnect={(account, others) => disconnect("pixiv", account, others)} onActivate={(account) => activate("pixiv", account)} manual={<form onSubmit={pixivForm.onSubmit((values) => mutation.mutate({ source: "pixiv", mode: "manual", values }))}><Group align="flex-start"><PasswordInput flex={1} disabled={!runtime} label="リフレッシュトークン" placeholder="手動で入力" {...pixivForm.getInputProps("token")} /><Button type="submit" mt={25} variant="light" disabled={!runtime}>検証して保存</Button></Group></form>} /><ConnectionCard source="fanbox" user={auth.fanbox} note={auth.unreadable?.includes("fanbox") ? UNREADABLE_NOTE : null} runtime={runtime} loading={mutation.isPending} onWeb={() => mutation.mutate({ source: "fanbox", mode: "web" })} accounts={auth.accounts?.fanbox ?? []} onDisconnect={(account, others) => disconnect("fanbox", account, others)} onActivate={(account) => activate("fanbox", account)} manual={<form onSubmit={fanboxForm.onSubmit((values) => mutation.mutate({ source: "fanbox", mode: "manual", values }))}><Stack><PasswordInput disabled={!runtime} label="FANBOXSESSID" placeholder="手動で入力" {...fanboxForm.getInputProps("session")} /><TextInput disabled={!runtime} label="User-Agent" {...fanboxForm.getInputProps("userAgent")} /><ActionRow><Button type="submit" variant="light" disabled={!runtime}>検証して保存</Button></ActionRow></Stack></form>} /><Text size="sm" c="dimmed">内蔵ブラウザのログインは保存画面で行います。ログイン・ログアウトしても取得用の接続は変わりません。</Text><Note icon={Icons.secure} title="ローカル保存">piepは接続情報を外部サーバーへ送信しません。各サービスへの通信とローカル保存だけに使用します。</Note></Stack>;
+interface ConnectionsSectionProps {
+  auth: ConnectionState;
+  disabled: boolean;
+  opening?: ConnectionSource;
+  pixivForm: UseFormReturnType<{ token: string }, { token: string }, any>;
+  fanboxForm: UseFormReturnType<{ session: string; userAgent: string }, { session: string; userAgent: string }, any>;
+  change: (input: ConnectionInput) => void;
+  disconnect: (source: ConnectionSource, account: ConnectedAccount, others: number) => void;
+  clear: (source: ConnectionSource) => void;
 }
 
-function ConnectionCard({ source, user, accounts, note, runtime, loading, onWeb, onDisconnect, onActivate, manual }: { source: "pixiv" | "fanbox"; user: { name: string } | null; accounts: ConnectedAccount[]; note?: string | null; runtime: boolean; loading: boolean; onWeb: () => void; onDisconnect: (account: ConnectedAccount, others: number) => void; onActivate: (account: ConnectedAccount) => void; manual: React.ReactNode }) {
-  // 保存元の記号を出す。ここは長く `profile_image_urls` を `Avatar` に渡して
-  // いたが、pixiv の画像は `Referer` を求めるので `<img>` からは取れず、必ず
-  // 人型に落ちていた。**取れない絵を頼んで、取れなかった姿を見せていた。**
-  // 作者の顔は棚が持っている（保存時に控えている）。ここで要るのは
-  // 「どのサービスに繋がっているか」なので、サービスの記号のほうが答えである。
-  const provider = getProvider(source); return <Card p="lg"><Group justify="space-between" align="flex-start"><Group><Avatar size={54} color="gray" variant="light" style={{ color: provider.color }}>{provider.icon}</Avatar><Box><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge color={user ? "green" : "gray"} variant="light">{user ? "取得用接続済み" : "未接続"}</Badge></Group><Text size="sm" c="dimmed" mt={4}>{user?.name || provider.description}</Text>{note && <Text size="xs" c="dimmed" mt={2}>{note}</Text>}</Box></Group>{user ? <Button variant="light" size="xs" disabled={!runtime} loading={loading} leftSection={<Icons.add size={IconSize.menu} />} onClick={onWeb}>アカウントを追加</Button> : <Button disabled={!runtime} loading={loading} leftSection={<Icons.credentials size={IconSize.menu} />} onClick={onWeb}>ブラウザで接続</Button>}</Group>{accounts.length > 0 && <AccountList accounts={accounts} runtime={runtime} onDisconnect={onDisconnect} onActivate={onActivate} />}{!user && <><Divider my="lg" label="または手動入力" labelPosition="center" />{manual}</>}</Card>;
+function ConnectionsSection({ auth, disabled, opening, pixivForm, fanboxForm, change, disconnect, clear }: ConnectionsSectionProps) {
+  const pixivManual = (
+    <form onSubmit={pixivForm.onSubmit((values) => change({ source: "pixiv", mode: "manual", values }))}>
+      <Group align="flex-start">
+        <PasswordInput flex={1} disabled={disabled} label="リフレッシュトークン" placeholder="手動で入力" {...pixivForm.getInputProps("token")} />
+        <Button type="submit" mt={25} variant="light" disabled={disabled}>検証して保存</Button>
+      </Group>
+    </form>
+  );
+  const fanboxManual = (
+    <form onSubmit={fanboxForm.onSubmit((values) => change({ source: "fanbox", mode: "manual", values }))}>
+      <Stack>
+        <PasswordInput disabled={disabled} label="FANBOXSESSID" placeholder="手動で入力" {...fanboxForm.getInputProps("session")} />
+        <TextInput disabled={disabled} label="User-Agent" {...fanboxForm.getInputProps("userAgent")} />
+        <ActionRow><Button type="submit" variant="light" disabled={disabled}>検証して保存</Button></ActionRow>
+      </Stack>
+    </form>
+  );
+  return <Stack gap="lg">
+    <SectionIntro title="取得用の接続" description="作品の保存・更新確認に使うアカウントです。取得元ごとに複数登録でき、使うのはそのうち一つです。内蔵ブラウザで表示するアカウントとは独立しています。" />
+    {(["pixiv", "fanbox"] as const).map((source) => {
+      const unreadable = auth.unreadable?.includes(source);
+      const note = unreadable ? "保存された接続を読み取れませんでした。一覧を削除してから登録し直してください"
+        : source === "pixiv" && auth.pixiv && !auth.pixiv.webSession ? "一覧を使った高速確認には、ブラウザでの再接続が必要です" : null;
+      return <ConnectionCard
+        key={source}
+        source={source}
+        user={auth[source]}
+        note={note}
+        disabled={disabled}
+        loading={opening === source}
+        onWeb={() => change({ source, mode: "web" })}
+        accounts={auth.accounts?.[source] ?? []}
+        onDisconnect={(account, others) => disconnect(source, account, others)}
+        onActivate={(account) => change({ source, mode: "activate", key: account.key })}
+        onClear={unreadable ? () => clear(source) : undefined}
+        manual={source === "pixiv" ? pixivManual : fanboxManual}
+      />;
+    })}
+    <Text size="sm" c="dimmed">内蔵ブラウザのログインは保存画面で行います。ログイン・ログアウトしても取得用の接続は変わりません。</Text>
+    <Note icon={Icons.secure} title="ローカル保存">piepは接続情報を外部サーバーへ送信しません。各サービスへの通信とローカル保存だけに使用します。</Note>
+  </Stack>;
+}
+
+interface ConnectionCardProps {
+  source: ConnectionSource;
+  user: { name: string } | null;
+  accounts: ConnectedAccount[];
+  note: string | null;
+  disabled: boolean;
+  loading: boolean;
+  onWeb: () => void;
+  onDisconnect: (account: ConnectedAccount, others: number) => void;
+  onActivate: (account: ConnectedAccount) => void;
+  onClear?: () => void;
+  manual: React.ReactNode;
+}
+
+function ConnectionCard({ source, user, accounts, note, disabled, loading, onWeb, onDisconnect, onActivate, onClear, manual }: ConnectionCardProps) {
+  const provider = getProvider(source);
+  return <Card p="lg">
+    <Group justify="space-between" align="flex-start">
+      <Group>
+        <Avatar size={54} color="gray" variant="light" style={{ color: provider.color }}>{provider.icon}</Avatar>
+        <Box>
+          <Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge color={user ? "green" : "gray"} variant="light">{user ? "取得用接続済み" : "未接続"}</Badge></Group>
+          <Text size="sm" c="dimmed" mt={4}>{user?.name || provider.description}</Text>
+          {note && <Text size="xs" c="dimmed" mt={2}>{note}</Text>}
+        </Box>
+      </Group>
+      {onClear ? <DangerButton size="xs" disabled={disabled} onClick={onClear}>接続一覧を削除</DangerButton>
+        : user ? <Button variant="light" size="xs" disabled={disabled} loading={loading} leftSection={<Icons.add size={IconSize.menu} />} onClick={onWeb}>アカウントを追加</Button>
+        : <Button disabled={disabled} loading={loading} leftSection={<Icons.credentials size={IconSize.menu} />} onClick={onWeb}>ブラウザで接続</Button>}
+    </Group>
+    {!onClear && <>
+      {accounts.length > 0 && <AccountList accounts={accounts} disabled={disabled} onDisconnect={onDisconnect} onActivate={onActivate} />}
+      <Divider my="lg" label={user ? "手動で追加" : "または手動入力"} labelPosition="center" />
+      {manual}
+    </>}
+  </Card>;
 }
 
 /**
@@ -367,14 +465,14 @@ function ConnectionCard({ source, user, accounts, note, runtime, loading, onWeb,
  * 行の右端の幅を揃える。印と「使う」の幅が違うと、切り替えるたびに解除の
  * ボタンが左右に動く。
  */
-function AccountList({ accounts, runtime, onDisconnect, onActivate }: { accounts: ConnectedAccount[]; runtime: boolean; onDisconnect: (account: ConnectedAccount, others: number) => void; onActivate: (account: ConnectedAccount) => void }) {
+function AccountList({ accounts, disabled, onDisconnect, onActivate }: { accounts: ConnectedAccount[]; disabled: boolean; onDisconnect: (account: ConnectedAccount, others: number) => void; onActivate: (account: ConnectedAccount) => void }) {
   return <Stack gap={6} mt="md">
     <Divider />
     {accounts.map((account) => <Group key={account.key} justify="space-between" wrap="nowrap" gap="xs">
       <Text size="sm" fw={account.active ? 700 : 400} className="line-clamp-1" miw={0}>{account.name || "名前の無いアカウント"}</Text>
       <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
-        <Box w={64} ta="center">{account.active ? <Badge color="green" variant="light">使用中</Badge> : <Button variant="default" size="compact-xs" disabled={!runtime} aria-label={`${account.name}を使う`} onClick={() => onActivate(account)}>使う</Button>}</Box>
-        <DangerButton size="compact-xs" disabled={!runtime} aria-label={`${account.name}の接続を解除`} onClick={() => onDisconnect(account, accounts.length - 1)}>解除</DangerButton>
+        <Box w={64} ta="center">{account.active ? <Badge color="green" variant="light">使用中</Badge> : <Button variant="default" size="compact-xs" disabled={disabled} aria-label={`${account.name}を使う`} onClick={() => onActivate(account)}>使う</Button>}</Box>
+        <DangerButton size="compact-xs" disabled={disabled} aria-label={`${account.name}の接続を解除`} onClick={() => onDisconnect(account, accounts.length - 1)}>解除</DangerButton>
       </Group>
     </Group>)}
     <Text size="xs" c="dimmed">同じアカウントで接続し直すと、登録を置き換えます。</Text>
