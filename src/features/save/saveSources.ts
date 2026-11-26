@@ -87,13 +87,17 @@ export const SAVE_SOURCES: Record<SaveSource, SaveSourceProfile> = {
       fanbox_single: {
         label: "投稿を保存できます",
         fetch: async (id) => {
-          const data = normalizeFanboxPostPayload<FanboxPost>(await fetchFanboxPost<unknown>(id));
-          return [row(id, data.title || "題名のない投稿", data.user?.name, data)];
+          const result = await fetchFanboxPost<unknown>(id);
+          const data = normalizeFanboxPostPayload<FanboxPost>(result.data);
+          return [{ ...row(id, data.title || "題名のない投稿", data.user?.name, data), restrictionAccountKey: result.accountKey }];
         },
       },
       fanbox_creator: {
         label: "クリエイターの投稿を選択できます",
-        fetch: async (id) => (await fetchFanboxCreatorPosts<FanboxPost[]>(id)).map(postRow),
+        fetch: async (id) => {
+          const result = await fetchFanboxCreatorPosts<FanboxPost[]>(id);
+          return result.data.map((post) => ({ ...postRow(post), restrictionAccountKey: result.accountKey }));
+        },
       },
     },
   },
@@ -106,13 +110,17 @@ export function targetLabel(source: SaveSource, kind: DownloadTargetKind): strin
   return SAVE_SOURCES[source].targets[kind]?.label ?? "作品・シリーズ・作者・一覧のページを開いてください";
 }
 
-/** 候補の行を保存の依頼にする。FANBOX は一覧で分かった権限を渡し、取り直しを省く。 */
+/**
+ * 候補の行を保存の依頼にする。FANBOX は一覧で分かった権限を、それを見たアカウントと
+ * 一緒に渡す。保存のときに使うアカウントが同じなら、取り直しを省ける。
+ */
 export function saveJobWork(source: SaveSource, item: SidebarItem): SaveJobWork {
   const work: SaveJobWork = { source, sourceId: item.id, title: item.title };
   const data = item.originalData;
-  if (source === "fanbox" && "isRestricted" in data) {
+  if (source === "fanbox" && item.restrictionAccountKey && "isRestricted" in data) {
     work.fanboxAccess = {
       isRestricted: data.isRestricted === true,
+      accountKey: item.restrictionAccountKey,
       feeRequired: data.feeRequired,
       creatorId: data.creatorId,
     };

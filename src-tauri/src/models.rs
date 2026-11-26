@@ -469,6 +469,8 @@ pub struct UpdateCredentials {
     pub pixiv_user_agent: Option<String>,
     pub fanbox_cookie: Option<String>,
     pub fanbox_user_agent: Option<String>,
+    /// 候補の閲覧制限を観測した接続と照合するための識別子。
+    pub fanbox_account_key: Option<String>,
 }
 
 /// 更新ジョブを始めるときに画面から届く依頼。

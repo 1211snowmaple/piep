@@ -1117,6 +1117,10 @@ pub async fn open_pixiv_login(app: AppHandle) -> Result<PixivConnection, String>
     builder = builder
         .title("Pixiv Login")
         .inner_size(400.0, 700.0)
+        // **毎回まっさらな状態で開く。** アカウントは複数登録できるので、前の
+        // ログインを覚えた窓では、別のアカウントを足そうとしても同じ人に戻る。
+        // 持ち帰る Cookie はこの窓の中のものなので、閉じれば何も残らない。
+        .incognito(true)
         // 内蔵ブラウザと同じ UA で名乗る。`cf_clearance` は発行時の UA に
         // 紐づくので、ここで名乗ったものと、あとで一覧を読むときに送るものが
         // 食い違うと弾かれる。既定に任せず、静的に決めておく。
@@ -1255,6 +1259,10 @@ pub async fn open_fanbox_login(app: AppHandle) -> Result<(String, FanboxUser, St
     builder = builder
         .title("FANBOX Login")
         .inner_size(400.0, 700.0)
+        // **毎回まっさらな状態で開く。** アカウントは複数登録できるので、前の
+        // ログインを覚えた窓では、別のアカウントを足そうとしても同じ人に戻る。
+        // 持ち帰る Cookie はこの窓の中のものなので、閉じれば何も残らない。
+        .incognito(true)
         .initialization_script(init_script)
         .on_navigation(move |url| {
             if let Some(auth_data) = fanbox_callback_data(url) {
@@ -1333,9 +1341,8 @@ use tauri::{LogicalPosition, LogicalSize};
 static EMBEDDED_BROWSER_OPEN_LOCK: Mutex<()> = Mutex::new(());
 static STANDALONE_BROWSER_OPEN_LOCK: Mutex<()> = Mutex::new(());
 
-// Browsing in the app has its own WebView2 profile. Login windows used to
-// obtain acquisition credentials keep the default profile, so signing in or
-// out in the reader never changes the account used by update/download jobs.
+// 内蔵ブラウザには専用の WebView2 プロファイルを使う。取得用のログイン窓は
+// プライベートモードで開き、保存・更新確認の接続は設定で管理する。
 fn browsing_data_directory(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     app.path()
         .app_data_dir()

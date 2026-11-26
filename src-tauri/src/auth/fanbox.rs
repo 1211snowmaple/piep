@@ -44,12 +44,15 @@ fn fanbox_user_from_home(html: &str) -> Result<FanboxUser, Box<dyn Error>> {
     let user = json["context"]["user"]
         .as_object()
         .ok_or("User data not found in Fanbox metadata JSON")?;
+    let user_id = user
+        .get("userId")
+        .and_then(|id| match id {
+            serde_json::Value::String(id) if !id.is_empty() => Some(id.clone()),
+            _ => id.as_u64().map(|id| id.to_string()),
+        })
+        .ok_or("接続した利用者の ID を取得できません")?;
     Ok(FanboxUser {
-        user_id: user
-            .get("userId")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
+        user_id,
         name: user
             .get("name")
             .and_then(|v| v.as_str())
@@ -104,5 +107,13 @@ mod tests {
             Some("https://example.test/icon.png")
         );
         assert!(fanbox_user_from_home("<html></html>").is_err());
+    }
+
+    #[test]
+    fn numeric_user_ids_are_kept_and_missing_ids_fail() {
+        let html =
+            r#"<meta id="metadata" name="metadata" content='{"context":{"user":{"userId":7}}}'>"#;
+        assert_eq!(fanbox_user_from_home(html).unwrap().user_id, "7");
+        assert!(fanbox_user_from_home(&html.replace("7", "null")).is_err());
     }
 }

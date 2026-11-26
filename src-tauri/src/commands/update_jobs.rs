@@ -1126,6 +1126,7 @@ pub struct SaveJobWork {
 #[serde(rename_all = "camelCase")]
 pub struct FanboxAccess {
     pub is_restricted: bool,
+    pub account_key: String,
     pub fee_required: Option<u64>,
     pub creator_id: Option<String>,
 }
@@ -1425,6 +1426,7 @@ fn snapshot_credentials_missing() -> UpdateCredentials {
         pixiv_user_agent: None,
         fanbox_cookie: None,
         fanbox_user_agent: None,
+        fanbox_account_key: None,
     }
 }
 
@@ -3530,6 +3532,24 @@ async fn process_candidate_item(
     save_candidate(state, item, credentials, &payload, previous).await
 }
 
+/// まとめ保存では、今の資格情報で観測した制限だけを再利用する。
+fn observed_fanbox_restriction<'a>(
+    payload: &'a Value,
+    credentials: &UpdateCredentials,
+) -> Option<&'a Value> {
+    let post = payload.get("originalData")?;
+    if post.get("isRestricted").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    if payload.get("kind").and_then(Value::as_str) == Some("save") {
+        let observed_key = post.get("accountKey").and_then(Value::as_str)?;
+        if credentials.fanbox_account_key.as_deref() != Some(observed_key) {
+            return None;
+        }
+    }
+    Some(post)
+}
+
 /// 候補を取りに行って保存する。`previous` は手元にあった版の題と字数。
 async fn save_candidate(
     state: &Arc<AppState>,
@@ -3567,12 +3587,7 @@ async fn save_candidate(
         // 利用者が自分で選ぶもので、勝手に増えると取得先への負荷にもなる。
         Ok(describe_candidate_save(&updated, previous, &masked))
     } else if source == "fanbox" {
-        if payload
-            .pointer("/originalData/isRestricted")
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
-            let post = &payload["originalData"];
+        if let Some(post) = observed_fanbox_restriction(payload, credentials) {
             let reason = super::downloader::fanbox_missing_material_error(post);
             hold_candidate(state, item, Some(post), &reason).await?;
             return Ok(ItemOutcome::Held(reason));
@@ -3922,6 +3937,7 @@ mod tests {
             title: "作品".into(),
             fanbox_access: Some(super::FanboxAccess {
                 is_restricted: true,
+                account_key: "取得時".into(),
                 fee_required: Some(1000),
                 creator_id: Some("creator".into()),
             }),
@@ -3930,6 +3946,13 @@ mod tests {
         assert_eq!(payload["originalData"]["feeRequired"], 1000);
         assert_eq!(payload["originalData"]["isRestricted"], true);
         assert!(payload["originalData"].get("body").is_none());
+        let mut credentials = super::snapshot_credentials_missing();
+        assert!(super::observed_fanbox_restriction(&payload, &credentials).is_none());
+        credentials.fanbox_account_key = Some("取得時".into());
+        assert!(super::observed_fanbox_restriction(&payload, &credentials).is_some());
+        // ジョブを再開したときは、その時点の資格情報で同じ候補を判定する。
+        credentials.fanbox_account_key = Some("切り替え後".into());
+        assert!(super::observed_fanbox_restriction(&payload, &credentials).is_none());
     }
 
     /// 改稿の候補で公開日を並べても仕方がない。置き換わるもの - いま手元に

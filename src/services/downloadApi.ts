@@ -14,10 +14,15 @@ export function fetchPixivUserNovels<T>(userId: string): Promise<T> {
   return invoke<T>("fetch_pixiv_user_novels", { userId });
 }
 
-export function fetchFanboxPost<T>(postId: string): Promise<T> {
-  return invoke<T>("fetch_fanbox_post", { postId });
+interface FanboxCandidates<T> {
+  accountKey: string;
+  data: T;
 }
 
-export function fetchFanboxCreatorPosts<T>(creatorId: string): Promise<T> {
-  return invoke<T>("fetch_fanbox_creator_posts", { creatorId });
+export function fetchFanboxPost<T>(postId: string): Promise<FanboxCandidates<T>> {
+  return invoke<FanboxCandidates<T>>("fetch_fanbox_post", { postId });
+}
+
+export function fetchFanboxCreatorPosts<T>(creatorId: string): Promise<FanboxCandidates<T>> {
+  return invoke<FanboxCandidates<T>>("fetch_fanbox_creator_posts", { creatorId });
 }
