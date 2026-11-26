@@ -58,8 +58,8 @@ export interface BrowserPageUsers {
 }
 
 /** 表示中のフォロー一覧から、読み込まれている分の作者を読み取る。通信は増えない。 */
-export function readBrowserPageUserCandidates(browser: "embedded" | "standalone"): Promise<BrowserPageUsers> {
-  return invoke<BrowserPageUsers>("read_browser_page_user_candidates", { browser });
+export function readBrowserPageUserCandidates(browser: "embedded" | "standalone", source: "pixiv" | "fanbox"): Promise<BrowserPageUsers> {
+  return invoke<BrowserPageUsers>("read_browser_page_user_candidates", { browser, source });
 }
 
 export function closeEmbeddedBrowser(): Promise<void> {

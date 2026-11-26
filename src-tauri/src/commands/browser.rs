@@ -92,22 +92,30 @@ pub struct PageUserCandidates {
 
 /// 内蔵ブラウザに表示中のフォロー一覧から、作者を読み取る。
 ///
+/// pixiv はフォロー一覧、FANBOX はフォロー中・支援中のクリエイターの一覧を読む。
 /// 開いているページの文書を読むだけで、取得元への通信は増えない。アカウントの
-/// フォローは変えず、監視に足すかどうかは利用者が選ぶ。
+/// フォローは変えず、監視に足すかどうかは利用者が選ぶ。`source` は `pixiv` か `fanbox`。
 #[tauri::command]
 pub async fn read_browser_page_user_candidates(
     app: tauri::AppHandle,
     browser: String,
+    source: String,
 ) -> Result<PageUserCandidates, String> {
-    let page = read_browser_page_users(app.clone(), browser).await?;
+    let page = read_browser_page_users(app.clone(), browser, source.clone()).await?;
     // 棚の監視の登録で見る（止めた登録も「登録済み」）。
     let library = super::watching::active(&app)?;
     super::watching::blocking(move || {
         let watched: std::collections::HashSet<String> =
             super::watching::targets(&library, Some("author"), false)?
                 .into_iter()
-                .filter(|target| target.source == "pixiv")
-                .map(|target| target.source_key)
+                .filter(|target| target.source == source)
+                .map(|target| {
+                    if source == "fanbox" {
+                        target.source_key.to_ascii_lowercase()
+                    } else {
+                        target.source_key
+                    }
+                })
                 .collect();
         let users = page
             .users

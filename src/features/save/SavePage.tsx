@@ -1,11 +1,9 @@
-import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type SetStateAction } from "react";
 import {
   ActionIcon,
   Badge,
   Box,
   Button,
-  Card,
-  Checkbox,
   Divider,
   Group,
   Loader,
@@ -35,22 +33,21 @@ import {
 import {
   describeDownloadTarget,
   downloadTargetKey,
-  isFollowingListUrl,
+  followingListSource,
   listPageNumber,
   mergePageWorkItems,
   nextPagedListUrl,
   pageListSource,
   pageWorkItems,
-  type DownloadTargetKind,
-  type FanboxPost,
   type PageRows,
-  type PixivNovel,
   type SidebarItem,
 } from "@/features/browser/downloadCandidates";
+import { CandidateRow, EmptyCandidates } from "./CandidateRow";
+import { SAVE_SOURCE_ORDER, SAVE_SOURCES, saveJobWork, targetLabel } from "./saveSources";
+import { applyJobItemState, isPendingSave, jobItemStatesById, summarizeSaveJob } from "./saveJobRows";
 import { FollowedUsersList, mergeFollowedUsers, type FollowedUserRow } from "./FollowedUsersList";
 import { DEFAULT_LIST_READ_OPTIONS, MAX_LIST_INTERVAL_SECONDS, MAX_LIST_PAGES, MIN_LIST_INTERVAL_SECONDS, normalizeListReadOptions, readListPages, type ListReadStop } from "./pageListReader";
 import { beginSaveDraftAnalysis, consumeListRead, isLatestSaveDraftAnalysis, readSaveDraft, subscribeSaveDraft, updateSaveDraft, type SaveSource } from "./saveDraft";
-import { normalizeFanboxPostPayload } from "@/features/browser/downloadMetadata";
 import { errorMessage } from "@/lib/format";
 import { getProvider, ProviderMark } from "@/lib/providers";
 import { registerUnsavedGuard } from "@/lib/unsavedGuard";
@@ -77,13 +74,6 @@ import {
 import { isTauriRuntime, upsertUpdateTarget } from "@/services/dbApi";
 import { loadSchedule } from "@/features/updates/updateSchedule";
 import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
-import {
-  fetchFanboxCreatorPosts,
-  fetchFanboxPost,
-  fetchPixivNovelByUrl,
-  fetchPixivSeriesNovels,
-  fetchPixivUserNovels,
-} from "@/services/downloadApi";
 import { subscribeTauriEvent } from "@/services/eventBus";
 import { getConnectionStatus } from "@/services/authApi";
 import {
@@ -101,40 +91,11 @@ import {
   type UpdateJobSnapshot,
 } from "@/services/updateJobApi";
 
-const SAVE_JOB_ROW_STATUS: Record<string, SidebarItem["status"]> = {
-  queued: "pending",
-  running: "downloading",
-  saved: "success",
-  done: "success",
-  skipped: "skipped",
-  failed: "failed",
-  held: "held",
-};
-
-const SAVE_JOB_STATUS_RANK: Partial<
-  Record<Exclude<SidebarItem["status"], undefined>, number>
-> = {
-  pending: 0,
-  downloading: 1,
-  success: 2,
-  skipped: 2,
-  failed: 2,
-  held: 2,
-};
-
-function applySaveJobRowState(row: SidebarItem, status: NonNullable<SidebarItem["status"]>, error: string | null): SidebarItem {
-  // 棚の照会よりジョブを優先し、遅れて届いた途中経過でジョブの結果を戻さない。
-  if (!row.shelfSkipped && row.status) {
-    if ((SAVE_JOB_STATUS_RANK[row.status] ?? 0) > (SAVE_JOB_STATUS_RANK[status] ?? 0)) return row;
-    if (row.status === status && (row.error ?? null) === error) return row;
-  }
-  return { ...row, status, shelfSkipped: undefined, selected: status === "held" ? false : row.selected, error: error ?? undefined };
-}
-
-function listReadStopMessage(stop: ListReadStop, pages: number, truncated: boolean, users: boolean): string {
+/** `person` は作者を読んだときの呼び方。作品を読んだときは null。 */
+function listReadStopMessage(stop: ListReadStop, pages: number, truncated: boolean, person: string | null): string {
   if (truncated) return "件数の上限で打ち切ったページがあります。";
-  if (stop === "saved") return `${users ? "登録済み" : "保存済み"}だけのページに着いたので止めました。`;
-  if (stop === "end") return `新しい${users ? "作者" : "作品"}が無くなったので止めました。`;
+  if (stop === "saved") return `${person ? "登録済み" : "保存済み"}だけのページに着いたので止めました。`;
+  if (stop === "end") return `新しい${person ?? "作品"}が無くなったので止めました。`;
   if (stop === "moved") return "別のページへ移ったので止めました。";
   if (stop === "cancelled") return "途中で止めました。";
   return pages > 1 ? "指定のページ数を読みました。" : "表示されている分だけです。";
@@ -155,6 +116,7 @@ export default function SavePage() {
   );
   const activeJob = activeLocalSave || updateJobs.some((job) => isUpdateJobActive(job.status));
   const source: SaveSource = routeSource === "fanbox" ? "fanbox" : "pixiv";
+  const profile = SAVE_SOURCES[source];
   const draft = useSyncExternalStore(subscribeSaveDraft, () => readSaveDraft(source));
   const { items, downloadType, lastAnalysisUrl, lastAnalysisKey } = draft;
   const initialUrl =
@@ -561,8 +523,6 @@ export default function SavePage() {
   const selectedCount = items.filter((item) => item.selected && item.status !== "held").length;
   // 保存ボタンが名乗る件数は、実際に取りに行く件数と同じでなければならない。
   // 済んだものは対象から外れるので、失敗が混じったあとは選択数と食い違う。
-  const isPendingSave = (item: SidebarItem) =>
-    item.selected && item.status !== "success" && item.status !== "skipped" && item.status !== "held";
   const pendingCount = items.filter(isPendingSave).length;
   const retryCount = items.filter(
     (item) => isPendingSave(item) && item.status === "failed",
@@ -579,16 +539,19 @@ export default function SavePage() {
     : retryCount === pendingCount
       ? `失敗した${pendingCount}件をやり直す`
       : `${pendingCount}件をライブラリに保存`;
-  const targetKind = describeDownloadTarget(currentUrl).kind;
+  // 取得元の外の作品のページは、この取得元では扱わない。pixiv の画面で FANBOX の
+  // 投稿を開いても、FANBOX の候補を pixiv の下書きへ入れない。
+  const describedKind = describeDownloadTarget(currentUrl).kind;
+  const targetKind = profile.targets[describedKind] ? describedKind : "unsupported";
   // 検索結果やブックマークは URL から全件を取れない。開いている画面から読む。
   const canReadPage = pageListSource(currentUrl) === source;
   const canAnalyze = targetKind !== "unsupported" || canReadPage;
   const canReadNextPages = canReadPage && nextPagedListUrl(currentUrl) !== null;
-  const readsFollowing = canReadPage && isFollowingListUrl(currentUrl);
+  const readsFollowing = followingListSource(currentUrl) === source;
   const followedRows = readsFollowing && followedUsers.key === downloadTargetKey(currentUrl) ? followedUsers.items : [];
   const listRead = normalizeListReadOptions(listReadSettings);
   // 古いのは一覧のほう。一覧が無いうちは、古くなりようがない。
-  const analyzeLabel = readsFollowing ? (listRead.pages > 1 ? `${listRead.pages}ページのフォローユーザーを読み取る` : "フォローユーザーを読み取る") : canReadNextPages && listRead.pages > 1 ? `${listRead.pages}ページ読み取る` : canReadPage ? "このページから読み取る" : lastAnalysisKey && lastAnalysisKey !== downloadTargetKey(currentUrl) ? "候補を再取得" : "候補を取得";
+  const analyzeLabel = readsFollowing ? (canReadNextPages && listRead.pages > 1 ? `${listRead.pages}ページの${profile.followingAction}` : profile.followingAction) : canReadNextPages && listRead.pages > 1 ? `${listRead.pages}ページ読み取る` : canReadPage ? "このページから読み取る" : lastAnalysisKey && lastAnalysisKey !== downloadTargetKey(currentUrl) ? "候補を再取得" : "候補を取得";
   const analysisStale =
     items.length > 0 &&
     Boolean(lastAnalysisKey) &&
@@ -629,7 +592,7 @@ export default function SavePage() {
     const added = new Set<string>();
     try {
       for (const row of rows) {
-        await upsertUpdateTarget({ targetType: "author", source: "pixiv", sourceKey: row.userId, displayName: row.name, enabled: true, metadataJson: null });
+        await upsertUpdateTarget({ targetType: "author", source, sourceKey: row.userId, displayName: row.name, enabled: true, metadataJson: null });
         added.add(row.userId);
       }
       notifications.show({ color: "green", title: `${added.size}人を監視に追加しました`, message: "「新作・改稿」の確認に入ります" });
@@ -778,7 +741,9 @@ export default function SavePage() {
         color: "piep",
         message: "候補の取得はデスクトップアプリで使えます",
       });
-    const { kind: target, id: targetId } = describeDownloadTarget(analysisUrl);
+    const described = describeDownloadTarget(analysisUrl);
+    const fetcher = profile.targets[described.kind];
+    const target = fetcher ? described.kind : "unsupported";
     const readsPage = target === "unsupported" && pageListSource(analysisUrl) === source;
     // 一覧の読み取りは開いている画面を読むだけなので、取得用の接続を使わない。
     if (!authConnected && !readsPage)
@@ -804,14 +769,14 @@ export default function SavePage() {
     setProgress(null);
     try {
       if (readsPage) {
-        const pageType = source === "pixiv" ? "pixiv_page" : "fanbox_page";
+        const { pageType, person } = profile;
         const browser = detachedRef.current ? "standalone" : "embedded";
         const options = nextPagedListUrl(analysisUrl) ? listRead : { ...listRead, pages: 1 };
-        const readsUsers = isFollowingListUrl(analysisUrl);
+        const readsUsers = followingListSource(analysisUrl) === source;
         const result = await readListPages(options, {
           read: readsUsers
             ? async () => {
-                const page = await readBrowserPageUserCandidates(browser);
+                const page = await readBrowserPageUserCandidates(browser, source);
                 return { url: page.url, truncated: page.truncated, works: page.users.map((user) => ({ sourceId: user.userId, title: user.name, author: "", saved: user.watched })) };
               }
             : () => readBrowserPageWorkCandidates(browser, source),
@@ -854,7 +819,7 @@ export default function SavePage() {
         if (!result.pagesRead) {
           notifications.show({
             color: "yellow",
-            title: readsUsers ? "作者が見つかりません" : "作品が見つかりません",
+            title: `${readsUsers ? person : "作品"}が見つかりません`,
             message: "一覧が表示されてから、もう一度読み取ってください",
           });
           return;
@@ -863,68 +828,12 @@ export default function SavePage() {
         notifications.show({
           color: "green",
           title: `${result.pagesRead > 1 ? `${result.pagesRead}ページ` : "このページ"}から${result.total}${unit}を読み取りました`,
-          message: `${result.saved ? `${result.saved}${unit}は${readsUsers ? "監視に登録済み" : "保存済み"}です。` : ""}${listReadStopMessage(result.stop, options.pages, result.truncated, readsUsers)}`,
+          message: `${result.saved ? `${result.saved}${unit}は${readsUsers ? "監視に登録済み" : "保存済み"}です。` : ""}${listReadStopMessage(result.stop, options.pages, result.truncated, readsUsers ? person : null)}`,
         });
         return;
       }
-      if (target === "unsupported") return;
-      let next: SidebarItem[] = [];
-      if (target === "pixiv_single") {
-        const data = await fetchPixivNovelByUrl<PixivNovel>(analysisUrl);
-        const novelId = String(data.id ?? data.detail?.id ?? "");
-        next = [
-          {
-            id: novelId,
-            title: data.title || data.detail?.title || "Pixiv novel",
-            subtitle: data.user?.name || data.detail?.user?.name,
-            selected: true,
-            originalData: data,
-          },
-        ];
-      } else if (target === "pixiv_series") {
-        next = (
-          await fetchPixivSeriesNovels<PixivNovel[]>(targetId)
-        ).map((novel) => ({
-          id: String(novel.id),
-          title: novel.title,
-          subtitle: novel.user?.name,
-          selected: true,
-          originalData: novel,
-        }));
-      } else if (target === "pixiv_user") {
-        next = (
-          await fetchPixivUserNovels<PixivNovel[]>(targetId)
-        ).map((novel) => ({
-          id: String(novel.id),
-          title: novel.title,
-          subtitle: novel.user?.name,
-          selected: true,
-          originalData: novel,
-        }));
-      } else if (target === "fanbox_single") {
-        const data = normalizeFanboxPostPayload<FanboxPost>(
-          await fetchFanboxPost<unknown>(targetId),
-        );
-        next = [
-          {
-            id: targetId,
-            title: data.title || "FANBOX投稿",
-            subtitle: data.user?.name,
-            selected: true,
-            originalData: data,
-          },
-        ];
-      } else if (target === "fanbox_creator") {
-        next = (
-          await fetchFanboxCreatorPosts<FanboxPost[]>(targetId)
-        ).map((post) => ({
-          id: String(post.id),
-          title: post.title,
-          subtitle: post.user?.name,
-          selected: true,
-          originalData: post,
-        }));
-      }
+      if (!fetcher || target === "unsupported") return;
+      const next = await fetcher.fetch(described.id, analysisUrl);
       if (!isCurrent()) return;
       updateSaveDraft(source, (current) => ({
         ...current,
@@ -1002,17 +911,11 @@ export default function SavePage() {
           () => null,
         );
         if (!states) return;
-        const byId = new Map(
-          states
-            .filter((state) => state.source === itemSource && state.sourceId)
-            .map((state) => [state.sourceId as string, state]),
-        );
+        const byId = jobItemStatesById(states, itemSource);
         setItems((rows) =>
           rows.map((row) => {
             const state = byId.get(row.id);
-            if (!state) return row;
-            const status = SAVE_JOB_ROW_STATUS[state.status];
-            return status ? applySaveJobRowState(row, status, state.error) : row;
+            return state ? applyJobItemState(row, state) : row;
           }),
         );
       })();
@@ -1025,10 +928,8 @@ export default function SavePage() {
     };
     const applyItemState = (state: UpdateJobItemState) => {
       if (state.source !== itemSource || !state.sourceId) return;
-      const status = SAVE_JOB_ROW_STATUS[state.status];
-      if (!status) return;
       setItems((rows) =>
-        rows.map((row) => row.id === state.sourceId ? applySaveJobRowState(row, status, state.error) : row),
+        rows.map((row) => (row.id === state.sourceId ? applyJobItemState(row, state) : row)),
       );
     };
     let lastProgressAt = 0;
@@ -1099,10 +1000,7 @@ export default function SavePage() {
     // 済んだものは対象から外す。再試行は「残りをもう一度」であって、
     // 保存できたものを取り直しに行くことではない - 監視中の作品は
     // 保存済みでも取り直す作りなので、素通しにすると本当に再取得される。
-    const selected = items.filter(
-      (item) =>
-        item.selected && item.status !== "success" && item.status !== "skipped" && item.status !== "held",
-    );
+    const selected = items.filter(isPendingSave);
     if (!selected.length || !downloadType || !runtime || savingRef.current || activeJob || analyzingRef.current)
       return;
     if (!authConnected)
@@ -1111,9 +1009,8 @@ export default function SavePage() {
         title: `${getProvider(source).label}に接続してください`,
         message: "保存には、設定の「サービス接続」で取得用の接続が必要です",
       });
-    const itemSource: "pixiv" | "fanbox" = downloadType.startsWith("pixiv")
-      ? "pixiv"
-      : "fanbox";
+    // 下書きは取得元ごとに分かれているので、候補の取得元はこの画面の取得元である。
+    const itemSource = source;
     const operation = startOperation({
       kind: "save",
       label: `${selected.length}件をライブラリに保存`,
@@ -1159,16 +1056,7 @@ export default function SavePage() {
     try {
       const schedule = await loadSchedule();
       const snapshot = await startSaveJobCommand(
-        selected.map((item) => ({
-          source: itemSource,
-          sourceId: item.id,
-          title: item.title,
-          ...(itemSource === "fanbox" && "isRestricted" in item.originalData ? { fanboxAccess: {
-            isRestricted: item.originalData.isRestricted === true,
-            feeRequired: item.originalData.feeRequired,
-            creatorId: item.originalData.creatorId,
-          } } : {}),
-        })),
+        selected.map((item) => saveJobWork(itemSource, item)),
         schedule.watchSaved ?? false,
       );
       saveJobIdRef.current = snapshot.jobId;
@@ -1185,22 +1073,15 @@ export default function SavePage() {
       queryClient.invalidateQueries({ queryKey: ["library"] });
       queryClient.invalidateQueries({ queryKey: ["entity"] });
       invalidateWorkSetViews(queryClient);
-      const saved = final.savedCount;
-      const failed = final.errorCount;
-      const held = final.heldCount ?? 0;
-      const skipped = Math.max(0, final.processed - saved - failed - held);
-      const tally = `保存 ${saved} · 保存済み ${skipped} · 失敗 ${failed}${held ? ` · 保留 ${held}（更新 → 保留・非表示から再確認できます）` : ""}`;
-      if (final.status === "canceled" || final.status === "canceling") {
+      const { outcome, tally, failed, held } = summarizeSaveJob(final);
+      if (outcome === "canceled") {
         operation.cancel(`${tally} の時点で中止しました`);
         notifications.show({
           color: "gray",
           title: "保存を中止しました",
           message: tally,
         });
-      } else if (
-        final.status === "paused" ||
-        final.status === "auth_required"
-      ) {
+      } else if (outcome === "paused") {
         // 止まっただけで、失敗ではない。ジョブは残っているので続きから再開できる。
         operation.complete(
           `${tally}（${final.activeLabel || "中断しました"}）`,
@@ -1210,7 +1091,7 @@ export default function SavePage() {
           title: "保存を中断しました",
           message: `${tally} · 新作・改稿の画面から再開できます`,
         });
-      } else if (saved === 0 && failed > 0) {
+      } else if (outcome === "failed") {
         operation.fail(
           new Error(final.activeLabel || "すべての作品を保存できませんでした"),
         );
@@ -1266,30 +1147,17 @@ export default function SavePage() {
               aria-label="保存元サービス"
               value={source}
               onChange={switchSource}
-              data={[
-                {
-                  value: "pixiv",
-                  label: (
-                    <Group gap={6} wrap="nowrap">
-                      <ProviderMark provider="pixiv" compact />
-                      <Text size="xs" fw={700}>
-                        pixiv
-                      </Text>
-                    </Group>
-                  ),
-                },
-                {
-                  value: "fanbox",
-                  label: (
-                    <Group gap={6} wrap="nowrap">
-                      <ProviderMark provider="fanbox" compact />
-                      <Text size="xs" fw={700}>
-                        FANBOX
-                      </Text>
-                    </Group>
-                  ),
-                },
-              ]}
+              data={SAVE_SOURCE_ORDER.map((value) => ({
+                value,
+                label: (
+                  <Group gap={6} wrap="nowrap">
+                    <ProviderMark provider={value} compact />
+                    <Text size="xs" fw={700}>
+                      {getProvider(value).label}
+                    </Text>
+                  </Group>
+                ),
+              }))}
             />
           </Group>
           <Group gap="xs">
@@ -1693,7 +1561,7 @@ export default function SavePage() {
                         一覧とそれ以外のページを行き来するたびにパネルが上下に動く。 */}
                       {canReadNextPages && listRead.pages > 1
                         ? `${listRead.pages}ページ · ${listRead.intervalSeconds}秒ごと${listRead.stopAtSaved ? (readsFollowing ? " · 登録済みで止める" : " · 保存済みで止める") : ""}`
-                        : readsFollowing ? "フォロー一覧から作者を読み取れます" : canReadPage ? "表示中の一覧から作品を読み取れます" : targetLabel(targetKind)}
+                        : readsFollowing ? `一覧から${profile.person}を読み取れます` : canReadPage ? "表示中の一覧から作品を読み取れます" : targetLabel(source, targetKind)}
                     </Text>
                   </Box>
                   <Group gap={4} wrap="nowrap" style={{ flexShrink: 0 }}>
@@ -1860,13 +1728,14 @@ export default function SavePage() {
                   <FollowedUsersList
                     rows={followedRows}
                     adding={addingToWatch}
+                    person={profile.person}
                     onToggle={(userId, selected) => setFollowedUsers((current) => ({ ...current, items: current.items.map((row) => row.userId === userId ? { ...row, selected } : row) }))}
                     onAdd={addFollowedUsersToWatch}
                   />
                 ) : (
                   <Stack gap="xs" pb="md">
                     {!items.length && !analyzing && (
-                      <EmptyCandidates source={source} />
+                      <EmptyCandidates supportedPages={profile.supportedPages} />
                     )}
                     {items.map((item) => (
                       <CandidateRow
@@ -1952,119 +1821,5 @@ export default function SavePage() {
         </aside>
       </div>
     </div>
-  );
-}
-
-function targetLabel(kind: DownloadTargetKind): string {
-  const labels: Record<string, string> = {
-    pixiv_single: "pixiv小説を保存できます",
-    pixiv_series: "シリーズ内の小説を選択できます",
-    pixiv_user: "作者の小説を選択できます",
-    fanbox_single: "FANBOX投稿を保存できます",
-    fanbox_creator: "クリエイターの投稿を選択できます",
-    unsupported: "作品・シリーズ・作者・一覧のページを開いてください",
-  };
-  return labels[kind];
-}
-
-/**
- * 一行。**メモ化しておく。**
- *
- * 保存は1件ごとに `items` を組み直すので、素のままだと**そのたびに全行が
- * 描き直される**。818件の保存なら 818行 x 2回 x 818件で百万回を超え、
- * その確保が積み上がって画面のプロセスがメモリ不足で落ちた（実際に落ちた）。
- * 変わるのは1行だけなので、他の行は前の結果を使い回す。
- *
- * そのためには押したときの関数も毎回作り直さないことが要る。作り直すと
- * props が毎回変わり、メモ化は素通しになる。
- */
-const CandidateRow = memo(function CandidateRow({
-  item,
-  disabled,
-  onToggle,
-}: {
-  item: SidebarItem;
-  disabled: boolean;
-  onToggle: (id: string) => void;
-}) {
-  const status = item.status;
-  return (
-    <Card
-      p="sm"
-      className="candidate-row"
-      data-selected={(item.selected && status !== "held") || undefined}
-    >
-      <Group wrap="nowrap" align="flex-start">
-        <Checkbox
-          checked={item.selected && status !== "held"}
-          disabled={disabled || status === "success" || status === "skipped" || status === "held"}
-          onChange={() => onToggle(item.id)}
-          aria-label={`${item.title}を保存対象にする`}
-          mt={3}
-        />
-        <Stack gap={3} flex={1} miw={0}>
-          <Text size="sm" fw={650} className="line-clamp-2">
-            {item.title}
-          </Text>
-          {item.subtitle && (
-            <Text size="xs" c="dimmed" className="line-clamp-1">
-              {item.subtitle}
-            </Text>
-          )}
-          {item.error && (
-            <Text size="xs" c="red" className="line-clamp-3">
-              {item.error}
-            </Text>
-          )}
-          <Text size="10px" c="dimmed">
-            ID {item.id}
-          </Text>
-        </Stack>
-        <StatusIcon status={status} />
-      </Group>
-    </Card>
-  );
-});
-
-function StatusIcon({ status }: { status: SidebarItem["status"] }) {
-  if (status === "held") return <Badge color="yellow" size="xs">保留</Badge>;
-  if (status === "downloading") return <Loader size="xs" />;
-  if (status === "success")
-    return (
-      <ThemeIcon color="green" size="sm" radius="xl">
-        <Icons.confirm size={IconSize.inline} />
-      </ThemeIcon>
-    );
-  if (status === "skipped")
-    return (
-      <Badge color="gray" size="xs">
-        保存済み
-      </Badge>
-    );
-  if (status === "failed")
-    return (
-      <ThemeIcon color="red" size="sm" radius="xl">
-        <Icons.cancel size={IconSize.inline} />
-      </ThemeIcon>
-    );
-  return null;
-}
-
-function EmptyCandidates({ source }: { source: SaveSource }) {
-  return (
-    <Stack align="center" ta="center" py={48} px="md">
-      <ThemeIcon size={48} radius="xl" variant="light" color="gray">
-        <Icons.link size={IconSize.feature} />
-      </ThemeIcon>
-      <Text size="sm" fw={700}>
-        ページを開いて候補を取得
-      </Text>
-      <Text size="xs" c="dimmed">
-        {source === "pixiv"
-          ? "小説、シリーズ、作者、一覧のページ"
-          : "投稿、クリエイター、一覧のページ"}
-        に対応しています。
-      </Text>
-    </Stack>
   );
 }

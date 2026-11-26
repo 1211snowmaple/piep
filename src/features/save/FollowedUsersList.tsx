@@ -1,7 +1,7 @@
 import { Badge, Button, Checkbox, Group, Stack, Text } from "@mantine/core";
 import { mergePageRows, type PageRows } from "@/features/browser/downloadCandidates";
 
-/** フォロー一覧から読み取った作者の行。`watched` は監視に登録済みかどうか。 */
+/** フォロー一覧から読み取った作者（クリエイター）の行。`watched` は監視に登録済みかどうか。 */
 export interface FollowedUserRow {
   userId: string;
   name: string;
@@ -20,9 +20,11 @@ export function mergeFollowedUsers(
   ));
 }
 
-export function FollowedUsersList({ rows, adding, onToggle, onAdd }: {
+export function FollowedUsersList({ rows, adding, person, onToggle, onAdd }: {
   rows: FollowedUserRow[];
   adding: boolean;
+  /** 作者にあたる人の呼び方（pixiv は作者、FANBOX はクリエイター）。 */
+  person: string;
   onToggle: (userId: string, selected: boolean) => void;
   onAdd: () => void;
 }) {
@@ -30,7 +32,7 @@ export function FollowedUsersList({ rows, adding, onToggle, onAdd }: {
   return (
     <Stack gap="xs" pb="md">
       <Button size="xs" loading={adding} disabled={!count} onClick={onAdd}>
-        {count ? `${count}人を監視に追加` : "監視に追加する作者を選択"}
+        {count ? `${count}人を監視に追加` : `監視に追加する${person}を選択`}
       </Button>
       {rows.map((row) => (
         <Group key={row.userId} gap="xs" wrap="nowrap" justify="space-between">
