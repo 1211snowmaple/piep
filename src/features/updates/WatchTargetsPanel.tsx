@@ -27,12 +27,15 @@ import { ActionRow } from "@/components/ActionRow";
 import { Icons, IconSize } from "@/lib/icons";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
-import { ProviderMark } from "@/lib/providers";
+import { ProviderMark, providers } from "@/lib/providers";
 import { getAssetUrl } from "@/services/dbApi";
 import type { UpdateTarget, WatchGroup, WatchId } from "@/types/library";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 export type TargetValues = { targetType: string; source: string; sourceKey: string; displayName: string };
+const watchSourceOptions = Object.values(providers)
+  .filter((provider) => provider.capability === "available")
+  .map(({ id, label }) => ({ value: id, label }));
 /** `groupId` があれば、追加した対象をそのグループにも入れる。 */
 export type TargetAction = { action: "add" | "toggle" | "delete"; target?: UpdateTarget; enabled?: boolean; values?: TargetValues; groupId?: WatchId };
 export type GroupAction =
@@ -262,7 +265,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
                       <Text size="xs" c="dimmed">ここに入るのは、自分で追加した作者とシリーズだけです。保存や更新確認で勝手に増えることはありません。{viewGroup && `追加した対象は「${viewGroup.name}」にも入ります。`}</Text>
                       <Grid gap="xs" align="flex-end">
                         <Grid.Col span={{ base: 6, sm: 2 }}><Select size="sm" label="種類" data={[{ value: "author", label: "作者" }, { value: "series", label: "シリーズ" }]} allowDeselect={false} {...form.getInputProps("targetType")} /></Grid.Col>
-                        <Grid.Col span={{ base: 6, sm: 2 }}><Select size="sm" label="ソース" data={[{ value: "pixiv", label: "pixiv" }, { value: "fanbox", label: "FANBOX" }]} allowDeselect={false} {...form.getInputProps("source")} /></Grid.Col>
+                        <Grid.Col span={{ base: 6, sm: 2 }}><Select size="sm" label="ソース" data={watchSourceOptions} allowDeselect={false} {...form.getInputProps("source")} /></Grid.Col>
                         <Grid.Col span={{ base: 12, sm: 3 }}><TextInput size="sm" label="ID" {...form.getInputProps("sourceKey")} /></Grid.Col>
                         <Grid.Col span={{ base: 12, sm: 3 }}><TextInput size="sm" label="表示名" {...form.getInputProps("displayName")} /></Grid.Col>
                         <Grid.Col span={{ base: 12, sm: 2 }}><Button size="sm" type="submit" fullWidth loading={mutation.isPending}>追加</Button></Grid.Col>

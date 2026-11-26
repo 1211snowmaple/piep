@@ -1,0 +1,23 @@
+[
+  ["https://www.pixiv.net/users/1/following", "pixiv"],
+  ["https://www.pixiv.net/en/users/1/following?rest=hide", "pixiv"],
+  ["https://pixiv.net/zh-tw/users/12345678901234567890/following/#list", "pixiv"],
+  ["https://www.pixiv.net/users/123456789012345678901/following", null],
+  ["https://www.pixiv.net/xy/users/1/following", null],
+  ["https://www.pixiv.net/EN/users/1/following", null],
+  ["https://www.pixiv.net/users//1/following", null],
+  ["https://www.pixiv.net/users/1/novels", null],
+  ["http://www.pixiv.net/users/1/following", null],
+  ["https://evil.example/users/1/following", null],
+  ["https://www.fanbox.cc/creators/following", "fanbox"],
+  ["https://www.fanbox.cc/creators/supporting", "fanbox"],
+  ["https://fanbox.cc/ja/creators/supporting/?p=2", "fanbox"],
+  ["https://www.fanbox.cc/xy/creators/following", null],
+  ["https://www.fanbox.cc/creators/following//", null],
+  ["https://www.fanbox.cc/creators/find", null],
+  ["https://artist.fanbox.cc/creators/following", null],
+  ["https://www.fanbox.cc/users/1/following", null],
+  ["https://www.pixiv.net/creators/following", null],
+  ["https://www.fanbox.cc.evil.example/creators/following", null],
+  ["http://www.fanbox.cc/creators/supporting", null]
+]
