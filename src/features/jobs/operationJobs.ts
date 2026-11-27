@@ -11,6 +11,7 @@ export type OperationStatus =
   | "canceled"
   | "completed"
   | "failed"
+  | "paused"
   | "interrupted";
 export type OperationLogLevel = "info" | "success" | "warn" | "error";
 
@@ -54,6 +55,7 @@ export interface OperationController {
   log: (message: string, level?: OperationLogLevel) => void;
   complete: (message?: string) => void;
   fail: (error: unknown) => void;
+  pause: (message?: string) => void;
   cancel: (message?: string) => void;
   isCancelRequested: () => boolean;
   linkExternalJob: (jobId: string) => void;
@@ -242,7 +244,7 @@ export function startOperation(
   emit("immediate");
 
   const finish = (
-    status: "completed" | "failed" | "canceled",
+    status: "completed" | "failed" | "canceled" | "paused",
     message: string,
     level: OperationLogLevel,
   ) => {
@@ -295,6 +297,8 @@ export function startOperation(
         error instanceof Error ? error.message : String(error),
         "error",
       ),
+    pause: (message = "処理を中断しました") =>
+      finish("paused", message, "warn"),
     cancel: (message = "処理をキャンセルしました") =>
       finish("canceled", message, "warn"),
     isCancelRequested: () => cancelRequests.has(jobId),
