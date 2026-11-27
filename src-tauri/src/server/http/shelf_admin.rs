@@ -1,5 +1,6 @@
 //! 管理の口：棚の写しの受け取りと、携帯が棚を読む許可（単独サーバーだけ）。
 
+use super::admin_web::actor;
 use super::{require_admin, AdminHeaders, ApiError, ApiJson, Ctx};
 use crate::library::{ContentFile, LibraryId};
 use crate::server::standalone::shipment::{self, ShelfShipments, ShipError, WireChunk};
@@ -39,6 +40,21 @@ async fn run<T: Send + 'static>(
         .map_err(ApiError::from)
 }
 
+/// 棚の操作を記録に残す。鍵やパスは載せない。
+async fn audit(ctx: &Ctx, headers: &AdminHeaders, action: &str, detail: String) {
+    let store = Arc::clone(&ctx.store);
+    let actor = actor(headers);
+    let action = action.to_owned();
+    // 記録は状態の DB に書くので、実行スレッドの外で行う。
+    let written = tokio::task::spawn_blocking(move || {
+        store.audit("library", &action, actor, None, true, Some(&detail));
+    })
+    .await;
+    if written.is_err() {
+        log::warn!("棚の操作を記録できません");
+    }
+}
+
 fn json<T: serde::Serialize>(value: &T) -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(
         serde_json::to_value(value).map_err(|_| ApiError::internal())?,
@@ -60,7 +76,17 @@ pub(super) async fn open(
     require_admin(&ctx, &headers)?;
     let shipments = shipments(&ctx)?;
     let opened = run(move || shipments.open(request.library_id)).await?;
-    json(&opened)
+    let value = serde_json::to_value(&opened).map_err(|_| ApiError::internal())?;
+    if let Some(id) = value["shipmentId"].as_str() {
+        audit(
+            &ctx,
+            &headers,
+            "棚の受け取りを開始",
+            format!("送信 ID {id}"),
+        )
+        .await;
+    }
+    Ok(Json(value))
 }
 
 /// 受け取りの進み具合。
@@ -143,7 +169,9 @@ pub(super) async fn commit(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     require_admin(&ctx, &headers)?;
     let shipments = shipments(&ctx)?;
+    let detail = format!("送信 ID {id}");
     let status = run(move || shipments.commit(&id, &request.database)).await?;
+    audit(&ctx, &headers, "棚の受け取りを確定", detail).await;
     Ok((StatusCode::ACCEPTED, json(&status)?))
 }
 
@@ -155,7 +183,9 @@ pub(super) async fn abort(
 ) -> Result<StatusCode, ApiError> {
     require_admin(&ctx, &headers)?;
     let shipments = shipments(&ctx)?;
+    let detail = format!("送信 ID {id}");
     run(move || shipments.abort(&id)).await?;
+    audit(&ctx, &headers, "棚の受け取りを中止", detail).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -199,6 +229,7 @@ pub(super) async fn set_reader(
     ))?;
     let paths = ctx.paths.get().cloned().ok_or_else(ApiError::not_found)?;
     let store = Arc::clone(&ctx.store);
+    let actor = actor(&headers);
     tokio::task::spawn_blocking(move || {
         let reader = store
             .list_devices()
@@ -219,6 +250,15 @@ pub(super) async fn set_reader(
                 log::error!("棚を読む許可を当てられません: {error}");
                 ApiError::internal()
             })?;
+        let state = if request.read { "入" } else { "切" };
+        store.audit(
+            "library",
+            "棚を読む許可の変更",
+            actor,
+            None,
+            true,
+            Some(&format!("端末 {device}・{state}")),
+        );
         Ok(StatusCode::NO_CONTENT)
     })
     .await

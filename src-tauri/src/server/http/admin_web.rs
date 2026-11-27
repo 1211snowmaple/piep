@@ -578,7 +578,7 @@ where
     ApiError::internal()
 }
 
-fn actor(headers: &HeaderMap) -> &'static str {
+pub(super) fn actor(headers: &HeaderMap) -> &'static str {
     if bearer(headers).is_some() {
         "デスクトップ版"
     } else {

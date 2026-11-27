@@ -711,8 +711,69 @@ fn prune_parts(paths: &ServerPaths, keep: &HashSet<Fingerprint>) -> Result<(), S
 
 /// 起動のとき、置き場の錠を持ったまま呼ぶ。引き継ぎを済ませてから棚と同期の世代を切り替える。
 pub fn apply_pending(paths: &ServerPaths) {
-    if let Err(error) = apply_pending_with(paths, |_| {}) {
-        log::error!("送られた棚の切り替え処理を完了できません。予約を残します: {error}");
+    record_outcome(paths, apply_pending_with(paths, |_| {}));
+}
+
+/// 起動時の切り替えの結果を、操作の記録に残す。
+fn record_outcome(paths: &ServerPaths, outcome: Result<Option<Publication>, String>) {
+    let store = super::super::store::ServerStore::open(&paths.store());
+    let audit = |action: &str, ok: bool, detail: &str| match &store {
+        Ok(store) => store.audit("library", action, "サーバー", None, ok, Some(detail)),
+        Err(error) => log::warn!("棚の公開を記録できません: {error}"),
+    };
+    match outcome {
+        Ok(None) => {}
+        Ok(Some(Publication::Published { shipment_id, works })) => {
+            audit(
+                "棚を公開",
+                true,
+                &format!("送信 ID {shipment_id}・{works} 作品"),
+            );
+        }
+        Ok(Some(Publication::Rejected {
+            shipment_id,
+            reason,
+        })) => {
+            audit(
+                "棚の公開を拒否",
+                false,
+                &format!("送信 ID {shipment_id}・{}", reason.text()),
+            );
+        }
+        Err(error) => {
+            log::error!("送られた棚の切り替え処理を完了できません。予約を残します: {error}");
+            // 中身のエラーにはパスが入りうるので、記録には決まった文だけを残す。
+            audit(
+                "棚の公開に失敗",
+                false,
+                "棚の切り替え処理を完了できませんでした。次の起動で再試行します",
+            );
+        }
+    }
+}
+
+/// 起動時の切り替えの結果。前に記録した結果をもう一度片付けただけなら返さない。
+#[derive(Debug, PartialEq, Eq)]
+enum Publication {
+    Published {
+        shipment_id: String,
+        works: u64,
+    },
+    Rejected {
+        shipment_id: String,
+        reason: Rejection,
+    },
+}
+
+impl Rejection {
+    /// 記録に載せる短い理由。
+    fn text(self) -> &'static str {
+        match self {
+            Rejection::AssemblyFailed => "棚を組めませんでした",
+            Rejection::Interrupted => "受け取りの途中で止まりました",
+            Rejection::Superseded => "引き継ぎ元の棚が変わりました",
+            Rejection::Canceled => "受け取りを中止しました",
+        }
     }
 }
 
@@ -751,7 +812,7 @@ pub(super) fn check_manual_activation(paths: &ServerPaths, generation: Id) -> Re
 fn apply_pending_with(
     paths: &ServerPaths,
     mut reached: impl FnMut(SwapStage),
-) -> Result<(), String> {
+) -> Result<Option<Publication>, String> {
     let result_error = |error| format!("棚の公開結果を記録できません: {error:?}");
     let Some(pending) = read_pending(paths)? else {
         if let Some(current) = read_current(paths) {
@@ -759,9 +820,13 @@ fn apply_pending_with(
                 == Some(PublicationState::Assembling)
             {
                 reject(paths, &current.id, Rejection::Interrupted).map_err(result_error)?;
+                return Ok(Some(Publication::Rejected {
+                    shipment_id: current.id,
+                    reason: Rejection::Interrupted,
+                }));
             }
         }
-        return Ok(());
+        return Ok(None);
     };
     let config = load_config(paths)?;
     let current = ShelfSource::from_config(config.shelf.as_ref());
@@ -769,7 +834,7 @@ fn apply_pending_with(
     let record = read_result(paths, &pending.shipment_id).map_err(result_error)?;
     if matches!(record, Some(PublicationState::Rejected { .. })) {
         sync_results(paths).map_err(result_error)?;
-        return clear_pending(paths);
+        return clear_pending(paths).map(|()| None);
     }
     if matches!(record, Some(PublicationState::Published(_))) {
         sync_results(paths).map_err(result_error)?;
@@ -777,7 +842,7 @@ fn apply_pending_with(
             let previous = pending.previous.root(paths)?;
             prune_generations(paths, pending.next_generation, previous.as_deref());
         }
-        return clear_pending(paths);
+        return clear_pending(paths).map(|()| None);
     }
     if (current != target && current != pending.previous)
         || config
@@ -785,7 +850,11 @@ fn apply_pending_with(
             .is_some_and(|settings| settings.library_id.get() != pending.library_id)
     {
         reject(paths, &pending.shipment_id, Rejection::Superseded).map_err(result_error)?;
-        return clear_pending(paths);
+        clear_pending(paths)?;
+        return Ok(Some(Publication::Rejected {
+            shipment_id: pending.shipment_id,
+            reason: Rejection::Superseded,
+        }));
     }
     let previous = pending.previous.root(paths)?;
     activate_locked(paths, pending.next_generation, |settings, new| {
@@ -832,7 +901,11 @@ fn apply_pending_with(
     )
     .map_err(result_error)?;
     prune_generations(paths, pending.next_generation, previous.as_deref());
-    clear_pending(paths)
+    clear_pending(paths)?;
+    Ok(Some(Publication::Published {
+        shipment_id: pending.shipment_id,
+        works: pending.works,
+    }))
 }
 
 fn clear_pending(paths: &ServerPaths) -> Result<(), String> {
