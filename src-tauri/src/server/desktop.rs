@@ -5,14 +5,13 @@
 
 use super::store::Role;
 use super::sync_send::{
-    admin_get, admin_get_if_present, admin_post, admin_put, pair_admin, RemoteServer, SendHandle,
-    SendProgress, CANCELED,
+    admin_get, admin_get_if_present, admin_post, admin_put, pair_admin, ClientCache, RemoteServer,
+    SendHandle, SendProgress, CANCELED,
 };
 use crate::{library::protocol::Id, AppState};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
@@ -146,6 +145,7 @@ pub type FavoritesListener = Arc<dyn Fn() + Send + Sync>;
 pub struct DesktopServer {
     dir: PathBuf,
     settings: Mutex<DesktopServerSettings>,
+    clients: ClientCache,
     send: SendHandle,
     send_lock: AsyncMutex<()>,
     /// 携帯がお気に入りを変えたと画面へ知らせる係。起動の途中で付ける。
@@ -234,6 +234,7 @@ impl DesktopServer {
         Ok(Self {
             dir,
             settings: Mutex::new(settings),
+            clients: ClientCache::default(),
             send: SendHandle::new(),
             send_lock: AsyncMutex::new(()),
             favorites_listener: OnceLock::new(),
@@ -291,6 +292,7 @@ impl DesktopServer {
         let token = credential::load(&remote.url)?
             .ok_or("サーバーの鍵がありません。登録し直してください")?;
         let body = admin_post(
+            &self.clients,
             &remote,
             &token,
             "pairings",
@@ -318,7 +320,7 @@ impl DesktopServer {
             .ok_or("単独サーバーにつないでいません")?;
         let token = credential::load(&remote.url)?
             .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        let body = admin_get(&remote, &token, "devices").await?;
+        let body = admin_get(&self.clients, &remote, &token, "devices").await?;
         Ok(body.as_array().cloned().unwrap_or_default())
     }
 
@@ -329,7 +331,7 @@ impl DesktopServer {
             .ok_or("単独サーバーにつないでいません")?;
         let token = credential::load(&remote.url)?
             .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        admin_get(&remote, &token, "status").await
+        admin_get(&self.clients, &remote, &token, "status").await
     }
 
     /// デスクトップ版の方が新しければ、サーバーにも更新を頼む。
@@ -356,7 +358,14 @@ impl DesktopServer {
             .ok_or("単独サーバーにつないでいません")?;
         let token = credential::load(&remote.url)?
             .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        admin_post(&remote, &token, "update/check", &serde_json::json!({})).await
+        admin_post(
+            &self.clients,
+            &remote,
+            &token,
+            "update/check",
+            &serde_json::json!({}),
+        )
+        .await
     }
 
     /// 管理画面へ入る、一度きりのリンクを作る。接続先の URL で開くので、その名前が覚えられる。
@@ -367,7 +376,14 @@ impl DesktopServer {
             .ok_or("単独サーバーにつないでいません")?;
         let token = credential::load(&remote.url)?
             .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        let ticket = admin_post(&remote, &token, "tickets", &serde_json::json!({})).await?;
+        let ticket = admin_post(
+            &self.clients,
+            &remote,
+            &token,
+            "tickets",
+            &serde_json::json!({}),
+        )
+        .await?;
         let path = ticket["path"]
             .as_str()
             .ok_or("サーバーの応答を読めません")?;
@@ -381,7 +397,14 @@ impl DesktopServer {
             .ok_or("単独サーバーにつないでいません")?;
         let token = credential::load(&remote.url)?
             .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        admin_post(&remote, &token, "update", &serde_json::json!({})).await?;
+        admin_post(
+            &self.clients,
+            &remote,
+            &token,
+            "update",
+            &serde_json::json!({}),
+        )
+        .await?;
         Ok(())
     }
 
@@ -401,6 +424,7 @@ impl DesktopServer {
         let token = credential::load(&remote.url)?
             .ok_or("サーバーの鍵がありません。登録し直してください")?;
         admin_put(
+            &self.clients,
             &remote,
             &token,
             &format!("devices/{device_id}/shelf"),
@@ -422,7 +446,7 @@ impl DesktopServer {
             url: parsed.url,
             fingerprint: parsed.fingerprint,
         };
-        let token = pair_admin(&remote, &parsed.secret, device_name).await?;
+        let token = pair_admin(&self.clients, &remote, &parsed.secret, device_name).await?;
         credential::store(&remote.url, &token)?;
         self.change_settings(|settings| {
             settings.remote = Some(remote);
@@ -436,11 +460,12 @@ impl DesktopServer {
     }
 
     pub async fn disconnect_remote(&self) -> Result<(), String> {
-        self.send.cancel.store(true, Ordering::Relaxed);
+        self.send.cancel();
         let _running = self.send_lock.lock().await;
         if let Some(remote) = self.settings().remote {
             credential::delete(&remote.url)?;
         }
+        self.clients.clear();
         self.change_settings(|settings| {
             settings.remote = None;
             settings.auto_send = false;
@@ -457,7 +482,7 @@ impl DesktopServer {
     }
 
     pub fn stop_send(&self) {
-        self.send.cancel.store(true, Ordering::Relaxed);
+        self.send.cancel();
     }
 
     /// 携帯で変えたお気に入りと読書位置を単独サーバーの棚から受け取り、棚へ書く。送信の途中なら何もしない。
@@ -536,7 +561,8 @@ impl DesktopServer {
         loop {
             let path = format!("shelf/reading?cursor={cursor}&limit={SHELF_READING_PAGE}");
             // 棚を配っていないサーバーには口が無い。携帯も棚へ書いていない。
-            let Some(page) = admin_get_if_present(&remote, &token, &path).await? else {
+            let Some(page) = admin_get_if_present(&self.clients, &remote, &token, &path).await?
+            else {
                 break;
             };
             let page: ShelfReadingPage = serde_json::from_value(page)
@@ -599,7 +625,8 @@ impl DesktopServer {
         let mut applied = 0;
         loop {
             let path = format!("shelf/favorites?cursor={cursor}&limit={SHELF_READING_PAGE}");
-            let Some(page) = admin_get_if_present(&remote, &token, &path).await? else {
+            let Some(page) = admin_get_if_present(&self.clients, &remote, &token, &path).await?
+            else {
                 return Ok(None);
             };
             let page: ShelfFavoritesPage = serde_json::from_value(page)
@@ -641,6 +668,7 @@ impl DesktopServer {
         let Ok(_running) = self.send_lock.try_lock() else {
             return Ok(SendAttempt::Busy);
         };
+        self.send.reset_cancel();
         // 写しに入れるため、携帯の変更を先に取り込む。取り込めなくても送信は止めない。
         if let Err(error) = self.pull_favorites_locked(&state).await {
             log::warn!("携帯のお気に入りを取り込めません: {error}");
@@ -654,7 +682,6 @@ impl DesktopServer {
             .ok_or("単独サーバーにつないでいません")?;
         let token = credential::load(&remote.url)?
             .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        self.send.cancel.store(false, Ordering::Relaxed);
         if let Ok(mut progress) = self.send.progress.lock() {
             *progress = SendProgress {
                 running: true,
@@ -665,8 +692,15 @@ impl DesktopServer {
         let finished_at = Some(chrono::Utc::now().to_rfc3339());
         let result = {
             let outgoing = self.dir.join("outgoing").join("shelf");
-            match super::shelf_send::send_shelf(&remote, &token, library, &outgoing, &self.send)
-                .await
+            match super::shelf_send::send_shelf(
+                &self.clients,
+                &remote,
+                &token,
+                library,
+                &outgoing,
+                &self.send,
+            )
+            .await
             {
                 Ok(sent) => self
                     .change_settings(|settings| {
