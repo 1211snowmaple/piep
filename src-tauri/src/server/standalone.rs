@@ -7,6 +7,7 @@ pub mod shipment;
 
 use super::admin_assets::ADMIN_ASSETS;
 use super::admin_store::TicketKind;
+use super::durable::write_atomic;
 use super::http::admin_web::command_ticket;
 use super::http::{
     admin_router, combined_router, reader_router, AdminWeb, ConnectionInfo, ServerContext,
@@ -27,7 +28,7 @@ use std::fs::{self, File};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 const ADMIN_PAIRING_LIFETIME: Duration = Duration::from_secs(30 * 60);
@@ -407,35 +408,65 @@ fn connection_text(text: &str, config: &ServerConfig) -> Result<String, String> 
     Ok(written)
 }
 
-/// 確かめた設定を書く。動いている設定は再起動まで変わらない。立ち上がれなければ、
-/// 次の起動で前の写しへ戻す（`restore_trial`）。
-pub(crate) fn save_connection(paths: &ServerPaths, config: &ServerConfig) -> Result<(), String> {
-    let text = fs::read_to_string(paths.config())
-        .map_err(|error| format!("{CONFIG_FILE} を読めません: {error}"))?;
-    let written = connection_text(&text, config)?;
-    update::write_atomic(&paths.config_previous(), text.as_bytes())?;
-    update::write_atomic(&paths.config(), written.as_bytes())?;
-    update::write_atomic(&paths.config_trial(), b"")
+/// 設定の読み取りから差し替えまでを、同じプロセス内のほかの書き手と直列にする。
+pub(super) fn edit_config<T>(
+    paths: &ServerPaths,
+    edit: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<T, String> {
+    static EDIT: Mutex<()> = Mutex::new(());
+    let _edit = EDIT.lock().map_err(|_| "設定を書き換えられません")?;
+    edit(&paths.config())
 }
 
-/// 試している設定で立ち上がれなかったら、前の設定へ戻す。戻したら true。
-fn restore_trial(paths: &ServerPaths, error: &str) -> bool {
-    if !paths.config_trial().exists() {
-        return false;
+pub(super) fn create_config(
+    paths: &ServerPaths,
+    initial: impl FnOnce() -> Result<String, String>,
+) -> Result<(), String> {
+    edit_config(paths, |path| {
+        if !path.try_exists().map_err(|error| error.to_string())? {
+            write_atomic(path, initial()?.as_bytes())?;
+        }
+        Ok(())
+    })
+}
+
+/// 前の写しと試行の印を先に残してから設定を差し替える。再起動で立ち上がれなければ前の写しへ戻す。
+pub(crate) fn save_connection(paths: &ServerPaths, config: &ServerConfig) -> Result<(), String> {
+    edit_config(paths, |path| {
+        let text = fs::read_to_string(path)
+            .map_err(|error| format!("{CONFIG_FILE} を読めません: {error}"))?;
+        let written = connection_text(&text, config)?;
+        write_atomic(&paths.config_previous(), text.as_bytes())?;
+        write_atomic(&paths.config_trial(), b"")?;
+        write_atomic(path, written.as_bytes())
+    })
+}
+
+/// 試行の印があれば前の設定へ戻し、差し替えを同期できてから印を消す。
+fn restore_trial(paths: &ServerPaths) -> Result<bool, String> {
+    edit_config(paths, |path| {
+        if !paths
+            .config_trial()
+            .try_exists()
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(false);
+        }
+        let previous = fs::read(paths.config_previous())
+            .map_err(|error| format!("前の接続設定を読めません: {error}"))?;
+        write_atomic(path, &previous)?;
+        clear_config_trial(paths)?;
+        Ok(true)
+    })
+}
+
+fn clear_config_trial(paths: &ServerPaths) -> Result<(), String> {
+    match fs::remove_file(paths.config_trial()) {
+        Ok(()) => piep_storage::sync_directory(&paths.state())
+            .map_err(|error| format!("試行の印を消したあと同期できません: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("試行の印を消せません: {error}")),
     }
-    let restored = fs::copy(paths.config_previous(), paths.config()).is_ok();
-    let _ = fs::remove_file(paths.config_trial());
-    if let Ok(store) = ServerStore::open(&paths.store()) {
-        store.audit(
-            "system",
-            "接続の設定を前に戻した",
-            "サーバー",
-            None,
-            false,
-            Some(error),
-        );
-    }
-    restored
 }
 
 const CONFIG_TEMPLATE: &str = r#"# piep-server の設定。説明は docs/guide/05-server.md
@@ -506,10 +537,7 @@ async fn tls_material(
 pub async fn command_init(data: &Path, url: Option<String>) -> Result<String, String> {
     let paths = ServerPaths::new(data)?;
     fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
-    if !paths.config().exists() {
-        fs::write(paths.config(), CONFIG_TEMPLATE)
-            .map_err(|error| format!("設定を書けません: {error}"))?;
-    }
+    create_config(&paths, || Ok(CONFIG_TEMPLATE.into()))?;
     command_admin_pair(data, url, false).await
 }
 
@@ -654,7 +682,7 @@ pub async fn run_listener(
 
 /// 自分の口に `hello` を通し、棚の台帳を検査してから、準備できた印を書く。
 /// 見張り役はこの印を見て、更新が定着したと判断する。
-async fn report_ready(paths: ServerPaths, config: ServerConfig) -> Result<(), String> {
+async fn report_ready(paths: &ServerPaths, config: &ServerConfig) -> Result<(), String> {
     let address = config.admin_listen.unwrap_or(config.listen);
     let host = match address.ip() {
         std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
@@ -694,13 +722,13 @@ async fn report_ready(paths: ServerPaths, config: ServerConfig) -> Result<(), St
     }
     // 配っている棚の台帳を検査する。まだ棚を受け取っていなければ検査する物は無い。
     let Some(shelf) = &config.shelf else {
-        return watchdog::write_ready_mark(&paths);
+        return watchdog::write_ready_mark(paths);
     };
-    let database = shelf.root(&paths)?.join("library.db");
+    let database = shelf.root(paths)?.join("library.db");
     tokio::task::spawn_blocking(move || check_database(&database))
         .await
         .map_err(|error| format!("DB の検査が異常終了しました: {error}"))??;
-    watchdog::write_ready_mark(&paths)
+    watchdog::write_ready_mark(paths)
 }
 
 fn check_database(path: &Path) -> Result<(), String> {
@@ -825,12 +853,28 @@ pub fn command_admin_web(data: &Path, enable: bool) -> Result<(), String> {
 /// `EXIT_RESTART` なら、管理画面から頼まれたので立ち上げ直す。
 pub async fn command_run(data: &Path) -> Result<i32, String> {
     let paths = ServerPaths::new(data)?;
-    let lock = lock_server(&paths)?;
-    match run_locked(paths.clone(), lock).await {
-        Err(error) if restore_trial(&paths, &error) => Err(format!(
-            "{error}。管理画面で変えた接続の設定では立ち上がれないので、前の設定へ戻しました"
-        )),
-        other => other,
+    let _lock = lock_server(&paths)?;
+    match run_locked(paths.clone()).await {
+        Err(error) => {
+            let (action, message, restored) = match restore_trial(&paths) {
+                Ok(false) => return Err(error),
+                Ok(true) => (
+                    "接続の設定を前に戻した",
+                    format!("{error}。前の接続設定へ戻しました"),
+                    true,
+                ),
+                Err(restore_error) => (
+                    "接続の設定を戻す処理に失敗した",
+                    format!("{error}。接続の設定を戻す処理に失敗しました: {restore_error}"),
+                    false,
+                ),
+            };
+            if let Ok(store) = ServerStore::open(&paths.store()) {
+                store.audit("system", action, "サーバー", None, restored, Some(&message));
+            }
+            Err(message)
+        }
+        ok => ok,
     }
 }
 
@@ -850,7 +894,7 @@ fn lock_server(paths: &ServerPaths) -> Result<File, String> {
     Ok(lock)
 }
 
-async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
+async fn run_locked(paths: ServerPaths) -> Result<i32, String> {
     // 送られた棚を組み終えていれば、設定を読む前に配る棚をそれへ切り替える。
     {
         let paths = paths.clone();
@@ -971,13 +1015,30 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
     let ready_paths = paths.clone();
     let ready_config = config.clone();
     tokio::spawn(async move {
-        let trial = ready_paths.config_trial();
-        match report_ready(ready_paths, ready_config).await {
-            // 変えた接続の設定で答えられたので、もう戻さない。
-            Ok(()) => {
-                let _ = fs::remove_file(trial);
-            }
-            Err(error) => log::error!("起動の確認に失敗しました: {error}"),
+        let ready = report_ready(&ready_paths, &ready_config)
+            .await
+            .and_then(|()| {
+                edit_config(&ready_paths, |_| {
+                    // 起動の確認中に保存された別の接続設定には、試行の印を残す。
+                    if ready_paths
+                        .config_trial()
+                        .try_exists()
+                        .map_err(|error| error.to_string())?
+                    {
+                        let current = load_config(&ready_paths)?;
+                        if current.listen == ready_config.listen
+                            && current.admin_listen == ready_config.admin_listen
+                            && current.public_url == ready_config.public_url
+                            && current.tls == ready_config.tls
+                        {
+                            clear_config_trial(&ready_paths)?;
+                        }
+                    }
+                    Ok(())
+                })
+            });
+        if let Err(error) = ready {
+            log::error!("起動の確認に失敗しました: {error}");
         }
     });
     let stop_handle = handle.clone();
@@ -1002,7 +1063,6 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
     }
     result?;
     let Some(after) = updates.and_then(|controller| controller.take_after_stop()) else {
-        drop(lock);
         return Ok(if restart.load(Ordering::SeqCst) {
             EXIT_RESTART
         } else {
@@ -1020,13 +1080,11 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
             // このプロセスの状態DBや本棚の接続はまだ開いている。DBの復元は
             // 終了を待った見張り役に任せ、Windowsで開いたDBを置き換えない。
             watchdog::request_rollback(&paths, &version)?;
-            drop(lock);
             return Ok(EXIT_RESTART);
         }
     };
-    update::write_atomic(&paths.pending_version(), version.as_bytes())?;
+    write_atomic(&paths.pending_version(), version.as_bytes())?;
     log::info!("版 {version} へ切り替えるので止まります");
-    drop(lock);
     Ok(EXIT_APPLY_UPDATE)
 }
 
@@ -1305,6 +1363,7 @@ pub async fn main_from_args(args: Vec<String>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::tests::TestRoot;
 
     fn config(text: &str) -> ServerConfig {
         toml::from_str(text).expect("config")
@@ -1702,7 +1761,7 @@ auto = false
         fs::create_dir_all(paths.state()).unwrap();
         fs::write(paths.config(), CONFIG_TEMPLATE).unwrap();
         // 試していなければ何もしない。
-        assert!(!restore_trial(&paths, "失敗"));
+        assert!(!restore_trial(&paths).unwrap());
 
         let next = ServerConfig {
             public_url: "https://example.com/".into(),
@@ -1715,9 +1774,63 @@ auto = false
             "https://example.com/"
         );
 
-        assert!(restore_trial(&paths, "待ち受けられません"));
+        assert!(restore_trial(&paths).unwrap());
         assert!(!paths.config_trial().exists());
         assert_eq!(fs::read_to_string(paths.config()).unwrap(), CONFIG_TEMPLATE);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn connection_save_keeps_config_when_trial_mark_cannot_be_written() {
+        let root = TestRoot::created("blocked-config-trial");
+        let paths = ServerPaths::new(&root.0).unwrap();
+        fs::write(paths.config(), CONFIG_TEMPLATE).unwrap();
+        fs::create_dir_all(paths.config_trial()).unwrap();
+        let next = config("public_url = \"https://example.com/\"");
+
+        assert!(save_connection(&paths, &next).is_err());
+        assert_eq!(fs::read_to_string(paths.config()).unwrap(), CONFIG_TEMPLATE);
+        assert_eq!(fs::read_dir(paths.state()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn restore_keeps_trial_mark_when_previous_config_is_missing() {
+        let root = TestRoot::created("missing-previous-config");
+        let paths = ServerPaths::new(&root.0).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        fs::write(paths.config(), CONFIG_TEMPLATE).unwrap();
+        fs::write(paths.config_trial(), b"").unwrap();
+
+        assert!(restore_trial(&paths).is_err());
+        assert!(paths.config_trial().is_file());
+        assert_eq!(fs::read_to_string(paths.config()).unwrap(), CONFIG_TEMPLATE);
+    }
+
+    #[test]
+    fn concurrent_connection_and_update_saves_keep_both_changes() {
+        let root = TestRoot::created("concurrent-config");
+        let paths = ServerPaths::new(&root.0).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        fs::write(paths.config(), CONFIG_TEMPLATE).unwrap();
+        let next = config("public_url = \"https://example.com/\"");
+        let start = std::sync::Barrier::new(2);
+
+        std::thread::scope(|scope| {
+            let connection = scope.spawn(|| {
+                start.wait();
+                save_connection(&paths, &next)
+            });
+            let update = scope.spawn(|| {
+                start.wait();
+                update::write_update_settings(&paths, false, "01:30-02:30")
+            });
+            connection.join().unwrap().unwrap();
+            update.join().unwrap().unwrap();
+        });
+
+        let saved = load_config(&paths).unwrap();
+        assert_eq!(saved.public_url, "https://example.com/");
+        assert!(!saved.update.auto);
+        assert_eq!(saved.update.window, "01:30-02:30");
     }
 }

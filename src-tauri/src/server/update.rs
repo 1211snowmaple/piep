@@ -4,8 +4,9 @@
 //! 版の切り替えと戻しは見張り役（`watchdog.rs`）が行う。動いている実行ファイルは
 //! 自分では置き換えられないからである。
 
+use super::durable::write_atomic;
 use super::standalone::shipment::ShelfShipments;
-use super::standalone::{ServerPaths, UpdateConfig};
+use super::standalone::{edit_config, ServerPaths, UpdateConfig};
 use chrono::{DateTime, Local, NaiveTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -125,14 +126,6 @@ pub fn read_version_file(path: &Path) -> Option<String> {
     let text = fs::read_to_string(path).ok()?;
     let version = text.trim();
     parse_version(version).map(|_| version.to_string())
-}
-
-pub fn write_atomic(path: &Path, content: &[u8]) -> Result<(), String> {
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, content)
-        .map_err(|error| format!("{} を書けません: {error}", path.display()))?;
-    fs::rename(&temporary, path)
-        .map_err(|error| format!("{} を置けません: {error}", path.display()))
 }
 
 /// 見張り役と本体が読み書きする更新の記録。版をまたいで読むので、知らない項目は無視する。
@@ -662,7 +655,7 @@ impl UpdateController {
     /// 自動更新と時間帯を変える。`server.toml` に書き戻し、再起動せずに効かせる。
     pub fn set_settings(&self, auto: bool, window_text: &str) -> Result<(), String> {
         let window = UpdateWindow::parse(window_text)?;
-        write_update_settings(&self.paths.config(), auto, window_text)?;
+        write_update_settings(&self.paths, auto, window_text)?;
         let mut settings = self
             .settings
             .lock()
@@ -848,24 +841,30 @@ impl UpdateController {
 }
 
 /// `[update]` の値だけを書き換える。コメントと他の設定はそのまま残す。
-pub fn write_update_settings(config: &Path, auto: bool, window: &str) -> Result<(), String> {
-    let text = match fs::read_to_string(config) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(format!("設定を読めません: {error}")),
-    };
-    let mut document: toml_edit::DocumentMut = text
-        .parse()
-        .map_err(|error| format!("設定を読み取れません: {error}"))?;
-    let update = document
-        .entry("update")
-        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-    let update = update
-        .as_table_mut()
-        .ok_or("設定の update が表ではありません".to_string())?;
-    update["auto"] = toml_edit::value(auto);
-    update["window"] = toml_edit::value(window);
-    write_atomic(config, document.to_string().as_bytes())
+pub(super) fn write_update_settings(
+    paths: &ServerPaths,
+    auto: bool,
+    window: &str,
+) -> Result<(), String> {
+    edit_config(paths, |path| {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("設定を読めません: {error}")),
+        };
+        let mut document: toml_edit::DocumentMut = text
+            .parse()
+            .map_err(|error| format!("設定を読み取れません: {error}"))?;
+        let update = document
+            .entry("update")
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+        let update = update
+            .as_table_mut()
+            .ok_or("設定の update が表ではありません")?;
+        update["auto"] = toml_edit::value(auto);
+        update["window"] = toml_edit::value(window);
+        write_atomic(path, document.to_string().as_bytes())
+    })
 }
 
 /// 当てる前に DB を整合した形で写す。戻すときに使う。
@@ -1005,7 +1004,7 @@ mod tests {
         let (_root, paths) = history_paths();
         let text = "# 上のコメント\nlisten = \"127.0.0.1:1234\"\n\n[update]\n# 時間帯の説明\nauto = true\nwindow = \"03:00-06:00\"\n";
         fs::write(paths.config(), text).unwrap();
-        write_update_settings(&paths.config(), false, "01:30-02:30").unwrap();
+        write_update_settings(&paths, false, "01:30-02:30").unwrap();
         let written = fs::read_to_string(paths.config()).unwrap();
         assert!(written.contains("# 上のコメント"));
         assert!(written.contains("# 時間帯の説明"));
@@ -1019,7 +1018,7 @@ mod tests {
     fn settings_can_be_written_when_the_section_is_missing() {
         let (_root, paths) = history_paths();
         fs::write(paths.config(), "listen = \"127.0.0.1:1234\"\n").unwrap();
-        write_update_settings(&paths.config(), true, "02:00-04:00").unwrap();
+        write_update_settings(&paths, true, "02:00-04:00").unwrap();
         let written = fs::read_to_string(paths.config()).unwrap();
         let config: crate::server::standalone::ServerConfig = toml::from_str(&written).unwrap();
         assert_eq!(config.update.window, "02:00-04:00");

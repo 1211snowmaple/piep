@@ -10,16 +10,16 @@
 //!
 //! 携帯が棚を読む許可（`shelf.readers`）は、管理者が端末ごとに付け外しする。
 
-use super::generations::{activate_locked, generation_path, generations, write_config};
-use super::{load_config, ReaderShelfConfig, ServerConfig, ServerPaths};
+use super::generations::{activate_locked, generation_path, generations};
+use super::{edit_config, load_config, ReaderShelfConfig, ServerConfig, ServerPaths};
 use crate::library::{
     protocol::Id, ContentFile, FileChunk, Fingerprint, Library, LibraryId, ObjectStore,
 };
+use crate::server::durable::write_atomic;
 use piep_storage::StoredEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use toml_edit::{value, DocumentMut, Item, Table};
@@ -413,7 +413,8 @@ impl ShelfShipments {
                 library_id,
             })
             .map_err(|error| ShipError::Internal(error.to_string()))?,
-        )?;
+        )
+        .map_err(ShipError::Internal)?;
         self.set_status(ShipmentStatus {
             state: "receiving".into(),
             shipment_id: Some(id.clone()),
@@ -566,14 +567,9 @@ impl ShelfShipments {
                 };
                 let result = result.and_then(|pending| {
                     let bytes = serde_json::to_vec(&pending).map_err(|error| error.to_string())?;
-                    write_atomic(&paths.root.join(PENDING), &bytes)
-                        .map_err(|error| error.to_string())?;
-                    if let Err(error) = piep_storage::sync_directory(&paths.root) {
-                        log::warn!("棚の切り替えの予約を同期できません: {error}");
-                    } else {
-                        // 予約が残ることを確かめてから受信の置き場を片付ける。
-                        let _ = fs::remove_dir_all(incoming(&paths));
-                    }
+                    write_atomic(&paths.root.join(PENDING), &bytes)?;
+                    // 予約が残ることを確かめてから受信の置き場を片付ける。
+                    let _ = fs::remove_dir_all(incoming(&paths));
                     if let Err(error) = prune_parts(&paths, &keep) {
                         log::warn!("前の台帳の部分を片付けられません: {error:?}");
                     }
@@ -681,8 +677,10 @@ fn write_result(paths: &ServerPaths, id: &str, state: &PublicationState) -> Resu
     let path = result_path(paths, id);
     let bytes =
         serde_json::to_vec(state).map_err(|error| ShipError::Internal(error.to_string()))?;
-    write_atomic(&path, &bytes)?;
-    sync_results(paths)
+    fs::create_dir_all(paths.root.join(RESULTS))?;
+    write_atomic(&path, &bytes).map_err(ShipError::Internal)?;
+    piep_storage::sync_directory(&paths.root)?;
+    Ok(())
 }
 
 fn sync_results(paths: &ServerPaths) -> Result<(), ShipError> {
@@ -693,23 +691,6 @@ fn sync_results(paths: &ServerPaths) -> Result<(), ShipError> {
 
 fn reject(paths: &ServerPaths, id: &str, reason: Rejection) -> Result<(), ShipError> {
     write_result(paths, id, &PublicationState::Rejected { reason })
-}
-
-fn write_atomic(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(".{}.part", uuid::Uuid::now_v7()));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)?;
-    let written = file.write_all(content).and_then(|()| file.sync_all());
-    drop(file);
-    if let Err(error) = written.and_then(|()| fs::rename(&temporary, path)) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    Ok(())
 }
 
 /// 台帳の部分の置き場は受け取りだけが使う（棚の実体ではない）。隔離を挟まずに消してよい。
@@ -881,39 +862,38 @@ fn prune_generations(paths: &ServerPaths, current: Id, previous: Option<&Path>) 
 /// 端末に棚を読む許可を付け外しする（設定の `shelf.readers` に書く）。読む利用者は棚の
 /// 持ち主（デスクトップと同じ利用者）。
 pub fn set_reader(paths: &ServerPaths, device: &str, read: bool) -> Result<Id, String> {
-    static EDIT: Mutex<()> = Mutex::new(());
-    let _edit = EDIT.lock().map_err(|_| "設定を書き換えられません")?;
-    let path = paths.config();
-    let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    let config: ServerConfig = toml::from_str(&text).map_err(|error| error.to_string())?;
-    let owner = config
-        .shelf
-        .as_ref()
-        .map(|settings| settings.library_id)
-        .ok_or("このサーバーはまだ棚を配っていません")?;
-    let mut document: DocumentMut = text
-        .parse()
-        .map_err(|error: toml_edit::TomlError| error.to_string())?;
-    let settings = document
-        .entry("shelf")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_like_mut()
-        .ok_or("棚の配信設定が不正です")?;
-    let readers = settings
-        .entry("readers")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_like_mut()
-        .ok_or("棚の配信設定が不正です")?;
-    if read {
-        readers.insert(device, value(owner.get().to_string()));
-    } else {
-        readers.remove(device);
-    }
-    let written = document.to_string();
-    let next: ServerConfig = toml::from_str(&written).map_err(|error| error.to_string())?;
-    next.validate()?;
-    write_config(paths, written.as_bytes())?;
-    Ok(owner)
+    edit_config(paths, |path| {
+        let text = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        let config: ServerConfig = toml::from_str(&text).map_err(|error| error.to_string())?;
+        let owner = config
+            .shelf
+            .as_ref()
+            .map(|settings| settings.library_id)
+            .ok_or("このサーバーはまだ棚を配っていません")?;
+        let mut document: DocumentMut = text
+            .parse()
+            .map_err(|error: toml_edit::TomlError| error.to_string())?;
+        let settings = document
+            .entry("shelf")
+            .or_insert(Item::Table(Table::new()))
+            .as_table_like_mut()
+            .ok_or("棚の配信設定が不正です")?;
+        let readers = settings
+            .entry("readers")
+            .or_insert(Item::Table(Table::new()))
+            .as_table_like_mut()
+            .ok_or("棚の配信設定が不正です")?;
+        if read {
+            readers.insert(device, value(owner.get().to_string()));
+        } else {
+            readers.remove(device);
+        }
+        let written = document.to_string();
+        let next: ServerConfig = toml::from_str(&written).map_err(|error| error.to_string())?;
+        next.validate()?;
+        write_atomic(path, written.as_bytes())?;
+        Ok(owner)
+    })
 }
 
 #[cfg(test)]

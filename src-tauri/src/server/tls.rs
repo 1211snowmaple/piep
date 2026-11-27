@@ -1,11 +1,14 @@
 //! 待ち受けの TLS。自己署名の証明書は作って置き場に残し、指紋を登録文字列に載せる。
 
+use super::durable::StagedWrite;
 use axum_server::tls_rustls::RustlsConfig;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufReader, Cursor};
 use std::path::Path;
+
+const SELF_SIGNED_RECOVERY: &str = "自己署名の証明書と秘密鍵を両方削除すると、次の起動で作り直します。登録済みの端末は再登録してください";
 
 pub struct TlsMaterial {
     pub config: RustlsConfig,
@@ -41,10 +44,18 @@ pub async fn self_signed(dir: &Path) -> Result<TlsMaterial, String> {
     install_crypto_provider();
     let cert_path = dir.join("certificate.pem");
     let key_path = dir.join("private-key.pem");
-    if cert_path.exists() != key_path.exists() {
-        return Err("サーバーの証明書か秘密鍵が欠けています。登録済みの端末がつながらなくなるので、自動では作り直しません".into());
+    let has_cert = cert_path
+        .try_exists()
+        .map_err(|error| format!("証明書の有無を確かめられません: {error}"))?;
+    let has_key = key_path
+        .try_exists()
+        .map_err(|error| format!("秘密鍵の有無を確かめられません: {error}"))?;
+    if has_cert != has_key {
+        return Err(format!(
+            "サーバーの証明書か秘密鍵が欠けています。{SELF_SIGNED_RECOVERY}"
+        ));
     }
-    let (certificate, private_key) = if cert_path.exists() {
+    let (certificate, private_key) = if has_cert {
         (
             fs::read(&cert_path).map_err(|error| format!("証明書を読めません: {error}"))?,
             fs::read(&key_path).map_err(|error| format!("秘密鍵を読めません: {error}"))?,
@@ -58,16 +69,20 @@ pub async fn self_signed(dir: &Path) -> Result<TlsMaterial, String> {
             signing_key.serialize_pem().into_bytes(),
         );
         fs::create_dir_all(dir).map_err(|error| format!("証明書の置き場を作れません: {error}"))?;
-        fs::write(&cert_path, &pair.0)
-            .map_err(|error| format!("証明書を保存できません: {error}"))?;
-        fs::write(&key_path, &pair.1)
-            .map_err(|error| format!("秘密鍵を保存できません: {error}"))?;
+        let key = StagedWrite::new(&key_path, &pair.1)?;
+        let cert = StagedWrite::new(&cert_path, &pair.0)?;
+        // 両方を同期してから、証明書だけが残らない順で確定する。
+        key.commit()?;
+        cert.commit()?;
         pair
     };
-    let fingerprint = pem_fingerprint(&certificate)?;
+    let fingerprint = pem_fingerprint(&certificate)
+        .map_err(|error| format!("{error}。{SELF_SIGNED_RECOVERY}"))?;
     let config = RustlsConfig::from_pem(certificate, private_key)
         .await
-        .map_err(|error| format!("証明書を読み込めません: {error}"))?;
+        .map_err(|error| {
+            format!("証明書か秘密鍵を読み込めません: {error}。{SELF_SIGNED_RECOVERY}")
+        })?;
     Ok(TlsMaterial {
         config,
         fingerprint: Some(fingerprint),
@@ -84,4 +99,49 @@ pub async fn from_files(cert: &Path, key: &Path) -> Result<TlsMaterial, String> 
         config,
         fingerprint: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::tests::TestRoot;
+
+    #[tokio::test]
+    async fn incomplete_self_signed_files_give_recovery_instructions() {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec!["piep.local".into()]).unwrap();
+        let cert = cert.pem();
+        let key = signing_key.serialize_pem();
+        for (certificate, private_key) in [
+            (None, Some(key.as_bytes())),
+            (Some(cert.as_bytes()), None),
+            (Some(b"".as_slice()), Some(key.as_bytes())),
+            (
+                Some(cert.as_bytes()),
+                Some(b"-----BEGIN PRIVATE KEY-----\n"),
+            ),
+        ] {
+            let root = TestRoot::created("incomplete-tls");
+            for (name, content) in [
+                ("certificate.pem", certificate),
+                ("private-key.pem", private_key),
+            ] {
+                if let Some(content) = content {
+                    fs::write(root.0.join(name), content).unwrap();
+                }
+            }
+            let error = self_signed(&root.0)
+                .await
+                .err()
+                .expect("壊れた組を読み込めた");
+            assert!(
+                error.contains("両方削除すると、次の起動で作り直します"),
+                "{error}"
+            );
+            assert!(
+                error.contains("登録済みの端末は再登録してください"),
+                "{error}"
+            );
+        }
+    }
 }
