@@ -8,7 +8,7 @@ use super::standalone::{
     assemble, command_admin_pair, command_init, run_listener, ServerPaths, StandaloneParts,
 };
 use super::store::{random_token, Role, ServerStore};
-use super::sync_send::{pair_admin, RemoteServer};
+use super::sync_send::{pair_admin, ClientCache, RemoteServer};
 use super::API_VERSION;
 use reqwest::{header, StatusCode};
 use sha2::{Digest, Sha256};
@@ -76,7 +76,7 @@ async fn admin_pairing_checks_the_reply_version_and_role() {
             url,
             fingerprint: None,
         };
-        let result = pair_admin(&remote, "fixture", "試験端末").await;
+        let result = pair_admin(&ClientCache::default(), &remote, "fixture", "試験端末").await;
         assert_eq!(result.is_ok(), accepted, "{version} {role}");
     }
 }
@@ -203,7 +203,7 @@ async fn self_signed_https_requires_pairing_and_revocation_takes_effect() {
     handle.shutdown();
 }
 
-fn spawn_plain(router: axum::Router) -> String {
+pub(super) fn spawn_plain(router: axum::Router) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     listener.set_nonblocking(true).expect("nonblocking");
     let address = listener.local_addr().expect("address");
@@ -215,6 +215,92 @@ fn spawn_plain(router: axum::Router) -> String {
             .expect("serve");
     });
     format!("http://{address}")
+}
+
+#[tokio::test]
+async fn repeated_admin_requests_probe_only_once_per_remote_setting() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = TestRoot::created("desktop-probe");
+    let tls = super::tls::self_signed(&root.0).await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let remote = RemoteServer {
+        url: format!("https://{}", listener.local_addr().unwrap()),
+        fingerprint: tls.fingerprint,
+    };
+    let probes = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&probes);
+    let router = axum::Router::new()
+        .route(
+            "/api/hello",
+            axum::routing::get(move || async move {
+                count.fetch_add(1, Ordering::Relaxed);
+                StatusCode::OK
+            }),
+        )
+        .route(
+            "/api/admin/status",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({ "ready": true })) }),
+        );
+    let serving = tokio::spawn(async move {
+        axum_server::from_tcp_rustls(listener, tls.config)
+            .unwrap()
+            .serve(router.into_make_service())
+            .await
+            .unwrap();
+    });
+    let clients = ClientCache::default();
+    for _ in 0..3 {
+        let status = super::sync_send::admin_get(&clients, &remote, "test", "status")
+            .await
+            .unwrap();
+        assert_eq!(status["ready"], true);
+    }
+    assert_eq!(probes.load(Ordering::Relaxed), 1);
+    let changed = RemoteServer {
+        fingerprint: Some("0".repeat(64)),
+        ..remote.clone()
+    };
+    assert!(
+        super::sync_send::admin_get(&clients, &changed, "test", "status")
+            .await
+            .is_err()
+    );
+    assert_eq!(probes.load(Ordering::Relaxed), 2);
+    assert!(
+        super::sync_send::admin_get(&clients, &remote, "test", "status")
+            .await
+            .is_ok()
+    );
+    assert_eq!(probes.load(Ordering::Relaxed), 3);
+    serving.abort();
+}
+
+#[tokio::test]
+async fn a_hanging_admin_request_has_a_short_timeout() {
+    let remote = RemoteServer {
+        url: spawn_plain(axum::Router::new().route(
+            "/api/admin/shelf/reading",
+            axum::routing::get(std::future::pending::<StatusCode>),
+        )),
+        fingerprint: None,
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(40),
+        super::sync_send::admin_get_if_present(
+            &ClientCache::default(),
+            &remote,
+            "test",
+            "shelf/reading",
+        ),
+    )
+    .await
+    .expect("応答のない要求は短い制限時間で終わる");
+    assert_eq!(
+        result.unwrap_err(),
+        "サーバーの応答が時間内にありませんでした"
+    );
 }
 
 fn standalone(root: &Path) -> (StandaloneParts, ServerPaths) {
@@ -324,9 +410,14 @@ async fn the_public_side_refuses_what_it_should() {
         url: url.clone(),
         fingerprint: None,
     };
-    let token = pair_admin(&remote, &admin_secret(&paths), "test desktop")
-        .await
-        .expect("pair admin");
+    let token = pair_admin(
+        &ClientCache::default(),
+        &remote,
+        &admin_secret(&paths),
+        "test desktop",
+    )
+    .await
+    .expect("pair admin");
 
     // 無認証で答えるのは hello と pair だけ。
     assert_eq!(
@@ -915,6 +1006,7 @@ async fn requests_from_other_sites_and_unknown_hosts_are_refused() {
 
     // 鍵の要求は Cookie を使わないので、この守りを通らない。
     let token = pair_admin(
+        &ClientCache::default(),
         &RemoteServer {
             url: format!("{}/", site.url),
             fingerprint: None,
@@ -941,6 +1033,7 @@ async fn a_link_is_not_issued_where_the_page_is_not_served() {
     let site = AdminSite::new("admin-link-elsewhere");
     site.set_up().await;
     let token = pair_admin(
+        &ClientCache::default(),
         &RemoteServer {
             url: format!("{}/", site.url),
             fingerprint: None,
@@ -983,6 +1076,7 @@ async fn the_name_the_desktop_issued_a_link_for_opens_the_page() {
     let site = AdminSite::new("admin-host-learn");
     site.set_up().await;
     let token = pair_admin(
+        &ClientCache::default(),
         &RemoteServer {
             url: format!("{}/", site.url),
             fingerprint: None,
@@ -1071,6 +1165,7 @@ async fn the_name_the_desktop_issued_a_link_for_opens_the_page() {
 async fn tickets_come_only_from_the_key_and_important_actions_ask_again() {
     let site = AdminSite::new("admin-ticket");
     let token = pair_admin(
+        &ClientCache::default(),
         &RemoteServer {
             url: format!("{}/", site.url),
             fingerprint: None,
@@ -1310,6 +1405,7 @@ async fn about_is_for_registered_devices_and_hello_stays_silent_about_the_versio
         StatusCode::UNAUTHORIZED
     );
     let token = pair_admin(
+        &ClientCache::default(),
         &RemoteServer {
             url: format!("{}/", site.url),
             fingerprint: None,
@@ -1436,10 +1532,15 @@ async fn pairing_secrets_and_library_bodies_are_not_forwarded_to_redirects() {
             url,
             fingerprint: None,
         };
-        assert!(pair_admin(&remote, "one-time-secret", "desktop")
-            .await
-            .is_err());
-        let client = super::sync_send::build_client(&remote).await.unwrap();
+        assert!(pair_admin(
+            &ClientCache::default(),
+            &remote,
+            "one-time-secret",
+            "desktop"
+        )
+        .await
+        .is_err());
+        let client = ClientCache::default().client(&remote).await.unwrap();
         let response = client
             .put(format!(
                 "{}/api/admin/shelf/shipments/s/chunks/c",
