@@ -539,7 +539,18 @@ async fn admin_status(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
 ) -> Result<Json<AdminStatus>, ApiError> {
-    require_admin(&ctx, &headers)?;
+    let status_ctx = Arc::clone(&ctx);
+    let (devices, server_name, admin_web) = tokio::task::spawn_blocking(move || {
+        require_admin(&status_ctx, &headers)?;
+        let devices = device_rows(&status_ctx)?;
+        Ok::<_, ApiError>((
+            devices,
+            status_ctx.store.server_name(),
+            admin_web_state(&status_ctx),
+        ))
+    })
+    .await
+    .map_err(|_| ApiError::internal())??;
     let shelf = if let Some(shelf) = ctx.reader_shelf.get().cloned() {
         Some(
             tokio::task::spawn_blocking(move || shelf.shelf_status())
@@ -553,7 +564,6 @@ async fn admin_status(
     } else {
         None
     };
-    let devices = device_rows(&ctx)?;
     Ok(Json(AdminStatus {
         version: super::update::VERSION,
         api_version: API_VERSION,
@@ -561,9 +571,9 @@ async fn admin_status(
         devices,
         public_url: ctx.public_url.clone(),
         update: ctx.update.get().map(|controller| controller.status()),
-        server_name: ctx.store.server_name(),
+        server_name,
         started_at: ctx.started_at.clone(),
-        admin_web: admin_web_state(&ctx),
+        admin_web,
         shelf_pending: ctx.shipments.get().map(|shipments| shipments.pending()),
         shipment: ctx.shipments.get().map(|shipments| shipments.status()),
     }))
@@ -672,8 +682,12 @@ async fn admin_devices(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
-    require_admin(&ctx, &headers)?;
-    Ok(Json(device_rows(&ctx)?))
+    tokio::task::spawn_blocking(move || {
+        require_admin(&ctx, &headers)?;
+        device_rows(&ctx).map(Json)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
 }
 
 /// 端末の一覧。棚を配っているサーバーだけ、携帯ごとに棚を読めるかを添える。
