@@ -155,6 +155,53 @@ fn the_index_follows_saves_tags_and_removals_and_rebuilds_when_lost() {
 }
 
 #[test]
+fn a_corrupt_index_invalidates_its_generation_and_rebuilds() {
+    for (open_before_sync, remove_meta) in [(true, false), (false, false), (false, true)] {
+        let temp =
+            Temp(std::env::temp_dir().join(format!("piep-search-corrupt-{}", LibraryId::now_v7())));
+        let library = Library::create(&temp.0).unwrap();
+        let work = library
+            .capture(capture("1", "一", "林檎の話を書く", 1_000))
+            .unwrap()
+            .entity_id;
+        let mut quiet = |_: usize, _: usize| {};
+        library.sync_search_index(&mut quiet).unwrap();
+        assert_eq!(found(&library, "林檎"), vec![work]);
+        let storage = library.search_storage();
+        let index_root = storage.join("search-index");
+        let marker_path = tantivy_index::generation_path(&storage);
+        let generation = std::fs::read(&marker_path).unwrap();
+
+        tantivy_index::release_runtime(&storage);
+        let meta_path = index_root
+            .join(tantivy_index::index_format_version())
+            .join("meta.json");
+        if remove_meta {
+            std::fs::remove_file(meta_path).unwrap();
+        } else {
+            std::fs::write(meta_path, b"{").unwrap();
+        }
+        if open_before_sync {
+            // 検索が先に索引を開いた場合も、次の同期で作り直す。
+            assert!(found(&library, "林檎").is_empty());
+            assert!(!marker_path.exists(), "壊れた索引の世代が残っている");
+        }
+
+        let rebuilt = library.sync_search_index(&mut quiet).unwrap();
+        assert!(rebuilt.reset);
+        assert_eq!(rebuilt.indexed, 1);
+        assert!(!rebuilt.history.reset);
+        assert_ne!(std::fs::read(&marker_path).unwrap(), generation);
+        assert_eq!(found(&library, "林檎"), vec![work]);
+        tantivy_index::release_runtime(&storage);
+        assert_eq!(
+            library.sync_search_index(&mut quiet).unwrap(),
+            SearchIndexReport::default()
+        );
+    }
+}
+
+#[test]
 fn search_results_page_by_relevance_and_combine_with_filters_and_sorts() {
     use crate::library::{UserStateChange, WorkFilter, WorkSort};
     let temp = Temp(std::env::temp_dir().join(format!("piep-search-list-{}", LibraryId::now_v7())));
