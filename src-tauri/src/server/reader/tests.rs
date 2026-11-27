@@ -1992,9 +1992,10 @@ async fn reading_write_from_another_scope_cannot_change_the_shelf() {
 async fn reading_positions_are_written_once_refuse_stale_generations_and_come_back_as_changes() {
     let server = Server::start().await;
     let mut paged = capture("north", None);
-    paged.body = Some(crate::library::SourceBody::PixivText(
-        "一[newpage]二".into(),
-    ));
+    let line = "あ".repeat(piep_reader_render::pages::READER_PAGE_TARGET_BYTES / 4);
+    paged.body = Some(crate::library::SourceBody::PixivText(format!(
+        "{line}\n{line}"
+    )));
     let north = save(&server.library, paged);
     let south = save(&server.library, capture("south", None));
     let epoch = server.context.sync_epoch.get();
@@ -2007,7 +2008,7 @@ async fn reading_positions_are_written_once_refuse_stale_generations_and_come_ba
 
     // 一度目で書け、同じ要求を送り直しても世代は進まない。
     let request = uuid::Uuid::now_v7().to_string();
-    let body = json!({"requestId": request, "expected": "0", "location": at(north.snapshot_id, 1, 500_000), "finished": false});
+    let body = json!({"requestId": request, "expected": "0", "location": at(north.snapshot_id, 1, 500_000), "finished": true});
     for _ in 0..2 {
         let stored: piep_mobile_api::MobileReading = server
             .reading_as(north.entity_id, body.clone(), "fixture")
@@ -2020,7 +2021,7 @@ async fn reading_positions_are_written_once_refuse_stale_generations_and_come_ba
             .await
             .unwrap();
         assert_eq!(stored.generation, "1");
-        assert!(stored.mine && !stored.finished);
+        assert!(stored.mine && stored.finished);
         assert_eq!(
             stored.location,
             Some(piep_mobile_api::MobileReadingLocation {
@@ -2073,14 +2074,27 @@ async fn reading_positions_are_written_once_refuse_stale_generations_and_come_ba
         "invalid_reading_location"
     );
 
-    // 本文に無いページ・別の作品の版・形の崩れ・知らない作品・権限の無い端末は断る。
     let fresh = || uuid::Uuid::now_v7().to_string();
+    // ページの範囲は、指定された版を読書画面と同じように分割して確かめる。
+    for page in [2, 1_000_001] {
+        let response = server
+            .reading_as(
+                north.entity_id,
+                json!({"requestId": fresh(), "expected": "1", "location": at(north.snapshot_id, page, 0), "finished": false}),
+                "fixture",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.json::<serde_json::Value>().await.unwrap()["code"],
+            "invalid_reading_location"
+        );
+    }
+
+    // 別の作品の版・形の崩れ・知らない作品・権限の無い端末は断る。
     for (work, body, status) in [
-        (
-            north.entity_id,
-            json!({"requestId": fresh(), "expected": "1", "location": at(north.snapshot_id, 2, 0), "finished": false}),
-            StatusCode::BAD_REQUEST,
-        ),
         (
             north.entity_id,
             json!({"requestId": fresh(), "expected": "1", "location": at(south.snapshot_id, 0, 0), "finished": false}),
@@ -2155,6 +2169,7 @@ async fn reading_positions_are_written_once_refuse_stale_generations_and_come_ba
                 },
             }),
             finished: true,
+            reader_pages: Some(1),
         })
         .unwrap();
     let changes = server.reading_page(&empty.cursor, 200, "fixture").await;
@@ -2284,6 +2299,7 @@ async fn phone_positions_and_favorites_on_the_served_copy_come_back_to_the_deskt
                     expected,
                     location: Some(location),
                     finished: false,
+                    reader_pages: Some(2),
                 })
                 .unwrap()
         };

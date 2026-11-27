@@ -9,8 +9,8 @@
 
 use super::{
     store::{regular_directory, sync_directory},
-    Error, FileChunk, Fingerprint, Library, LibraryId, ObjectStore, ReadingPosition, ReadingUpdate,
-    Result,
+    Error, FileChunk, Fingerprint, Library, LibraryId, ObjectStore, ReadingAnchor, ReadingLocation,
+    ReadingPosition, ReadingUpdate, ResourceScope, Result,
 };
 use rusqlite::{Connection, OpenFlags};
 use std::collections::{BTreeMap, HashSet};
@@ -170,6 +170,9 @@ impl Library {
     /// 変えていなければ（`Some(false)`）ほかの写しの位置を写す。両方で変えた・分からないときだけ、
     /// 書いた時刻の新しいほうにする（機械ごとの時計のずれは、この食い違いのときだけ効く）。
     /// 写したら真。
+    ///
+    /// `count_pages` は、ページの位置を写す前に読む画面のページ数を数える（ほかの機械の棚から
+    /// 写すとき）。None は同じ棚の写しで、書いたときにそのページ数で確かめてある。
     pub fn adopt_reading(
         &self,
         work: LibraryId,
@@ -177,6 +180,7 @@ impl Library {
         other: &ReadingPosition,
         skip_device: Option<LibraryId>,
         here: Option<bool>,
+        count_pages: Option<&dyn Fn(ResourceScope) -> Result<usize>>,
     ) -> Result<bool> {
         let Some(device) = other.device else {
             return Ok(false);
@@ -194,15 +198,37 @@ impl Library {
         if here != Some(false) && other.updated_at.unwrap_or(0) <= local.updated_at.unwrap_or(0) {
             return Ok(false);
         }
-        match self.set_reading_position(ReadingUpdate {
-            request: adopted_request(),
-            work,
-            user,
-            device,
-            expected: local.generation,
-            location: other.location.clone(),
-            finished: other.finished,
-        }) {
+        let paged = match &other.location {
+            Some(ReadingLocation::Source {
+                snapshot,
+                anchor: ReadingAnchor::Page { .. },
+            }) => Some(ResourceScope::Snapshot(*snapshot)),
+            Some(ReadingLocation::Edit {
+                edit,
+                anchor: ReadingAnchor::Page { .. },
+            }) => Some(ResourceScope::Edit(*edit)),
+            _ => None,
+        };
+        let written = (|| {
+            let reader_pages = match (paged, count_pages) {
+                (Some(scope), Some(count)) => Some(count(scope)?),
+                _ => None,
+            };
+            self.write_reading_position(
+                ReadingUpdate {
+                    request: adopted_request(),
+                    work,
+                    user,
+                    device,
+                    expected: local.generation,
+                    location: other.location.clone(),
+                    finished: other.finished,
+                    reader_pages,
+                },
+                true,
+            )
+        })();
+        match written {
             Ok(_) => Ok(true),
             // 本文に無い位置（この棚では別の版）や、いま書かれた位置との食い違い。写さない。
             Err(
@@ -317,7 +343,7 @@ impl Library {
                         continue;
                     };
                     let position = older.reading_position(work, user)?;
-                    if self.adopt_reading(work, user, &position, None, Some(both))? {
+                    if self.adopt_reading(work, user, &position, None, Some(both), None)? {
                         positions += 1;
                     }
                 }
