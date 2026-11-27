@@ -2,7 +2,7 @@
 //!
 //! 外へどう出すかは利用者が決める。特定の製品を検出も実行もしない。
 
-use super::durable::write_atomic;
+use super::durable::{write_atomic, StagedWrite};
 use super::standalone::{command_admin_pair, create_config, ServerPaths};
 use super::store::ServerStore;
 use super::update::{current_version, VERSION};
@@ -12,6 +12,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
 const TASK_NAME: &str = "piep-server";
 const DEFAULT_PORT_TEXT: &str = "38777";
@@ -233,63 +234,103 @@ fn same_file(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// 自分と DLL を `versions\<版>\` と置き場の直下へ写す。
-fn place_programs(paths: &ServerPaths) -> Result<(), String> {
+struct FileChange {
+    target: PathBuf,
+    replacement: Option<StagedWrite>,
+}
+
+impl FileChange {
+    fn prepare(
+        target: PathBuf,
+        stage: impl FnOnce(&Path) -> Result<Option<StagedWrite>, String>,
+    ) -> Result<Self, String> {
+        file_exists(&target)?;
+        let replacement = stage(&target)?;
+        Ok(Self {
+            target,
+            replacement,
+        })
+    }
+}
+
+fn file_exists(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.permissions().readonly() => Ok(true),
+        Ok(_) => Err(format!(
+            "{} は差し替えられるファイルではありません",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("{} を調べられません: {error}", path.display())),
+    }
+}
+
+/// 動いている実行物に触れず、差し替える内容を同じディレクトリへ書いておく。
+fn prepare_programs(paths: &ServerPaths) -> Result<Vec<FileChange>, String> {
+    check_install_transitions(paths)?;
     let executable =
         std::env::current_exe().map_err(|error| format!("自分の場所が分かりません: {error}"))?;
-    let source = executable
-        .parent()
-        .ok_or("自分の場所が分かりません")?
-        .to_path_buf();
+    let source = executable.parent().ok_or("自分の場所が分かりません")?;
     let version_dir = paths.version_dir(VERSION);
     fs::create_dir_all(&version_dir).map_err(|error| format!("置き場を作れません: {error}"))?;
-    clear_install_transitions(paths)?;
+    let mut changes = Vec::new();
+    for path in [paths.pending_version(), paths.previous_version()] {
+        changes.push(FileChange::prepare(path, |_| Ok(None))?);
+    }
     for target in [&version_dir, &paths.root] {
-        remove_stale_dlls(target, &source)?;
+        for path in stale_dlls(target, source)? {
+            changes.push(FileChange::prepare(path, |_| Ok(None))?);
+        }
         let destination = target.join("piep-server.exe");
         if !same_file(&executable, &destination) {
-            fs::copy(&executable, &destination)
-                .map_err(|error| format!("{} へ写せません: {error}", destination.display()))?;
+            changes.push(FileChange::prepare(destination, |path| {
+                StagedWrite::copy_from(path, &executable).map(Some)
+            })?);
         }
         for name in COMPANION_FILES {
             let from = source.join(name);
             let to = target.join(name);
             // 同梱されていない組み立てでは、機械に入っているものを使う。
-            if from.exists() && !same_file(&from, &to) {
-                fs::copy(&from, &to)
-                    .map_err(|error| format!("{} へ写せません: {error}", to.display()))?;
+            if from
+                .try_exists()
+                .map_err(|error| format!("{} を調べられません: {error}", from.display()))?
+                && !same_file(&from, &to)
+            {
+                changes.push(FileChange::prepare(to, |path| {
+                    StagedWrite::copy_from(path, &from).map(Some)
+                })?);
             }
         }
     }
-    write_atomic(&paths.current_version(), VERSION.as_bytes())
+    changes.push(FileChange::prepare(paths.current_version(), |path| {
+        StagedWrite::new(path, VERSION.as_bytes()).map(Some)
+    })?);
+    Ok(changes)
 }
 
 /// 再導入では、アクセス権を塞ぐ前からあった版の指示を信頼しない。
 /// 動かすのは今回配置する版だけで、待機中や戻し中の実行ファイルを起動させない。
-fn clear_install_transitions(paths: &ServerPaths) -> Result<(), String> {
+fn check_install_transitions(paths: &ServerPaths) -> Result<(), String> {
     // 保護された既存の置き場では、戻しの印はDB復旧に必要な状態である。
     // 再導入で消して部分的な復元を隠さず、見張り役による復旧を先に済ませる。
-    if ["rollback-version", "requested-rollback-version"]
-        .iter()
-        .any(|name| paths.state().join(name).exists())
-    {
-        return Err(
-            "前のバージョンへの復旧が残っています。serve で復旧を完了してから入れ直してください"
-                .into(),
-        );
-    }
-    for path in [paths.pending_version(), paths.previous_version()] {
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("前の版の指示を片付けられません: {error}")),
+    for name in ["rollback-version", "requested-rollback-version"] {
+        let path = paths.state().join(name);
+        if path
+            .try_exists()
+            .map_err(|error| format!("{} を調べられません: {error}", path.display()))?
+        {
+            return Err(
+                "前のバージョンへの復旧が残っています。serve で復旧を完了してから入れ直してください"
+                    .into(),
+            );
         }
     }
     Ok(())
 }
 
 /// DLL の残骸を昇格後の本体に読み込ませない。今回の配布元にある既知の DLL だけを残す。
-fn remove_stale_dlls(target: &Path, source: &Path) -> Result<(), String> {
+fn stale_dlls(target: &Path, source: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut stale = Vec::new();
     for entry in fs::read_dir(target).map_err(|error| format!("実行物を調べられません: {error}"))?
     {
         let entry = entry.map_err(|error| error.to_string())?;
@@ -305,11 +346,69 @@ fn remove_stale_dlls(target: &Path, source: &Path) -> Result<(), String> {
             .iter()
             .any(|allowed| name.eq_ignore_ascii_case(allowed) && source.join(allowed).is_file());
         if !supplied {
-            fs::remove_file(path)
-                .map_err(|error| format!("以前の DLL を片付けられません: {error}"))?;
+            stale.push(path);
         }
     }
-    Ok(())
+    Ok(stale)
+}
+
+/// 停止後に差し替えたファイルを、起動を確認するまで退避しておく。
+#[derive(Default)]
+struct PlacedFiles {
+    backups: Vec<(PathBuf, Option<PathBuf>)>,
+}
+
+impl PlacedFiles {
+    fn apply(&mut self, changes: Vec<FileChange>) -> Result<(), String> {
+        for FileChange {
+            target,
+            replacement,
+        } in changes
+        {
+            let backup = if file_exists(&target)? {
+                let backup = target.with_file_name(format!(".{}.install-backup", Uuid::now_v7()));
+                fs::rename(&target, &backup)
+                    .map_err(|error| format!("{} を退避できません: {error}", target.display()))?;
+                Some(backup)
+            } else {
+                None
+            };
+            self.backups.push((target, backup));
+            if let Some(replacement) = replacement {
+                replacement.commit()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn restore(self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (target, backup) in self.backups.into_iter().rev() {
+            let result = match backup {
+                Some(backup) => fs::rename(backup, &target),
+                None => remove_if_exists(&target),
+            };
+            if let Err(error) = result {
+                errors.push(format!("{} を元に戻せません: {error}", target.display()));
+            }
+        }
+        errors
+    }
+
+    fn finish(self) {
+        for (_, backup) in self.backups {
+            if let Some(backup) = backup {
+                let _ = fs::remove_file(backup);
+            }
+        }
+    }
+}
+
+fn remove_if_exists(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 fn run_quiet(program: &str, args: &[&str]) -> Result<(), String> {
@@ -364,21 +463,70 @@ fn stop_task() {
 }
 
 #[cfg(windows)]
-fn register_task(paths: &ServerPaths) -> Result<(), String> {
-    let xml = task_xml(&paths.root);
-    let file = paths.state().join("task.xml");
-    // schtasks は UTF-16 の XML を読む。
-    let mut bytes = vec![0xFF, 0xFE];
-    bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
-    fs::write(&file, bytes).map_err(|error| format!("タスクの定義を書けません: {error}"))?;
-    let file_text = file.display().to_string();
-    let registered = run_quiet(
-        "schtasks",
-        &["/Create", "/TN", TASK_NAME, "/XML", &file_text, "/F"],
-    );
-    let _ = fs::remove_file(&file);
-    registered?;
+fn start_task() -> Result<(), String> {
     run_quiet("schtasks", &["/Run", "/TN", TASK_NAME])
+}
+
+#[cfg(windows)]
+struct TaskDefinition(PathBuf);
+
+#[cfg(windows)]
+impl TaskDefinition {
+    fn prepare(paths: &ServerPaths, xml: &str) -> Result<Self, String> {
+        let file = Self(paths.state().join(format!(".{}.xml", Uuid::now_v7())));
+        // schtasks は UTF-16 の XML を読む。
+        let mut bytes = vec![0xFF, 0xFE];
+        bytes.extend(xml.encode_utf16().flat_map(u16::to_le_bytes));
+        write_atomic(&file.0, &bytes)?;
+        Ok(file)
+    }
+
+    fn create(&self) -> Result<(), String> {
+        let file = self.0.display().to_string();
+        run_quiet(
+            "schtasks",
+            &["/Create", "/TN", TASK_NAME, "/XML", &file, "/F"],
+        )
+    }
+}
+
+#[cfg(windows)]
+impl Drop for TaskDefinition {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// 未登録と照会の失敗を区別し、既存登録があれば復元できるようにする。
+#[cfg(windows)]
+fn previous_task(paths: &ServerPaths) -> Result<Option<TaskDefinition>, String> {
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+$scheduler = New-Object -ComObject 'Schedule.Service'
+$scheduler.Connect()
+foreach ($task in $scheduler.GetFolder('\').GetTasks(1)) {{
+    if ($task.Name -eq '{TASK_NAME}') {{
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        [Console]::Write($task.Xml)
+        break
+    }}
+}}
+"#
+    );
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|error| format!("以前のタスクを調べられません: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("以前のタスクを調べられません（{}）", output.status));
+    }
+    if output.stdout.is_empty() {
+        return Ok(None);
+    }
+    let xml = std::str::from_utf8(&output.stdout)
+        .map_err(|error| format!("以前のタスクの定義を読めません: {error}"))?;
+    TaskDefinition::prepare(paths, xml).map(Some)
 }
 
 /// 本体が `hello` を通すまで待つ。
@@ -409,8 +557,7 @@ fn pause_if_own_window(interactive: bool) {
     }
 }
 
-/// 置き場・設定・プログラムを整える。タスクには触らない。
-pub fn lay_out(
+fn prepare_layout(
     root: &Path,
     exposure: Option<Exposure>,
     url: Option<&str>,
@@ -422,8 +569,80 @@ pub fn lay_out(
         let url = url.ok_or("URL が決まっていません")?;
         Ok(config_text(exposure, url))
     })?;
-    place_programs(&paths)?;
     Ok(paths)
+}
+
+/// 置き場・設定・プログラムを整える。タスクには触らない。
+pub fn lay_out(
+    root: &Path,
+    exposure: Option<Exposure>,
+    url: Option<&str>,
+) -> Result<ServerPaths, String> {
+    let paths = prepare_layout(root, exposure, url)?;
+    let changes = prepare_programs(&paths)?;
+    let mut placed = PlacedFiles::default();
+    if let Err(error) = placed.apply(changes) {
+        let mut errors = vec![error];
+        errors.extend(placed.restore());
+        return Err(errors.join("\n"));
+    }
+    placed.finish();
+    Ok(paths)
+}
+
+#[cfg(windows)]
+async fn install_scheduled(
+    paths: &ServerPaths,
+    find_previous: impl FnOnce(&ServerPaths) -> Result<Option<TaskDefinition>, String>,
+    mut stop: impl AsyncFnMut(),
+) -> Result<(), String> {
+    let mut changes = prepare_programs(paths)?;
+    changes.push(FileChange::prepare(paths.ready_mark(), |_| Ok(None))?);
+    let task = TaskDefinition::prepare(paths, &task_xml(&paths.root))?;
+    let previous = find_previous(paths)?;
+    if previous.is_some() {
+        stop().await;
+    }
+
+    let mut placed = PlacedFiles::default();
+    let mut registered = false;
+    let result = async {
+        // 準備中に見張り役が戻しを始めていたら、その印を保護したまま再起動する。
+        check_install_transitions(paths)?;
+        placed.apply(changes)?;
+        task.create()?;
+        registered = true;
+        start_task()?;
+        wait_for_ready(paths).await
+    }
+    .await;
+    let Err(error) = result else {
+        placed.finish();
+        return Ok(());
+    };
+
+    if registered {
+        stop().await;
+    }
+    let mut errors = vec![error];
+    errors.extend(placed.restore());
+    if let Some(previous) = previous {
+        let restarted = (|| {
+            if registered {
+                previous.create()?;
+            }
+            start_task()
+        })();
+        match restarted {
+            Ok(()) => errors.push("以前のサーバーの起動タスクを再実行しました".into()),
+            Err(error) => errors.push(format!("以前のサーバーを再起動できません: {error}")),
+        }
+    } else if registered {
+        if let Err(error) = run_quiet("schtasks", &["/Delete", "/TN", TASK_NAME, "/F"]) {
+            errors.push(format!("新しい起動タスクを片付けられません: {error}"));
+        }
+    }
+    Err(errors.join("\n"))
 }
 
 /// 入れ終わったときに見せるもの。
@@ -441,14 +660,20 @@ async fn install_inner(options: InstallOptions) -> Result<Option<InstallDone>, S
     let no_task = options.no_task;
     let (root, exposure, url) = complete_options(options)?;
     validate_install_directory(&root)?;
-    if !no_task {
+    let paths = if no_task {
+        lay_out(&root, exposure, url.as_deref())?
+    } else {
         // 断るなら、動いているサーバーを止める前に断る。
         super::install_acl::secure_install_root(&root)?;
-        stop_task();
-        // 止まって実行ファイルが解放されるのを少し待つ。
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-    let paths = lay_out(&root, exposure, url.as_deref())?;
+        let paths = prepare_layout(&root, exposure, url.as_deref())?;
+        install_scheduled(&paths, previous_task, async || {
+            stop_task();
+            // 止まって実行ファイルが解放されるのを少し待つ。
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        })
+        .await?;
+        paths
+    };
     if no_task {
         println!();
         println!("置きました。次のコマンドを、お使いの仕組みで起動時に動かしてください。");
@@ -459,9 +684,6 @@ async fn install_inner(options: InstallOptions) -> Result<Option<InstallDone>, S
         );
         println!("SYSTEM など管理者の権限で動かすときは、このフォルダーを管理者だけが書き換えられるようにしてください。");
     } else {
-        let _ = fs::remove_file(paths.ready_mark());
-        register_task(&paths)?;
-        wait_for_ready(&paths).await?;
         println!();
         println!("動き始めました。この PC を起動すると、自動で動きます。");
     }
@@ -682,13 +904,15 @@ mod tests {
         for name in ["rollback-version", "requested-rollback-version"] {
             let marker = paths.state().join(name);
             fs::write(&marker, b"9.9.9").unwrap();
-            assert!(clear_install_transitions(&paths).is_err());
+            assert!(prepare_programs(&paths).is_err());
             assert!(marker.exists());
             assert!(paths.pending_version().exists());
             assert!(paths.previous_version().exists());
             fs::remove_file(marker).unwrap();
         }
-        clear_install_transitions(&paths).unwrap();
+        let mut placed = PlacedFiles::default();
+        placed.apply(prepare_programs(&paths).unwrap()).unwrap();
+        placed.finish();
         assert!(current_version(&paths).is_some());
         for path in [paths.pending_version(), paths.previous_version()] {
             assert!(!path.exists());
@@ -703,10 +927,83 @@ mod tests {
         fs::write(target.join("vcruntime140.dll"), b"not supplied").unwrap();
         fs::write(target.join("unknown.DLL"), b"not in the package").unwrap();
         fs::write(target.join("notes.txt"), b"keep").unwrap();
-        remove_stale_dlls(&target, &source).unwrap();
+        let changes = stale_dlls(&target, &source)
+            .unwrap()
+            .into_iter()
+            .map(|path| FileChange::prepare(path, |_| Ok(None)).unwrap())
+            .collect();
+        let mut placed = PlacedFiles::default();
+        placed.apply(changes).unwrap();
+        placed.finish();
         assert!(target.join("pdfium.dll").is_file());
         assert!(!target.join("vcruntime140.dll").exists());
         assert!(!target.join("unknown.DLL").exists());
         assert_eq!(fs::read(target.join("notes.txt")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn refused_reinstalls_leave_the_old_task_running() {
+        let dir = crate::server::tests::TestRoot::created("reinstall_refused");
+        let paths = ServerPaths::new(&dir.0).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        let marker = paths.state().join("rollback-version");
+        write_atomic(&marker, b"1.1.0").unwrap();
+        write_atomic(&paths.pending_version(), b"1.1.0").unwrap();
+        let existing_task =
+            |paths: &ServerPaths| Ok(Some(TaskDefinition(paths.state().join("test-task.xml"))));
+        let stop = async || panic!("準備に失敗したのにタスクを止めようとした");
+
+        let error = install_scheduled(&paths, existing_task, stop)
+            .await
+            .unwrap_err();
+        assert!(error.contains("前のバージョンへの復旧が残っています"));
+        assert!(marker.exists());
+        assert!(paths.pending_version().exists());
+
+        fs::remove_file(marker).unwrap();
+        fs::create_dir(paths.root.join("stale.dll")).unwrap();
+        let error = install_scheduled(&paths, existing_task, stop)
+            .await
+            .unwrap_err();
+        assert!(error.contains("stale.dll"));
+        assert!(error.contains("差し替えられるファイルではありません"));
+        assert!(paths.pending_version().exists());
+    }
+
+    #[test]
+    fn a_failed_placement_restores_replaced_and_removed_files() {
+        let dir = crate::server::tests::TestRoot::created("reinstall_restore");
+        let removed = dir.0.join("previous-version");
+        let replaced = dir.0.join("current-version");
+        let added = dir.0.join("piep-server.exe");
+        let blocked = dir.0.join("pending-version");
+        write_atomic(&removed, b"1.0.0").unwrap();
+        write_atomic(&replaced, b"1.1.0").unwrap();
+        let changes = vec![
+            FileChange::prepare(removed.clone(), |_| Ok(None)).unwrap(),
+            FileChange::prepare(replaced.clone(), |path| {
+                StagedWrite::new(path, b"1.2.0").map(Some)
+            })
+            .unwrap(),
+            FileChange::prepare(added.clone(), |path| {
+                StagedWrite::new(path, b"new").map(Some)
+            })
+            .unwrap(),
+            FileChange::prepare(blocked.clone(), |_| Ok(None)).unwrap(),
+        ];
+        // 準備が済んだ後に、差し替え先を使えなくする。
+        fs::create_dir(&blocked).unwrap();
+        let mut placed = PlacedFiles::default();
+        assert!(placed.apply(changes).is_err());
+        assert_eq!(fs::read(&replaced).unwrap(), b"1.2.0");
+        assert!(!removed.exists());
+        assert!(added.exists());
+        assert!(placed.restore().is_empty());
+        assert_eq!(fs::read(removed).unwrap(), b"1.0.0");
+        assert_eq!(fs::read(replaced).unwrap(), b"1.1.0");
+        assert!(!added.exists());
+        assert!(blocked.is_dir());
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 3);
     }
 }
