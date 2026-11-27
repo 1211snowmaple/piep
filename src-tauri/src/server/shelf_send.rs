@@ -9,19 +9,21 @@ use super::standalone::shipment::{
     MAX_QUERY_CHUNKS,
 };
 use super::sync_send::{
-    build_client, check_status, net_error, normalized_base, RemoteServer, SendHandle,
+    check_status, net_error, normalized_base, ClientCache, RemoteServer, SendHandle, CANCELED,
 };
 use crate::library::{protocol::Id, FileChunk, Library, ObjectStore};
-use futures_util::{stream, StreamExt};
+use futures_util::{stream, TryStreamExt};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Notify;
 
 const PARALLEL_UPLOADS: usize = 4;
 const CHUNK_RETRIES: usize = 3;
+const CHUNK_UPLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// 棚が公開されるまで、この間を置いて進み具合を尋ねる。
 const STATUS_POLL: Duration = Duration::from_secs(2);
 /// 公開待ちや再起動を待つ時間。組み立てにかかる時間は含まない。
@@ -47,6 +49,20 @@ struct Shipper {
     base: String,
     token: String,
     handle: SendHandle,
+}
+
+struct SnapshotDirectory {
+    path: PathBuf,
+    removed: Arc<Notify>,
+}
+
+impl Drop for SnapshotDirectory {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.path) {
+            log::warn!("棚の送信に使った写しを消せません: {error}");
+        }
+        self.removed.notify_one();
+    }
 }
 
 impl Shipper {
@@ -97,13 +113,13 @@ impl Shipper {
     ) -> Result<(), String> {
         let mut last_error = String::new();
         for attempt in 0..CHUNK_RETRIES {
-            self.handle.check_cancel()?;
             if attempt > 0 {
                 tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
             }
             let sent = self
                 .client
                 .put(self.url(&format!("/{shipment}/chunks/{}", chunk.id)))
+                .timeout(CHUNK_UPLOAD_TIMEOUT)
                 .query(&[("length", chunk.length)])
                 .bearer_auth(&self.token)
                 .body(body.clone())
@@ -160,30 +176,55 @@ fn receivable(status: &ShipmentStatus) -> Result<(), String> {
 }
 
 /// 棚の写しを作って送り、その送信の棚が公開されるまで待つ。
-pub async fn send_shelf(
+pub(super) async fn send_shelf(
+    clients: &ClientCache,
     remote: &RemoteServer,
     token: &str,
     library: Arc<Library>,
     outgoing: &Path,
     handle: &SendHandle,
 ) -> Result<ShelfSent, String> {
-    let shipper = Arc::new(Shipper {
-        client: build_client(remote).await?,
-        base: normalized_base(&remote.url),
-        token: token.to_string(),
-        handle: handle.clone(),
-    });
-    // 写しを作る前に、サーバーがこの棚の版を扱えるかを確かめる。
-    receivable(&shipper.status().await?)?;
-    handle.update(|progress| progress.phase = "snapshot".into());
     if outgoing.exists() {
         fs::remove_dir_all(outgoing).map_err(|error| format!("前の写しを消せません: {error}"))?;
     }
     fs::create_dir_all(outgoing).map_err(|error| format!("写しの置き場を作れません: {error}"))?;
-    let snapshot = outgoing.join("library.db");
+    let removed = Arc::new(Notify::new());
+    let snapshot = Arc::new(SnapshotDirectory {
+        path: outgoing.to_path_buf(),
+        removed: Arc::clone(&removed),
+    });
+    let result = tokio::select! {
+        biased;
+        () = handle.canceled() => Err(CANCELED.into()),
+        result = async move {
+            let shipper = Shipper {
+                client: clients.client(remote).await?,
+                base: normalized_base(&remote.url),
+                token: token.to_string(),
+                handle: handle.clone(),
+            };
+            ship_shelf(&shipper, library, snapshot).await
+        } => result,
+    };
+    // 送信を打ち切ったときも、始まった台帳の読み書きが終わってから写しを消す。
+    removed.notified().await;
+    result
+}
+
+async fn ship_shelf(
+    shipper: &Shipper,
+    library: Arc<Library>,
+    snapshot: Arc<SnapshotDirectory>,
+) -> Result<ShelfSent, String> {
+    // 写しを作る前に、サーバーがこの棚の版を扱えるかを確かめる。
+    receivable(&shipper.status().await?)?;
+    shipper
+        .handle
+        .update(|progress| progress.phase = "snapshot".into());
     let shelf = Arc::clone(&library);
-    let written = snapshot.clone();
+    let writing = Arc::clone(&snapshot);
     let (objects, database, shipped_sequence) = tokio::task::spawn_blocking(move || {
+        let written = writing.path.join("library.db");
         let objects = shelf
             .ship_snapshot(&written)
             .map_err(|error| format!("棚の写しを作れません: {error}"))?;
@@ -219,7 +260,7 @@ pub async fn send_shelf(
         shipper
             .client
             .post(shipper.url(""))
-            .bearer_auth(token)
+            .bearer_auth(&shipper.token)
             .json(&serde_json::json!({ "libraryId": library.id }))
             .send()
             .await
@@ -231,7 +272,9 @@ pub async fn send_shelf(
     .map_err(net_error)?;
     let shipment = opened.shipment_id;
 
-    handle.update(|progress| progress.phase = "manifest".into());
+    shipper
+        .handle
+        .update(|progress| progress.phase = "manifest".into());
     let mut seen = HashSet::new();
     let all: Vec<FileChunk> = objects
         .iter()
@@ -241,13 +284,12 @@ pub async fn send_shelf(
         .collect();
     let mut needed = Vec::new();
     for batch in all.chunks(MAX_QUERY_CHUNKS) {
-        handle.check_cancel()?;
         let wires: Vec<WireChunk> = batch.iter().map(wire).collect();
         let response: serde_json::Value = check_status(
             shipper
                 .client
                 .post(shipper.url(&format!("/{shipment}/needed")))
-                .bearer_auth(token)
+                .bearer_auth(&shipper.token)
                 .json(&serde_json::json!({ "chunks": wires }))
                 .send()
                 .await
@@ -270,31 +312,30 @@ pub async fn send_shelf(
                 .cloned(),
         );
     }
-    handle.update(|progress| {
+    shipper.handle.update(|progress| {
         progress.phase = "upload".into();
         progress.files_total = needed.len() as u64;
         progress.files_done = 0;
         progress.bytes_total = needed.iter().map(|chunk| chunk.length).sum();
         progress.bytes_done = 0;
     });
-    let snapshot = Arc::new(snapshot);
-    let uploaded: Vec<Result<(), String>> = stream::iter(needed.iter().cloned())
-        .map(|chunk| {
-            let shipper = Arc::clone(&shipper);
+    let upload_id = shipment.as_str();
+    stream::iter(needed.iter().cloned().map(Ok::<_, String>))
+        .try_for_each_concurrent(PARALLEL_UPLOADS, |chunk| {
             let library = Arc::clone(&library);
             // 送信が中断されても、始まった読み出しが終わるまで実体を守る。
             let objects = Arc::clone(&objects);
-            let snapshot = Arc::clone(&snapshot);
             let offset = offsets.get(&chunk.id).copied();
-            let shipment = shipment.clone();
+            let reading = offset.map(|offset| (Arc::clone(&snapshot), offset));
             async move {
-                shipper.handle.check_cancel()?;
                 let read = chunk.clone();
                 let body = tokio::task::spawn_blocking(move || {
                     let _pin = objects;
-                    let sent = match offset {
+                    let sent = match reading {
                         // 台帳の部分は写しから読んで、その場で符号化する。
-                        Some(offset) => read_part(&snapshot, offset, &read),
+                        Some((snapshot, offset)) => {
+                            read_part(&snapshot.path.join("library.db"), offset, &read)
+                        }
                         None => {
                             let mut encoded = Vec::new();
                             library
@@ -307,7 +348,7 @@ pub async fn send_shelf(
                 })
                 .await
                 .map_err(|_| "送る実体を読めません".to_string())??;
-                shipper.put_chunk(&shipment, &chunk, body).await?;
+                shipper.put_chunk(upload_id, &chunk, body).await?;
                 shipper.handle.update(|progress| {
                     progress.files_done += 1;
                     progress.bytes_done += chunk.length;
@@ -315,32 +356,31 @@ pub async fn send_shelf(
                 Ok(())
             }
         })
-        .buffer_unordered(PARALLEL_UPLOADS)
-        .collect()
-        .await;
-    uploaded.into_iter().collect::<Result<Vec<_>, _>>()?;
+        .await?;
 
-    handle.check_cancel()?;
-    handle.update(|progress| progress.phase = "commit".into());
+    shipper
+        .handle
+        .update(|progress| progress.phase = "commit".into());
     check_status(
         shipper
             .client
             .post(shipper.url(&format!("/{shipment}/commit")))
-            .bearer_auth(token)
+            .bearer_auth(&shipper.token)
             .json(&serde_json::json!({ "database": database }))
             .send()
             .await
             .map_err(net_error)?,
     )
     .await?;
-    let _ = fs::remove_dir_all(outgoing);
+    drop(snapshot);
 
     // 公開を待つ。中止しても、サーバーは組み続けて次の起動で配る。
-    handle.update(|progress| progress.phase = "assemble".into());
+    shipper
+        .handle
+        .update(|progress| progress.phase = "assemble".into());
     let sent = needed.len() as u64;
     let mut waiting_since = tokio::time::Instant::now();
     loop {
-        handle.check_cancel()?;
         tokio::time::sleep(STATUS_POLL).await;
         match shipper.result(&shipment).await {
             Ok(Some(status)) => {
@@ -357,7 +397,7 @@ pub async fn send_shelf(
                     });
                 }
                 if let Some(restarting) = pending {
-                    handle.update(|progress| {
+                    shipper.handle.update(|progress| {
                         progress.message = Some(if restarting {
                             "サーバーでの公開を待っています".into()
                         } else {

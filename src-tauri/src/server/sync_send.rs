@@ -5,9 +5,12 @@
 use super::tls::certificate_fingerprint;
 use piep_library_protocol::{PairReply, PairReplyError, Role};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::{watch, OnceCell};
+
+const SHORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMED_OUT: &str = "サーバーの応答が時間内にありませんでした";
 
 /// 管理者としてつないでいる単独サーバー。鍵は別の場所（資格情報マネージャー）に置く。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -33,14 +36,14 @@ pub struct SendProgress {
 #[derive(Clone)]
 pub struct SendHandle {
     pub progress: Arc<Mutex<SendProgress>>,
-    pub cancel: Arc<AtomicBool>,
+    cancel: watch::Sender<bool>,
 }
 
 impl SendHandle {
     pub fn new() -> Self {
         Self {
             progress: Arc::new(Mutex::new(SendProgress::default())),
-            cancel: Arc::new(AtomicBool::new(false)),
+            cancel: watch::Sender::new(false),
         }
     }
 
@@ -50,12 +53,16 @@ impl SendHandle {
         }
     }
 
-    pub(super) fn check_cancel(&self) -> Result<(), String> {
-        if self.cancel.load(Ordering::Relaxed) {
-            Err(CANCELED.to_string())
-        } else {
-            Ok(())
-        }
+    pub(super) fn cancel(&self) {
+        self.cancel.send_replace(true);
+    }
+
+    pub(super) fn reset_cancel(&self) {
+        self.cancel.send_replace(false);
+    }
+
+    pub(super) async fn canceled(&self) {
+        let _ = self.cancel.subscribe().wait_for(|&canceled| canceled).await;
     }
 }
 
@@ -74,7 +81,7 @@ pub(super) fn normalized_base(url: &str) -> String {
 pub(super) fn net_error(error: reqwest::Error) -> String {
     // 誤り文に URL の問い合わせや鍵が混ざらないよう、種類だけを言う。
     if error.is_timeout() {
-        "サーバーの応答が時間内にありませんでした".into()
+        REQUEST_TIMED_OUT.into()
     } else if error.is_connect() {
         "サーバーに接続できません。URL と通信状態を確認してください".into()
     } else {
@@ -85,11 +92,52 @@ pub(super) fn net_error(error: reqwest::Error) -> String {
     }
 }
 
+type ClientSlot = Arc<OnceCell<reqwest::Client>>;
+
+/// 同じ接続先と指紋で証明書の確認結果と接続を使い回す。
+#[derive(Default)]
+pub(super) struct ClientCache {
+    current: Mutex<Option<(RemoteServer, ClientSlot)>>,
+}
+
+impl ClientCache {
+    pub(super) async fn client(&self, remote: &RemoteServer) -> Result<reqwest::Client, String> {
+        let slot = {
+            let mut current = self
+                .current
+                .lock()
+                .map_err(|_| "サーバーの接続設定を開けません")?;
+            match current.as_ref() {
+                Some((setting, slot)) if setting == remote => Arc::clone(slot),
+                _ => {
+                    let slot = Arc::new(OnceCell::new());
+                    *current = Some((remote.clone(), Arc::clone(&slot)));
+                    slot
+                }
+            }
+        };
+        // 別の要求が証明書を確認中でも、クライアントを待つ時間に上限を置く。
+        tokio::time::timeout(
+            SHORT_REQUEST_TIMEOUT,
+            slot.get_or_try_init(|| build_client(remote)),
+        )
+        .await
+        .map_err(|_| REQUEST_TIMED_OUT.to_string())?
+        .cloned()
+    }
+
+    pub(super) fn clear(&self) {
+        if let Ok(mut current) = self.current.lock() {
+            *current = None;
+        }
+    }
+}
+
 /// 接続先を確かめて、HTTP クライアントを作る。
 ///
 /// 指紋があれば、その証明書にだけつなぐ（自己署名）。無ければ OS の信頼する CA と
 /// ホスト名で検証する。平文の http はこの機械の中だけ許す。
-pub async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, String> {
+async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, String> {
     let parsed = url::Url::parse(&remote.url)
         .map_err(|_| "サーバーの URL が正しくありません".to_string())?;
     if !parsed.username().is_empty()
@@ -103,7 +151,7 @@ pub async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, Stri
         // 登録の鍵や本棚の本文を、307/308 の転送先へ再送しない。
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(30 * 60))
+        .timeout(SHORT_REQUEST_TIMEOUT)
         .no_proxy();
     match parsed.scheme() {
         "https" => {}
@@ -123,7 +171,7 @@ pub async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, Stri
         .tls_info(true)
         .no_proxy()
         .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(30))
+        .timeout(SHORT_REQUEST_TIMEOUT)
         .build()
         .map_err(net_error)?;
     let response = probe
@@ -186,12 +234,13 @@ fn server_message(body: &serde_json::Value) -> Option<String> {
 }
 
 /// 管理者として登録する。一回限りの鍵を、端末の鍵に換える。
-pub async fn pair_admin(
+pub(super) async fn pair_admin(
+    clients: &ClientCache,
     remote: &RemoteServer,
     secret: &str,
     device_name: &str,
 ) -> Result<String, String> {
-    let client = build_client(remote).await?;
+    let client = clients.client(remote).await?;
     let response = client
         .post(format!("{}/api/pair", normalized_base(&remote.url)))
         .json(&serde_json::json!({ "secret": secret, "deviceName": device_name }))
@@ -210,12 +259,13 @@ pub async fn pair_admin(
     Ok(reply.token)
 }
 
-pub async fn admin_get(
+pub(super) async fn admin_get(
+    clients: &ClientCache,
     remote: &RemoteServer,
     token: &str,
     path: &str,
 ) -> Result<serde_json::Value, String> {
-    let client = build_client(remote).await?;
+    let client = clients.client(remote).await?;
     let response = client
         .get(format!("{}/api/admin/{path}", normalized_base(&remote.url)))
         .bearer_auth(token)
@@ -230,12 +280,13 @@ pub async fn admin_get(
 }
 
 /// `admin_get` と同じだが、その口が無い（古いサーバーの）ときは `None` を返す。
-pub async fn admin_get_if_present(
+pub(super) async fn admin_get_if_present(
+    clients: &ClientCache,
     remote: &RemoteServer,
     token: &str,
     path: &str,
 ) -> Result<Option<serde_json::Value>, String> {
-    let client = build_client(remote).await?;
+    let client = clients.client(remote).await?;
     let response = client
         .get(format!("{}/api/admin/{path}", normalized_base(&remote.url)))
         .bearer_auth(token)
@@ -253,13 +304,14 @@ pub async fn admin_get_if_present(
         .map_err(net_error)
 }
 
-pub async fn admin_post(
+pub(super) async fn admin_post(
+    clients: &ClientCache,
     remote: &RemoteServer,
     token: &str,
     path: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let client = build_client(remote).await?;
+    let client = clients.client(remote).await?;
     let response = client
         .post(format!("{}/api/admin/{path}", normalized_base(&remote.url)))
         .bearer_auth(token)
@@ -275,13 +327,14 @@ pub async fn admin_post(
 }
 
 /// 本文の要らない応答（204）を返す口へ JSON を置く。
-pub async fn admin_put(
+pub(super) async fn admin_put(
+    clients: &ClientCache,
     remote: &RemoteServer,
     token: &str,
     path: &str,
     body: &serde_json::Value,
 ) -> Result<(), String> {
-    let client = build_client(remote).await?;
+    let client = clients.client(remote).await?;
     let response = client
         .put(format!("{}/api/admin/{path}", normalized_base(&remote.url)))
         .bearer_auth(token)
