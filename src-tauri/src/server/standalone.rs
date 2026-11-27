@@ -750,25 +750,24 @@ fn check_database(path: &Path) -> Result<(), String> {
 
 /// 動き出したら、前回との違いを更新の履歴と記録に足す。
 fn note_started(paths: &ServerPaths, store: &ServerStore) {
-    let before = UpdateHistory::load(paths).entries.len();
-    UpdateHistory::reconcile(paths, update::VERSION, chrono::Utc::now());
+    if !UpdateHistory::reconcile(paths, update::VERSION, chrono::Utc::now()) {
+        return;
+    }
     let history = UpdateHistory::load(paths);
-    if history.entries.len() > before || history.entries.len() == 50 {
-        if let Some(entry) = history.entries.first() {
-            let detail = format!("{} → {}", entry.from.as_deref().unwrap_or("不明"), entry.to);
-            store.audit(
-                "update",
-                match entry.result.as_str() {
-                    "failed" => "更新に失敗して戻した",
-                    "rolled_back" => "前の版へ戻した",
-                    _ => "更新した",
-                },
-                "サーバー",
-                None,
-                entry.result != "failed",
-                Some(&detail),
-            );
-        }
+    if let Some(entry) = history.entries.first() {
+        let detail = format!("{} → {}", entry.from.as_deref().unwrap_or("不明"), entry.to);
+        store.audit(
+            "update",
+            match entry.result.as_str() {
+                "failed" => "更新に失敗して戻した",
+                "rolled_back" => "前の版へ戻した",
+                _ => "更新した",
+            },
+            "サーバー",
+            None,
+            entry.result != "failed",
+            Some(&detail),
+        );
     }
 }
 
@@ -1367,6 +1366,46 @@ mod tests {
 
     fn config(text: &str) -> ServerConfig {
         toml::from_str(text).expect("config")
+    }
+
+    #[test]
+    fn starting_with_full_update_history_audits_only_new_entries() {
+        let root = TestRoot::created("full_update_history");
+        let paths = ServerPaths::new(&root.0).unwrap();
+        let store = ServerStore::open(&paths.store()).unwrap();
+        let old_entry = update::UpdateHistoryEntry {
+            at: chrono::Utc::now().to_rfc3339(),
+            from: None,
+            to: update::VERSION.into(),
+            result: "applied".into(),
+            downtime_seconds: None,
+            reason: None,
+        };
+        let mut history = UpdateHistory {
+            last_version: Some(update::VERSION.into()),
+            entries: vec![old_entry; 50],
+            ..UpdateHistory::default()
+        };
+        history.save(&paths);
+        let audit = || store.list_audit(Some("update"), None, None, 10).unwrap();
+
+        note_started(&paths, &store);
+        assert!(audit().is_empty());
+
+        history.last_version = Some("0.0.0-test".into());
+        history.save(&paths);
+        note_started(&paths, &store);
+        assert_eq!(UpdateHistory::load(&paths).entries.len(), 50);
+        let rows = audit();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "更新した");
+        assert_eq!(
+            rows[0].detail,
+            Some(format!("0.0.0-test → {}", update::VERSION))
+        );
+
+        note_started(&paths, &store);
+        assert_eq!(audit().len(), 1);
     }
 
     #[tokio::test]

@@ -38,6 +38,81 @@ impl Authority for TestAuthority {
         })
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn reader_auth_leaves_runtime_free_while_state_db_is_locked() {
+    use crate::server::store::{Role, ServerStore};
+    use std::sync::mpsc;
+    use tokio::sync::oneshot;
+
+    struct NotifyingAuthority {
+        devices: DeviceAuthority,
+        lookup_started: Mutex<Option<oneshot::Sender<()>>>,
+    }
+
+    impl Authority for NotifyingAuthority {
+        fn grant(&self, bearer: &str, library: Id) -> Option<Grant> {
+            if let Some(started) = self.lookup_started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            Authority::grant(&self.devices, bearer, library)
+        }
+    }
+
+    let temp = Temp::new();
+    let library = Arc::new(Library::create(&temp.0).unwrap());
+    let library_id = Id::new(library.id).unwrap();
+    let subject = Id::new(uuid::Uuid::now_v7()).unwrap();
+    let store = Arc::new(ServerStore::open(&temp.0.join("state.db")).unwrap());
+    let pairing = store
+        .issue_pairing(Role::Reader, Duration::from_secs(60))
+        .unwrap();
+    let paired = store.consume_pairing(&pairing, "試験用の端末").unwrap();
+    let devices = DeviceAuthority::new(store.clone());
+    devices
+        .grant(paired.device_id, library_id, subject)
+        .unwrap();
+    let (lookup_started, lookup) = oneshot::channel();
+    let authority = Arc::new(NotifyingAuthority {
+        devices,
+        lookup_started: Mutex::new(Some(lookup_started)),
+    });
+    let ctx = Arc::new(Context::new(library, authority, subject).unwrap());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router(ctx)).await.unwrap() });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .unwrap();
+
+    let (locked, lock_ready) = oneshot::channel();
+    let (release, wait_for_release) = mpsc::channel();
+    let lock_holder = std::thread::spawn(move || {
+        let _connection = store.connection().unwrap();
+        locked.send(()).unwrap();
+        // 同じランタイム側から解除を頼めない場合も、時間切れで試験を終えられるようにする。
+        wait_for_release.recv_timeout(Duration::from_secs(5))
+    });
+    lock_ready.await.unwrap();
+
+    let response = client
+        .get(format!("http://{address}/api/identity"))
+        .bearer_auth(paired.token)
+        .send();
+    let (response, ()) = tokio::join!(response, async {
+        tokio::time::timeout(Duration::from_secs(10), lookup)
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = release.send(());
+    });
+    server.abort();
+    assert_eq!(lock_holder.join().unwrap(), Ok(()));
+    assert_eq!(response.unwrap().status(), StatusCode::OK);
+}
+
 struct Server {
     base: String,
     client: reqwest::Client,
