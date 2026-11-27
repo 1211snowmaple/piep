@@ -74,6 +74,26 @@ fn note(paths: &ServerPaths, message: &str) {
     }
 }
 
+/// 戻しが済むまでは、本体を起動する処理へ進まない。
+fn retry_rollback(
+    paths: &ServerPaths,
+    backoff: &mut Backoff,
+    mut rollback: impl FnMut() -> Result<(), String>,
+    mut sleep: impl FnMut(Duration),
+) {
+    while let Err(error) = rollback() {
+        let wait = backoff.after_exit(Duration::ZERO);
+        note(
+            paths,
+            &format!(
+                "前の版に戻せません: {error}。{} 秒後に再試行します",
+                wait.as_secs()
+            ),
+        );
+        sleep(wait);
+    }
+}
+
 /// 待機中の版へ切り替える。切り替えた版を返す。
 fn switch_to_pending(paths: &ServerPaths) -> Result<String, String> {
     let pending =
@@ -107,7 +127,7 @@ fn roll_back(paths: &ServerPaths, failed: &str, reason: &str) -> Result<(), Stri
     record.last_error = Some(format!(
         "版 {failed} に更新できなかったので、{previous} に戻しました: {reason}"
     ));
-    record.save(paths);
+    record.try_save(paths)?;
     clear_pending(paths)?;
     fs::remove_file(rollback_mark(paths))
         .map_err(|error| format!("戻しの印を消せません: {error}"))?;
@@ -119,8 +139,12 @@ fn rollback_mark(paths: &ServerPaths) -> std::path::PathBuf {
 }
 
 fn resume_rollback(paths: &ServerPaths) -> Result<(), String> {
-    if rollback_mark(paths).exists() {
-        let failed = read_version_file(&rollback_mark(paths)).ok_or("戻しの印を読めません")?;
+    let mark = rollback_mark(paths);
+    if mark
+        .try_exists()
+        .map_err(|error| format!("戻しの印を確かめられません: {error}"))?
+    {
+        let failed = read_version_file(&mark).ok_or("戻しの印を読めません")?;
         roll_back(paths, &failed, "中断された旧版への戻しを再開しました")?;
     }
     Ok(())
@@ -158,11 +182,14 @@ fn write_requested_rollback(paths: &ServerPaths, version: &str) -> Result<(), St
 }
 
 fn resume_requested_rollback(paths: &ServerPaths) -> Result<(), String> {
-    if !requested_rollback_mark(paths).exists() {
+    let mark = requested_rollback_mark(paths);
+    if !mark
+        .try_exists()
+        .map_err(|error| format!("頼まれた戻しの印を確かめられません: {error}"))?
+    {
         return Ok(());
     }
-    let target = read_version_file(&requested_rollback_mark(paths))
-        .ok_or("頼まれた戻しのバージョンを読めません")?;
+    let target = read_version_file(&mark).ok_or("頼まれた戻しのバージョンを読めません")?;
     let current = current_version(paths).ok_or("動いていたバージョンを読めません")?;
     if current != target {
         if read_version_file(&paths.previous_version()).as_deref() != Some(target.as_str()) {
@@ -172,10 +199,22 @@ fn resume_requested_rollback(paths: &ServerPaths) -> Result<(), String> {
     }
     let mut record = UpdateRecord::load(paths);
     record.last_error = None;
-    record.save(paths);
+    record.try_save(paths)?;
     // currentを戻した直後に中断しても、済んだ戻しで旧版をskippedへ足さない。
-    fs::remove_file(requested_rollback_mark(paths))
-        .map_err(|error| format!("頼まれた戻しの印を消せません: {error}"))
+    fs::remove_file(mark).map_err(|error| format!("頼まれた戻しの印を消せません: {error}"))
+}
+
+fn resume_rollbacks(paths: &ServerPaths, backoff: &mut Backoff, sleep: impl FnMut(Duration)) {
+    retry_rollback(
+        paths,
+        backoff,
+        || {
+            // 依頼された戻しが途中で失敗した場合も、書かれた復旧の印から先に続ける。
+            resume_rollback(paths)?;
+            resume_requested_rollback(paths)
+        },
+        sleep,
+    );
 }
 
 fn clear_pending(paths: &ServerPaths) -> Result<(), String> {
@@ -186,7 +225,10 @@ fn clear_pending(paths: &ServerPaths) -> Result<(), String> {
     }
 }
 
-fn resume_pending_update(paths: &ServerPaths) -> Result<Option<String>, String> {
+fn resume_pending_update(
+    paths: &ServerPaths,
+    backoff: &mut Backoff,
+) -> Result<Option<String>, String> {
     if !paths.pending_version().exists() {
         return Ok(None);
     }
@@ -200,7 +242,7 @@ fn resume_pending_update(paths: &ServerPaths) -> Result<Option<String>, String> 
             if let Some(failed) =
                 pending.filter(|version| Some(version) == current_version(paths).as_ref())
             {
-                fail_update(paths, &failed, &error)?;
+                fail_update(paths, &failed, &error, backoff);
             } else {
                 clear_pending(paths)?;
             }
@@ -255,7 +297,10 @@ fn bootstrap_target(paths: &ServerPaths, executable: &Path) -> Result<Option<Pat
 fn delegate_bootstrap(paths: &ServerPaths, executable: &Path) -> Option<i32> {
     // 戻し先の旧版は、この復旧用の印を知らないことがある。固定入口が先に
     // 復旧してから動かし、古い見張り役へ未完了の戻しを渡さない。
-    if rollback_mark(paths).exists() || requested_rollback_mark(paths).exists() {
+    if [rollback_mark(paths), requested_rollback_mark(paths)]
+        .iter()
+        .any(|mark| !matches!(mark.try_exists(), Ok(false)))
+    {
         return None;
     }
     let target = match bootstrap_target(paths, executable) {
@@ -376,6 +421,13 @@ pub fn run(paths: &ServerPaths) -> Result<i32, String> {
     if let Some(code) = delegate_bootstrap(paths, &executable) {
         return Ok(code);
     }
+    run_watchdog(paths, std::thread::sleep)
+}
+
+fn run_watchdog(
+    paths: &ServerPaths,
+    mut rollback_sleep: impl FnMut(Duration),
+) -> Result<i32, String> {
     // 同じ置き場を 2 つの見張り役で見ない。
     let lock = File::create(paths.watchdog_lock())
         .map_err(|error| format!("置き場を確保できません: {error}"))?;
@@ -385,10 +437,9 @@ pub fn run(paths: &ServerPaths) -> Result<i32, String> {
     let mut backoff = Backoff::default();
     note(paths, &format!("見張り役を始めました（{VERSION}）"));
 
-    resume_rollback(paths)?;
-    resume_requested_rollback(paths)?;
+    resume_rollbacks(paths, &mut backoff, &mut rollback_sleep);
     // 更新の途中で機械が落ちたら、切り替える前の状態から続ける。
-    let mut applying = resume_pending_update(paths)?;
+    let mut applying = resume_pending_update(paths, &mut backoff)?;
 
     loop {
         let version = current_version(paths).ok_or("動かす版が書かれていません")?;
@@ -398,7 +449,7 @@ pub fn run(paths: &ServerPaths) -> Result<i32, String> {
             Err(error) => {
                 note(paths, &error);
                 if let Some(failed) = applying.take() {
-                    fail_update(paths, &failed, &error)?;
+                    fail_update(paths, &failed, &error, &mut backoff);
                     continue;
                 }
                 std::thread::sleep(backoff.after_exit(started.elapsed()));
@@ -414,7 +465,7 @@ pub fn run(paths: &ServerPaths) -> Result<i32, String> {
                 Err(reason) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    fail_update(paths, &target, &reason)?;
+                    fail_update(paths, &target, &reason, &mut backoff);
                     continue;
                 }
             }
@@ -428,8 +479,7 @@ pub fn run(paths: &ServerPaths) -> Result<i32, String> {
                 return Ok(0);
             }
             Some(EXIT_RESTART) => {
-                resume_rollback(paths)?;
-                resume_requested_rollback(paths)?;
+                resume_rollbacks(paths, &mut backoff, &mut rollback_sleep);
                 note(paths, "管理画面から頼まれたので立ち上げ直します");
                 backoff = Backoff::default();
             }
@@ -457,9 +507,15 @@ pub fn run(paths: &ServerPaths) -> Result<i32, String> {
     }
 }
 
-fn fail_update(paths: &ServerPaths, failed: &str, reason: &str) -> Result<(), String> {
+fn fail_update(paths: &ServerPaths, failed: &str, reason: &str, backoff: &mut Backoff) {
     note(paths, &format!("update_failed: 版 {failed}: {reason}"));
-    roll_back(paths, failed, reason)
+    // 印を書くところで失敗しても、失敗した版と理由を保持したまま戻しをやり直す。
+    retry_rollback(
+        paths,
+        backoff,
+        || roll_back(paths, failed, reason),
+        std::thread::sleep,
+    );
 }
 
 /// 見張り役が強制終了されても本体を残さない。残ると置き場の鍵を持ったままになり、
@@ -666,6 +722,67 @@ mod tests {
         }
     }
 
+    fn block_database_restore(paths: &ServerPaths) {
+        let database = rusqlite::Connection::open(paths.store()).unwrap();
+        database
+            .execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1);")
+            .unwrap();
+        drop(database);
+        update::back_up_databases(paths).unwrap();
+        fs::remove_file(paths.store()).unwrap();
+        // ファイルの場所をディレクトリで塞ぎ、DB の差し替えだけを失敗させる。
+        fs::create_dir(paths.store()).unwrap();
+        write_atomic(&paths.pending_version(), b"1.1.0").unwrap();
+        switch_to_pending(paths).unwrap();
+        write_atomic(&rollback_mark(paths), b"1.1.0").unwrap();
+    }
+
+    #[test]
+    fn a_failed_database_restore_is_logged_and_retried() {
+        let (_dir, paths) = laid_out();
+        block_database_restore(&paths);
+        let mut waits = Vec::new();
+
+        resume_rollbacks(&paths, &mut Backoff::default(), |wait| {
+            waits.push(wait);
+            assert!(rollback_mark(&paths).exists());
+            assert_eq!(current_version(&paths).as_deref(), Some("1.1.0"));
+            let log = fs::read_to_string(paths.watchdog_log()).unwrap();
+            assert!(log.contains("state.db を戻せません"));
+            fs::remove_dir(paths.store()).unwrap();
+        });
+
+        assert_eq!(waits, [seconds(5)]);
+        assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
+        assert!(!paths.pending_version().exists());
+        assert!(!rollback_mark(&paths).exists());
+        let database = rusqlite::Connection::open(paths.store()).unwrap();
+        let value: i64 = database
+            .query_row("SELECT v FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "復旧の再試行を3回観察した")]
+    fn a_persistently_failed_restore_keeps_the_new_body_from_starting() {
+        let (_dir, paths) = laid_out();
+        block_database_restore(&paths);
+        // spawn_body を通ると、実行ファイルの起動に失敗する場合もこの印を消す。
+        write_atomic(&paths.ready_mark(), b"ready").unwrap();
+        let mut waits = Vec::new();
+        let _ = run_watchdog(&paths, |wait| {
+            waits.push(wait);
+            assert!(rollback_mark(&paths).exists());
+            assert!(paths.pending_version().exists());
+            assert!(paths.ready_mark().exists());
+            if waits.len() == 3 {
+                assert_eq!(waits, [seconds(5), seconds(30), seconds(120)]);
+                panic!("復旧の再試行を3回観察した");
+            }
+        });
+    }
+
     #[test]
     fn a_manual_rollback_is_deferred_until_the_body_exits_and_can_resume() {
         let (_dir, paths) = laid_out();
@@ -804,9 +921,12 @@ mod tests {
             delegate_bootstrap(&paths, &paths.root.join("piep-server.exe")),
             None
         );
-        let applying = resume_pending_update(&paths).unwrap().unwrap();
+        let mut backoff = Backoff::default();
+        let applying = resume_pending_update(&paths, &mut backoff)
+            .unwrap()
+            .unwrap();
         let reason = spawn_body(&paths, &applying, &JobGuard::new()).unwrap_err();
-        fail_update(&paths, &applying, &reason).unwrap();
+        fail_update(&paths, &applying, &reason, &mut backoff);
         assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
         assert!(!paths.pending_version().exists());
         assert_eq!(
@@ -844,7 +964,10 @@ mod tests {
             delegate_bootstrap(&paths, &paths.root.join("piep-server.exe")),
             None
         );
-        assert_eq!(resume_pending_update(&paths).unwrap(), None);
+        assert_eq!(
+            resume_pending_update(&paths, &mut Backoff::default()).unwrap(),
+            None
+        );
         assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
         assert!(!paths.pending_version().exists());
         assert_eq!(UpdateRecord::load(&paths).skipped, vec!["1.1.0"]);

@@ -149,12 +149,14 @@ impl UpdateRecord {
     }
 
     pub fn save(&self, paths: &ServerPaths) {
-        let result = serde_json::to_vec_pretty(self)
-            .map_err(|error| error.to_string())
-            .and_then(|bytes| write_atomic(&paths.update_record(), &bytes));
-        if let Err(error) = result {
+        if let Err(error) = self.try_save(paths) {
             log::warn!("更新の記録を書けません: {error}");
         }
+    }
+
+    pub(super) fn try_save(&self, paths: &ServerPaths) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
+        write_atomic(&paths.update_record(), &bytes)
     }
 }
 
