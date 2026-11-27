@@ -476,10 +476,7 @@ fn host_rejected_page(host: &str) -> Response {
         .replace("{host}", &piep_reader_render::parser::escape_html(host));
     (
         StatusCode::FORBIDDEN,
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-store"),
-        ],
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         page,
     )
         .into_response()
@@ -556,10 +553,6 @@ async fn secure_headers(State(ctx): State<Ctx>, request: Request, next: Next) ->
     headers.insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
-    );
-    headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
     );
     if ctx.web.get().is_some_and(|web| web.direct_tls) {
         headers.insert(
@@ -1526,6 +1519,23 @@ pub(super) fn note_device(ctx: &ServerContext, headers: &HeaderMap, ip: &ClientI
         .audit("device", action, actor(headers), ip.get(), true, None);
 }
 
+/// Vite が出力する assets/ 以下の名前には、末尾に 8 文字のハッシュが付く。
+fn hashed_asset(path: &str) -> bool {
+    let Some((stem, _)) = path
+        .strip_prefix("assets/")
+        .and_then(|path| path.rsplit_once('.'))
+    else {
+        return false;
+    };
+    let Some((name, hash)) = stem.split_at_checked(stem.len().saturating_sub(8)) else {
+        return false;
+    };
+    name.ends_with('-')
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
 /// 画面のファイルを返す。知らない道は画面そのものを返す。
 fn asset_response(site: &AdminWeb, path: &str) -> Response {
     let path = path.trim_start_matches('/');
@@ -1540,10 +1550,16 @@ fn asset_response(site: &AdminWeb, path: &str) -> Response {
                 .flatten()
         });
     match found {
-        Some(asset) => Response::builder()
-            .header(header::CONTENT_TYPE, asset.mime)
-            .body(Body::from(asset.bytes))
-            .unwrap_or_else(|_| ApiError::internal().into_response()),
+        Some(asset) => {
+            let mut response = Response::builder().header(header::CONTENT_TYPE, asset.mime);
+            if hashed_asset(asset.path) && !asset.mime.starts_with("text/html") {
+                response =
+                    response.header(header::CACHE_CONTROL, "public, max-age=31536000, immutable");
+            }
+            response
+                .body(Body::from(asset.bytes))
+                .unwrap_or_else(|_| ApiError::internal().into_response())
+        }
         None if site.assets.is_empty() => (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],

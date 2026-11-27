@@ -2,6 +2,7 @@
 //!
 //! 棚の送信そのものは `shelf_send`。取得元の認証情報はこの経路を通らない。
 
+use super::endpoint::{server_url, ServerUrlScheme};
 use super::tls::certificate_fingerprint;
 use piep_library_protocol::{PairReply, PairReplyError, Role};
 use serde::{Deserialize, Serialize};
@@ -138,27 +139,15 @@ impl ClientCache {
 /// 指紋があれば、その証明書にだけつなぐ（自己署名）。無ければ OS の信頼する CA と
 /// ホスト名で検証する。平文の http はこの機械の中だけ許す。
 async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, String> {
-    let parsed = url::Url::parse(&remote.url)
-        .map_err(|_| "サーバーの URL が正しくありません".to_string())?;
-    if !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return Err("サーバーの URL に利用者名や問い合わせは書けません".into());
-    }
+    let parsed = server_url(&remote.url, ServerUrlScheme::HttpsOrLocalHttp)?;
     let builder = reqwest::Client::builder()
         // 登録の鍵や本棚の本文を、307/308 の転送先へ再送しない。
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .timeout(SHORT_REQUEST_TIMEOUT)
         .no_proxy();
-    match parsed.scheme() {
-        "https" => {}
-        "http" if matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) => {
-            return builder.build().map_err(net_error);
-        }
-        _ => return Err("サーバーの URL は https にしてください".into()),
+    if parsed.scheme() == "http" {
+        return builder.build().map_err(net_error);
     }
     let Some(fingerprint) = remote.fingerprint.as_deref() else {
         return builder.https_only(true).build().map_err(net_error);
@@ -175,7 +164,7 @@ async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, String> 
         .build()
         .map_err(net_error)?;
     let response = probe
-        .get(format!("{}/api/hello", normalized_base(&remote.url)))
+        .get(format!("{}/api/hello", normalized_base(parsed.as_str())))
         .send()
         .await
         .map_err(net_error)?;
@@ -196,6 +185,16 @@ async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, String> 
         .https_only(true)
         .build()
         .map_err(net_error)
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn the_client_refuses_whitespace_before_building() {
+    let remote = RemoteServer {
+        url: "https://server.example/a\nb".into(),
+        fingerprint: None,
+    };
+    assert!(build_client(&remote).await.is_err());
 }
 
 /// 応答の状態コードを誤りに直す。

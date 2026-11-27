@@ -341,7 +341,6 @@ fn delegate_bootstrap(paths: &ServerPaths, executable: &Path) -> Option<i32> {
     }
 }
 
-/// 本体を子として動かす。見張り役が消えたら一緒に消えるようにする。
 /// 起動できない exe で Windows に窓を出させず、失敗として返させる。
 ///
 /// 中身が壊れた exe（PE でない物）を Windows は 16 ビットのプログラムとして扱い、
@@ -362,6 +361,7 @@ pub(crate) fn launch_failures_without_dialogs() {
 #[cfg(not(windows))]
 pub(crate) fn launch_failures_without_dialogs() {}
 
+/// 本体を子として動かし、見張り役が消えたら一緒に終了するようにする。
 fn spawn_body(paths: &ServerPaths, version: &str, job: &JobGuard) -> Result<Child, String> {
     let _ = fs::remove_file(paths.ready_mark());
     let executable = paths.version_dir(version).join("piep-server.exe");
