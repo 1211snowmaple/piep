@@ -244,36 +244,52 @@ fn uuid(bytes: Vec<u8>) -> Result<LibraryId> {
     LibraryId::from_slice(&bytes).map_err(|_| Error::Integrity("UUID の長さが不正です".into()))
 }
 
+pub(super) const LIBRARY_MARKER: &str = "library.json";
+pub(super) const CREATION_MARKER: &str = ".creation.json";
+
 impl Library {
     pub fn create(root: &Path) -> Result<Self> {
         Self::create_with_id(root, LibraryId::now_v7())
     }
 
     pub(crate) fn create_with_id(root: &Path, id: LibraryId) -> Result<Self> {
+        if let (Some(parent), Some(name)) = (root.parent(), root.file_name()) {
+            if parent
+                .canonicalize()
+                .is_ok_and(|parent| super::publish::is_staged_copy(&parent.join(name)))
+            {
+                return Err(Error::UnsafePath(root.into()));
+            }
+        }
+        fs::create_dir_all(root)?;
         Self::initialize(root, id, false)
     }
 
-    pub(super) fn create_backup_stage(root: &Path, id: LibraryId) -> Result<Self> {
+    pub(super) fn create_staged_copy(root: &Path, id: LibraryId) -> Result<Self> {
+        fs::create_dir(root)?;
         Self::initialize(root, id, true)
     }
 
-    fn initialize(root: &Path, id: LibraryId, backup_stage: bool) -> Result<Self> {
-        fs::create_dir_all(root)?;
-        regular_directory(root)?;
-        let lock = Self::lock(root)?;
-        let pending_name = if backup_stage {
-            ".backup-marker.json"
-        } else {
-            ".creation.json"
+    pub(super) fn write_format_marker(path: &Path, id: LibraryId) -> Result<()> {
+        let marker = FormatMarker {
+            format: "piep-library".into(),
+            version: 1,
+            library_id: id,
         };
-        let pending = root.join(pending_name);
+        let mut output = OpenOptions::new().write(true).create_new(true).open(path)?;
+        output.write_all(&serde_json::to_vec_pretty(&marker)?)?;
+        output.sync_all()?;
+        Ok(())
+    }
+
+    fn prepare_creation(root: &Path, pending: &Path, id: LibraryId) -> Result<LibraryId> {
         let resuming = pending.try_exists()?;
         // 作成操作の記録がある場合だけ再開する。未知の既存フォルダーを棚にしない。
         for entry in fs::read_dir(root)? {
             let name = entry?.file_name();
             if name != ".library.lock"
                 && !(resuming
-                    && (name == pending_name
+                    && (name == CREATION_MARKER
                         || matches!(
                             name.to_str(),
                             Some("library.db" | "library.db-wal" | "library.db-shm" | "objects")
@@ -284,31 +300,37 @@ impl Library {
                 ));
             }
         }
-        let mut marker = FormatMarker {
-            format: "piep-library".into(),
-            version: 1,
-            library_id: id,
-        };
         if resuming {
-            super::store::regular_file(&pending)?;
-            let bytes = fs::read(&pending)?;
+            super::store::regular_file(pending)?;
+            let bytes = fs::read(pending)?;
             if bytes.len() > 65536 {
                 return Err(Error::Unsupported("作成操作の記録が不正です".into()));
             }
-            marker = serde_json::from_slice(&bytes)?;
+            let marker: FormatMarker = serde_json::from_slice(&bytes)?;
             if marker.format != "piep-library" || marker.version != 1 {
                 return Err(Error::Unsupported("作成操作の形式が異なります".into()));
             }
-        } else {
-            let mut output = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&pending)?;
-            output.write_all(&serde_json::to_vec_pretty(&marker)?)?;
-            output.sync_all()?;
-            super::store::sync_directory(root)?;
+            return Ok(marker.library_id);
         }
-        let id = marker.library_id;
+        Self::write_format_marker(pending, id)?;
+        super::store::sync_directory(root)?;
+        Ok(id)
+    }
+
+    fn initialize(root: &Path, id: LibraryId, staged: bool) -> Result<Self> {
+        regular_directory(root)?;
+        let canonical = root.canonicalize()?;
+        if !staged && super::publish::is_staged_copy(&canonical) {
+            return Err(Error::UnsafePath(root.into()));
+        }
+        let root = canonical.as_path();
+        let lock = Self::lock(root)?;
+        let pending = root.join(CREATION_MARKER);
+        let id = if staged {
+            id
+        } else {
+            Self::prepare_creation(root, &pending, id)?
+        };
         if root.join("library.db").try_exists()? {
             super::store::regular_file(&root.join("library.db"))?;
         }
@@ -324,13 +346,13 @@ impl Library {
             schema::open(&conn, id)?;
         }
         let objects = Self::open_objects(root)?;
-        if !backup_stage {
-            fs::rename(pending, root.join("library.json"))?;
+        if !staged {
+            fs::rename(pending, root.join(LIBRARY_MARKER))?;
             super::store::sync_directory(root)?;
         }
         let conn = Arc::new(Mutex::new(conn));
         let library = Self {
-            root: root.canonicalize()?,
+            root: canonical,
             id,
             objects,
             loans: super::reader_loans::Loans::new(&conn),
@@ -347,12 +369,12 @@ impl Library {
     }
 
     pub fn open(root: &Path) -> Result<Self> {
-        Self::open_inner(root, None, "library.json")
+        Self::open_inner(root, None, LIBRARY_MARKER)
     }
 
     /// 設定で指定した棚かを、DB の更新を始める前に照合する。
     pub fn open_matching(root: &Path, expected: LibraryId) -> Result<Self> {
-        Self::open_inner(root, Some(expected), "library.json")
+        Self::open_inner(root, Some(expected), LIBRARY_MARKER)
     }
 
     /// 棚の部分写し（作者・シリーズのアーカイブ）を開く。形式の記録の名前が棚と違うので、
@@ -363,6 +385,11 @@ impl Library {
 
     fn open_inner(root: &Path, expected: Option<LibraryId>, marker_name: &str) -> Result<Self> {
         regular_directory(root)?;
+        let canonical = root.canonicalize()?;
+        if super::publish::is_staged_copy(&canonical) {
+            return Err(Error::UnsafePath(root.into()));
+        }
+        let root = canonical.as_path();
         let lock = Self::lock(root)?;
         super::store::regular_file(&root.join(marker_name))?;
         let mut input = Vec::new();
@@ -394,7 +421,7 @@ impl Library {
         let objects = Self::open_objects(root)?;
         let conn = Arc::new(Mutex::new(conn));
         let library = Self {
-            root: root.canonicalize()?,
+            root: canonical,
             id: marker.library_id,
             objects,
             loans: super::reader_loans::Loans::new(&conn),

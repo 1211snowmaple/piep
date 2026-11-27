@@ -49,7 +49,11 @@
   },
   "bundle": {
     "active": true,
-    "resources": ["vendor/pdfium/pdfium.dll"],
+    "resources": [
+      "vendor/pdfium/pdfium.dll",
+      "vendor/pdfium/LICENSE",
+      "vendor/pdfium/BUILD_LICENSES/*"
+    ],
     "createUpdaterArtifacts": true,
     "targets": "nsis",
     "shortDescription": "pixiv と FANBOX を、自分のPCに丸ごと残して読む",

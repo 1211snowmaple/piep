@@ -117,6 +117,23 @@ describe("一覧を順に読む", () => {
     expect(result).toMatchObject({ stop: "end", pagesRead: 1 });
   });
 
+  it.each([false, true])("候補が 0 件でも打ち切りを知らせる（開いた直後: %s）", async (opened) => {
+    const { deps, onPage, navigate } = browser({ [base]: { ...listPage(base, []), truncated: true } });
+    expect(await readListPages(options, deps, opened)).toMatchObject({ stop: "end", pagesRead: 0, total: 0, truncated: true });
+    expect(onPage).not.toHaveBeenCalled();
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("次のページが 0 件で打ち切られたときも知らせる", async () => {
+    const next = `${base}?p=2`;
+    const { deps, onPage } = browser({
+      [base]: listPage(base, ["1"]),
+      [next]: { ...listPage(next, []), truncated: true },
+    });
+    expect(await readListPages(options, deps)).toMatchObject({ stop: "end", pagesRead: 1, total: 1, truncated: true });
+    expect(onPage).toHaveBeenCalledTimes(1);
+  });
+
   it("待っているあいだに利用者が移ったら、連れ戻さない", async () => {
     let waits = 0;
     const ctx = browser({ [base]: listPage(base, ["1"]) }, {

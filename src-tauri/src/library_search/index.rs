@@ -28,12 +28,10 @@ const COMMIT_EVERY: usize = 2000;
 /// （長い読み取りは WAL の折り返しを止める）。
 const BATCH: usize = 32;
 
-const MARKER: &str = "library-generation";
-
 /// 同期の結果。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchIndexReport {
-    /// 索引を空から作り直したか（初回・形式の変更・索引の消失）。
+    /// 索引を空から作り直したか（初回・形式の変更・索引の消失や破損）。
     pub reset: bool,
     pub indexed: usize,
     pub removed: usize,
@@ -363,7 +361,7 @@ impl Library {
     fn prepare_space(&self, space: Space, storage: &Path) -> Result<bool> {
         // 索引の形式に、棚の作り方（タグごとの読み）の版を足す。
         let format = format!("{}+tag-readings-1", tantivy_index::index_format_version());
-        let marker_path = storage.join("search-index").join(MARKER);
+        let marker_path = tantivy_index::generation_path(storage);
         let state = space.state_table();
         let recorded: Option<(String, Vec<u8>)> = self
             .reader()?
@@ -373,20 +371,35 @@ impl Library {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let marker = std::fs::read(&marker_path).ok();
-        if let Some((recorded_format, generation)) = &recorded {
-            if *recorded_format == format && marker.as_deref() == Some(generation.as_slice()) {
+        let read_marker = || match std::fs::read(&marker_path) {
+            Ok(marker) => Ok(Some(marker)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(Error::from(error)),
+        };
+        let marker = read_marker()?;
+        if recorded
+            .as_ref()
+            .is_some_and(|(recorded_format, generation)| {
+                *recorded_format == format && marker.as_ref() == Some(generation)
+            })
+        {
+            // 世代が合っていても、初めて開く索引はここで確かめる。破損を直したときは
+            // 索引が空になり世代が消えるので、台帳の文書も未処理に戻す。
+            tantivy_index::ensure_available(storage).map_err(Error::Integrity)?;
+            if read_marker()? == marker {
                 return Ok(false);
             }
+        } else {
+            // 別の世代の文書が残ると、鍵の違うものとして引かれる。
+            tantivy_index::release_runtime(storage);
+            tantivy_index::invalidate_generation(storage)?;
+            match std::fs::remove_dir_all(storage.join("search-index")) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
+            }
+            tantivy_index::ensure_available(storage).map_err(Error::Integrity)?;
         }
-        // 索引の場所ごと消してから作る。別の世代の文書が残ると、鍵の違うものとして引かれる。
-        tantivy_index::release_runtime(storage);
-        match std::fs::remove_dir_all(storage.join("search-index")) {
-            Ok(()) => (),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error.into()),
-        }
-        tantivy_index::ensure_index(storage).map_err(Error::Integrity)?;
         let generation = LibraryId::now_v7();
         std::fs::write(&marker_path, generation.as_bytes())?;
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;

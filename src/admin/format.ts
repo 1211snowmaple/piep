@@ -55,7 +55,7 @@ export function adminPlace(connection: Connection): { url: string; thisMachineOn
 export function connectionWarnings(connection: Connection): string[] {
   const warnings: string[] = [];
   if (connection.adminListen && isOpen(connection.adminListen)) {
-    warnings.push(`管理画面のアドレス ${connection.adminListen} に、ほかの機器から届きます。家の中のネットワークか VPN の中だけに置いてください。`);
+    warnings.push(`管理画面のアドレス ${connection.adminListen} に、ほかの機器から届きます。信頼できる相手だけがつながる範囲に置いてください。`);
   }
   if (!connection.adminListen && !connection.publicUrl && isOpen(connection.listen)) {
     warnings.push(`携帯用と管理用が同じアドレス ${connection.listen} で、ほかの機器から届きます。「管理画面のアドレスを分ける」で分けてください。`);

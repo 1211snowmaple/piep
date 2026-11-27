@@ -16,10 +16,11 @@ use uuid::Uuid;
 
 const TASK_NAME: &str = "piep-server";
 const DEFAULT_PORT_TEXT: &str = "38777";
-const COMPANION_FILES: [&str; 5] = [
+const COMPANION_FILES: [&str; 6] = [
     "msvcp140.dll",
     "msvcp140_1.dll",
     "pdfium.dll",
+    "pdfium-licenses.txt",
     "vcruntime140.dll",
     "vcruntime140_1.dll",
 ];

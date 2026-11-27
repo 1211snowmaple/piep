@@ -5,6 +5,7 @@ use crate::library::{
 };
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 
 struct Temp(PathBuf);
@@ -96,6 +97,26 @@ fn count(library: &Library, sql: &str) -> i64 {
         .unwrap()
         .query_row(sql, [], |r| r.get(0))
         .unwrap()
+}
+
+#[test]
+fn interrupted_publish_of_partial_copy_can_be_retried() {
+    let temp = Temp::new();
+    let source = Library::create(&temp.0.join("source")).unwrap();
+    let saved = capture(&source, "1", "author", None);
+    let destination = temp.0.join("partial");
+    let copy = || source.copy_works(&[saved.entity_id], &destination);
+
+    crate::library::publish::tests::interrupt_next_publish(PART_MARKER);
+    assert!(matches!(copy(), Err(Error::Canceled)));
+    assert!(!destination.exists());
+
+    assert_eq!(copy().unwrap().added, 1);
+    assert!(Library::is_part(&destination));
+    assert!(Library::open(&destination).is_err());
+    let part = Library::open_part(&destination).unwrap();
+    assert_eq!(part.works(10).unwrap()[0].id, saved.entity_id);
+    part.verify().unwrap();
 }
 
 fn edit_of(library: &Library, work: LibraryId) -> Option<LibraryId> {

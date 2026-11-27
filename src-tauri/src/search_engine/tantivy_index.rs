@@ -17,7 +17,8 @@ use tantivy::tokenizer::{
     LowerCaser, RemoveLongFilter, TextAnalyzer, Token, TokenStream, Tokenizer,
 };
 use tantivy::{
-    Directory, Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy, TantivyDocument, Term,
+    Directory, Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy, TantivyDocument,
+    TantivyError, Term,
 };
 
 use url::Url;
@@ -28,6 +29,7 @@ use super::normalization::{
 use super::text::{parse_search_query, ParsedSearchQuery, SearchDocument, SearchTerm};
 
 const INDEX_DIR_NAME: &str = "search-index";
+const MARKER: &str = "library-generation";
 // v4 drops the body field that duplicated the body n-grams verbatim, stops
 // storing the derived forms that are only ever matched against, and no longer
 // folds the readings into the n-gram field. Existing v3 directories are left
@@ -184,41 +186,56 @@ fn remove_obsolete_index_versions(index_root: &Path) {
     }
 }
 
-pub fn ensure_index(storage_dir: &Path) -> Result<Index, String> {
+pub(crate) fn generation_path(storage_dir: &Path) -> PathBuf {
+    storage_dir.join(INDEX_DIR_NAME).join(MARKER)
+}
+
+pub(crate) fn invalidate_generation(storage_dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(generation_path(storage_dir)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+fn ensure_index(storage_dir: &Path) -> Result<Index, String> {
     let index_root = storage_dir.join(INDEX_DIR_NAME);
     let index_dir = index_root.join(INDEX_VERSION_DIR);
     std::fs::create_dir_all(&index_dir)
-        .map_err(|e| format!("Tantivy index dir creation failed: {}", e))?;
-    remove_obsolete_index_versions(&index_root);
+        .map_err(|error| format!("全文索引のフォルダーを作成できません: {error}"))?;
 
-    match open_existing_index(&index_dir) {
-        Ok(index) => {
-            register_tokenizer(&index)?;
-            if schema_has_required_fields(&index.schema()) {
-                Ok(index)
-            } else {
-                reset_index_dir(&index_dir)
-            }
+    let directory = ScanTolerantDirectory::open(&index_dir)?;
+    let schema = build_schema();
+    let index = match Index::open(directory) {
+        Ok(index) if index.schema() == schema => index,
+        Ok(_) | Err(TantivyError::DataCorruption(_)) => {
+            reset_index_dir(storage_dir, &index_dir, schema)?
         }
-        Err(_) => reset_index_dir(&index_dir),
-    }
-}
-
-fn open_existing_index(index_dir: &Path) -> Result<Index, String> {
-    let directory = ScanTolerantDirectory::open(index_dir)?;
-    Index::open(directory).map_err(|e| format!("Tantivy index open failed: {e}"))
-}
-
-fn reset_index_dir(index_dir: &Path) -> Result<Index, String> {
-    if index_dir.exists() {
-        let _ = std::fs::remove_dir_all(index_dir);
-    }
-    std::fs::create_dir_all(index_dir).map_err(|e| format!("Tantivy index reset failed: {}", e))?;
-    let directory = ScanTolerantDirectory::open(index_dir)?;
-    let index = Index::create(directory, build_schema(), IndexSettings::default())
-        .map_err(|e| format!("Tantivy index creation failed: {}", e))?;
+        Err(TantivyError::OpenReadError(OpenReadError::FileDoesNotExist(path)))
+            if path == Path::new("meta.json") =>
+        {
+            reset_index_dir(storage_dir, &index_dir, schema)?
+        }
+        Err(error) => return Err(format!("全文索引を開けません: {error}")),
+    };
     register_tokenizer(&index)?;
+    remove_obsolete_index_versions(&index_root);
     Ok(index)
+}
+
+fn reset_index_dir(storage_dir: &Path, index_dir: &Path, schema: Schema) -> Result<Index, String> {
+    // 削除が途中で失敗しても、次の同期では以前の文書を索引済みとみなさない。
+    invalidate_generation(storage_dir)
+        .map_err(|error| format!("全文索引の世代を無効にできません: {error}"))?;
+    match std::fs::remove_dir_all(index_dir) {
+        Ok(()) => (),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(format!("全文索引を削除できません: {error}")),
+    }
+    std::fs::create_dir_all(index_dir)
+        .map_err(|error| format!("全文索引のフォルダーを作成できません: {error}"))?;
+    let directory = ScanTolerantDirectory::open(index_dir)?;
+    Index::create(directory, schema, IndexSettings::default())
+        .map_err(|error| format!("全文索引を作成できません: {error}"))
 }
 
 /// Windows error 5, `ERROR_ACCESS_DENIED`.
@@ -382,6 +399,10 @@ fn runtime(storage_dir: &Path) -> Result<Arc<TantivyRuntime>, String> {
     });
     runtimes.insert(key, runtime.clone());
     Ok(runtime)
+}
+
+pub(crate) fn ensure_available(storage_dir: &Path) -> Result<(), String> {
+    runtime(storage_dir).map(|_| ())
 }
 
 #[cfg(not(test))]
@@ -1608,65 +1629,6 @@ fn add_text_family(builder: &mut tantivy::schema::SchemaBuilder, name: &str) {
     builder.add_text_field(&format!("{}_reading_romaji", name), TEXT);
 }
 
-fn schema_has_required_fields(schema: &Schema) -> bool {
-    [
-        "download_id",
-        "source_exact",
-        "source_id_exact",
-        "source_id_lower",
-        "source_id_ngram",
-        "source_id_reading_kana",
-        "source_id_reading_romaji",
-        "source_url_exact",
-        "source_url_lower",
-        "source_url_ngram",
-        "source_url_reading_kana",
-        "source_url_reading_romaji",
-        "title_exact",
-        "title_lower",
-        "title_ngram",
-        "title_reading_kana",
-        "title_reading_romaji",
-        "author_name_exact",
-        "author_name_lower",
-        "author_name_ngram",
-        "author_name_reading_kana",
-        "author_name_reading_romaji",
-        "author_id_exact",
-        "author_id_lower",
-        "author_id_ngram",
-        "author_id_reading_kana",
-        "author_id_reading_romaji",
-        "tags_exact",
-        "tags_lower",
-        "tags_ngram",
-        "tags_reading_kana",
-        "tags_reading_romaji",
-        "series_title_exact",
-        "series_title_lower",
-        "series_title_ngram",
-        "series_title_reading_kana",
-        "series_title_reading_romaji",
-        "excerpt_exact",
-        "excerpt_lower",
-        "excerpt_ngram",
-        "excerpt_reading_kana",
-        "excerpt_reading_romaji",
-        "body_exact",
-        "body_ngram",
-        "body_reading_kana",
-        "body_reading_romaji",
-        "published_at",
-        "downloaded_at",
-        "favorite",
-        "watch_updates",
-        "asset_kinds",
-        "text_length",
-    ]
-    .iter()
-    .all(|field| schema.get_field(field).is_ok())
-}
-
 /// 部分一致のための n-gram。**下限は 2 である。**
 ///
 /// つまり検索語が1文字のとき、クエリ側も同じ解析器を通るのでトークンが0個に
@@ -2041,6 +2003,32 @@ mod index_format_migration_tests {
     fn touch(dir: &Path, name: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join(name), b"stale").unwrap();
+    }
+
+    #[test]
+    fn an_index_read_error_keeps_the_files() {
+        let (_guard, storage) = temp_storage();
+        ensure_index(&storage).unwrap();
+        let index_root = storage.join(INDEX_DIR_NAME);
+        let index_dir = index_root.join(INDEX_VERSION_DIR);
+        let meta = std::fs::read(index_dir.join("meta.json")).unwrap();
+        // 通常のファイルとして読めない場所を作り、権限設定に頼らず読み取りエラーを起こす。
+        let managed = index_dir.join(".managed.json");
+        let saved_managed = index_dir.join("managed-backup");
+        std::fs::rename(&managed, &saved_managed).unwrap();
+        std::fs::create_dir(&managed).unwrap();
+        let marker_path = generation_path(&storage);
+        std::fs::write(&marker_path, b"generation").unwrap();
+
+        let error = ensure_index(&storage).unwrap_err();
+        assert!(error.contains(".managed.json"), "{error}");
+        assert_eq!(std::fs::read(index_dir.join("meta.json")).unwrap(), meta);
+        assert!(managed.is_dir());
+
+        std::fs::remove_dir(&managed).unwrap();
+        std::fs::rename(saved_managed, managed).unwrap();
+        ensure_index(&storage).unwrap();
+        assert_eq!(std::fs::read(marker_path).unwrap(), b"generation");
     }
 
     /// 索引の形を変えたら、前の版は消えて新しい版が空から始まる。

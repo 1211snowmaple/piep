@@ -19,6 +19,7 @@ pub use partial::{PartTransfer, PART_MARKER};
 mod pixiv_edit_gaps;
 mod profile_capture;
 pub use profile_capture::{ProfileSave, PROFILE_REFRESH_ROUTE};
+mod publish;
 mod reader;
 mod reader_catalogue;
 mod reader_loans;
