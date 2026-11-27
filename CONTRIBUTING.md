@@ -153,8 +153,8 @@ self-hosted runner（ラベル `snow`、2台）で動く。組み立ての途中
 
 ## 署名鍵
 
-配布物の署名鍵は二つある。どちらも GitHub の `release` Environment の Secrets にあり、`v*` のタグからしか
-読めない。秘密鍵の所在や保護方法は公開資料に記載しない。
+配布物の署名鍵は二つある。どちらも GitHub の `release` Environment の Secrets にあり、Release ワークフローが
+読む。秘密鍵の所在や保護方法は公開資料に記載しない。
 
 | Secret | 用途 |
 |---|---|

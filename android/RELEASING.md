@@ -15,16 +15,16 @@ Android の APK 更新には同じアプリ ID、同じ署名鍵、増加する 
 
 ## 署名鍵
 
-鍵は GitHub の `release` Environment の Secrets にあり、`v*` のタグからしか読めない。
+鍵は GitHub の `release` Environment の Secrets にあり、Release ワークフローが読む。
 
 | Secret | 中身 |
 |---|---|
-| `ANDROID_KEYSTORE_BASE64` | `piep-android-release.jks` を base64 にしたもの |
+| `ANDROID_KEYSTORE_BASE64` | 鍵のストア（`.jks`）を base64 にしたもの |
 | `ANDROID_KEYSTORE_PASSWORD` | ストアのパスワード |
-| `ANDROID_KEY_ALIAS` | 鍵の別名（`piep-android-release`） |
+| `ANDROID_KEY_ALIAS` | 鍵の別名 |
 | `ANDROID_KEY_PASSWORD` | 鍵のパスワード |
 
-Secrets は書き込み専用で、あとから取り出せない。`.jks` とパスワードの控えはリポジトリとも GitHub とも別の安全な場所（パスワード管理アプリなど）に置く。公開済みの版を作り直す場合も署名鍵を変更しない。
+Secrets は書き込み専用で、あとから取り出せない。`.jks` とパスワードの控えはリポジトリとも GitHub とも別の場所に置く。公開済みの版を作り直す場合も署名鍵を変更しない。
 
 ## 手元で組む
 
