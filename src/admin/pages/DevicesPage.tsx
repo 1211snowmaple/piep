@@ -52,10 +52,14 @@ function DeviceTable({ devices, onReplace, onRevoke }: { devices: Device[]; onRe
         <tbody>
           {devices.map((device) => {
             const admin = device.role === "admin";
+            const shelf = device.readsShelf === undefined ? "配信なし" : device.readsShelf ? "許可あり" : "許可なし";
             return (
               <tr key={device.id}>
                 <td data-label="名前"><span className="adm-strong adm-clamp">{device.name || "名前なし"}</span></td>
-                <td data-label="種類" className="adm-nowrap">{admin ? "管理者（デスクトップ版）" : "携帯"}</td>
+                <td data-label="種類" className="adm-nowrap">
+                  {admin ? "管理者（デスクトップ版）" : "携帯"}
+                  {!admin && <div className="adm-cell-sub">本棚：{shelf}</div>}
+                </td>
                 <td data-label="登録" className="adm-num">{dayTime(new Date(device.createdAt))}</td>
                 <td data-label="最後の接続" className="adm-num">{device.lastSeenAt ? relativeTime(device.lastSeenAt) : "まだ接続していません"}</td>
                 <td className="adm-cell-action">

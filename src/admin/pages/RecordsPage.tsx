@@ -4,7 +4,7 @@ import { useInfiniteQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Icons, IconSize } from "@/lib/icons";
 import { adminApi, type AuditEntry } from "../api";
-import { stamp } from "../format";
+import { stamp, stampWithOffset } from "../format";
 import { Card, PageHead } from "../shared";
 
 const KINDS = [
@@ -26,7 +26,7 @@ const KIND_LABEL: Record<string, string> = {
 const PAGE = 200;
 
 function line(entry: AuditEntry): string {
-  return [new Date(entry.at).toISOString(), KIND_LABEL[entry.kind] ?? entry.kind, entry.action, entry.ok ? "成功" : "失敗", entry.actor, entry.ip ?? "", entry.detail ?? ""].join("\t");
+  return [stampWithOffset(new Date(entry.at)), KIND_LABEL[entry.kind] ?? entry.kind, entry.action, entry.ok ? "成功" : "失敗", entry.actor, entry.ip ?? "", entry.detail ?? ""].join("\t");
 }
 
 export function RecordsPage() {

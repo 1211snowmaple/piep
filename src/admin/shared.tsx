@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Group, Modal, PasswordInput, Stack, Text, Title } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useQuery } from "@tanstack/react-query";
@@ -85,14 +85,23 @@ export function ReauthProvider({ children }: { children: ReactNode }) {
   const [password, setPassword] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const waiting = useRef<((passed: boolean) => void) | null>(null);
+  const waiting = useRef<{ result: Promise<boolean>; resolve: (passed: boolean) => void } | null>(null);
 
-  const ask = useCallback(() => new Promise<boolean>((resolve) => {
-    waiting.current = resolve;
+  useEffect(() => () => {
+    waiting.current?.resolve(false);
+    waiting.current = null;
+  }, []);
+
+  const ask = useCallback(() => {
+    if (waiting.current) return waiting.current.result;
+    let resolve!: (passed: boolean) => void;
+    const result = new Promise<boolean>((complete) => { resolve = complete; });
+    waiting.current = { result, resolve };
     setPassword("");
     setProblem(null);
     setOpened(true);
-  }), []);
+    return result;
+  }, []);
 
   const confirmed = useCallback(async <T,>(action: () => Promise<T>): Promise<T | undefined> => {
     try {
@@ -105,23 +114,30 @@ export function ReauthProvider({ children }: { children: ReactNode }) {
   }, [ask]);
 
   const finish = (passed: boolean) => {
+    const request = waiting.current;
+    waiting.current = null;
     setOpened(false);
     setPassword("");
-    waiting.current?.(passed);
-    waiting.current = null;
+    setPending(false);
+    request?.resolve(passed);
   };
 
   const submit = async () => {
+    const request = waiting.current;
+    if (!request || pending) return;
     setPending(true);
     setProblem(null);
     try {
       await adminApi.reauth(password);
-      finish(true);
     } catch (error) {
-      setProblem(failureMessage(error));
-    } finally {
-      setPending(false);
+      if (waiting.current === request) {
+        setProblem(failureMessage(error));
+        setPending(false);
+      }
+      return;
     }
+    // 送信中に閉じた窓の応答で、次の窓を閉じない。
+    if (waiting.current === request) finish(true);
   };
 
   return (
