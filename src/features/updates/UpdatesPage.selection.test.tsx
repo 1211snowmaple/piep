@@ -1,9 +1,17 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { it, expect } from "vitest";
+import { it, expect, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import UpdatesPage, { CandidatesPanel } from "./UpdatesPage";
+
+vi.mock("@/lib/providers", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/providers")>();
+  return {
+    ...original,
+    providers: { ...original.providers, pixiv: { ...original.providers.pixiv, label: "小説の取得元" } },
+  };
+});
 
 function renderUpdatesPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -15,6 +23,14 @@ function renderUpdatesPage() {
     </MantineProvider>,
   );
 }
+
+it("監視対象を追加するときの取得元は提供元定義の名前で表示する", async () => {
+  window.location.hash = "#/updates";
+  renderUpdatesPage();
+  fireEvent.click(await screen.findByRole("tab", { name: "監視対象" }));
+  fireEvent.click(await screen.findByRole("button", { name: "IDで追加" }));
+  expect(screen.getByLabelText("ソース")).toHaveValue("小説の取得元");
+});
 
 it("更新画面を離れて戻っても、外した候補のチェックは戻らない", async () => {
   window.location.hash = "#/updates";

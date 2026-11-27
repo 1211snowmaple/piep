@@ -95,6 +95,14 @@ pub async fn fetch_pixiv_novel_metadata(
         .map_err(|e| e.to_string())
 }
 
+/// 候補と、その閲覧制限を確認した接続の識別子。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanboxCandidates<T> {
+    account_key: String,
+    data: T,
+}
+
 /// FANBOX の投稿を一件、生の JSON のまま返す。
 ///
 /// 型を付けずに返すのは、FANBOX の本文が投稿の種類ごとに別の形をしている
@@ -102,9 +110,12 @@ pub async fn fetch_pixiv_novel_metadata(
 ///
 /// 鍵は保存してある FANBOX の接続から読む。
 #[tauri::command]
-pub async fn fetch_fanbox_post(post_id: String) -> Result<serde_json::Value, String> {
-    let (cookie, user_agent) = crate::auth::saved::Vault::app().fanbox_session()?;
-    fanbox_post(post_id, cookie, user_agent).await
+pub async fn fetch_fanbox_post(
+    post_id: String,
+) -> Result<FanboxCandidates<serde_json::Value>, String> {
+    let (account_key, account) = crate::auth::saved::Vault::app().fanbox_session()?;
+    let data = fanbox_post(post_id, account.session_id, account.user_agent).await?;
+    Ok(FanboxCandidates { account_key, data })
 }
 
 /// FANBOX の投稿を一件。更新ジョブが自分の持つ鍵で呼ぶ。
@@ -128,13 +139,17 @@ pub(crate) async fn fanbox_post(
 ///
 /// 鍵は保存してある FANBOX の接続から読む。
 #[tauri::command]
-pub async fn fetch_fanbox_creator_posts(creator_id: String) -> Result<Vec<FanboxPost>, String> {
-    let (cookie, user_agent) = crate::auth::saved::Vault::app().fanbox_session()?;
-    let api = crate::downloader::session::fanbox(cookie, user_agent)
+pub async fn fetch_fanbox_creator_posts(
+    creator_id: String,
+) -> Result<FanboxCandidates<Vec<FanboxPost>>, String> {
+    let (account_key, account) = crate::auth::saved::Vault::app().fanbox_session()?;
+    let api = crate::downloader::session::fanbox(account.session_id, account.user_agent)
         .map_err(|error| error.to_string())?;
-    api.get_all_creator_posts(&creator_id)
+    let data = api
+        .get_all_creator_posts(&creator_id)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(FanboxCandidates { account_key, data })
 }
 
 pub(crate) async fn fetch_fanbox_creator_posts_since(

@@ -64,7 +64,9 @@ export interface SidebarItem {
   subtitle?: string;
   selected: boolean;
   originalData: PixivNovel | FanboxPost;
+  restrictionAccountKey?: string;
   status?: "pending" | "downloading" | "success" | "skipped" | "failed" | "held";
+  shelfSkipped?: true;
   error?: string;
 }
 
@@ -101,7 +103,7 @@ function isSourceHost(hostname: string, domain: string): boolean {
 }
 
 function sourcePath(pathname: string): string {
-  return pathname.replace(/^\/[a-z]{2}\//i, "/");
+  return pathname.replace(/^\/(?:ja|en|ko|zh-cn|zh-tw)\//, "/");
 }
 
 function isSourceId(value: string | null | undefined): value is string {
@@ -120,7 +122,7 @@ export function getFanboxCreatorId(url: string): string | null {
   if (!parsed || !isSourceHost(parsed.hostname, "fanbox.cc")) return null;
   const labels = parsed.hostname.split(".");
   if (labels.length === 3 && labels[0] !== "www" && labels[0] !== "api") return labels[0];
-  return parsed.pathname.match(/^\/@([^/]+)(?:\/|$)/)?.[1] ?? null;
+  return sourcePath(parsed.pathname).match(/^\/@([^/]+)(?:\/|$)/)?.[1].toLowerCase() ?? null;
 }
 
 /** そのページが指している相手。作品ID・シリーズID・作者ID・クリエイター名。 */
@@ -190,11 +192,27 @@ const PAGED_PIXIV_LISTS = [
   /^\/users\/\d+\/following\/?$/,
 ];
 
-/** pixiv のフォロー一覧か。ここからは作品でなく作者を読む。 */
-export function isFollowingListUrl(url: string): boolean {
-  const parsed = sourceUrl(url);
-  return pageListSource(url) === "pixiv" && /^\/users\/\d+\/following\/?$/.test(sourcePath(parsed?.pathname ?? ""));
+/**
+ * フォローしている人の一覧の取得元。ここからは作品でなく作者を読む。
+ *
+ * pixiv はフォロー一覧（`/users/{id}/following`）、FANBOX はフォロー中と
+ * 支援中のクリエイター（`/creators/following`・`/creators/supporting`）。
+ */
+export function followingListSource(url: string): "pixiv" | "fanbox" | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:") return null;
+  const { hostname, pathname } = parsed;
+  const path = sourcePath(pathname);
+  if (isSourceHost(hostname, "pixiv.net") && /^\/users\/\d{1,20}\/following\/?$/.test(path)) return "pixiv";
+  if ((hostname === "fanbox.cc" || hostname === "www.fanbox.cc") && /^\/creators\/(?:following|supporting)\/?$/.test(path)) return "fanbox";
+  return null;
 }
+
 
 /** 一覧の何ページ目か。URL に無ければ 1 ページ目である。 */
 export function listPageNumber(url: string): number {
@@ -230,7 +248,7 @@ export function pageWorkItems(source: "pixiv" | "fanbox", works: PageWorkCandida
       title,
       subtitle: work.author || undefined,
       selected: !work.saved,
-      ...(work.saved ? { status: "skipped" as const } : {}),
+      ...(work.saved ? { status: "skipped" as const, shelfSkipped: true as const } : {}),
       originalData: source === "pixiv"
         ? { id: work.sourceId, title, characterCount: 0, createDate: "", user: { id: "", name: work.author } }
         : { id: work.sourceId, title, type: "", publishedDatetime: "", user: { userId: "", name: work.author } },
@@ -238,10 +256,55 @@ export function pageWorkItems(source: "pixiv" | "fanbox", works: PageWorkCandida
   });
 }
 
-/** 同じ一覧の続きを足す。行の状態と選択は、すでにある行のものを残す。 */
-export function mergePageWorkItems(current: SidebarItem[], incoming: SidebarItem[]): SidebarItem[] {
-  const known = new Set(current.map((item) => item.id));
-  return [...current, ...incoming.filter((item) => !known.has(item.id))];
+export interface PageRows<Row> {
+  items: Row[];
+  pageOrder: ReadonlyMap<number, readonly string[]>;
+}
+
+/** ページ順に並べ、重複する行は最初に載るページに置く。見つからなくなった行は末尾に残す。 */
+export function mergePageRows<Row>(
+  current: PageRows<Row> | undefined,
+  incoming: Row[],
+  pageNumber: number,
+  getId: (row: Row) => string,
+  updateRow: (current: Row, incoming: Row) => Row,
+): PageRows<Row> {
+  const pageOrder = new Map(current?.pageOrder);
+  const byId = new Map(current?.items.map((row) => [getId(row), row]));
+  const fresh = new Map(incoming.map((row) => [getId(row), row]));
+  pageOrder.set(pageNumber, [...fresh.keys()]);
+  for (const [id, row] of fresh) {
+    const previous = byId.get(id);
+    byId.set(id, previous === undefined ? row : updateRow(previous, row));
+  }
+
+  const items: Row[] = [];
+  for (const [, ids] of [...pageOrder].sort(([a], [b]) => a - b)) {
+    for (const id of ids) {
+      const row = byId.get(id);
+      if (row === undefined) continue;
+      items.push(row);
+      byId.delete(id);
+    }
+  }
+  return { items: [...items, ...byId.values()], pageOrder };
+}
+
+/** 選択とジョブの状態を引き継ぎ、棚の照会による保存済み表示を更新する。 */
+export function mergePageWorkItems(
+  current: PageRows<SidebarItem> | undefined,
+  incoming: SidebarItem[],
+  pageNumber: number,
+): PageRows<SidebarItem> {
+  return mergePageRows(current, incoming, pageNumber, (row) => row.id, (row, fresh) => {
+    if (row.shelfSkipped && !fresh.shelfSkipped) {
+      return { ...row, status: undefined, shelfSkipped: undefined };
+    }
+    if (row.status === undefined && fresh.shelfSkipped) {
+      return { ...row, status: "skipped", shelfSkipped: true, selected: false };
+    }
+    return row;
+  });
 }
 
 export function detectDownloadTarget(url: string): DownloadTargetKind {

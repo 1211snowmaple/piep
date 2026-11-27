@@ -1,4 +1,5 @@
 import { MantineProvider } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +7,7 @@ import { AppRouter } from "@/app/router";
 import { hasUnsavedWork } from "@/lib/unsavedGuard";
 import SavePage from "./SavePage";
 import { readSaveDraft, resetSaveDraftsForTest } from "./saveDraft";
+import { summarizeSaveJob } from "./saveJobRows";
 
 const browserApi = vi.hoisted(() => ({
   openEmbeddedBrowser: vi.fn().mockResolvedValue(undefined),
@@ -26,7 +28,7 @@ const browserApi = vi.hoisted(() => ({
 }));
 
 const upsertTarget = vi.hoisted(() => vi.fn());
-const downloadApi = vi.hoisted(() => ({ fetchPixivSeriesNovels: vi.fn() }));
+const downloadApi = vi.hoisted(() => ({ fetchPixivSeriesNovels: vi.fn(), fetchFanboxCreatorPosts: vi.fn() }));
 const jobs = vi.hoisted(() => ({
   start: vi.fn(),
   states: vi.fn(),
@@ -134,6 +136,24 @@ describe("SavePage の Rust 保存ジョブ", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "選択したものは保存済みです" })).toBeDisabled());
   });
 
+  it("閲覧制限を候補取得時のアカウントと一緒に Rust へ預ける", async () => {
+    window.location.hash = "#/save/fanbox";
+    downloadApi.fetchFanboxCreatorPosts.mockResolvedValue({
+      accountKey: "取得時",
+      data: [{ id: "9", title: "限定投稿", isRestricted: true, feeRequired: 500, creatorId: "creator" }],
+    });
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: "https://creator.fanbox.cc/" } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+    fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
+    expect(await screen.findByText("限定投稿")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "1件をライブラリに保存" }));
+    await waitFor(() => expect(jobs.start).toHaveBeenCalledWith([
+      { source: "fanbox", sourceId: "9", title: "限定投稿", fanboxAccess: { accountKey: "取得時", isRestricted: true, feeRequired: 500, creatorId: "creator" } },
+    ], expect.any(Boolean)));
+  });
+
   it("保存中に画面を離れて戻っても同じ候補を再送しない", async () => {
     let finish!: (value: ReturnType<typeof summary>) => void;
     jobs.wait.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
@@ -223,6 +243,37 @@ describe("SavePage の Rust 保存ジョブ", () => {
     expect(browserApi.navigateEmbeddedBrowser).not.toHaveBeenCalledWith(`${first}?p=3`);
   });
 
+  it("重複する続きのページは後ろに足し、読み直すと棚から外れた作品を選べる", async () => {
+    const first = "https://www.pixiv.net/tags/x/novels";
+    const second = `${first}?p=2`;
+    const work = (sourceId: string, saved = false) => ({ sourceId, title: `作品${sourceId}`, author: "", saved });
+    browserApi.readBrowserPageWorkCandidates.mockReset()
+      .mockResolvedValueOnce({ url: first, truncated: false, works: [work("1"), work("2")] })
+      .mockResolvedValueOnce({ url: second, truncated: false, works: [work("3"), work("1", true), work("4")] })
+      .mockResolvedValueOnce({ url: first, truncated: false, works: [work("2"), work("1")] });
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    const read = async (url: string) => {
+      fireEvent.change(address, { target: { value: url } });
+      fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "このページから読み取る" })));
+    };
+
+    await read(first);
+    await read(second);
+    const checkboxes = () => screen.getAllByRole("checkbox", { name: /を保存対象にする$/ });
+    expect(checkboxes().map((box) => box.getAttribute("aria-label"))).toEqual(["作品1を保存対象にする", "作品2を保存対象にする", "作品3を保存対象にする", "作品4を保存対象にする"]);
+    expect(checkboxes()[0]).toBeDisabled();
+
+    await read(first);
+    const unsaved = screen.getByRole("checkbox", { name: "作品1を保存対象にする" });
+    expect(checkboxes()[1]).toBe(unsaved);
+    expect(unsaved).toBeEnabled();
+    expect(unsaved).not.toBeChecked();
+    fireEvent.click(unsaved);
+    expect(unsaved).toBeChecked();
+  });
+
   it("続きを開ける一覧でだけ、読み取りの設定を開ける", async () => {
     renderSavePage();
     const address = await screen.findByLabelText("ブラウザのアドレス");
@@ -268,6 +319,72 @@ describe("SavePage の Rust 保存ジョブ", () => {
     expect(upsertTarget).toHaveBeenCalledWith({ targetType: "author", source: "pixiv", sourceKey: "1", displayName: "作者一", enabled: true, metadataJson: null });
     expect(browserApi.readBrowserPageWorkCandidates).not.toHaveBeenCalled();
     expect(await screen.findByRole("checkbox", { name: "作者一を監視に追加する" })).toBeDisabled();
+  });
+
+  it("保存ジョブの集計は画面で使う項目を返す", () => {
+    expect(summarizeSaveJob(summary("completed"))).toEqual({
+      outcome: "completed",
+      tally: "保存 2 · 保存済み 0 · 失敗 0",
+      failed: 0,
+      held: 0,
+    });
+  });
+
+  it("フォロー中の候補から監視に追加でき、上限での打ち切りを知らせる", async () => {
+    window.location.hash = "#/save/fanbox";
+    const page = "https://www.fanbox.cc/creators/following";
+    upsertTarget.mockReset().mockResolvedValue(undefined);
+    browserApi.readBrowserPageUserCandidates.mockReset().mockResolvedValue({
+      url: page,
+      truncated: true,
+      users: [{ userId: "mizu-atelier", name: "mizu atelier", watched: false }],
+    });
+    const show = vi.spyOn(notifications, "show");
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: page } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+    fireEvent.click(await screen.findByRole("button", { name: "クリエイターを読み取る" }));
+    fireEvent.click(await screen.findByRole("button", { name: "1人を監視に追加" }));
+
+    await waitFor(() => expect(upsertTarget).toHaveBeenCalledTimes(1));
+    expect(show).toHaveBeenCalledWith(expect.objectContaining({ message: "件数の上限で打ち切ったページがあります。" }));
+    show.mockRestore();
+    expect(browserApi.readBrowserPageUserCandidates).toHaveBeenCalledWith("embedded", "fanbox");
+    expect(upsertTarget).toHaveBeenCalledWith({ targetType: "author", source: "fanbox", sourceKey: "mizu-atelier", displayName: "mizu atelier", enabled: true, metadataJson: null });
+  });
+
+  it("別の取得元の作品のページでは候補を取得しない", async () => {
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: "https://www.fanbox.cc/@creator/posts/100" } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+
+    expect(await screen.findByText("作品・シリーズ・作者・一覧のページを開いてください")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "候補を取得" })).toBeDisabled();
+  });
+
+  it("フォロー一覧の再読込で作者を並べ直し、選択を引き継いで監視状態を更新する", async () => {
+    const page = "https://www.pixiv.net/users/7/following";
+    const user = (userId: string, watched = false) => ({ userId, name: `作者${userId}`, watched });
+    browserApi.readBrowserPageUserCandidates.mockReset()
+      .mockResolvedValueOnce({ url: page, truncated: false, users: [user("1", true), user("2"), user("3")] })
+      .mockResolvedValueOnce({ url: page, truncated: false, users: [user("4"), user("3"), user("2", true), user("1")] });
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: page } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+    const read = await screen.findByRole("button", { name: "フォローユーザーを読み取る" });
+    fireEvent.click(read);
+    fireEvent.click(await screen.findByRole("checkbox", { name: "作者3を監視に追加する" }));
+    fireEvent.click(read);
+    await screen.findByRole("checkbox", { name: "作者4を監視に追加する" });
+
+    const checkboxes = screen.getAllByRole("checkbox", { name: /を監視に追加する$/ });
+    expect(checkboxes.map((box) => box.getAttribute("aria-label"))).toEqual(["作者4を監視に追加する", "作者3を監視に追加する", "作者2を監視に追加する", "作者1を監視に追加する"]);
+    expect(checkboxes[1]).not.toBeChecked();
+    expect(checkboxes[2]).toBeDisabled();
+    expect(checkboxes[3]).toBeEnabled();
   });
 
   it("読み取れる作品が無いページでは候補を置き換えない", async () => {

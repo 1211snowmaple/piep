@@ -123,7 +123,7 @@ export interface SaveJobWork {
   source: "pixiv" | "fanbox";
   sourceId: string;
   title: string;
-  fanboxAccess?: { isRestricted: boolean; feeRequired?: number; creatorId?: string };
+  fanboxAccess?: { isRestricted: boolean; accountKey: string; feeRequired?: number; creatorId?: string };
 }
 
 export interface DeferredUpdateCandidate {
