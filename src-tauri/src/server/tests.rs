@@ -223,6 +223,101 @@ fn standalone(root: &Path) -> (StandaloneParts, ServerPaths) {
     (assemble(&paths, None, None).expect("assemble"), paths)
 }
 
+async fn request_pairing(
+    role: Role,
+    public_url: Option<&str>,
+    page_url: &str,
+) -> (StatusCode, serde_json::Value) {
+    let root = TestRoot::created("pairing-url");
+    let paths = ServerPaths::new(&root.0).unwrap();
+    fs::create_dir_all(paths.state()).unwrap();
+    let parts = assemble(&paths, public_url.map(str::to_owned), None).unwrap();
+    let store = &parts.context.store;
+    let secret = store
+        .issue_pairing(Role::Admin, Duration::from_secs(60))
+        .unwrap();
+    let admin = store.consume_pairing(&secret, "試験端末").unwrap();
+    let handle = axum_server::Handle::new();
+    let mut server = tokio::spawn(run_listener(
+        "127.0.0.1:0".parse().unwrap(),
+        None,
+        combined_router(Arc::clone(&parts.context)),
+        handle.clone(),
+    ));
+    let address = tokio::select! {
+        address = handle.listening() => address.unwrap(),
+        result = &mut server => panic!("試験サーバーが待ち受けを始めませんでした: {result:?}"),
+    };
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("http://{address}/api/admin/pairings"))
+        .bearer_auth(&admin.token)
+        .json(&serde_json::json!({ "role": role.as_str(), "url": page_url }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.json().await.unwrap();
+    handle.graceful_shutdown(Some(Duration::from_secs(2)));
+    server.await.unwrap().unwrap();
+    assert!(store.authorize(&admin.token).is_some());
+    (status, body)
+}
+
+fn assert_pairing_url((status, body): (StatusCode, serde_json::Value), role: Role, expected: &str) {
+    assert_eq!(status, StatusCode::OK);
+    let payload: serde_json::Value =
+        serde_json::from_str(body["payload"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["role"], role.as_str());
+    assert_eq!(payload["url"], expected);
+}
+
+#[tokio::test]
+async fn admin_replacement_pairing_prefers_the_public_url() {
+    let public_url = "https://server.example/shelf/";
+    let response = request_pairing(Role::Admin, Some(public_url), "http://127.0.0.1:38778").await;
+    assert_pairing_url(response, Role::Admin, public_url);
+}
+
+#[tokio::test]
+async fn admin_replacement_pairing_refuses_a_loopback_page_without_a_public_url() {
+    for url in [
+        "http://127.0.0.1:38778",
+        "https://127.42.0.1",
+        "https://[::1]",
+        "https://[::ffff:127.0.0.1]",
+        "https://localhost.",
+    ] {
+        let (status, body) = request_pairing(Role::Admin, None, url).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{url}");
+        assert_eq!(
+            body["message"],
+            "このアドレスはこの PC でしか使えません。登録する端末から届く URL を使ってください"
+        );
+        assert!(body.get("payload").is_none());
+    }
+}
+
+#[tokio::test]
+async fn admin_replacement_pairing_uses_the_page_url_without_a_public_url() {
+    let page_url = "https://server.example:38777";
+    let response = request_pairing(Role::Admin, None, page_url).await;
+    assert_pairing_url(response, Role::Admin, page_url);
+}
+
+#[tokio::test]
+async fn reader_pairing_prefers_the_public_url_and_refuses_a_loopback_fallback() {
+    let public_url = "https://server.example/shelf/";
+    let local_url = "https://localhost:38777/";
+    let response = request_pairing(Role::Reader, Some(public_url), local_url).await;
+    assert_pairing_url(response, Role::Reader, public_url);
+
+    let (status, _) = request_pairing(Role::Reader, None, local_url).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn protected_admin_routes_reject_before_receiving_the_body() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

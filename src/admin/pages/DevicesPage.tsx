@@ -6,7 +6,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { QRCodeSVG } from "qrcode.react";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
-import { adminApi, failureMessage, type Device, type Pairing } from "../api";
+import { adminApi, ApiFailure, failureMessage, type Device, type Pairing } from "../api";
 import { dayTime, relativeTime } from "../format";
 import { Card, PageHead, showFailure, useReauth, useStatus } from "../shared";
 
@@ -98,7 +98,16 @@ export function DevicesPage() {
       children: <Text size="sm">新しい登録文字列を出します。それを別の PC のデスクトップ版に貼り付けると、今の PC は接続できなくなります。使わなければ何も変わりません。</Text>,
       labels: { confirm: "登録文字列を出す", cancel: "キャンセル" },
       onConfirm: () => {
-        void confirmed(() => adminApi.replaceAdmin(url)).then((pairing) => { if (pairing) setAdmin(pairing); }).catch(showFailure);
+        setProblem(null);
+        void confirmed(() => adminApi.replaceAdmin(url)).then((pairing) => {
+          if (pairing) setAdmin(pairing);
+        }).catch((error) => {
+          if (error instanceof ApiFailure && error.code === "invalid_request") {
+            setProblem(failureMessage(error));
+          } else {
+            showFailure(error);
+          }
+        });
       },
     });
   };

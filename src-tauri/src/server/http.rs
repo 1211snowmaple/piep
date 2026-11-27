@@ -695,10 +695,8 @@ async fn admin_pairing(
     require_admin(&ctx, &headers)?;
     if request.role.as_deref() == Some("admin") {
         admin_web::require_for_admin_pairing(&ctx, &headers, &ip)?;
-        let url = request
-            .url
-            .filter(|url| url.len() <= 512 && url.starts_with("http"))
-            .ok_or_else(|| ApiError::invalid("このサーバーへ届く URL が決まっていません"))?;
+        let url = pairing_url(&ctx, request.url, "http")
+            .ok_or_else(|| ApiError::invalid("このサーバーへ届く URL が決まっていません"))??;
         let lifetime = Duration::from_secs(30 * 60);
         let secret = ctx
             .store
@@ -710,12 +708,8 @@ async fn admin_pairing(
         })));
     }
     admin_web::note_device(&ctx, &headers, &ip, "携帯の登録文字列の発行");
-    let url = ctx
-        .public_url
-        .clone()
-        .or(request.url)
-        .filter(|url| url.len() <= 512 && url.starts_with("https://"))
-        .ok_or_else(|| ApiError::invalid("携帯が接続する https の URL が決まっていません。server.toml の public_url に書いてください"))?;
+    let url = pairing_url(&ctx, request.url, "https://")
+        .ok_or_else(|| ApiError::invalid("携帯が接続する https の URL が決まっていません。server.toml の public_url に書いてください"))??;
     let secret = ctx
         .store
         .issue_pairing(Role::Reader, READER_PAIRING_LIFETIME)
@@ -724,6 +718,47 @@ async fn admin_pairing(
         "payload": pairing_payload(Role::Reader, &url, ctx.fingerprint.as_deref(), &secret),
         "expiresInSeconds": READER_PAIRING_LIFETIME.as_secs(),
     })))
+}
+
+/// 登録文字列に載せる URL。公開の URL があればそれを、無ければ画面から渡された URL を使う。
+/// 登録する端末は別の機械なので、この機械の中だけのアドレスは載せない。
+fn pairing_url(
+    ctx: &ServerContext,
+    page: Option<String>,
+    scheme: &str,
+) -> Option<Result<String, ApiError>> {
+    let url = ctx
+        .public_url
+        .clone()
+        .or(page)
+        .filter(|url| url.len() <= 512 && url.starts_with(scheme))?;
+    if only_this_machine(&url) {
+        return Some(Err(ApiError::invalid(
+            "このアドレスはこの PC でしか使えません。登録する端末から届く URL を使ってください",
+        )));
+    }
+    Some(Ok(url))
+}
+
+/// この機械の中からしか届かないアドレスか（ループバックと localhost）。
+fn only_this_machine(url: &str) -> bool {
+    match url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host().map(|host| host.to_owned()))
+    {
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => {
+            address.is_loopback()
+                || address
+                    .to_ipv4_mapped()
+                    .is_some_and(|address| address.is_loopback())
+        }
+        None => true,
+    }
 }
 
 async fn admin_devices(
