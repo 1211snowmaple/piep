@@ -40,11 +40,13 @@ const TEST_SOURCE: Option<&str> = option_env!("PIEP_SERVER_TEST_SOURCE");
 
 const EXECUTABLE: &str = "piep-server.exe";
 /// zip の中で受け入れるファイル。これ以外があれば、その配布物は使わない。
-const PACKAGE_FILES: [&str; 6] = [
+const PACKAGE_FILES: [&str; 7] = [
     EXECUTABLE,
     "msvcp140.dll",
     "msvcp140_1.dll",
     "pdfium.dll",
+    // pdfium と同梱物の使用許諾。DLL ではないので実行物の検査には関わらない。
+    "pdfium-licenses.txt",
     "vcruntime140.dll",
     "vcruntime140_1.dll",
 ];
@@ -1163,10 +1165,14 @@ mod tests {
         let package = dir.0.join("p.zip");
         let target = dir.0.join("out");
 
-        zip_with(&package, &["piep-server.exe", "MSVCP140.dll"]);
+        zip_with(
+            &package,
+            &["piep-server.exe", "MSVCP140.dll", "pdfium-licenses.txt"],
+        );
         extract_package(&package, &target).expect("extract");
         assert!(target.join("piep-server.exe").exists());
         assert!(target.join("msvcp140.dll").exists());
+        assert!(target.join("pdfium-licenses.txt").exists());
 
         // パスの外へ出る名前も、知らない名前も受け入れない。
         for bad in ["../piep-server.exe", "sub/piep-server.exe", "evil.dll"] {
