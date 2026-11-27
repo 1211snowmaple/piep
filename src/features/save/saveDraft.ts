@@ -9,7 +9,7 @@ export interface SaveJobRun {
 
 export interface SaveDraft extends PageRows<SidebarItem> {
   downloadType: SidebarDownloadType | null;
-  lastAnalysisUrl: string | null;
+  analysisTargetId: string | null;
   lastAnalysisKey: string | null;
   browserUrl: string | null;
   unconfirmedJob: SaveJobRun | null;
@@ -19,7 +19,7 @@ const emptyDraft = (): SaveDraft => ({
   items: [],
   pageOrder: new Map(),
   downloadType: null,
-  lastAnalysisUrl: null,
+  analysisTargetId: null,
   lastAnalysisKey: null,
   browserUrl: null,
   unconfirmedJob: null,

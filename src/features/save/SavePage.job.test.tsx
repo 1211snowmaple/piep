@@ -97,9 +97,9 @@ function renderSavePage() {
   );
 }
 
-async function collectCandidates() {
+async function collectCandidates(url = SERIES) {
   const address = await screen.findByLabelText("ブラウザのアドレス");
-  fireEvent.change(address, { target: { value: SERIES } });
+  fireEvent.change(address, { target: { value: url } });
   fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
   fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
   expect(await screen.findByText("第一話")).toBeInTheDocument();
@@ -109,10 +109,10 @@ describe("SavePage の Rust 保存ジョブ", () => {
   beforeEach(() => {
     resetSaveDraftsForTest();
     window.location.hash = "#/save/pixiv";
-    downloadApi.fetchPixivSeriesNovels.mockReset().mockResolvedValue([
+    downloadApi.fetchPixivSeriesNovels.mockReset().mockResolvedValue({ truncated: false, items: [
       { id: 1, title: "第一話", user: { name: "作者" } },
       { id: 2, title: "第二話", user: { name: "作者" } },
-    ]);
+    ] });
     jobs.start.mockReset().mockResolvedValue(summary());
     jobs.get.mockReset().mockResolvedValue(summary("completed"));
     jobs.states.mockReset().mockResolvedValue([
@@ -140,6 +140,53 @@ describe("SavePage の Rust 保存ジョブ", () => {
     ], expect.any(Boolean));
     await waitFor(() => expect(screen.getByRole("button", { name: "選択したものは保存済みです" })).toBeDisabled());
   });
+
+  it("保存元のクエリとフラグメントを操作履歴に書かない", async () => {
+    renderSavePage();
+    await collectCandidates(`${SERIES}?tracking=example#private`);
+    fireEvent.click(screen.getByRole("button", { name: "2件をライブラリに保存" }));
+    await waitFor(() => expect(jobs.start).toHaveBeenCalledOnce());
+    const detail = getOperationJobs()[0].detail;
+    expect(detail).toContain("シリーズ 1000");
+    expect(detail).not.toMatch(/tracking|private|https?:/);
+    const stored = window.localStorage.getItem("piep.operation-history");
+    expect(stored).toContain(detail);
+    expect(stored).not.toMatch(/tracking|private/);
+  });
+
+  it("件数の上限に達しても候補を並べ、打ち切りを知らせる", async () => {
+    const show = vi.spyOn(notifications, "show");
+    try {
+      downloadApi.fetchPixivSeriesNovels.mockResolvedValueOnce({
+        items: [{ id: 1, title: "第一話" }, { id: 2, title: "第二話" }],
+        truncated: true,
+      });
+      renderSavePage();
+      await collectCandidates();
+      expect(screen.getByRole("button", { name: "2件をライブラリに保存" })).toBeEnabled();
+      expect(show).toHaveBeenCalledWith(expect.objectContaining({
+        message: "件数の上限で候補の取得を打ち切りました。",
+      }));
+    } finally {
+      show.mockRestore();
+    }
+  });
+
+  it.each(["a&b", "a%3Fb", "a%2Fb", "a%25b", "a b", "a".repeat(65)])(
+    "不正なクリエイター ID のページから候補を取得しない（%s）",
+    async (id) => {
+      window.location.hash = "#/save/fanbox";
+      downloadApi.fetchFanboxCreatorPosts.mockClear();
+      browserApi.readBrowserPageWorkCandidates.mockClear();
+      renderSavePage();
+      const address = await screen.findByLabelText("ブラウザのアドレス");
+      fireEvent.change(address, { target: { value: `https://www.fanbox.cc/@${id}` } });
+      fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+      expect(await screen.findByRole("button", { name: "候補を取得" })).toBeDisabled();
+      expect(downloadApi.fetchFanboxCreatorPosts).not.toHaveBeenCalled();
+      expect(browserApi.readBrowserPageWorkCandidates).not.toHaveBeenCalled();
+    },
+  );
 
   it("再試行のジョブのイベントで失敗行を処理中に戻す", async () => {
     const failed = { source: "pixiv", sourceId: "1", status: "failed", error: "取得できませんでした" };
@@ -272,7 +319,7 @@ describe("SavePage の Rust 保存ジョブ", () => {
     window.location.hash = "#/save/fanbox";
     downloadApi.fetchFanboxCreatorPosts.mockResolvedValue({
       accountKey: "取得時",
-      data: [{ id: "9", title: "限定投稿", isRestricted: true, feeRequired: 500, creatorId: "creator" }],
+      data: { truncated: false, items: [{ id: "9", title: "限定投稿", isRestricted: true, feeRequired: 500, creatorId: "creator" }] },
     });
     renderSavePage();
     const address = await screen.findByLabelText("ブラウザのアドレス");

@@ -2064,14 +2064,6 @@ fn page_user_id(href: &str) -> Option<String> {
     }
 }
 
-/// FANBOX のクリエイターの ID として通す文字。英数字と `-`・`_` だけ。
-fn is_fanbox_creator_id(id: &str) -> bool {
-    (1..=64).contains(&id.len())
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
 /// リンクが指す FANBOX のクリエイターの ID。クリエイターのトップでなければ `None`。
 ///
 /// `https://{id}.fanbox.cc/` と `https://www.fanbox.cc/@{id}` の二つの形がある。
@@ -2089,7 +2081,7 @@ fn page_creator_id(href: &str) -> Option<String> {
         _ => return None,
     }
     .to_ascii_lowercase();
-    (is_fanbox_creator_id(&id)
+    (super::fanbox::validate_creator_id(&id).is_ok()
         && !["www", "api", "downloads", "help", "official"].contains(&id.as_str()))
     .then_some(id)
 }

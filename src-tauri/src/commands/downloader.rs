@@ -7,6 +7,7 @@
 //! の組ごとに錠を持つ。同じ作品への保存が重なるのは珍しいことではなく、
 //! 一覧からの一括保存と更新監視が並んだときに普通に起きる。
 
+use crate::downloader::candidate_list::CandidateList;
 use crate::downloader::fanbox::get_post_detail;
 use crate::downloader::pixiv::{get_novel_detail, PixivNovelContent};
 use crate::fanbox_api::models::FanboxPost;
@@ -131,7 +132,7 @@ pub(crate) async fn fanbox_post(
         .map_err(|e| e.to_string())
 }
 
-/// クリエイターの投稿を、最初から最後まで並べて返す。
+/// クリエイターの投稿を並べ、件数の上限で打ち切ったかを返す。
 ///
 /// 返るのは一覧の情報だけで、本文は含まない。**一覧に出たことは、中身が読める
 /// ことを意味しない** - 支援していない有料の投稿は `isRestricted` が立って返り、
@@ -141,7 +142,8 @@ pub(crate) async fn fanbox_post(
 #[tauri::command]
 pub async fn fetch_fanbox_creator_posts(
     creator_id: String,
-) -> Result<FanboxCandidates<Vec<FanboxPost>>, String> {
+) -> Result<FanboxCandidates<CandidateList<FanboxPost>>, String> {
+    crate::auth::fanbox::validate_creator_id(&creator_id)?;
     let (account_key, account) = crate::auth::saved::Vault::app().fanbox_session()?;
     let api = crate::downloader::session::fanbox(account.session_id, account.user_agent)
         .map_err(|error| error.to_string())?;
@@ -157,7 +159,7 @@ pub(crate) async fn fetch_fanbox_creator_posts_since(
     cookie: String,
     user_agent: String,
     stop_source_id: Option<&str>,
-) -> Result<Vec<FanboxPost>, String> {
+) -> Result<CandidateList<FanboxPost>, String> {
     crate::downloader::session::fanbox(cookie, user_agent)
         .map_err(|error| error.to_string())?
         .get_creator_posts_since(&creator_id, stop_source_id)
@@ -165,7 +167,7 @@ pub(crate) async fn fetch_fanbox_creator_posts_since(
         .map_err(|e| e.to_string())
 }
 
-/// 公式シリーズに入っている小説を、最初から最後まで並べて返す。
+/// 公式シリーズの小説を並べ、件数の上限で打ち切ったかを返す。
 ///
 /// 頁をたどるので、長いシリーズでは相応に時間がかかる。**100頁で打ち切って
 /// `Err` にする**（相手の返事が終わらないときに無限に叩き続けないための歯止め
@@ -175,7 +177,7 @@ pub(crate) async fn fetch_fanbox_creator_posts_since(
 #[tauri::command]
 pub async fn fetch_pixiv_series_novels(
     series_id: String,
-) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
+) -> Result<CandidateList<pixiv_api::models::NovelInfo>, String> {
     let refresh_token = crate::auth::saved::Vault::app().pixiv_token()?;
     fetch_pixiv_series_novels_since(series_id, refresh_token, None).await
 }
@@ -184,13 +186,13 @@ pub(crate) async fn fetch_pixiv_series_novels_since(
     series_id: String,
     refresh_token: String,
     stop_source_id: Option<&str>,
-) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
+) -> Result<CandidateList<pixiv_api::models::NovelInfo>, String> {
     let api =
         crate::downloader::session::pixiv(refresh_token).map_err(|error| error.to_string())?;
     let id_u64: u64 = series_id.parse().map_err(|_| "Invalid series ID")?;
 
     let mut last_order: Option<String> = None;
-    let mut all_novels = Vec::new();
+    let mut candidates = CandidateList::default();
     let mut page_count = 0;
     let mut seen_cursors = std::collections::HashSet::new();
     let mut seen_ids = std::collections::HashSet::new();
@@ -213,23 +215,12 @@ pub(crate) async fn fetch_pixiv_series_novels_since(
         }
 
         let parsed: NovelSeriesResponse = serde_json::from_value(res).map_err(|e| e.to_string())?;
-        let mut reached_stop = false;
-        for novel in parsed.novels {
-            let id = novel.id.to_string();
-            if stop_source_id.is_some_and(|stop| stop == id) {
-                reached_stop = true;
-                break;
-            }
-            if seen_ids.insert(novel.id) {
-                all_novels.push(novel);
-            }
-            if all_novels.len() >= 10_000 {
-                return Err(
-                    "Pixiv series history exceeded the 10,000-item safety limit".to_string()
-                );
-            }
-        }
-        if reached_stop {
+        if candidates.append_page(
+            parsed.novels,
+            &mut seen_ids,
+            |novel| novel.id,
+            |id| stop_source_id.is_some_and(|stop| stop == id.to_string()),
+        ) {
             break;
         }
 
@@ -250,10 +241,10 @@ pub(crate) async fn fetch_pixiv_series_novels_since(
         }
     }
 
-    Ok(all_novels)
+    Ok(candidates)
 }
 
-/// 作者の小説を、最初から最後まで並べて返す。
+/// 作者の小説を並べ、件数の上限で打ち切ったかを返す。
 ///
 /// `fetch_pixiv_series_novels` と同じく頁をたどり、**100頁で打ち切って `Err`**
 /// にする。作品数の多い作者では時間がかかる。
@@ -262,7 +253,7 @@ pub(crate) async fn fetch_pixiv_series_novels_since(
 #[tauri::command]
 pub async fn fetch_pixiv_user_novels(
     user_id: String,
-) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
+) -> Result<CandidateList<pixiv_api::models::NovelInfo>, String> {
     let refresh_token = crate::auth::saved::Vault::app().pixiv_token()?;
     fetch_pixiv_user_novels_since(user_id, refresh_token, None).await
 }
@@ -282,13 +273,13 @@ pub(crate) async fn fetch_pixiv_user_novels_since(
     user_id: String,
     refresh_token: String,
     stop_source_id: Option<&str>,
-) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
+) -> Result<CandidateList<pixiv_api::models::NovelInfo>, String> {
     let api =
         crate::downloader::session::pixiv(refresh_token).map_err(|error| error.to_string())?;
     let id_u64: u64 = user_id.parse().map_err(|_| "Invalid user ID")?;
 
     let mut offset: Option<String> = None;
-    let mut all_novels = Vec::new();
+    let mut candidates = CandidateList::default();
     let mut page_count = 0;
     let mut seen_cursors = std::collections::HashSet::new();
     let mut seen_ids = std::collections::HashSet::new();
@@ -304,22 +295,12 @@ pub(crate) async fn fetch_pixiv_user_novels_since(
             .await
             .map_err(|e| e.to_string())?;
 
-        let mut reached_stop = false;
-        for novel in res.novels {
-            if reached_last_seen(novel.id, stop_source_id) {
-                reached_stop = true;
-                break;
-            }
-            if seen_ids.insert(novel.id) {
-                all_novels.push(novel);
-            }
-            if all_novels.len() >= 10_000 {
-                return Err(
-                    "Pixiv author history exceeded the 10,000-item safety limit".to_string()
-                );
-            }
-        }
-        if reached_stop {
+        if candidates.append_page(
+            res.novels,
+            &mut seen_ids,
+            |novel| novel.id,
+            |id| reached_last_seen(*id, stop_source_id),
+        ) {
             break;
         }
 
@@ -340,7 +321,65 @@ pub(crate) async fn fetch_pixiv_user_novels_since(
         }
     }
 
-    Ok(all_novels)
+    Ok(candidates)
+}
+
+#[cfg(test)]
+mod candidate_limit_tests {
+    use super::CandidateList;
+    use crate::downloader::candidate_list::CANDIDATE_LIMIT;
+    use std::collections::HashSet;
+
+    #[test]
+    fn exact_limit_is_complete_even_with_duplicates_on_the_next_page() {
+        let mut candidates = CandidateList::default();
+        let mut seen = HashSet::new();
+        assert!(!candidates.append_page(
+            (1..=CANDIDATE_LIMIT).collect(),
+            &mut seen,
+            |id| *id,
+            |_| false
+        ));
+        assert!(!candidates.append_page(vec![1, CANDIDATE_LIMIT], &mut seen, |id| *id, |_| false));
+        assert_eq!(candidates.items, (1..=CANDIDATE_LIMIT).collect::<Vec<_>>());
+        assert!(!candidates.truncated);
+    }
+
+    #[test]
+    fn overflow_keeps_the_first_ten_thousand_and_marks_truncation() {
+        let mut candidates = CandidateList::default();
+        let mut seen = HashSet::new();
+        assert!(!candidates.append_page(
+            (1..=CANDIDATE_LIMIT).collect(),
+            &mut seen,
+            |id| *id,
+            |_| false
+        ));
+        assert!(candidates.append_page(
+            vec![1, CANDIDATE_LIMIT + 1],
+            &mut seen,
+            |id| *id,
+            |_| false
+        ));
+        assert_eq!(candidates.items, (1..=CANDIDATE_LIMIT).collect::<Vec<_>>());
+        assert!(candidates.truncated);
+        assert!(candidates.into_complete().is_err());
+    }
+
+    #[test]
+    fn checkpoint_after_the_limit_is_not_an_extra_candidate() {
+        let mut candidates = CandidateList::default();
+        let mut seen = HashSet::new();
+        let checkpoint = CANDIDATE_LIMIT + 1;
+        assert!(candidates.append_page(
+            (1..=checkpoint).collect(),
+            &mut seen,
+            |id| *id,
+            |id| *id == checkpoint
+        ));
+        assert_eq!(candidates.items.len(), CANDIDATE_LIMIT);
+        assert!(!candidates.truncated);
+    }
 }
 
 /// pixiv の小説を URL 一本から取ってくる。本文と挿絵の在り処まで含む。

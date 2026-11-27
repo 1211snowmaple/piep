@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { downloadTargetKey, followingListSource, listPageNumber, mergePageWorkItems, nextPagedListUrl, pageListSource, pageWorkItems, detectDownloadTarget, extractSavedSourceTarget, getFanboxCreatorId, normalizeContentLinkUrl, type SidebarItem } from "@/features/browser/downloadCandidates";
+
+it.each(["a&b", "a%3Fb", "a%2Fb", "a%25b", "a b", "a".repeat(65)])(
+  "不正なクリエイター ID を候補の取得元にしない（%s）",
+  (id) => {
+    const url = `https://www.fanbox.cc/@${id}`;
+    expect(getFanboxCreatorId(url)).toBeNull();
+    expect(detectDownloadTarget(url)).toBe("unsupported");
+    expect(pageListSource(url)).toBeNull();
+  },
+);
+
+it("有効なクリエイター ID を正規化し、クエリとフラグメントを含めない", () => {
+  const id = "A-0_".repeat(16);
+  expect(getFanboxCreatorId(`https://www.fanbox.cc/@${id}/posts?x=1#top`)).toBe(id.toLowerCase());
+});
 import followingListUrls from "@shared/followingListUrls.test.json";
 
 function firstPage(items: SidebarItem[]) {
