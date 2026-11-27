@@ -224,7 +224,7 @@ pub fn open_for_startup(state: Arc<Shelf>, app_data: &Path) -> Result<(), String
     crate::advanced_settings::load(app_data);
     let path = library_dir(app_data);
     // 予約した復元は、棚を開く前に入れ替える。
-    super::backup::apply_pending_restore(&path);
+    super::backup::apply_pending_restore(&path)?;
     state.open(&path)?;
     let spawned = std::thread::Builder::new()
         .name("piep-library-index".into())
