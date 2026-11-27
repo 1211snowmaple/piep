@@ -497,6 +497,25 @@ describe("SavePage の Rust 保存ジョブ", () => {
     expect(screen.getByRole("button", { name: "候補を取得" })).toBeDisabled();
   });
 
+  it("フォロー一覧の候補が 0 人でも、上限で打ち切ったことを知らせる", async () => {
+    const page = "https://www.pixiv.net/users/7/following";
+    browserApi.readBrowserPageUserCandidates.mockReset().mockResolvedValue({ url: page, truncated: true, users: [] });
+    const show = vi.spyOn(notifications, "show");
+    try {
+      renderSavePage();
+      const address = await screen.findByLabelText("ブラウザのアドレス");
+      fireEvent.change(address, { target: { value: page } });
+      fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+      fireEvent.click(await screen.findByRole("button", { name: "フォローユーザーを読み取る" }));
+      await waitFor(() => expect(show).toHaveBeenCalledWith(expect.objectContaining({
+        color: "yellow",
+        message: "件数の上限で打ち切ったページがあります。",
+      })));
+    } finally {
+      show.mockRestore();
+    }
+  });
+
   it("フォロー一覧の再読込で作者を並べ直し、選択を引き継いで監視状態を更新する", async () => {
     const page = "https://www.pixiv.net/users/7/following";
     const user = (userId: string, watched = false) => ({ userId, name: `作者${userId}`, watched });

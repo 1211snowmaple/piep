@@ -846,7 +846,9 @@ export default function SavePage() {
           notifications.show({
             color: "yellow",
             title: `${readsUsers ? person : "作品"}が見つかりません`,
-            message: "一覧が表示されてから、もう一度読み取ってください",
+            message: result.truncated
+              ? listReadStopMessage(result.stop, options.pages, true, readsUsers ? person : null)
+              : "一覧が表示されてから、もう一度読み取ってください",
           });
           return;
         }

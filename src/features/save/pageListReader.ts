@@ -74,7 +74,7 @@ async function waitOrCancel(milliseconds: number, deps: ListReadDeps): Promise<b
   return !deps.cancelled();
 }
 
-type Settled = { kind: "page"; page: ListPage } | { kind: "empty" } | { kind: "moved" } | { kind: "cancelled" };
+type Settled = { kind: "page"; page: ListPage } | { kind: "empty"; truncated: boolean } | { kind: "moved" } | { kind: "cancelled" };
 
 /**
  * 開いたページが描き終わるのを待つ。読むのは文書だけなので、待つあいだの通信は
@@ -83,7 +83,7 @@ type Settled = { kind: "page"; page: ListPage } | { kind: "empty" } | { kind: "m
 async function settle(arrival: (url: string) => "arrived" | "waiting" | "moved", polls: number, deps: ListReadDeps): Promise<Settled> {
   let last = "";
   let repeats = 0;
-  let arrived = false;
+  let arrived: ListPage | undefined;
   for (let poll = 0; poll < polls; poll += 1) {
     if (!(await waitOrCancel(SETTLE_POLL_MS, deps))) return { kind: "cancelled" };
     const page = await deps.read().catch(() => null);
@@ -92,14 +92,14 @@ async function settle(arrival: (url: string) => "arrived" | "waiting" | "moved",
     const state = arrival(page.url);
     if (state === "moved") return { kind: "moved" };
     if (state === "waiting") continue;
-    arrived = true;
+    arrived = page;
     if (!page.works.length) continue;
     const ids = page.works.map((work) => work.sourceId).join(",");
     repeats = ids === last ? repeats + 1 : 1;
     last = ids;
     if (repeats >= SETTLED_READS) return { kind: "page", page };
   }
-  return arrived ? { kind: "empty" } : { kind: "moved" };
+  return arrived ? { kind: "empty", truncated: arrived.truncated } : { kind: "moved" };
 }
 
 /**
@@ -124,7 +124,10 @@ export async function readListPages(options: ListReadOptions, deps: ListReadDeps
     const first = await settle((url) => nextPagedListUrl(url) ? "arrived" : "waiting", OPENED_SETTLE_POLLS, deps);
     if (first.kind === "cancelled") return finish("cancelled");
     if (first.kind === "moved") return finish("moved");
-    if (first.kind === "empty") return finish("end");
+    if (first.kind === "empty") {
+      truncated = first.truncated;
+      return finish("end");
+    }
     page = first.page;
   } else {
     page = await deps.read();
@@ -132,6 +135,7 @@ export async function readListPages(options: ListReadOptions, deps: ListReadDeps
   const base = page.url;
   for (;;) {
     if (deps.cancelled()) return finish("cancelled");
+    truncated ||= page.truncated;
     if (!page.works.length) return finish("end");
     const allSeen = page.works.every((work) => seen.has(work.sourceId));
     for (const work of page.works) {
@@ -139,7 +143,6 @@ export async function readListPages(options: ListReadOptions, deps: ListReadDeps
       if (work.saved) savedIds.add(work.sourceId);
       else savedIds.delete(work.sourceId);
     }
-    truncated ||= page.truncated;
     pagesRead += 1;
     deps.onPage(page, pagesRead, seen.size);
     if (allSeen) return finish("end");
@@ -160,7 +163,10 @@ export async function readListPages(options: ListReadOptions, deps: ListReadDeps
     );
     if (settled.kind === "cancelled") return finish("cancelled");
     if (settled.kind === "moved") return finish("moved");
-    if (settled.kind === "empty") return finish("end");
+    if (settled.kind === "empty") {
+      truncated ||= settled.truncated;
+      return finish("end");
+    }
     page = settled.page;
   }
 }
