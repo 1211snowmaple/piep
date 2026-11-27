@@ -47,7 +47,7 @@ import { SAVE_SOURCE_ORDER, SAVE_SOURCES, saveJobWork, targetLabel } from "./sav
 import { applyJobItemState, isPendingSave, jobItemStatesById, summarizeSaveJob } from "./saveJobRows";
 import { FollowedUsersList, mergeFollowedUsers, type FollowedUserRow } from "./FollowedUsersList";
 import { DEFAULT_LIST_READ_OPTIONS, MAX_LIST_INTERVAL_SECONDS, MAX_LIST_PAGES, MIN_LIST_INTERVAL_SECONDS, normalizeListReadOptions, readListPages, type ListReadStop } from "./pageListReader";
-import { beginSaveDraftAnalysis, consumeListRead, isLatestSaveDraftAnalysis, readSaveDraft, subscribeSaveDraft, updateSaveDraft, type SaveSource } from "./saveDraft";
+import { beginSaveDraftAnalysis, consumeListRead, isLatestSaveDraftAnalysis, readSaveDraft, subscribeSaveDraft, updateSaveDraft, type SaveJobRun, type SaveSource } from "./saveDraft";
 import { errorMessage } from "@/lib/format";
 import { getProvider, ProviderMark } from "@/lib/providers";
 import { registerUnsavedGuard } from "@/lib/unsavedGuard";
@@ -85,6 +85,7 @@ import {
 import { isUpdateJobActive, useUpdateJobSummaries, waitForUpdateJob } from "@/features/updates/updateJobs";
 import {
   cancelUpdateJobCommand,
+  getUpdateJobCommand,
   listUpdateJobItemStatesCommand,
   startSaveJobCommand,
   type UpdateJobItemState,
@@ -99,6 +100,25 @@ function listReadStopMessage(stop: ListReadStop, pages: number, truncated: boole
   if (stop === "moved") return "別のページへ移ったので止めました。";
   if (stop === "cancelled") return "途中で止めました。";
   return pages > 1 ? "指定のページ数を読みました。" : "表示されている分だけです。";
+}
+
+const SAVE_RESULT_UNCONFIRMED = "作品ごとの保存結果を確認できませんでした";
+
+async function readSaveJobRows(source: SaveSource, run: SaveJobRun, phase: "progress" | "result") {
+  const states = jobItemStatesById(await listUpdateJobItemStatesCommand(run.jobId), source);
+  if (readSaveDraft(source).unconfirmedJob !== run) return false;
+  if (phase === "result" && [...run.itemIds].some((id) => !states.has(id))) {
+    throw new Error("ジョブに預けた作品の状態が揃っていません");
+  }
+  updateSaveDraft(source, (draft) => ({
+    ...draft,
+    unconfirmedJob: phase === "result" ? null : run,
+    items: draft.items.map((row) => {
+      const state = states.get(row.id);
+      return state && run.itemIds.has(row.id) ? applyJobItemState(row, state, phase) : row;
+    }),
+  }));
+  return true;
 }
 
 export default function SavePage() {
@@ -118,7 +138,7 @@ export default function SavePage() {
   const source: SaveSource = routeSource === "fanbox" ? "fanbox" : "pixiv";
   const profile = SAVE_SOURCES[source];
   const draft = useSyncExternalStore(subscribeSaveDraft, () => readSaveDraft(source));
-  const { items, downloadType, lastAnalysisUrl, lastAnalysisKey } = draft;
+  const { items, lastAnalysisUrl, lastAnalysisKey, unconfirmedJob } = draft;
   const initialUrl =
     searchParams.get("url") ||
     draft.browserUrl ||
@@ -134,6 +154,7 @@ export default function SavePage() {
   }, [source]);
   const [analyzing, setAnalyzing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [checkingSaveResult, setCheckingSaveResult] = useState(false);
   // 中止は押した瞬間に見えなければならない。取り消しが実際に効くのは次の
   // 待ちの切れ目なので、その間ボタンが何も言わないと押せていないと読まれる。
   const [canceling, setCanceling] = useState(false);
@@ -527,8 +548,13 @@ export default function SavePage() {
   const retryCount = items.filter(
     (item) => isPendingSave(item) && item.status === "failed",
   ).length;
+  const saveActionDisabled = !runtime || (!pendingCount && !unconfirmedJob) || activeJob || analyzing || checkingSaveResult;
   const saveActionLabel = activeJob && !saving
     ? "保存・更新の処理中です"
+    : checkingSaveResult
+    ? "前回の結果を確認しています"
+    : unconfirmedJob
+    ? pendingCount ? "前回の結果を確認して保存" : "前回の保存結果を確認"
     : !pendingCount
     ? selectedCount
       ? "選択したものは保存済みです"
@@ -888,59 +914,25 @@ export default function SavePage() {
   // 走っているのは Rust の中で、ここはそれを覗いているだけ。だからこの画面を
   // 離れても、描画側が落ちても、保存は最後まで進む。
   const followSaveJob = async (
-    jobId: string,
-    itemSource: "pixiv" | "fanbox",
+    run: SaveJobRun,
+    itemSource: SaveSource,
     operation: OperationController,
     total: number,
   ) => {
     let forwardedLogId = 0;
-    let lastStatesAt = 0;
-    let statesPromise: Promise<void> | null = null;
-    const applyItemStates = async (force = false) => {
-      // A progress event arrives for every item. Item-state lookup is a full
-      // IPC query, so never let those events start overlapping queries.
-      if (statesPromise) {
-        if (!force) return;
-        await statesPromise;
-      }
-      const now = Date.now();
-      if (!force && now - lastStatesAt < 200) return;
-      lastStatesAt = now;
-      const request = (async () => {
-        const states = await listUpdateJobItemStatesCommand(jobId).catch(
-          () => null,
-        );
-        if (!states) return;
-        const byId = jobItemStatesById(states, itemSource);
-        setItems((rows) =>
-          rows.map((row) => {
-            const state = byId.get(row.id);
-            return state ? applyJobItemState(row, state) : row;
-          }),
-        );
-      })();
-      statesPromise = request;
-      try {
-        await request;
-      } finally {
-        if (statesPromise === request) statesPromise = null;
-      }
-    };
     const applyItemState = (state: UpdateJobItemState) => {
-      if (state.source !== itemSource || !state.sourceId) return;
-      setItems((rows) =>
-        rows.map((row) => (row.id === state.sourceId ? applyJobItemState(row, state) : row)),
-      );
+      if (state.source !== itemSource || !state.sourceId || !run.itemIds.has(state.sourceId)) return;
+      updateSaveDraft(itemSource, (draft) => draft.unconfirmedJob !== run ? draft : {
+        ...draft,
+        items: draft.items.map((row) => row.id === state.sourceId ? applyJobItemState(row, state, "progress") : row),
+      });
     };
     let lastProgressAt = 0;
     let lastProgressDone = -1;
     const applySnapshot = (snapshot: UpdateJobSnapshot) => {
       const done = Math.min(snapshot.processed, total);
       const now = Date.now();
-      const terminal =
-        snapshot.status === "completed" ||
-        snapshot.status === "failed" ||
-        snapshot.status === "canceled";
+      const terminal = !isUpdateJobActive(snapshot.status);
       // Keep the progress indicator responsive without forcing a React render
       // and an operation-history write for every worker event.
       if (!terminal && done === lastProgressDone && now - lastProgressAt < 250)
@@ -983,16 +975,15 @@ export default function SavePage() {
 
     // One full read establishes the state if the worker progressed before the
     // delta listener was registered. Live events update one row at a time.
-    await applyItemStates(true);
+    await readSaveJobRows(itemSource, run, "progress").catch(() => undefined);
     const final = await waitForUpdateJob(
-      jobId,
+      run.jobId,
       (snapshot) => {
-        applySnapshot(snapshot);
+        if (isUpdateJobActive(snapshot.status)) applySnapshot(snapshot);
       },
       applyItemState,
     );
-    // 最後の1件ぶんは、終わりの様子が届いたあとで書き戻す。
-    await applyItemStates(true);
+    applySnapshot(final);
     return final;
   };
 
@@ -1000,8 +991,8 @@ export default function SavePage() {
     // 済んだものは対象から外す。再試行は「残りをもう一度」であって、
     // 保存できたものを取り直しに行くことではない - 監視中の作品は
     // 保存済みでも取り直す作りなので、素通しにすると本当に再取得される。
-    const selected = items.filter(isPendingSave);
-    if (!selected.length || !downloadType || !runtime || savingRef.current || activeJob || analyzingRef.current)
+    const previousJob = readSaveDraft(source).unconfirmedJob;
+    if ((!pendingCount && !previousJob) || !runtime || savingRef.current || activeJob || analyzingRef.current)
       return;
     if (!authConnected)
       return notifications.show({
@@ -1011,6 +1002,24 @@ export default function SavePage() {
       });
     // 下書きは取得元ごとに分かれているので、候補の取得元はこの画面の取得元である。
     const itemSource = source;
+    if (previousJob) {
+      savingRef.current = true;
+      setCheckingSaveResult(true);
+      try {
+        const previous = await getUpdateJobCommand(previousJob.jobId);
+        if (isUpdateJobActive(previous.status)) throw new Error("前回の保存が進行中です");
+        if (!(await readSaveJobRows(itemSource, previousJob, "result"))) return;
+      } catch (error) {
+        notifications.show({ color: "yellow", title: SAVE_RESULT_UNCONFIRMED, message: errorMessage(error) });
+        return;
+      } finally {
+        savingRef.current = false;
+        setCheckingSaveResult(false);
+      }
+    }
+    const current = readSaveDraft(itemSource);
+    const selected = current.items.filter(isPendingSave);
+    if (!current.downloadType || !selected.length || analyzingRef.current) return;
     const operation = startOperation({
       kind: "save",
       label: `${selected.length}件をライブラリに保存`,
@@ -1060,54 +1069,65 @@ export default function SavePage() {
         schedule.watchSaved ?? false,
       );
       saveJobIdRef.current = snapshot.jobId;
+      const run = { jobId: snapshot.jobId, itemIds: new Set(selected.map((item) => item.id)) };
+      // 新しいジョブが受け付けた行だけを待機に戻し、前回のエラーを消す。
+      updateSaveDraft(itemSource, (draft) => ({
+        ...draft,
+        unconfirmedJob: run,
+        items: draft.items.map((row) => run.itemIds.has(row.id)
+          ? { ...row, status: "pending", shelfSkipped: undefined, error: undefined }
+          : row),
+      }));
       operation.linkExternalJob(snapshot.jobId);
       if (operation.isCancelRequested()) {
         await cancelUpdateJobCommand(snapshot.jobId).catch(() => undefined);
       }
       const final = await followSaveJob(
-        snapshot.jobId,
+        run,
         itemSource,
         operation,
         selected.length,
       );
+      let resultUnconfirmed = false;
+      try {
+        // 進捗の購読を終えてから、イベントで拾えなかった行と中断時に待機へ戻った行を取得する。
+        await readSaveJobRows(itemSource, run, "result");
+      } catch (error) {
+        resultUnconfirmed = true;
+        operation.log(`${SAVE_RESULT_UNCONFIRMED}（${errorMessage(error)}）`, "warn");
+      }
       queryClient.invalidateQueries({ queryKey: ["library"] });
       queryClient.invalidateQueries({ queryKey: ["entity"] });
       invalidateWorkSetViews(queryClient);
-      const { outcome, tally, failed, held } = summarizeSaveJob(final);
+      const { outcome, tally, failed, held, partial } = summarizeSaveJob(final);
+      let color: string;
+      let title: string;
+      let message = tally;
       if (outcome === "canceled") {
         operation.cancel(`${tally} の時点で中止しました`);
-        notifications.show({
-          color: "gray",
-          title: "保存を中止しました",
-          message: tally,
-        });
+        color = "gray";
+        title = "保存を中止しました";
       } else if (outcome === "paused") {
-        // 止まっただけで、失敗ではない。ジョブは残っているので続きから再開できる。
-        operation.complete(
+        operation.pause(
           `${tally}（${final.activeLabel || "中断しました"}）`,
         );
-        notifications.show({
-          color: "yellow",
-          title: "保存を中断しました",
-          message: `${tally} · 新作・改稿の画面から再開できます`,
-        });
+        color = "yellow";
+        title = "保存を中断しました";
+        message = `${tally} · 新作・改稿の画面から再開できます`;
       } else if (outcome === "failed") {
-        operation.fail(
-          new Error(final.activeLabel || "すべての作品を保存できませんでした"),
-        );
-        notifications.show({
-          color: "red",
-          title: "保存できませんでした",
-          message: tally,
-        });
+        color = partial ? "yellow" : "red";
+        title = partial ? "保存が一部失敗しました" : "保存できませんでした";
+        operation.fail(`${final.activeLabel || title}（${tally}）`);
       } else {
         operation.complete(tally);
-        notifications.show({
-          color: failed || held ? "yellow" : "green",
-          title: failed ? "保存が完了しました（一部失敗）" : held ? "保存が完了しました（保留あり）" : "保存が完了しました",
-          message: tally,
-        });
+        color = failed || held ? "yellow" : "green";
+        title = failed ? "保存が完了しました（一部失敗）" : held ? "保存が完了しました（保留あり）" : "保存が完了しました";
       }
+      notifications.show(resultUnconfirmed ? {
+        color: "yellow",
+        title: SAVE_RESULT_UNCONFIRMED,
+        message: `${title}（${message}）。次の保存の前に結果を照合します。`,
+      } : { color, title, message });
     } catch (error) {
       operation.fail(error);
       // 見失っただけで、保存そのものは保存側で走り続けている。ここで棚の
@@ -1514,7 +1534,7 @@ export default function SavePage() {
                   variant="light"
                   color="piep"
                   size="lg"
-                  disabled={!runtime || !pendingCount || activeJob || analyzing}
+                  disabled={saveActionDisabled}
                   aria-label={saveActionLabel}
                   onClick={execute}
                 >
@@ -1799,7 +1819,7 @@ export default function SavePage() {
                     fullWidth
                     size="md"
                     leftSection={<Icons.collect size={IconSize.action} />}
-                    disabled={!runtime || !pendingCount || activeJob || analyzing}
+                    disabled={saveActionDisabled}
                     onClick={execute}
                   >
                     {saveActionLabel}

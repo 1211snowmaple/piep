@@ -4,7 +4,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
+import { getOperationJobs } from "@/features/jobs/operationJobs";
 import { hasUnsavedWork } from "@/lib/unsavedGuard";
+import type { UpdateJobItemState, UpdateJobStatus } from "@/services/updateJobApi";
 import SavePage from "./SavePage";
 import { readSaveDraft, resetSaveDraftsForTest } from "./saveDraft";
 import { summarizeSaveJob } from "./saveJobRows";
@@ -31,6 +33,7 @@ const upsertTarget = vi.hoisted(() => vi.fn());
 const downloadApi = vi.hoisted(() => ({ fetchPixivSeriesNovels: vi.fn(), fetchFanboxCreatorPosts: vi.fn() }));
 const jobs = vi.hoisted(() => ({
   start: vi.fn(),
+  get: vi.fn(),
   states: vi.fn(),
   cancel: vi.fn(),
   wait: vi.fn(),
@@ -52,6 +55,7 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
 vi.mock("@/services/updateJobApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/updateJobApi")>()),
   startSaveJobCommand: jobs.start,
+  getUpdateJobCommand: jobs.get,
   listUpdateJobItemStatesCommand: jobs.states,
   cancelUpdateJobCommand: jobs.cancel,
 }));
@@ -62,7 +66,7 @@ vi.mock("@/features/updates/updateJobs", async (importOriginal) => ({
 }));
 
 const SERIES = "https://www.pixiv.net/novel/series/1000";
-const summary = (status: "running" | "completed" | "canceled" = "running") => ({
+const summary = (status: UpdateJobStatus = "running") => ({
   jobId: "save-1",
   status,
   scope: "save" as const,
@@ -110,6 +114,7 @@ describe("SavePage の Rust 保存ジョブ", () => {
       { id: 2, title: "第二話", user: { name: "作者" } },
     ]);
     jobs.start.mockReset().mockResolvedValue(summary());
+    jobs.get.mockReset().mockResolvedValue(summary("completed"));
     jobs.states.mockReset().mockResolvedValue([
       { source: "pixiv", sourceId: "1", status: "saved", error: null },
       { source: "pixiv", sourceId: "2", status: "saved", error: null },
@@ -134,6 +139,133 @@ describe("SavePage の Rust 保存ジョブ", () => {
       { source: "pixiv", sourceId: "2", title: "第二話" },
     ], expect.any(Boolean));
     await waitFor(() => expect(screen.getByRole("button", { name: "選択したものは保存済みです" })).toBeDisabled());
+  });
+
+  it("再試行のジョブのイベントで失敗行を処理中に戻す", async () => {
+    const failed = { source: "pixiv", sourceId: "1", status: "failed", error: "取得できませんでした" };
+    const saved = { source: "pixiv", sourceId: "2", status: "saved", error: null };
+    jobs.states
+      .mockResolvedValueOnce([failed, saved])
+      .mockResolvedValueOnce([failed, saved])
+      .mockRejectedValueOnce(new Error("開始時の照会に失敗しました"))
+      .mockResolvedValue([{ ...failed, status: "saved", error: null }]);
+    let reportPreviousItem!: (state: UpdateJobItemState) => void;
+    jobs.wait.mockImplementationOnce(async (_jobId, _onSnapshot, onItemState) => {
+      reportPreviousItem = onItemState;
+      return { ...summary("failed"), savedCount: 1, errorCount: 1 };
+    });
+    jobs.start.mockResolvedValueOnce(summary()).mockResolvedValueOnce({ ...summary(), jobId: "save-2" });
+    let finish!: () => void;
+    jobs.wait.mockImplementationOnce((_jobId, _onSnapshot, onItemState) => new Promise((resolve) => {
+      onItemState({ ...failed, status: "running", error: null });
+      finish = () => resolve({ ...summary("completed"), jobId: "save-2", totals: 1, processed: 1, savedCount: 1 });
+    }));
+    renderSavePage();
+    await collectCandidates();
+    fireEvent.click(screen.getByRole("button", { name: "2件をライブラリに保存" }));
+    fireEvent.click(await screen.findByRole("button", { name: "失敗した1件をやり直す" }));
+    await waitFor(() => expect(finish).toBeDefined());
+    const running = readSaveDraft("pixiv").items[0];
+    act(() => reportPreviousItem(failed));
+    const afterOldEvent = readSaveDraft("pixiv").items[0];
+    await act(async () => finish());
+    expect(running).toMatchObject({ status: "downloading", error: undefined });
+    expect(afterOldEvent).toBe(running);
+  });
+
+  it("中断後の待機行を表示し、操作の記録にも中断を残す", async () => {
+    const running = { source: "pixiv", sourceId: "1", status: "running", error: null };
+    const queued = { source: "pixiv", sourceId: "2", status: "queued", error: null };
+    jobs.states.mockResolvedValueOnce([running, queued]).mockResolvedValue([{ ...running, status: "queued" }, queued]);
+    const paused = { ...summary("paused"), processed: 0, activeLabel: "一時停止しました" };
+    jobs.wait.mockImplementationOnce(async (_jobId, onSnapshot) => {
+      onSnapshot(paused);
+      return paused;
+    });
+    renderSavePage();
+    await collectCandidates();
+    fireEvent.click(screen.getByRole("button", { name: "2件をライブラリに保存" }));
+    await waitFor(() => expect(jobs.states).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(hasUnsavedWork("close")).toBe(false));
+    expect(readSaveDraft("pixiv").items.map((item) => item.status)).toEqual(["pending", "pending"]);
+    expect(getOperationJobs()[0]).toMatchObject({ status: "paused", current: 0, total: 2 });
+  });
+
+  it.each([0, 1])("項目失敗がなくてもジョブ全体の失敗を知らせる（保存 %i 件）", async (savedCount) => {
+    const show = vi.spyOn(notifications, "show");
+    jobs.states.mockResolvedValue([
+      { source: "pixiv", sourceId: "1", status: savedCount ? "saved" : "queued", error: null },
+      { source: "pixiv", sourceId: "2", status: "queued", error: null },
+    ]);
+    jobs.wait.mockResolvedValueOnce({ ...summary("failed"), savedCount, processed: savedCount, activeLabel: "処理が異常終了しました" });
+    renderSavePage();
+    await collectCandidates();
+    show.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "2件をライブラリに保存" }));
+    await waitFor(() => expect(hasUnsavedWork("close")).toBe(false));
+    expect(show).toHaveBeenCalledWith(expect.objectContaining({
+      title: savedCount ? "保存が一部失敗しました" : "保存できませんでした",
+      message: `保存 ${savedCount} · 保存済み 0 · 失敗 0 · 未処理 ${2 - savedCount}`,
+    }));
+    expect(getOperationJobs()[0].status).toBe("failed");
+    show.mockRestore();
+  });
+
+  it("最終照会が失敗したら画面を開き直しても照合まで再送せず、未処理の作品だけを送る", async () => {
+    const show = vi.spyOn(notifications, "show");
+    const queued = { source: "pixiv", sourceId: "1", status: "queued", error: null };
+    const saved = { source: "pixiv", sourceId: "2", status: "saved", error: null };
+    const failed = { ...summary("failed"), processed: 1, savedCount: 1 };
+    jobs.get.mockResolvedValue(failed);
+    jobs.start.mockResolvedValueOnce(summary()).mockResolvedValueOnce({ ...summary(), jobId: "save-2", totals: 1 });
+    jobs.states
+      .mockResolvedValueOnce([queued, { ...saved, status: "queued" }])
+      .mockRejectedValueOnce(new Error("最終照会に失敗しました"))
+      .mockRejectedValueOnce(new Error("再照会に失敗しました"))
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([queued, saved])
+      .mockResolvedValue([{ ...queued, status: "saved" }]);
+    jobs.wait.mockResolvedValueOnce(failed)
+      .mockResolvedValueOnce({ ...summary("completed"), jobId: "save-2", totals: 1, processed: 1, savedCount: 1 });
+    const first = renderSavePage();
+    await collectCandidates();
+    show.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "2件をライブラリに保存" }));
+    await waitFor(() => expect(hasUnsavedWork("close")).toBe(false));
+    expect(show).toHaveBeenCalledWith(expect.objectContaining({ title: "作品ごとの保存結果を確認できませんでした" }));
+
+    first.unmount();
+    renderSavePage();
+    fireEvent.click(await screen.findByRole("button", { name: "前回の結果を確認して保存" }));
+    await waitFor(() => expect(jobs.states).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.getByRole("button", { name: "前回の結果を確認して保存" })).toBeEnabled());
+    expect(jobs.start).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "前回の結果を確認して保存" }));
+    await waitFor(() => expect(jobs.states).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(screen.getByRole("button", { name: "前回の結果を確認して保存" })).toBeEnabled());
+    expect(jobs.start).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(await screen.findByRole("button", { name: "前回の結果を確認して保存" }));
+    await waitFor(() => expect(jobs.start).toHaveBeenCalledTimes(2));
+    expect(jobs.states).toHaveBeenNthCalledWith(5, "save-1");
+    expect(jobs.start).toHaveBeenLastCalledWith([
+      { source: "pixiv", sourceId: "1", title: "第一話" },
+    ], expect.any(Boolean));
+    await waitFor(() => expect(hasUnsavedWork("close")).toBe(false));
+    show.mockRestore();
+  });
+
+  it("全件保存の最終照会が失敗しても、照合して保存済みの行を再送しない", async () => {
+    const queued = ["1", "2"].map((sourceId) => ({ source: "pixiv", sourceId, status: "queued", error: null }));
+    jobs.states.mockResolvedValueOnce(queued).mockRejectedValueOnce(new Error("照会に失敗しました"));
+    renderSavePage();
+    await collectCandidates();
+    fireEvent.click(screen.getByRole("button", { name: "2件をライブラリに保存" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "前回の結果を確認して保存" }));
+    expect(await screen.findByRole("button", { name: "選択したものは保存済みです" })).toBeDisabled();
+    expect(jobs.start).toHaveBeenCalledTimes(1);
   });
 
   it("閲覧制限を候補取得時のアカウントと一緒に Rust へ預ける", async () => {
@@ -327,6 +459,7 @@ describe("SavePage の Rust 保存ジョブ", () => {
       tally: "保存 2 · 保存済み 0 · 失敗 0",
       failed: 0,
       held: 0,
+      partial: false,
     });
   });
 

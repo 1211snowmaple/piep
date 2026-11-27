@@ -74,6 +74,7 @@ const operationStatusMeta: Record<
   canceled: { label: "中止", color: "gray" },
   completed: { label: "完了", color: "green" },
   failed: { label: "失敗", color: "red" },
+  paused: { label: "中断", color: "yellow" },
   interrupted: { label: "追跡不可", color: "yellow" },
 };
 

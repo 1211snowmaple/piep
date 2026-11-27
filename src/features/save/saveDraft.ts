@@ -2,11 +2,17 @@ import type { PageRows, SidebarDownloadType, SidebarItem } from "@/features/brow
 
 export type SaveSource = "pixiv" | "fanbox";
 
+export interface SaveJobRun {
+  jobId: string;
+  itemIds: ReadonlySet<string>;
+}
+
 export interface SaveDraft extends PageRows<SidebarItem> {
   downloadType: SidebarDownloadType | null;
   lastAnalysisUrl: string | null;
   lastAnalysisKey: string | null;
   browserUrl: string | null;
+  unconfirmedJob: SaveJobRun | null;
 }
 
 const emptyDraft = (): SaveDraft => ({
@@ -16,6 +22,7 @@ const emptyDraft = (): SaveDraft => ({
   lastAnalysisUrl: null,
   lastAnalysisKey: null,
   browserUrl: null,
+  unconfirmedJob: null,
 });
 
 // Keep the candidate list for this app session. It can contain full post
