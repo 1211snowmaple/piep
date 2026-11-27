@@ -8,6 +8,19 @@ describe("operation history", () => {
 
   afterEach(() => vi.useRealTimers());
 
+  it("保存元の URL を含む履歴は読み込み時に詳細を消す", async () => {
+    const key = "piep.operation-history";
+    const api = await import("./operationJobs");
+    api.startOperation({ kind: "save", label: "保存" }).complete();
+    const stored = JSON.parse(window.localStorage.getItem(key) ?? "[]");
+    stored[0].detail = "取得元 · https://example.invalid/path?private=value#fragment";
+    window.localStorage.setItem(key, JSON.stringify(stored));
+    vi.resetModules();
+    const reloaded = await import("./operationJobs");
+    expect(reloaded.getOperationJobs()[0].detail).toBeNull();
+    expect(window.localStorage.getItem(key)).not.toMatch(/private|fragment/);
+  });
+
   it("records progress, completion and logs", async () => {
     const api = await import("./operationJobs");
     const operation = api.startOperation({

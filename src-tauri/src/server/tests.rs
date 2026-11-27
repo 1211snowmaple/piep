@@ -544,18 +544,19 @@ async fn the_public_side_refuses_what_it_should() {
         assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
     }
 
-    // 登録の試行は 1 分に 10 回まで。止めた試行では鍵を使い切らない。
+    // 登録の失敗は 1 分に 10 回まで。止めた試行では鍵を使い切らない。
     let secret = ServerStore::open(&paths.store())
         .unwrap()
         .issue_pairing(Role::Reader, Duration::from_secs(60))
         .unwrap();
     for _ in 0..10 {
-        client
+        let failure = client
             .post(format!("{url}/api/pair"))
             .json(&serde_json::json!({ "secret": "wrong", "deviceName": "x" }))
             .send()
             .await
             .unwrap();
+        assert_eq!(failure.status(), StatusCode::UNAUTHORIZED);
     }
     let limited = client
         .post(format!("{url}/api/pair"))
@@ -563,11 +564,55 @@ async fn the_public_side_refuses_what_it_should() {
         .send()
         .await
         .unwrap();
-    assert_eq!(limited.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    let seconds: u64 = limited.headers()[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&seconds));
     assert!(ServerStore::open(&paths.store())
         .unwrap()
         .consume_pairing(&secret, "x")
         .is_ok());
+}
+
+#[tokio::test]
+async fn successful_pairings_do_not_count_toward_the_failure_limit() {
+    let root = TestRoot::created("pair-failures");
+    let store = Arc::new(ServerStore::open(&root.0.join("state.sqlite")).unwrap());
+    let ctx = super::http::ServerContext::new(Arc::clone(&store), root.0.clone(), None, None);
+    let url = spawn_plain(combined_router(ctx));
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let attempt = |secret: &str| {
+        client
+            .post(format!("{url}/api/pair"))
+            .json(&serde_json::json!({ "secret": secret, "deviceName": "試験端末" }))
+            .send()
+    };
+    for _ in 0..9 {
+        assert_eq!(
+            attempt("wrong").await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    for _ in 0..2 {
+        let secret = store
+            .issue_pairing(Role::Reader, Duration::from_secs(60))
+            .unwrap();
+        pair_with(&client, &url, &secret).await;
+    }
+    assert_eq!(
+        attempt("wrong").await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let secret = store
+        .issue_pairing(Role::Reader, Duration::from_secs(60))
+        .unwrap();
+    let limited = attempt(&secret).await.unwrap();
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(limited.headers().contains_key(header::RETRY_AFTER));
+    assert!(store.consume_pairing(&secret, "試験端末").is_ok());
 }
 
 // ---- 管理画面 ----
@@ -586,6 +631,61 @@ static TEST_ASSETS: &[AdminAsset] = &[
 ];
 
 const GOOD_PASSWORD: &str = "夏の終わりに海辺で読む本を探す";
+
+#[tokio::test]
+async fn non_bearer_authorization_is_subject_to_browser_checks_and_cannot_authenticate() {
+    let site = AdminSite::new("admin-auth-scheme");
+    let cookie = site.set_up().await;
+    let status = || {
+        site.get("/api/admin/status")
+            .header(header::AUTHORIZATION, "Basic x")
+            .header(header::COOKIE, &cookie)
+    };
+    let host = status()
+        .header(header::HOST, "unknown.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(host.status(), StatusCode::FORBIDDEN);
+    let origin = site
+        .client
+        .post(format!("{}/api/admin/tickets", site.url))
+        .header(header::ORIGIN, "https://other.example")
+        .header(header::AUTHORIZATION, "Basic x")
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(origin.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        origin.json::<serde_json::Value>().await.unwrap()["code"],
+        "cross_site"
+    );
+    assert_eq!(
+        status().send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn session_cookie_is_only_accepted_where_the_admin_page_is_served() {
+    let site = AdminSite::new("admin-cookie-port");
+    let cookie = site.set_up().await;
+    let public = spawn_plain(combined_router(Arc::clone(&site.parts.context)));
+    for (url, expected) in [
+        (&site.url, StatusCode::OK),
+        (&public, StatusCode::UNAUTHORIZED),
+    ] {
+        let response = site
+            .client
+            .get(format!("{url}/api/admin/status"))
+            .header(header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}
 
 struct AdminSite {
     _root: TestRoot,

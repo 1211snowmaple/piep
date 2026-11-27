@@ -117,12 +117,22 @@ export function extractSavedSourceTarget(url: string): SavedSourceTarget | null 
   return null;
 }
 
+function fanboxCreatorSegment(parsed: URL): string | undefined {
+  const fromPath = sourcePath(parsed.pathname).match(/^\/@([^/]*)/)?.[1];
+  if (fromPath !== undefined) return fromPath;
+  const labels = parsed.hostname.split(".");
+  if (labels.length === 3 && labels[0] !== "www" && labels[0] !== "api") return labels[0];
+}
+
+function validFanboxCreatorId(id: string): boolean {
+  return id.length >= 1 && id.length <= 64 && !/[^A-Za-z0-9_-]/.test(id);
+}
+
 export function getFanboxCreatorId(url: string): string | null {
   const parsed = sourceUrl(url);
   if (!parsed || !isSourceHost(parsed.hostname, "fanbox.cc")) return null;
-  const labels = parsed.hostname.split(".");
-  if (labels.length === 3 && labels[0] !== "www" && labels[0] !== "api") return labels[0];
-  return sourcePath(parsed.pathname).match(/^\/@([^/]+)(?:\/|$)/)?.[1].toLowerCase() ?? null;
+  const id = fanboxCreatorSegment(parsed);
+  return id !== undefined && validFanboxCreatorId(id) ? id.toLowerCase() : null;
 }
 
 /** そのページが指している相手。作品ID・シリーズID・作者ID・クリエイター名。 */
@@ -156,12 +166,13 @@ export function describeDownloadTarget(url: string): DownloadTarget {
   }
 
   if (isSourceHost(parsed.hostname, "fanbox.cc")) {
+    const creatorSegment = fanboxCreatorSegment(parsed);
+    if (creatorSegment !== undefined && !validFanboxCreatorId(creatorSegment)) return none;
     const postId = path.match(/^\/(?:@[^/]+\/)?posts\/(\d+)\/?$/)?.[1];
     if (postId) return { kind: "fanbox_single", id: postId };
-    const creatorId = getFanboxCreatorId(parsed.href);
     const creatorPage = /^\/(?:@[^/]+\/?)?$/.test(path)
       || /^\/(?:@[^/]+\/)?(?:posts|plans|about)\/?$/.test(path);
-    if (creatorId && creatorPage) return { kind: "fanbox_creator", id: creatorId };
+    if (creatorSegment && creatorPage) return { kind: "fanbox_creator", id: creatorSegment.toLowerCase() };
   }
 
   return none;
@@ -171,14 +182,17 @@ export function describeDownloadTarget(url: string): DownloadTarget {
  * URL だけでは中身が分からない、取得元の一覧ページの取得元。
  *
  * 検索結果、ランキング、ブックマーク、フォロー新着など。作品・シリーズ・作者の
- * ページは API で全件を取れるので、ここには入れない。
+ * ページは API で候補を取るので、ここには入れない。
  */
 export function pageListSource(url: string): "pixiv" | "fanbox" | null {
   if (describeDownloadTarget(url).kind !== "unsupported") return null;
   const parsed = sourceUrl(url);
   if (parsed?.protocol !== "https:") return null;
   if (isSourceHost(parsed.hostname, "pixiv.net")) return "pixiv";
-  if (isSourceHost(parsed.hostname, "fanbox.cc")) return "fanbox";
+  if (isSourceHost(parsed.hostname, "fanbox.cc")) {
+    const id = fanboxCreatorSegment(parsed);
+    if (id === undefined || validFanboxCreatorId(id)) return "fanbox";
+  }
   return null;
 }
 

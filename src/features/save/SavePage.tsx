@@ -43,7 +43,7 @@ import {
   type SidebarItem,
 } from "@/features/browser/downloadCandidates";
 import { CandidateRow, EmptyCandidates } from "./CandidateRow";
-import { SAVE_SOURCE_ORDER, SAVE_SOURCES, saveJobWork, targetLabel } from "./saveSources";
+import { SAVE_SOURCE_ORDER, SAVE_SOURCES, saveHistoryDetail, saveJobWork, targetLabel } from "./saveSources";
 import { applyJobItemState, isPendingSave, jobItemStatesById, summarizeSaveJob } from "./saveJobRows";
 import { FollowedUsersList, mergeFollowedUsers, type FollowedUserRow } from "./FollowedUsersList";
 import { DEFAULT_LIST_READ_OPTIONS, MAX_LIST_INTERVAL_SECONDS, MAX_LIST_PAGES, MIN_LIST_INTERVAL_SECONDS, normalizeListReadOptions, readListPages, type ListReadStop } from "./pageListReader";
@@ -138,7 +138,7 @@ export default function SavePage() {
   const source: SaveSource = routeSource === "fanbox" ? "fanbox" : "pixiv";
   const profile = SAVE_SOURCES[source];
   const draft = useSyncExternalStore(subscribeSaveDraft, () => readSaveDraft(source));
-  const { items, lastAnalysisUrl, lastAnalysisKey, unconfirmedJob } = draft;
+  const { items, lastAnalysisKey, unconfirmedJob } = draft;
   const initialUrl =
     searchParams.get("url") ||
     draft.browserUrl ||
@@ -828,7 +828,7 @@ export default function SavePage() {
               ...current,
               ...mergePageWorkItems(current.downloadType === pageType && current.lastAnalysisKey === key ? current : undefined, incoming, pageNumber),
               downloadType: pageType,
-              lastAnalysisUrl: page.url,
+              analysisTargetId: null,
               lastAnalysisKey: key,
             }));
           },
@@ -861,20 +861,20 @@ export default function SavePage() {
         return;
       }
       if (!fetcher || target === "unsupported") return;
-      const next = await fetcher.fetch(described.id, analysisUrl);
+      const { items: next, truncated } = await fetcher.fetch(described.id, analysisUrl);
       if (!isCurrent()) return;
       updateSaveDraft(source, (current) => ({
         ...current,
         items: next,
         pageOrder: new Map(),
         downloadType: target,
-        lastAnalysisUrl: analysisUrl,
+        analysisTargetId: described.id,
         lastAnalysisKey: downloadTargetKey(analysisUrl),
       }));
       notifications.show({
-        color: "green",
+        color: truncated ? "yellow" : "green",
         title: `${next.length}件の候補を取得しました`,
-        message: "保存する項目を確認してください",
+        message: truncated ? "件数の上限で候補の取得を打ち切りました。" : "保存する項目を確認してください",
       });
     } catch (error) {
       if (isCurrent()) notifications.show({
@@ -1026,7 +1026,7 @@ export default function SavePage() {
       kind: "save",
       label: `${selected.length}件をライブラリに保存`,
       // 一覧の出どころは、いま開いているページではなく取ってきたページ。
-      detail: `${getProvider(source).label} · ${lastAnalysisUrl || currentUrl}`,
+      detail: saveHistoryDetail(itemSource, current.downloadType, current.analysisTargetId),
       total: selected.length,
       // 中止はジョブへ伝える。押されたことは画面にも即座に出す - 実際に
       // 止まるのは次の切れ目だが、返事はここで返す。

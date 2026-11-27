@@ -219,10 +219,13 @@ async fn authorize(
         .typed_try_get::<Authorization<Bearer>>()
         .map_err(|_| denied())?
         .ok_or_else(denied)?;
-    let Grant { device, subject } = ctx
-        .authority
-        .grant(token.token(), ctx.library_id)
-        .ok_or_else(denied)?;
+    let authority = Arc::clone(&ctx.authority);
+    let library_id = ctx.library_id;
+    let Grant { device, subject } =
+        tokio::task::spawn_blocking(move || authority.grant(token.token(), library_id))
+            .await
+            .map_err(|_| internal())?
+            .ok_or_else(denied)?;
     if request.headers().contains_key(header::ORIGIN) {
         return Err(ApiError(StatusCode::FORBIDDEN, ErrorCode::OriginForbidden));
     }

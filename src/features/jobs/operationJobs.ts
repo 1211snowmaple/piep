@@ -99,9 +99,15 @@ function storage(): Storage | null {
   }
 }
 
+function historyDetail(kind: OperationKind, detail?: string | null): string | null {
+  if (kind === "save" && detail && /https?:\/\//i.test(detail)) return null;
+  return detail ?? null;
+}
+
 function loadJobs(): OperationJob[] {
   try {
-    const raw = storage()?.getItem(STORAGE_KEY);
+    const store = storage();
+    const raw = store?.getItem(STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
     const loaded = parsed.filter((job): job is OperationJob =>
@@ -109,6 +115,21 @@ function loadJobs(): OperationJob[] {
         job && typeof job.id === "string" && typeof job.label === "string",
       ),
     );
+    let sanitized = false;
+    for (const job of loaded) {
+      const detail = historyDetail(job.kind, job.detail);
+      if (job.detail !== detail) {
+        job.detail = detail;
+        sanitized = true;
+      }
+    }
+    if (sanitized) {
+      try {
+        store?.setItem(STORAGE_KEY, JSON.stringify(loaded));
+      } catch {
+        // 書き換えられなくても、詳細を除いた履歴は表示する。
+      }
+    }
     const loadedAt = now();
     // 読み込むのは詳細設定より先（このファイルを読み込んだ時点）なので、ここでは設定の上限まで残す。
     // 今の件数で切ると、件数を増やした人の記録が起動のたびに既定の件数へ削られる。
@@ -220,7 +241,7 @@ export function startOperation(
     id: jobId,
     kind: options.kind,
     label: options.label,
-    detail: options.detail ?? null,
+    detail: historyDetail(options.kind, options.detail),
     status: "running",
     current: 0,
     total: options.total ?? null,

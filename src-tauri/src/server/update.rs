@@ -181,7 +181,7 @@ const HISTORY_LIMIT: usize = 50;
 /// 更新の履歴。書くのは本体だけにする。
 ///
 /// 見張り役は更新のあとも次の起動まで古いまま動き続けるので、`UpdateRecord` に載せると
-/// 古い見張り役が知らない項目を落としてしまう。起動のたびに前回との違いから 1 行を足す。
+/// 古い見張り役が知らない項目を落としてしまう。更新の結果や版の変化があった起動で 1 行を足す。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UpdateHistory {
@@ -203,13 +203,12 @@ impl UpdateHistory {
             .unwrap_or_default()
     }
 
-    pub fn save(&self, paths: &ServerPaths) {
-        let result = serde_json::to_vec_pretty(self)
+    pub fn save(&self, paths: &ServerPaths) -> bool {
+        serde_json::to_vec_pretty(self)
             .map_err(|error| error.to_string())
-            .and_then(|bytes| write_atomic(&paths.update_history(), &bytes));
-        if let Err(error) = result {
-            log::warn!("更新の履歴を書けません: {error}");
-        }
+            .and_then(|bytes| write_atomic(&paths.update_history(), &bytes))
+            .inspect_err(|error| log::warn!("更新の履歴を書けません: {error}"))
+            .is_ok()
     }
 
     fn push(&mut self, entry: UpdateHistoryEntry) {
@@ -226,10 +225,9 @@ impl UpdateHistory {
         history.save(paths);
     }
 
-    /// 本体が動き出したら呼ぶ。前回と比べて、起きたことを履歴に足す。
-    pub fn reconcile(paths: &ServerPaths, version: &str, now: DateTime<Utc>) {
+    /// 本体が動き出したら呼ぶ。前回と比べて、新しい行を履歴に保存できたときだけ true を返す。
+    pub fn reconcile(paths: &ServerPaths, version: &str, now: DateTime<Utc>) -> bool {
         let mut history = Self::load(paths);
-        let record = UpdateRecord::load(paths);
         let downtime = history
             .stopping_at
             .as_deref()
@@ -239,8 +237,8 @@ impl UpdateHistory {
         let target = history.stopping_to.take();
         let rollback = std::mem::take(&mut history.stopping_rollback);
         history.stopping_at = None;
-        match target {
-            Some(target) if target == version => history.push(UpdateHistoryEntry {
+        let entry = match target {
+            Some(target) if target == version => Some(UpdateHistoryEntry {
                 at: now.to_rfc3339(),
                 from,
                 to: target,
@@ -249,29 +247,34 @@ impl UpdateHistory {
                 reason: None,
             }),
             // 当てようとした版とは別の版で動き出した。見張り役が戻した。
-            Some(target) => history.push(UpdateHistoryEntry {
+            Some(target) => Some(UpdateHistoryEntry {
                 at: now.to_rfc3339(),
                 from,
                 to: target,
                 result: "failed".into(),
                 downtime_seconds: downtime,
-                reason: record.last_error.clone(),
+                reason: UpdateRecord::load(paths).last_error,
             }),
             // 更新の外で版が変わった。入れ直したときなど。
             None if from.as_deref().is_some_and(|from| from != version) => {
-                history.push(UpdateHistoryEntry {
+                Some(UpdateHistoryEntry {
                     at: now.to_rfc3339(),
                     from,
                     to: version.to_string(),
                     result: "applied".into(),
                     downtime_seconds: None,
                     reason: None,
-                });
+                })
             }
-            None => {}
+            None => None,
+        };
+        let added = entry.is_some();
+        if let Some(entry) = entry {
+            history.push(entry);
         }
         history.last_version = Some(version.to_string());
-        history.save(paths);
+        let saved = history.save(paths);
+        added && saved
     }
 }
 
