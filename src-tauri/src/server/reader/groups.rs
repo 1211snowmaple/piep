@@ -19,7 +19,8 @@ use axum::{
 use piep_mobile_api::MobileEntitySort;
 use piep_mobile_api::{
     MobileCollection, MobileCollectionCoverTile, MobileCollectionDetail, MobileCollectionMember,
-    MobileEntity, MobileEntityDetail, MobileEntityPage, MobileEntitySeriesPage, MobileFacet,
+    MobileCollectionPage, MobileEntity, MobileEntityDetail, MobileEntityPage,
+    MobileEntitySeriesPage, MobileFacet,
 };
 use serde::Deserialize;
 use std::collections::VecDeque;
@@ -108,16 +109,30 @@ fn limit(value: Option<usize>) -> usize {
     value.unwrap_or(PAGE).clamp(1, MAX_PAGE)
 }
 
+/// 続きの位置は何件目からかを十進で渡す。
+fn cursor_offset(cursor: Option<&str>) -> Result<usize, ApiError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    if cursor.is_empty() || cursor.len() > 7 || !cursor.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let offset = cursor.parse::<usize>().map_err(|_| invalid())?;
+    if offset > MAX_OFFSET {
+        return Err(invalid());
+    }
+    Ok(offset)
+}
+
 /// 画像のファイルの識別子（16 進の 64 文字）。
 fn file(hex: &str) -> Option<Fingerprint> {
-    if hex.len() != 64 {
-        return None;
-    }
-    let mut bytes = [0u8; 32];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
-    }
-    Some(Fingerprint(bytes))
+    Fingerprint::parse(hex).ok()
+}
+
+#[cfg(test)]
+#[test]
+fn image_fingerprint_rejects_a_sign_in_a_byte() {
+    assert!(file(&format!("+0{}", "00".repeat(31))).is_none());
 }
 
 pub(super) fn mobile_collection(
@@ -406,19 +421,7 @@ pub(super) async fn person_series(
     }
     let needle = text(query.text)?;
     let (sort, ascending) = sort(query.sort.as_deref(), query.order.as_deref())?;
-    let offset = match query.cursor.as_deref() {
-        None => 0,
-        Some(cursor) => {
-            if cursor.is_empty() || cursor.len() > 7 || !cursor.bytes().all(|b| b.is_ascii_digit())
-            {
-                return Err(invalid());
-            }
-            cursor.parse::<usize>().map_err(|_| invalid())?
-        }
-    };
-    if offset > MAX_OFFSET {
-        return Err(invalid());
-    }
+    let offset = cursor_offset(query.cursor.as_deref())?;
     let limit = limit(query.limit);
     let permit = read_permit(&ctx, &principal.device).await?;
     let bytes = tokio::task::spawn_blocking(move || {
@@ -530,27 +533,48 @@ pub(super) async fn series_cover(
     entity_cover(ctx, principal, path, query, EntityKind::Series).await
 }
 
-/// コレクションの一覧（更新の新しい順）。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CollectionQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+/// 次の一件があるときは続きの位置を返し、その一件は次のページに回す。
+fn collection_cursor<T>(items: &mut Vec<T>, offset: usize, limit: usize) -> Option<String> {
+    let end = offset + limit;
+    let next = (items.len() > limit && end <= MAX_OFFSET).then(|| end.to_string());
+    items.truncate(limit);
+    next
+}
+
+/// コレクションの一覧の一ページ（更新の新しい順）。
 pub(super) async fn collections(
     State(ctx): State<Arc<Context>>,
     Extension(principal): Extension<Principal>,
     path: PathResult<Id>,
-    query: QueryResult<super::EmptyQuery>,
+    query: QueryResult<CollectionQuery>,
 ) -> Result<Response, ApiError> {
     let Path(library) = path.map_err(|_| invalid())?;
-    query.map_err(|_| invalid())?;
+    let Query(query) = query.map_err(|_| invalid())?;
     this_library(&ctx, library)?;
+    let offset = cursor_offset(query.cursor.as_deref())?;
+    let limit = limit(query.limit);
     let permit = read_permit(&ctx, &principal.device).await?;
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let items: Vec<MobileCollection> = ctx
+        let mut summaries = ctx
             .library
-            .list_collections()
-            .map_err(library_error)?
-            .into_iter()
-            .map(|summary| mobile_collection(summary, None))
-            .collect();
-        json(&items)
+            .collection_summaries_page(limit + 1, offset)
+            .map_err(library_error)?;
+        let next_cursor = collection_cursor(&mut summaries, offset, limit);
+        json(&MobileCollectionPage {
+            items: summaries
+                .into_iter()
+                .map(|summary| mobile_collection(summary, None))
+                .collect(),
+            next_cursor,
+        })
     })
     .await
     .map_err(|_| internal())??;
@@ -568,23 +592,28 @@ fn collection_target(id: &str) -> Result<LibraryId, ApiError> {
     id.parse::<LibraryId>().map_err(|_| not_found())
 }
 
-/// コレクションの画面。回は並べた順で、棚にある回は一覧と同じ作品の形。
+/// コレクションの画面と回の一ページ。棚にある回は一覧と同じ作品の形。
 pub(super) async fn collection(
     State(ctx): State<Arc<Context>>,
     Extension(principal): Extension<Principal>,
     path: PathResult<CollectionLocation>,
-    query: QueryResult<super::EmptyQuery>,
+    query: QueryResult<CollectionQuery>,
 ) -> Result<Response, ApiError> {
     let Path(location) = path.map_err(|_| invalid())?;
-    query.map_err(|_| invalid())?;
+    let Query(query) = query.map_err(|_| invalid())?;
     this_library(&ctx, location.library)?;
+    let offset = cursor_offset(query.cursor.as_deref())?;
+    let limit = limit(query.limit);
     let subject = principal.subject.get();
     let permit = read_permit(&ctx, &principal.device).await?;
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let library = &ctx.library;
         let target = collection_target(&location.collection)?;
-        let detail = library.collection_detail(target).map_err(library_error)?;
+        let mut detail = library
+            .collection_detail_page(target, limit + 1, offset)
+            .map_err(library_error)?;
+        let next_cursor = collection_cursor(&mut detail.members, offset, limit);
         let cards: Vec<_> = detail
             .members
             .iter()
@@ -616,6 +645,7 @@ pub(super) async fn collection(
         json(&MobileCollectionDetail {
             summary: mobile_collection(detail.summary, None),
             members,
+            next_cursor,
         })
     })
     .await

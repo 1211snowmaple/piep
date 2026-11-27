@@ -847,6 +847,71 @@ async fn shelf_page(response: reqwest::Response) -> piep_mobile_api::MobileWorkP
 }
 
 #[tokio::test]
+async fn series_filter_treats_spaces_and_quotes_as_part_of_the_key() {
+    let server = Server::start().await;
+    let key = r#"連載 "第一部""#;
+    for (work, series) in [("wanted", key), ("other", "連載")] {
+        let mut input = capture(work, None);
+        input.metadata.insert("series_id".into(), json!(series));
+        input
+            .metadata
+            .insert("series_title".into(), json!("同じ題"));
+        save(&server.library, input);
+    }
+    for request in [
+        json!({"seriesSource": "pixiv", "seriesKey": key}),
+        json!({"seriesKey": key}),
+    ] {
+        let page = shelf_page(server.search(request).send().await.unwrap()).await;
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].source_id, "wanted");
+    }
+}
+
+#[tokio::test]
+async fn work_cover_refuses_an_oversized_image() {
+    let server = Server::start().await;
+    let cover = png_with_size(16_385, 1);
+    let work = save(&server.library, capture("oversized", Some(&cover)));
+    let response = server
+        .get(&server.shelf(&format!("/works/{}/cover", work.entity_id)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// 原寸で保存した大きな表紙も縮めて返す（実際の棚には長辺 8,842 px・5,808 万画素の表紙がある）。
+#[tokio::test]
+async fn work_cover_shrinks_a_large_original() {
+    let server = Server::start().await;
+    let cover = png_with_size(8_900, 1_200);
+    let work = save(&server.library, capture("large", Some(&cover)));
+    let response = server
+        .get(&server.shelf(&format!("/works/{}/cover?size=large", work.entity_id)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/webp");
+}
+
+#[tokio::test]
+async fn cover_response_shares_the_cached_bytes() {
+    let server = Server::start().await;
+    let cover = png();
+    save(&server.library, capture("covered", Some(&cover)));
+    let file = crate::library::Fingerprint::of(&cover);
+    let (bytes, mime) = list::shrunk_image(&server.context, file, list::CoverSize::Card).unwrap();
+    let (cached, _) = list::shrunk_image(&server.context, file, list::CoverSize::Card).unwrap();
+    let response = list::image_response(cached, mime);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ptr(), body.as_ptr());
+}
+
+#[tokio::test]
 async fn work_search_rejects_invalid_page_sizes_and_false_favorite_filter() {
     let server = Server::start().await;
     for request in [
@@ -1614,6 +1679,73 @@ impl Server {
 }
 
 #[tokio::test]
+async fn collection_lists_and_members_resume_from_their_cursor() {
+    let server = Server::start().await;
+    let works = grouped_shelf(&server.library);
+    let collection = uuid::Uuid::now_v7();
+    let second = uuid::Uuid::now_v7();
+    for (id, title) in [(collection, "一冊目"), (second, "二冊目")] {
+        server
+            .library
+            .save_collection(crate::library::CollectionSave {
+                request_id: uuid::Uuid::now_v7(),
+                id,
+                expected_generation: 0,
+                title: title.into(),
+                description: None,
+                ordered: true,
+                members: ["w2", "w1"]
+                    .into_iter()
+                    .map(|key| crate::library::CollectionMember {
+                        work_id: works[key],
+                        title_at_add: key.into(),
+                        author_at_add: "作者".into(),
+                        role: "main".into(),
+                        added_by: "manual".into(),
+                        pinned: false,
+                        note: None,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+    }
+    let list = "/collections";
+    let detail = format!("/collections/{collection}");
+    let first_page = |route: &str| {
+        server
+            .get(&server.shelf(&format!("{route}?limit=1")))
+            .send()
+    };
+    let (list_page, detail_page) = tokio::join!(first_page(list), first_page(&detail));
+    let (list_page, detail_page) = (list_page.unwrap(), detail_page.unwrap());
+    assert_eq!(
+        (list_page.status(), detail_page.status()),
+        (StatusCode::OK, StatusCode::OK),
+    );
+    for (route, field, first) in [
+        (list, "items", list_page),
+        (&detail, "members", detail_page),
+    ] {
+        let first: serde_json::Value = first.json().await.unwrap();
+        let first_items = first[field].as_array().unwrap();
+        assert_eq!(first_items.len(), 1);
+        let cursor = first["nextCursor"].as_str().unwrap();
+        let last: serde_json::Value = server
+            .read(&format!("{route}?limit=1&cursor={cursor}"), "fixture")
+            .await;
+        let last_items = last[field].as_array().unwrap();
+        assert_eq!(last_items.len(), 1);
+        assert_ne!(first_items, last_items);
+        assert_eq!(last.get("nextCursor"), Some(&serde_json::Value::Null));
+        if field == "members" {
+            assert_eq!(first_items[0]["work"]["id"], works["w2"].to_string());
+            assert_eq!(last_items[0]["work"]["id"], works["w1"].to_string());
+            assert_eq!(last["memberCount"], 2);
+        }
+    }
+}
+
+#[tokio::test]
 async fn people_series_and_collections_come_from_the_shelf() {
     let server = Server::start().await;
     let works = grouped_shelf(&server.library);
@@ -1707,12 +1839,14 @@ async fn people_series_and_collections_come_from_the_shelf() {
         .unwrap()
         .error_for_status()
         .unwrap();
-    let list: Vec<piep_mobile_api::MobileCollection> = server.read("/collections", "fixture").await;
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].collection_kind, "ordered");
-    assert_eq!((list[0].member_count, list[0].available_count), (2, 2));
-    assert_eq!(list[0].cover_tiles.len(), 2);
-    assert!(list[0].cover_tiles.iter().all(|tile| tile.has_cover));
+    let list: piep_mobile_api::MobileCollectionPage = server.read("/collections", "fixture").await;
+    assert_eq!(list.next_cursor, None);
+    assert_eq!(list.items.len(), 1);
+    let first = &list.items[0];
+    assert_eq!(first.collection_kind, "ordered");
+    assert_eq!((first.member_count, first.available_count), (2, 2));
+    assert_eq!(first.cover_tiles.len(), 2);
+    assert!(first.cover_tiles.iter().all(|tile| tile.has_cover));
     let detail: piep_mobile_api::MobileCollectionDetail = server
         .read(&format!("/collections/{collection}"), "fixture")
         .await;

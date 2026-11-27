@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
-import type { MobileCollection, MobileEntityDetail, MobileSearchSuggestions, MobileCollectionDetail, MobileWorkPage, MobileWork, MobileWorkDetail } from "@shared/mobileApi";
+import type { MobileCollection, MobileCollectionDetail, MobileCollectionPage, MobileEntityDetail, MobileSearchSuggestions, MobileWorkPage, MobileWork, MobileWorkDetail } from "@shared/mobileApi";
 import type { PcCollection, PcCollectionDetail, PcConnectionStatus, PcEntityDetail, PcEntityPage, PcEntitySeriesPage, PcMetadata, PcOutlineEntry, PcPage, PcSearchPage, PcWork, PcWorkSearch, ReadingScope, SearchSuggestion } from "./pcApi";
 
 export type ShelfScope = NonNullable<PcConnectionStatus["shelf"]>["scope"];
@@ -97,8 +97,14 @@ export async function listShelfEntitySeries(library: ShelfScope, source: string,
 }
 
 export async function listShelfCollections(library: ShelfScope): Promise<PcCollection[]> {
-  const items = await invoke<MobileCollection[]>("pc_collections", { library });
-  return items.map((collection) => shelfCollection(collection, library));
+  const items: PcCollection[] = [];
+  let cursor: string | null = null;
+  do {
+    const page: MobileCollectionPage = await invoke("pc_collections", { library, cursor });
+    for (const collection of page.items) items.push(shelfCollection(collection, library));
+    cursor = page.nextCursor;
+  } while (cursor !== null);
+  return items;
 }
 
 export async function shelfWorkCollections(library: ShelfScope, work: string): Promise<PcCollection[]> {
@@ -108,7 +114,13 @@ export async function shelfWorkCollections(library: ShelfScope, work: string): P
 
 /** コレクションの画面。`collection` は棚の UUID。 */
 export async function shelfCollectionDetail(library: ShelfScope, collection: string): Promise<PcCollectionDetail> {
-  const { members, ...summary } = await invoke<MobileCollectionDetail>("pc_collection", { library, collection });
+  const { members, nextCursor, ...summary } = await invoke<MobileCollectionDetail>("pc_collection", { library, collection, cursor: null });
+  let cursor = nextCursor;
+  while (cursor !== null) {
+    const page: MobileCollectionDetail = await invoke("pc_collection", { library, collection, cursor });
+    members.push(...page.members);
+    cursor = page.nextCursor;
+  }
   return { ...shelfCollection(summary, library), members: members.map((member) => ({ ...member, work: member.work ? shelfWork(member.work, library) : null })) };
 }
 

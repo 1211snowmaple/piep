@@ -12,16 +12,17 @@ use crate::library::{
     CountRange, DateField, DateRange, EntityKind, Fingerprint, LibraryId, RevisionFilter,
     UserState, WorkCard, WorkCursor, WorkFilter, WorkListQuery, WorkSort,
 };
-use crate::library_search::{parse_query, TextSearch};
+use crate::library_search::{parse_query, QueryParts, SeriesRef, TextSearch};
 use crate::library_view::CardKeys;
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
 use chrono::{NaiveDate, SecondsFormat};
+use image::{DynamicImage, ImageDecoder, ImageError, ImageFormat, ImageReader, Limits};
 use piep_mobile_api::{MobileDateField, MobileSearchRequest, MobileSortOrder, MobileWorkSort};
 use piep_mobile_api::{
     MobilePerson, MobileSearchSuggestion, MobileSearchSuggestions, MobileSeriesMembership,
@@ -29,13 +30,20 @@ use piep_mobile_api::{
 };
 use serde::Deserialize;
 use std::collections::VecDeque;
+use std::io::Cursor;
 use std::sync::{atomic::Ordering, Arc};
 
-/// 表紙の縮小前の上限。
-const MAX_COVER_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+/// 出力は最大約 61 万画素。元画像は原寸で保存されるので、上限は実際の棚の表紙を断らない大きさにする。
+/// 2026-11-28 の実測（表紙 33,956 件）で最大は 14 MB・5,808 万画素・長辺 8,842 px。
+/// ここを下げると、超えた作品は携帯で表紙が出なくなる。
+const MAX_COVER_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_COVER_EDGE: u32 = 16_384;
 const MAX_COVER_PIXELS: u64 = 64_000_000;
-/// 縮めた表紙を覚えておく数。一覧を行き来しても縮め直さない。
+/// 6,400 万画素の RGBA（約 256 MiB）と作業用の余裕。
+const MAX_COVER_DECODE_BYTES: u64 = 320 * 1024 * 1024;
+/// 覚えておく表紙の件数と合計の大きさ。
 const REMEMBERED_COVERS: usize = 256;
+const REMEMBERED_COVER_BYTES: usize = 32 * 1024 * 1024;
 
 /// 縮める大きさ。作品の表紙は一覧（`Card`）と画面（`Large`）、作者のヘッダーは `Banner`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,29 +67,38 @@ impl CoverSize {
 pub(super) struct CoverEntry {
     file: Fingerprint,
     size: CoverSize,
-    bytes: Arc<Vec<u8>>,
+    bytes: Bytes,
     mime: &'static str,
 }
 
 /// 縮めた表紙を、新しく使ったものから覚えておく。
 #[derive(Default)]
-pub(super) struct Covers(VecDeque<CoverEntry>);
+pub(super) struct Covers {
+    entries: VecDeque<CoverEntry>,
+    bytes: usize,
+}
 
 impl Covers {
-    fn get(&mut self, file: Fingerprint, size: CoverSize) -> Option<(Arc<Vec<u8>>, &'static str)> {
+    fn get(&mut self, file: Fingerprint, size: CoverSize) -> Option<(Bytes, &'static str)> {
         let index = self
-            .0
+            .entries
             .iter()
             .position(|entry| entry.file == file && entry.size == size)?;
-        let entry = self.0.remove(index)?;
-        let found = (Arc::clone(&entry.bytes), entry.mime);
-        self.0.push_front(entry);
+        let entry = self.entries.remove(index)?;
+        let found = (entry.bytes.clone(), entry.mime);
+        self.entries.push_front(entry);
         Some(found)
     }
 
     fn put(&mut self, entry: CoverEntry) {
-        self.0.push_front(entry);
-        self.0.truncate(REMEMBERED_COVERS);
+        if entry.bytes.len() > REMEMBERED_COVER_BYTES {
+            return;
+        }
+        self.bytes += entry.bytes.len();
+        self.entries.push_front(entry);
+        while self.entries.len() > REMEMBERED_COVERS || self.bytes > REMEMBERED_COVER_BYTES {
+            self.bytes -= self.entries.pop_back().expect("表紙がある").bytes.len();
+        }
     }
 }
 
@@ -173,27 +190,27 @@ fn work_sort(sort: MobileWorkSort) -> WorkSort {
     }
 }
 
+struct ShelfRequest {
+    search: TextSearch,
+    query: WorkListQuery,
+    person: Option<PersonKey>,
+    series: Option<SeriesRef>,
+}
+
 /// 携帯の検索の条件を、棚の問い合わせにする。
-pub(super) fn shelf_request(
+fn shelf_request(
     request: MobileSearchRequest,
     epoch: Id,
     subject: Id,
-) -> Result<(TextSearch, WorkListQuery, Option<PersonKey>), ApiError> {
+) -> Result<ShelfRequest, ApiError> {
     request.validate().map_err(|_| invalid())?;
-    let mut text = request.text.as_deref().unwrap_or("").trim().to_owned();
-    if let Some(key) = &request.series_key {
-        let term = match &request.series_source {
-            Some(source) => format!("series:{source}:{key}"),
-            None => format!("series:{key}"),
-        };
-        text = if text.is_empty() {
-            term
-        } else {
-            format!("{text} {term}")
-        };
-    }
+    let text = request.text.as_deref().unwrap_or("").trim();
+    let series = request.series_key.map(|key| match request.series_source {
+        Some(provider) => SeriesRef::Key { provider, key },
+        None => SeriesRef::KeyOrTitle(key),
+    });
     let sort = match request.sort_by {
-        None if text.is_empty() => WorkSort::Saved,
+        None if text.is_empty() && series.is_none() => WorkSort::Saved,
         None => WorkSort::Relevance,
         Some(sort) => work_sort(sort),
     };
@@ -249,9 +266,9 @@ pub(super) fn shelf_request(
         .person_source
         .clone()
         .zip(request.person_key.clone());
-    Ok((
-        TextSearch::current(text),
-        WorkListQuery {
+    Ok(ShelfRequest {
+        search: TextSearch::current(text),
+        query: WorkListQuery {
             sort,
             descending,
             limit: usize::try_from(limit).map_err(|_| invalid())?,
@@ -261,7 +278,8 @@ pub(super) fn shelf_request(
             count: request.cursor.is_none(),
         },
         person,
-    ))
+        series,
+    })
 }
 
 pub(super) async fn search(
@@ -277,7 +295,12 @@ pub(super) async fn search(
     }
     let numbered = request.offset.is_some();
     let (epoch, subject) = (ctx.sync_epoch, principal.subject);
-    let (search, mut query, person) = shelf_request(request, epoch, subject)?;
+    let ShelfRequest {
+        search,
+        mut query,
+        person,
+        series,
+    } = shelf_request(request, epoch, subject)?;
     // 語の検索は索引が棚に追いつくまで答えない（古い索引の結果を返さない）。絞り込みだけなら読める。
     let words = !parse_query(&search.text).text.trim().is_empty();
     if words && !ctx.search_ready.load(Ordering::Acquire) {
@@ -299,6 +322,17 @@ pub(super) async fn search(
                 // 棚にない作者の作品はない。
                 None => query.filter.works = Some(Vec::new()),
             }
+        }
+        if let Some(series) = series {
+            library
+                .apply_query_parts(
+                    &QueryParts {
+                        series: vec![series],
+                        ..QueryParts::default()
+                    },
+                    &mut query.filter,
+                )
+                .map_err(library_error)?;
         }
         let page = library
             .search_works(&search, &query)
@@ -460,7 +494,7 @@ pub(super) fn shrunk_image(
     ctx: &Context,
     file: Fingerprint,
     size: CoverSize,
-) -> Result<(Arc<Vec<u8>>, &'static str), ApiError> {
+) -> Result<(Bytes, &'static str), ApiError> {
     if let Some(found) = ctx
         .covers
         .lock()
@@ -471,63 +505,87 @@ pub(super) fn shrunk_image(
     }
     let content = ctx.library.file(file).map_err(library_error)?;
     if content.length > MAX_COVER_SOURCE_BYTES {
-        return Err(ApiError(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            ErrorCode::AssetTooLarge,
-        ));
+        return Err(asset_too_large());
     }
     let mut source = Vec::with_capacity(usize::try_from(content.length).unwrap_or(0));
     ctx.library
         .objects
         .export(&content, &mut source)
         .map_err(|_| internal())?;
-    let (width, height) = image::ImageReader::new(std::io::Cursor::new(&source))
-        .with_guessed_format()
-        .map_err(|_| not_found())?
-        .into_dimensions()
-        .map_err(|_| not_found())?;
-    if u64::from(width) * u64::from(height) > MAX_COVER_PIXELS {
-        return Err(ApiError(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            ErrorCode::AssetTooLarge,
-        ));
-    }
-    let (bounds_w, bounds_h) = size.bounds();
-    let options = crate::epub::intermediate::ImageCompressOptions {
-        enabled: true,
-        max_width: Some(bounds_w),
-        max_height: Some(bounds_h),
-        output_format: Some("webp".into()),
-        webp_quality: 78,
-        webp_method: 0,
-        ..Default::default()
-    };
-    let (bytes, mime) = crate::epub::image_processor::process_image_bytes(&source, &options)
-        .map_err(|_| not_found())?;
-    let mime = match mime.as_str() {
-        "image/webp" => "image/webp",
-        "image/gif" => "image/gif",
-        _ => return Err(not_found()),
-    };
-    let bytes = Arc::new(bytes);
+    let (bytes, mime) = shrink_cover(source, size)?;
     if let Ok(mut covers) = ctx.covers.lock() {
         covers.put(CoverEntry {
             file,
             size,
-            bytes: Arc::clone(&bytes),
+            bytes: bytes.clone(),
             mime,
         });
     }
     Ok((bytes, mime))
 }
 
+fn asset_too_large() -> ApiError {
+    ApiError(StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::AssetTooLarge)
+}
+
+fn cover_decode_error(error: ImageError) -> ApiError {
+    match error {
+        ImageError::Limits(_) => asset_too_large(),
+        _ => not_found(),
+    }
+}
+
+fn shrink_cover(source: Vec<u8>, size: CoverSize) -> Result<(Bytes, &'static str), ApiError> {
+    let mut reader = ImageReader::new(Cursor::new(source.as_slice()))
+        .with_guessed_format()
+        .map_err(|_| not_found())?;
+    let format = reader.format();
+    if !matches!(
+        format,
+        Some(ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP | ImageFormat::Gif)
+    ) {
+        return Err(not_found());
+    }
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_COVER_EDGE);
+    limits.max_image_height = Some(MAX_COVER_EDGE);
+    limits.max_alloc = Some(MAX_COVER_DECODE_BYTES);
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder().map_err(cover_decode_error)?;
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) > MAX_COVER_PIXELS {
+        return Err(asset_too_large());
+    }
+    if format == Some(ImageFormat::Gif) {
+        drop(decoder);
+        return Ok((Bytes::from(source), "image/gif"));
+    }
+    // 出力画素の割り当てを先に引き、残りをデコーダーに渡す。
+    limits
+        .reserve(decoder.total_bytes())
+        .map_err(cover_decode_error)?;
+    decoder.set_limits(limits).map_err(cover_decode_error)?;
+    let image = DynamicImage::from_decoder(decoder).map_err(cover_decode_error)?;
+    drop(source);
+    let (bounds_w, bounds_h) = size.bounds();
+    let image = if width > bounds_w || height > bounds_h {
+        image.resize(bounds_w, bounds_h, image::imageops::FilterType::Lanczos3)
+    } else {
+        image
+    };
+    let options = crate::epub::intermediate::ImageCompressOptions {
+        webp_quality: 78,
+        webp_method: 0,
+        ..Default::default()
+    };
+    let (bytes, _) =
+        crate::epub::image_processor::encode_webp(&image, &options).map_err(|_| not_found())?;
+    Ok((Bytes::from(bytes), "image/webp"))
+}
+
 /// 縮めた画像の応答。表紙は版で変わるので、同じ URL でも確かめ直させる（携帯は版を鍵に覚える）。
-pub(super) fn image_response(bytes: Arc<Vec<u8>>, mime: &'static str) -> Response {
-    let mut response = (
-        [(header::CONTENT_TYPE, mime)],
-        Body::from(bytes.as_ref().clone()),
-    )
-        .into_response();
+pub(super) fn image_response(bytes: Bytes, mime: &'static str) -> Response {
+    let mut response = ([(header::CONTENT_TYPE, mime)], Body::from(bytes)).into_response();
     let headers = response.headers_mut();
     headers.insert(
         header::CACHE_CONTROL,
