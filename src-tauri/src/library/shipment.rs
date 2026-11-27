@@ -8,13 +8,13 @@
 //! 写しを入れ替える前に携帯が書いた読書位置は、組んだ棚へ当て直す（`adopt_from_previous`）。
 
 use super::{
-    store::{regular_directory, sync_directory},
+    publish::{StagedCopy, SHIPMENT_STAGE_PREFIX},
+    repository::LIBRARY_MARKER,
     Error, FileChunk, Fingerprint, Library, LibraryId, ObjectStore, ReadingAnchor, ReadingLocation,
     ReadingPosition, ReadingUpdate, ResourceScope, Result,
 };
 use rusqlite::{Connection, OpenFlags};
 use std::collections::{BTreeMap, HashSet};
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -77,17 +77,10 @@ impl Library {
         previous: Option<&Library>,
         expected: LibraryId,
     ) -> Result<Assembled> {
-        let parent = destination
-            .parent()
-            .ok_or_else(|| Error::UnsafePath(destination.into()))?;
-        regular_directory(parent)?;
-        if destination.try_exists()? {
-            return Err(Error::UnsafePath(destination.into()));
-        }
+        let stage = StagedCopy::new(destination, SHIPMENT_STAGE_PREFIX)?;
         super::store::regular_file(database)?;
-        let stage = parent.join(format!(".piep-shipment-{}.part", LibraryId::now_v7()));
-        let assembled = (|| {
-            let assembled = Library::create_backup_stage(&stage, expected)?;
+        let assembled = {
+            let assembled = Library::create_staged_copy(&stage.path(), expected)?;
             {
                 let source =
                     Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -136,30 +129,13 @@ impl Library {
                 let conn = assembled.conn.lock().map_err(|_| Error::Busy)?;
                 conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
             }
-            Ok(Assembled {
+            Assembled {
                 works: u64::try_from(works).unwrap_or(0),
                 files,
                 read,
-            })
-        })();
-        let assembled = match assembled {
-            Ok(assembled) => assembled,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&stage);
-                return Err(error);
             }
         };
-        if destination.try_exists()? {
-            let _ = fs::remove_dir_all(&stage);
-            return Err(Error::UnsafePath(destination.into()));
-        }
-        fs::rename(&stage, destination)?;
-        sync_directory(parent)?;
-        fs::rename(
-            destination.join(".backup-marker.json"),
-            destination.join("library.json"),
-        )?;
-        sync_directory(destination)?;
+        stage.publish(expected, LIBRARY_MARKER)?;
         Ok(assembled)
     }
 

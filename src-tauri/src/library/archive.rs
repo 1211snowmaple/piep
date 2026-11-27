@@ -1,20 +1,14 @@
 use super::{
-    store::{regular_directory, sync_directory},
-    Error, Fingerprint, Library, LibraryId, Result,
+    publish::{is_stage_name, StagedCopy, BACKUP_STAGE_PREFIX},
+    repository::{CREATION_MARKER, LIBRARY_MARKER},
+    store::regular_directory,
+    Error, Fingerprint, Library, Result, PART_MARKER,
 };
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 
-const BACKUP_STAGE_PREFIX: &str = ".piep-backup-";
-const BACKUP_STAGE_SUFFIX: &str = ".part";
-
 fn is_backup_stage(name: &str) -> bool {
-    name.strip_prefix(BACKUP_STAGE_PREFIX)
-        .and_then(|name| name.strip_suffix(BACKUP_STAGE_SUFFIX))
-        .is_some_and(|id| {
-            LibraryId::parse_str(id)
-                .is_ok_and(|uuid| uuid.get_version_num() == 7 && id == uuid.to_string())
-        })
+    is_stage_name(name, BACKUP_STAGE_PREFIX)
 }
 
 impl Library {
@@ -39,31 +33,22 @@ impl Library {
             let path = entry.path();
             if entry.file_name().to_str().is_some_and(is_backup_stage)
                 && regular_directory(&path).is_ok()
-                && !path.join("library.json").try_exists()?
-                && !path.join("library-part.json").try_exists()?
-                && !path.join(".creation.json").try_exists()?
+                && !path.join(LIBRARY_MARKER).try_exists()?
+                && !path.join(PART_MARKER).try_exists()?
+                && !path.join(CREATION_MARKER).try_exists()?
             {
                 fs::remove_dir_all(path)?;
             }
         }
         // 写す途中で、写し元の台帳が参照しなくなった実体を回収されないようにする。
         let _turn = self.storage_gate.lock().map_err(|_| Error::Busy)?;
-        let id = LibraryId::now_v7();
-        let stage = parent.join(format!("{BACKUP_STAGE_PREFIX}{id}{BACKUP_STAGE_SUFFIX}"));
-        fs::create_dir(&stage)?;
-        // 完成した写しだけを作業フォルダーの中から公開する。
-        let result = self.write_backup(&stage.join("copy"), destination);
-        if let Err(error) = fs::remove_dir_all(&stage) {
-            log::warn!("バックアップの作業フォルダーを片付けられません: {error}");
-        }
-        result?;
-        sync_directory(parent)?;
-        Ok(())
+        let stage = StagedCopy::new(destination, BACKUP_STAGE_PREFIX)?;
+        self.write_backup(&stage.path())?;
+        stage.publish(self.id, LIBRARY_MARKER)
     }
 
-    fn write_backup(&self, stage: &Path, destination: &Path) -> Result<()> {
-        // 作成した瞬間から、コピー先を通常の棚としては開けない。
-        let backup = Library::create_backup_stage(stage, self.id)?;
+    fn write_backup(&self, stage: &Path) -> Result<()> {
+        let backup = Library::create_staged_copy(stage, self.id)?;
         {
             let source = self.conn.lock().map_err(|_| Error::Busy)?;
             let mut target = backup.conn.lock().map_err(|_| Error::Busy)?;
@@ -92,16 +77,6 @@ impl Library {
             let conn = backup.conn.lock().map_err(|_| Error::Busy)?;
             conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         }
-        drop(backup);
-        fs::rename(
-            stage.join(".backup-marker.json"),
-            stage.join("library.json"),
-        )?;
-        sync_directory(stage)?;
-        if destination.try_exists()? {
-            return Err(Error::UnsafePath(destination.into()));
-        }
-        fs::rename(stage, destination)?;
         Ok(())
     }
 }
@@ -109,8 +84,29 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::{Capture, EntityKind};
+    use crate::library::{Capture, EntityKind, LibraryId};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn interrupted_publish_of_backup_can_be_retried() {
+        let root = std::env::temp_dir().join(format!("piep-backup-test-{}", LibraryId::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let source = Library::create(&root.join("source")).unwrap();
+        let destination = root.join("backup");
+
+        crate::library::publish::tests::interrupt_next_publish(LIBRARY_MARKER);
+        assert!(matches!(source.backup(&destination), Err(Error::Canceled)));
+        assert!(!destination.exists());
+
+        source.backup(&destination).unwrap();
+        Library::open_matching(&destination, source.id)
+            .unwrap()
+            .verify()
+            .unwrap();
+        drop(source);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_failed_backup_never_exposes_a_completed_library() {
         let root = std::env::temp_dir().join(format!("piep-backup-test-{}", LibraryId::now_v7()));
@@ -147,8 +143,9 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let source = Library::create(&root.join("source")).unwrap();
         let stale = root.join(format!(".piep-backup-{}.part", LibraryId::now_v7()));
-        fs::create_dir(&stale).unwrap();
-        fs::write(stale.join(".backup-marker.json"), b"incomplete").unwrap();
+        let ready = stale.join("copy");
+        fs::create_dir_all(&ready).unwrap();
+        Library::write_format_marker(&ready.join(LIBRARY_MARKER), source.id).unwrap();
         let unrelated = [
             root.join("other.part"),
             root.join(".piep-backup-not-an-id.part"),
