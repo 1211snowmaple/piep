@@ -52,6 +52,8 @@ pub struct Context {
     entity_rows: Mutex<groups::EntityRows>,
     /// 検索欄の候補の、正規化で足す名前の束（棚の世代ごと）。
     suggestions: crate::library_suggest::SuggestionPool,
+    /// 読書位置のページ番号を確かめるための、読む画面のページ数。
+    page_counts: crate::library_view::ReaderPageCounts,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -81,6 +83,7 @@ impl Context {
             covers: Mutex::new(list::Covers::default()),
             entity_rows: Mutex::new(groups::EntityRows::default()),
             suggestions: Default::default(),
+            page_counts: Default::default(),
         })
     }
 

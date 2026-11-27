@@ -43,7 +43,6 @@ const PULL_LIMIT: usize = 200;
 // 1 回の同期で読むページ数の上限。残りは次の同期で続きから読む。
 const MAX_PULL_PAGES: usize = 50;
 const RATIO_SCALE: u32 = 1_000_000;
-const MAX_PAGE_NUMBER: u64 = 1_000_000;
 
 pub struct ShelfReadingState {
     db: Arc<DeviceDb>,
@@ -78,7 +77,6 @@ fn valid_location(location: &MobileReadingLocation) -> bool {
     matches!(location.view_kind.as_str(), "snapshot" | "edit")
         && uuid::Uuid::parse_str(&location.view_id)
             .is_ok_and(|id| !id.is_nil() && id.to_string() == location.view_id)
-        && location.page <= MAX_PAGE_NUMBER
         && location.ratio_ppm <= RATIO_SCALE
 }
 
@@ -827,7 +825,6 @@ mod tests {
             |l: &mut MobileReadingLocation| l.view_kind = "page".into(),
             |l: &mut MobileReadingLocation| l.view_id = "x".into(),
             |l: &mut MobileReadingLocation| l.ratio_ppm = RATIO_SCALE + 1,
-            |l: &mut MobileReadingLocation| l.page = MAX_PAGE_NUMBER + 1,
         ] {
             let mut bad = reading(work, "1", false);
             change(bad.location.as_mut().unwrap());
@@ -838,5 +835,12 @@ mod tests {
             ..reading(work, "2", true)
         };
         assert!(valid_reading(&cleared));
+    }
+
+    #[test]
+    fn a_page_number_from_the_shelf_is_not_limited_by_the_client() {
+        let mut position = reading(id(), "1", false);
+        position.location.as_mut().unwrap().page = 1_000_001;
+        assert!(valid_reading(&position));
     }
 }

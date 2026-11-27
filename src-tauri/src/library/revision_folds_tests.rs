@@ -424,6 +424,7 @@ fn a_version_named_by_a_recorded_reading_request_is_not_folded() {
                 },
             }),
             finished: false,
+            reader_pages: None,
         })
         .unwrap();
     split_by_rule_one(&library, &first, &second);
