@@ -93,6 +93,102 @@ fn paths_with_config(root: &Path) -> ServerPaths {
     paths
 }
 
+async fn interrupted_desktop_upload(cancel: bool) {
+    use crate::server::sync_send::{ClientCache, RemoteServer, SendHandle, CANCELED};
+    use axum::{http::StatusCode, routing, Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    let temp = TestRoot::created("interrupted");
+    let library = Arc::new(Library::create(&temp.0.join("desktop")).unwrap());
+    for n in 1..=12 {
+        save(&library, &n.to_string(), &format!("本文 {n}"));
+    }
+    let outgoing = temp.0.join("outgoing");
+    let count = Arc::new(AtomicUsize::new(0));
+    let uploads = Arc::clone(&count);
+    let handle = SendHandle::new();
+    let cancel_send = handle.clone();
+    let snapshot = outgoing.join("library.db");
+    let router = Router::new()
+        .route(
+            "/api/admin/shelf/shipments",
+            routing::get(|| async {
+                Json(ShipmentStatus {
+                    schema: Some(crate::library::schema::VERSION),
+                    publication_by_id: true,
+                    ..Default::default()
+                })
+            })
+            .post(|| async {
+                Json(Opened {
+                    shipment_id: "test".into(),
+                    resumed: false,
+                })
+            }),
+        )
+        .route(
+            "/api/admin/shelf/shipments/test/needed",
+            routing::post(|Json(body): Json<serde_json::Value>| async move {
+                let chunks = body["chunks"].as_array().unwrap();
+                assert!(chunks.len() > 4);
+                let needed: Vec<_> = chunks.iter().map(|chunk| &chunk["id"]).collect();
+                Json(serde_json::json!({ "needed": needed }))
+            }),
+        )
+        .route(
+            "/api/admin/shelf/shipments/test/chunks/{id}",
+            routing::put(move || {
+                let uploads = Arc::clone(&uploads);
+                let cancel_send = cancel_send.clone();
+                let snapshot = snapshot.clone();
+                async move {
+                    assert!(snapshot.is_file());
+                    uploads.fetch_add(1, Ordering::Relaxed);
+                    if cancel {
+                        cancel_send.cancel();
+                        std::future::pending::<()>().await;
+                    }
+                    StatusCode::UNAUTHORIZED
+                }
+            }),
+        );
+    let clients = ClientCache::default();
+    let remote = RemoteServer {
+        url: crate::server::tests::spawn_plain(router),
+        fingerprint: None,
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::server::shelf_send::send_shelf(
+            &clients, &remote, "test", library, &outgoing, &handle,
+        ),
+    )
+    .await;
+    let requests = count.load(Ordering::Relaxed);
+    assert!(
+        (1..=4).contains(&requests) && !outgoing.exists(),
+        "実体の要求数: {requests}、写しの残存: {}",
+        outgoing.exists(),
+    );
+    let expected = if cancel {
+        CANCELED
+    } else {
+        "サーバーに登録が残っていません。登録し直してください"
+    };
+    assert_eq!(result.expect("送信をすぐに終える").unwrap_err(), expected);
+}
+
+#[tokio::test]
+async fn desktop_upload_stops_after_the_first_fatal_failure_and_removes_the_snapshot() {
+    interrupted_desktop_upload(false).await;
+}
+
+#[tokio::test]
+async fn canceling_a_desktop_upload_removes_the_snapshot() {
+    interrupted_desktop_upload(true).await;
+}
+
 #[test]
 fn a_shipped_shelf_is_served_after_restart_and_keeps_what_the_phone_wrote_on_the_old_copy() {
     let temp = TestRoot::created("v2-shipment");
@@ -616,7 +712,7 @@ async fn stop(serving: Serving) {
 #[tokio::test]
 async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_second_time() {
     use crate::server::store::Role;
-    use crate::server::sync_send::{admin_get, admin_put, RemoteServer, SendHandle};
+    use crate::server::sync_send::{admin_get, admin_put, ClientCache, RemoteServer, SendHandle};
     use std::time::Duration;
 
     let temp = TestRoot::created("v2-shipment-http");
@@ -643,12 +739,14 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
             "携帯",
         )
         .unwrap();
+    let clients = ClientCache::default();
     let remote = RemoteServer {
         url: base,
         fingerprint: None,
     };
     // 棚を配る前は、携帯に許可を付けられない。
     assert!(admin_put(
+        &clients,
         &remote,
         &admin.token,
         &format!("devices/{}/shelf", phone.device_id),
@@ -661,6 +759,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     drop(store);
     let (first, (_, store, shelf, serving)) = tokio::join!(
         crate::server::shelf_send::send_shelf(
+            &clients,
             &remote,
             &admin.token,
             Arc::clone(&desktop),
@@ -677,13 +776,16 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     // 立ち上げ直すと送った棚を配る。携帯ごとに許可を付けると、すぐ読める。
     let shelf = shelf.expect("送った棚を配る");
     assert!(!shelf.reads(&phone.device_id));
-    let status = admin_get(&remote, &admin.token, "status").await.unwrap();
+    let status = admin_get(&clients, &remote, &admin.token, "status")
+        .await
+        .unwrap();
     assert_eq!(status["shelfPending"], false);
     assert_eq!(
         status["shelf"]["syncEpoch"],
         first.sync_epoch.get().to_string()
     );
     admin_put(
+        &clients,
         &remote,
         &admin.token,
         &format!("devices/{}/shelf", phone.device_id),
@@ -692,7 +794,9 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     .await
     .unwrap();
     assert!(shelf.reads(&phone.device_id));
-    let devices = admin_get(&remote, &admin.token, "devices").await.unwrap();
+    let devices = admin_get(&clients, &remote, &admin.token, "devices")
+        .await
+        .unwrap();
     let row = devices
         .as_array()
         .unwrap()
@@ -703,6 +807,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     assert_eq!(row["readsShelf"], true);
     // 管理者の登録には付けられない。
     assert!(admin_put(
+        &clients,
         &remote,
         &admin.token,
         &format!("devices/{}/shelf", admin.device_id),
@@ -733,9 +838,14 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
             reader_pages: Some(2),
         })
         .unwrap();
-    let reading = admin_get(&remote, &admin.token, "shelf/reading?cursor=&limit=10")
-        .await
-        .unwrap();
+    let reading = admin_get(
+        &clients,
+        &remote,
+        &admin.token,
+        "shelf/reading?cursor=&limit=10",
+    )
+    .await
+    .unwrap();
     assert_eq!(reading["items"].as_array().unwrap().len(), 1);
     // お気に入りも同じように読める。初めは全部、印のあとは変わった分だけ。
     let liked = shelf
@@ -752,9 +862,14 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
             true,
         )
         .unwrap();
-    let favorites = admin_get(&remote, &admin.token, "shelf/favorites?cursor=&limit=10")
-        .await
-        .unwrap();
+    let favorites = admin_get(
+        &clients,
+        &remote,
+        &admin.token,
+        "shelf/favorites?cursor=&limit=10",
+    )
+    .await
+    .unwrap();
     let item = favorites["items"]
         .as_array()
         .unwrap()
@@ -767,6 +882,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     let mut more = favorites["more"] == true;
     while more {
         let page = admin_get(
+            &clients,
             &remote,
             &admin.token,
             &format!("shelf/favorites?cursor={cursor}&limit=10"),
@@ -777,6 +893,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
         more = page["more"] == true;
     }
     let after = admin_get(
+        &clients,
         &remote,
         &admin.token,
         &format!("shelf/favorites?cursor={cursor}&limit=10"),
@@ -791,6 +908,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     drop(store);
     let (second, (_, _store, shelf, serving)) = tokio::join!(
         crate::server::shelf_send::send_shelf(
+            &clients,
             &remote,
             &admin.token,
             Arc::clone(&desktop),
@@ -829,7 +947,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
 #[ignore]
 async fn probe_shipping_a_real_partial_shelf() {
     use crate::server::store::Role;
-    use crate::server::sync_send::{admin_get, RemoteServer, SendHandle};
+    use crate::server::sync_send::{admin_get, ClientCache, RemoteServer, SendHandle};
     use std::time::{Duration, Instant};
 
     let Some(probe) = std::env::var_os("PIEP_SHIP_PROBE").map(PathBuf::from) else {
@@ -928,6 +1046,7 @@ async fn probe_shipping_a_real_partial_shelf() {
             "確認",
         )
         .unwrap();
+    let clients = ClientCache::default();
     let remote = RemoteServer {
         url: base,
         fingerprint: None,
@@ -938,6 +1057,7 @@ async fn probe_shipping_a_real_partial_shelf() {
     drop(store);
     let (first, (_, store, shelf, serving)) = tokio::join!(
         crate::server::shelf_send::send_shelf(
+            &clients,
             &remote,
             &admin.token,
             Arc::clone(&desktop),
@@ -951,7 +1071,9 @@ async fn probe_shipping_a_real_partial_shelf() {
     let first_time = started.elapsed();
     let first_bytes = handle.progress.lock().unwrap().bytes_total;
     let shelf = shelf.unwrap();
-    let status = admin_get(&remote, &admin.token, "status").await.unwrap();
+    let status = admin_get(&clients, &remote, &admin.token, "status")
+        .await
+        .unwrap();
     println!(
         "first send works={:?} sent={} bytes={} time={:?} served={}",
         first.works, first.sent, first_bytes, first_time, status["shelf"]["works"]
@@ -982,6 +1104,7 @@ async fn probe_shipping_a_real_partial_shelf() {
     drop(store);
     let (second, (_, store, shelf, serving)) = tokio::join!(
         crate::server::shelf_send::send_shelf(
+            &clients,
             &remote,
             &admin.token,
             Arc::clone(&desktop),
