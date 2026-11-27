@@ -711,7 +711,11 @@ fn prune_parts(paths: &ServerPaths, keep: &HashSet<Fingerprint>) -> Result<(), S
 
 /// 起動のとき、置き場の錠を持ったまま呼ぶ。引き継ぎを済ませてから棚と同期の世代を切り替える。
 pub fn apply_pending(paths: &ServerPaths) {
-    let outcome = apply_pending_with(paths, |_| {});
+    record_outcome(paths, apply_pending_with(paths, |_| {}));
+}
+
+/// 起動時の切り替えの結果を、操作の記録に残す。
+fn record_outcome(paths: &ServerPaths, outcome: Result<Option<Publication>, String>) {
     let store = super::super::store::ServerStore::open(&paths.store());
     let audit = |action: &str, ok: bool, detail: &str| match &store {
         Ok(store) => store.audit("library", action, "サーバー", None, ok, Some(detail)),

@@ -2,6 +2,7 @@ use super::*;
 use crate::library::{ReadingAnchor, ReadingLocation, ReadingUpdate, WorkSave};
 use crate::server::store::ServerStore;
 use crate::server::tests::TestRoot;
+use std::time::Duration;
 
 fn save(library: &Library, key: &str, text: &str) -> crate::library::CaptureResult {
     library
@@ -699,7 +700,9 @@ async fn serve(
     Option<Arc<crate::server::reader::Context>>,
     Serving,
 ) {
-    apply_pending(paths);
+    let outcome = apply_pending_with(paths, |_| {});
+    assert!(outcome.is_ok(), "棚の切り替えを完了できません: {outcome:?}");
+    record_outcome(paths, outcome);
     let config = load_config(paths).unwrap();
     let parts = crate::server::standalone::assemble(paths, None, None).unwrap();
     let store = Arc::clone(&parts.context.store);
@@ -713,6 +716,7 @@ async fn serve(
     }
     let shipments = Arc::new(ShelfShipments::new(paths.clone(), served));
     parts.context.set_shipments(paths.clone(), shipments);
+    let shelf_root = shelf.as_ref().map(|ctx| ctx.library().root().to_owned());
     let router = crate::server::http::combined_router(Arc::clone(&parts.context));
     let listener = tokio::net::TcpListener::bind(address).await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -725,13 +729,23 @@ async fn serve(
             .await
             .unwrap()
     });
-    (base, store, shelf, Serving { shutdown, task })
+    (
+        base,
+        store,
+        shelf,
+        Serving {
+            shutdown,
+            task,
+            shelf_root,
+        },
+    )
 }
 
 /// 試験の中で動かしている単独サーバー。
 struct Serving {
     shutdown: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
+    shelf_root: Option<PathBuf>,
 }
 
 async fn restart_when_pending(
@@ -757,17 +771,101 @@ async fn restart_when_pending(
 
 /// 止めて、開いていた棚を手放すまで待つ。
 ///
-/// 本番は再起動でプロセスを抜けるので、棚の錠はそこで外れる。試験は同じプロセスで立て直すので、
-/// つないだままの接続のタスクが棚を掴み終えるまで待つ必要がある。以前は待ち受けを abort して
-/// 300ms 眠るだけで、abort は接続のタスクを止めないため、混んだ PC では前の棚が掴まれたまま
-/// 次の起動の引き継ぎが「このライブラリは別の処理で使用中です」で落ちた（AUD-024）。
-/// 穏やかな停止は接続を閉じ、全部の接続のタスクが終わってから返る。
+/// 接続は穏やかに閉じる（AUD-024）。本文の索引を作るスレッドは HTTP の停止後も棚を持てる。
+/// 本番は見張り役が本体の終了を待つ。試験は同じプロセスで立て直すため、前の棚の錠が外れる
+/// ところまで確かめる。呼び手も、返された棚の参照を先に手放す。
 async fn stop(serving: Serving) {
     let _ = serving.shutdown.send(());
-    tokio::time::timeout(std::time::Duration::from_secs(30), serving.task)
+    tokio::time::timeout(Duration::from_secs(30), serving.task)
         .await
         .expect("待ち受けが止まりません")
         .unwrap();
+    if let Some(root) = serving.shelf_root {
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join(".library.lock"))
+            .expect("前の棚の錠を開けません");
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut checks = tokio::time::interval(Duration::from_millis(10));
+            loop {
+                checks.tick().await;
+                match lock.try_lock() {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) => {}
+                    Err(error) => panic!("前の棚の錠を確かめられません: {error}"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("前の棚の錠が外れません: {}", root.display()));
+        lock.unlock().expect("前の棚の錠を外せません");
+    }
+}
+
+#[tokio::test]
+async fn restart_waits_for_search_to_release_the_previous_generation() {
+    use super::super::generations::{activate, stage};
+
+    let temp = TestRoot::created("v2-shipment-restart");
+    let paths = paths_with_config(&temp.0);
+    let source = temp.0.join("desktop");
+    let desktop = Library::create(&source).unwrap();
+    save(&desktop, "1", "本文");
+    let library_id = desktop.id;
+    drop(desktop);
+    let previous = stage(&paths, &source).unwrap();
+    activate(&paths, previous).unwrap();
+    let next = stage(&paths, &source).unwrap();
+    let pending = Pending {
+        shipment_id: uuid::Uuid::now_v7().to_string(),
+        library_id,
+        previous: ShelfSource::Generation(previous),
+        next_generation: next,
+        works: 1,
+    };
+
+    // 前の棚の索引スレッドだけ止めて、待ち受けが終わったあとまで棚を持たせる。
+    let (release, gate) = std::sync::mpsc::channel();
+    crate::server::reader::SEARCH_START_GATE.set(Some(gate));
+    let (base, store, shelf, serving) = serve(&paths, "127.0.0.1:0").await;
+    drop(shelf);
+    let listener = serving.task.abort_handle();
+    write_atomic(
+        &paths.root.join(PENDING),
+        &serde_json::to_vec(&pending).unwrap(),
+    )
+    .unwrap();
+    let restarting = restart_when_pending(&paths, &base, serving);
+    tokio::pin!(restarting);
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::select! {
+            biased;
+            _ = &mut restarting => panic!("前の棚を手放す前に再起動しました"),
+            () = async {
+                while !listener.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+    })
+    .await
+    .expect("待ち受けが止まりません");
+    assert!(matches!(
+        Library::open(&generation_path(&paths, previous).unwrap()),
+        Err(crate::library::Error::Busy)
+    ));
+    drop(store);
+    release.send(()).unwrap();
+    let (_, _, shelf, serving) = restarting.await;
+    assert!(shelf.is_some());
+    assert_eq!(
+        load_config(&paths).unwrap().shelf.unwrap().generation,
+        Some(next)
+    );
+    assert!(!paths.root.join(PENDING).exists());
+    drop(shelf);
+    stop(serving).await;
 }
 
 #[tokio::test]
@@ -776,7 +874,6 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     use crate::server::sync_send::{
         admin_get, admin_post, admin_put, ClientCache, RemoteServer, SendHandle,
     };
-    use std::time::Duration;
 
     let temp = TestRoot::created("v2-shipment-http");
     let paths = paths_with_config(&temp.0);
@@ -1059,6 +1156,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     assert_eq!(audit[0]["detail"], format!("送信 ID {aborted_id}"));
     assert_eq!(audit[2]["detail"], format!("端末 {}・切", phone.device_id));
     assert_eq!(audit[6]["detail"], format!("端末 {}・入", phone.device_id));
+    drop(shelf);
     stop(serving).await;
 }
 
@@ -1070,7 +1168,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
 async fn probe_shipping_a_real_partial_shelf() {
     use crate::server::store::Role;
     use crate::server::sync_send::{admin_get, ClientCache, RemoteServer, SendHandle};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     let Some(probe) = std::env::var_os("PIEP_SHIP_PROBE").map(PathBuf::from) else {
         return;
@@ -1243,11 +1341,10 @@ async fn probe_shipping_a_real_partial_shelf() {
         second_bytes,
         started.elapsed()
     );
-    stop(serving).await;
     drop(shelf);
+    stop(serving).await;
     drop(store);
     drop(desktop);
-    tokio::time::sleep(Duration::from_secs(2)).await;
     for dir in [&server_root, &part] {
         if let Err(error) = fs::remove_dir_all(dir) {
             println!("片付けられません（あとで消す）: {} {error}", dir.display());
