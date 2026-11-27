@@ -295,6 +295,14 @@ pub struct MobileCollectionMember {
     pub work: Option<MobileWork>,
 }
 
+/// 棚のコレクションの一覧の一ページ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileCollectionPage {
+    pub items: Vec<MobileCollection>,
+    pub next_cursor: Option<String>,
+}
+
 /// 棚のコレクションの画面。`id` は棚の UUID、表紙は `cover_mode` の枠ごとに
 /// `/collections/{id}/cover/{single|file|tile-N}` から引く。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,6 +311,7 @@ pub struct MobileCollectionDetail {
     #[serde(flatten)]
     pub summary: MobileCollection,
     pub members: Vec<MobileCollectionMember>,
+    pub next_cursor: Option<String>,
 }
 
 #[cfg(test)]
@@ -311,12 +320,13 @@ mod tests {
 
     #[test]
     fn a_collection_detail_is_one_flat_object_on_the_wire() {
-        let json = r#"{"id":"c1","name":"棚","description":null,"collectionKind":"manual","memberCount":1,"availableCount":0,"coverMode":"tiles","coverRevision":0,"hasSingleCover":false,"hasFileCover":false,"coverTiles":[],"members":[{"title":"題","authorName":"作者","position":0,"work":null}]}"#;
+        let json = r#"{"id":"c1","name":"棚","description":null,"collectionKind":"manual","memberCount":1,"availableCount":0,"coverMode":"tiles","coverRevision":0,"hasSingleCover":false,"hasFileCover":false,"coverTiles":[],"members":[{"title":"題","authorName":"作者","position":0,"work":null}],"nextCursor":null}"#;
         let detail: MobileCollectionDetail = serde_json::from_str(json).unwrap();
         assert_eq!(detail.summary.cover_mode, "tiles");
         assert_eq!(detail.members.len(), 1);
         let written = serde_json::to_value(&detail).unwrap();
         assert_eq!(written["name"], "棚");
+        assert_eq!(written.get("nextCursor"), Some(&serde_json::Value::Null));
         assert!(written.get("position").is_none());
         assert!(written.get("summary").is_none());
     }

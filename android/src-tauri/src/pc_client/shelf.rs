@@ -8,10 +8,10 @@ use piep_library_protocol::{
     ResourceReference, ResourceScope, WorkReadingView,
 };
 use piep_mobile_api::{
-    MobileCollection, MobileCollectionDetail, MobileEntityDetail, MobileEntityPage,
-    MobileEntitySeriesPage, MobileFavorite, MobileFavoriteUpdate, MobileSearchSuggestions,
-    MobileWork, MobileWorkDetail, MobileWorkPage, MutationConflict, ReaderError,
-    ReaderErrorCode as ErrorCode,
+    MobileCollection, MobileCollectionDetail, MobileCollectionPage, MobileEntityDetail,
+    MobileEntityPage, MobileEntitySeriesPage, MobileFavorite, MobileFavoriteUpdate,
+    MobileSearchSuggestions, MobileWork, MobileWorkDetail, MobileWorkPage, MutationConflict,
+    ReaderError, ReaderErrorCode as ErrorCode,
 };
 use piep_storage::Fingerprint;
 use reqwest::{Response, StatusCode, header::HeaderMap};
@@ -758,19 +758,51 @@ pub async fn pc_entity_series(
     .await
 }
 
-/// コレクションの一覧を棚から引く。
+const MAX_COLLECTION_OFFSET: usize = 1_000_000;
+
+fn collection_offset(cursor: Option<&str>) -> Result<usize, ClientError> {
+    match cursor {
+        None => Ok(0),
+        Some(cursor) if cursor.len() <= 7 && cursor.bytes().all(|byte| byte.is_ascii_digit()) => {
+            cursor
+                .parse::<usize>()
+                .ok()
+                .filter(|offset| *offset <= MAX_COLLECTION_OFFSET)
+                .ok_or_else(ClientError::protocol)
+        }
+        _ => Err(ClientError::protocol()),
+    }
+}
+
+fn valid_collection_page(offset: usize, count: usize, next: Option<&str>) -> bool {
+    count <= 50
+        && next.is_none_or(|next| {
+            count > 0
+                && offset + count <= MAX_COLLECTION_OFFSET
+                && next == (offset + count).to_string()
+        })
+}
+
+/// コレクションの一覧の一ページを棚から引く。
 #[tauri::command]
 pub async fn pc_collections(
     state: State<'_, PcClientState>,
     library: ShelfScope,
-) -> Result<Vec<MobileCollection>, ClientError> {
-    let endpoint = format!("/api/libraries/{}/collections", library.library_id.get());
+    cursor: Option<String>,
+) -> Result<MobileCollectionPage, ClientError> {
+    let offset = collection_offset(cursor.as_deref())?;
+    let endpoint = format!(
+        "/api/libraries/{}/collections?cursor={offset}",
+        library.library_id.get()
+    );
     read(&state, library, &endpoint, |bytes| {
-        let items: Vec<MobileCollection> = parse_json(bytes)?;
-        if !valid_collections(&items) {
+        let page: MobileCollectionPage = parse_json(bytes)?;
+        if !valid_collection_page(offset, page.items.len(), page.next_cursor.as_deref())
+            || !valid_collections(&page.items)
+        {
             return Err(ClientError::protocol());
         }
-        Ok(items)
+        Ok(page)
     })
     .await
 }
@@ -805,12 +837,13 @@ pub(super) async fn work_collections(
     .await
 }
 
-/// コレクションの画面（回の作品は一覧と同じ棚の作品の形）を棚から引く。
+/// コレクションの要約と回の一ページを棚から引く。
 #[tauri::command]
 pub async fn pc_collection(
     state: State<'_, PcClientState>,
     library: ShelfScope,
     collection: String,
+    cursor: Option<String>,
 ) -> Result<MobileCollectionDetail, ClientError> {
     // 棚のコレクションの UUID。サーバーが読み解くので、ここでは道に入れてよい文字かだけを見る。
     if collection.is_empty()
@@ -821,13 +854,15 @@ pub async fn pc_collection(
     {
         return Err(ClientError::remote());
     }
+    let offset = collection_offset(cursor.as_deref())?;
     let endpoint = format!(
-        "/api/libraries/{}/collections/{collection}",
+        "/api/libraries/{}/collections/{collection}?cursor={offset}",
         library.library_id.get(),
     );
     read(&state, library, &endpoint, |bytes| {
         let detail: MobileCollectionDetail = parse_json(bytes)?;
-        if !valid_collections(std::slice::from_ref(&detail.summary))
+        if !valid_collection_page(offset, detail.members.len(), detail.next_cursor.as_deref())
+            || !valid_collections(std::slice::from_ref(&detail.summary))
             || !detail
                 .members
                 .iter()

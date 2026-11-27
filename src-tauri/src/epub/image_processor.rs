@@ -118,34 +118,6 @@ pub fn process_image(
     Ok((encoded, mime))
 }
 
-/// 中身のバイト列から縮める。表紙を配るとき、棚の実体を一時ファイルへ書き出さずに済む。
-/// 形式は中身で決め、分からない形式は断る。GIF と縮めない指定は中身をそのまま返す。
-pub fn process_image_bytes(
-    bytes: &[u8],
-    options: &ImageCompressOptions,
-) -> Result<(Vec<u8>, String), String> {
-    let reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| format!("画像デコードエラー: {}", e))?;
-    let original_mime = core_mime(bytes).ok_or_else(|| "画像の形式が分かりません".to_string())?;
-    if !options.enabled || original_mime == "image/gif" {
-        return Ok((bytes.to_vec(), original_mime.to_string()));
-    }
-    let img = reader
-        .decode()
-        .map_err(|e| format!("画像デコードエラー: {}", e))?;
-    let img = resize_if_needed(img, options);
-    let output_format = options
-        .output_format
-        .as_deref()
-        .unwrap_or(match original_mime {
-            "image/png" => "png",
-            "image/webp" => "webp",
-            _ => "jpeg",
-        });
-    encode_image(&img, output_format, options)
-}
-
 fn resize_if_needed(img: DynamicImage, options: &ImageCompressOptions) -> DynamicImage {
     let (w, h) = (img.width(), img.height());
     let max_w = options.max_width.unwrap_or(w);
@@ -278,7 +250,7 @@ fn encode_png(
 }
 
 /// WebP エンコード (webp crate を使用した品質指定/可逆圧縮エンコード)
-fn encode_webp(
+pub(crate) fn encode_webp(
     img: &DynamicImage,
     options: &ImageCompressOptions,
 ) -> Result<(Vec<u8>, String), String> {
