@@ -34,6 +34,7 @@ export interface ServerLastSend {
 
 export interface DesktopServerStatus {
   remote: RemoteServerInfo | null;
+  connectionIssue: "settingsUnreadable" | null;
   autoSend: boolean;
   send: ServerSendProgress;
   lastSend: ServerLastSend;
