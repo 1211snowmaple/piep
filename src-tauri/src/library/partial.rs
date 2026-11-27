@@ -8,13 +8,12 @@
 //!
 //! 写しの作成も取り込みも同じ手順で行う。作成は空の棚へ、取り込みは今の棚へ足すだけの違い。
 use super::{
+    publish::{is_staged_copy, StagedCopy, PART_STAGE_PREFIX},
     repository::PreparedFile,
-    store::{regular_directory, sync_directory},
     Error, Fingerprint, Library, LibraryId, Result,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, ToSql, TransactionBehavior};
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 
 /// 部分写しの形式の記録。棚の `library.json` とは名前を分け、棚として開けないようにする。
@@ -199,23 +198,17 @@ impl Library {
     /// 部分写しか（形式の記録で見分ける）。
     pub fn is_part(root: &Path) -> bool {
         root.join(PART_MARKER).is_file()
+            && root.canonicalize().is_ok_and(|root| !is_staged_copy(&root))
     }
 
     /// 選んだ作品を、その作者・シリーズ・版・編集・読書位置・画像・添付ごと、まだ無いフォルダー
     /// `destination` へ自立した部分写しとして写す。写し終えて全体を検査するまでは置かない。
     pub fn copy_works(&self, works: &[LibraryId], destination: &Path) -> Result<PartTransfer> {
-        let parent = destination
-            .parent()
-            .ok_or_else(|| Error::UnsafePath(destination.into()))?;
-        regular_directory(parent)?;
-        if destination.try_exists()? {
-            return Err(Error::UnsafePath(destination.into()));
-        }
+        let stage = StagedCopy::new(destination, PART_STAGE_PREFIX)?;
         // 写す途中で、写し元の台帳が参照しなくなった実体を回収されないようにする。
         let _turn = self.storage_gate.lock().map_err(|_| Error::Busy)?;
-        let stage = parent.join(format!(".piep-part-{}.part", LibraryId::now_v7()));
-        let made = (|| {
-            let part = Library::create_backup_stage(&stage, self.id)?;
+        let outcome = {
+            let part = Library::create_staged_copy(&stage.path(), self.id)?;
             let outcome = {
                 let mut conn = part.conn.lock().map_err(|_| Error::Busy)?;
                 transfer(self, &part, &mut conn, works)?
@@ -230,26 +223,9 @@ impl Library {
                 .lock()
                 .map_err(|_| Error::Busy)?
                 .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-            Ok(outcome)
-        })();
-        let outcome = match made {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&stage);
-                return Err(error);
-            }
+            outcome
         };
-        if destination.try_exists()? {
-            let _ = fs::remove_dir_all(&stage);
-            return Err(Error::UnsafePath(destination.into()));
-        }
-        fs::rename(&stage, destination)?;
-        sync_directory(parent)?;
-        fs::rename(
-            destination.join(".backup-marker.json"),
-            destination.join(PART_MARKER),
-        )?;
-        sync_directory(destination)?;
+        stage.publish(self.id, PART_MARKER)?;
         Ok(outcome)
     }
 

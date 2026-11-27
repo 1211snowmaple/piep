@@ -1,5 +1,6 @@
 use super::*;
 use crate::library::{ReadingAnchor, ReadingLocation, WorkSave};
+use std::fs;
 use std::path::PathBuf;
 
 struct Temp(PathBuf);
@@ -56,6 +57,29 @@ fn receive(
 fn store(path: &Path) -> ObjectStore {
     fs::create_dir_all(path).unwrap();
     ObjectStore::open(path).unwrap()
+}
+
+#[test]
+fn interrupted_publish_of_shipment_can_be_retried() {
+    let temp = Temp::new();
+    let source = Library::create(&temp.0.join("source")).unwrap();
+    save(&source, "1", "本文");
+    let database = temp.0.join("shipment.db");
+    let chunks = source.ship_snapshot(&database).unwrap();
+    let received = store(&temp.0.join("received"));
+    receive(&source, &chunks, &[], &received);
+    let destination = temp.0.join("shipment");
+    let assemble =
+        || Library::assemble_shipment(&destination, &database, &received, None, source.id);
+
+    crate::library::publish::tests::interrupt_next_publish(LIBRARY_MARKER);
+    assert!(matches!(assemble(), Err(Error::Canceled)));
+    assert!(!destination.exists());
+
+    assert_eq!(assemble().unwrap().works, 1);
+    let copy = Library::open_matching(&destination, source.id).unwrap();
+    assert_eq!(copy.works(10).unwrap().len(), 1);
+    copy.verify().unwrap();
 }
 
 #[test]
