@@ -573,8 +573,11 @@ fn a_failed_assembly_keeps_its_rejection_after_restart() {
     panic!("組み立ての拒否を確認できません");
 }
 
-#[test]
-fn a_superseded_reservation_is_rejected_for_its_own_shipment() {
+#[tokio::test]
+async fn a_superseded_reservation_is_rejected_for_its_own_shipment() {
+    use crate::server::store::Role;
+    use crate::server::sync_send::{admin_get, ClientCache, RemoteServer};
+
     let temp = TestRoot::created("v2-shipment-superseded");
     let paths = paths_with_config(&temp.0);
     let desktop = Library::create(&temp.0.join("desktop")).unwrap();
@@ -602,6 +605,64 @@ fn a_superseded_reservation_is_rejected_for_its_own_shipment() {
     );
     assert!(!restarted.pending());
     assert!(restarted.open(desktop.id).is_ok());
+
+    // 次の起動で同じ拒否を重ねて記録しない。
+    let (base, store, _, serving) = serve(&paths, "127.0.0.1:0").await;
+    let admin = store
+        .consume_pairing(
+            &store
+                .issue_pairing(Role::Admin, std::time::Duration::from_secs(60))
+                .unwrap(),
+            "デスクトップ",
+        )
+        .unwrap();
+    let remote = RemoteServer {
+        url: base,
+        fingerprint: None,
+    };
+    let audit = admin_get(
+        &ClientCache::default(),
+        &remote,
+        &admin.token,
+        "audit?kind=library&ok=false",
+    )
+    .await
+    .unwrap();
+    let audit = audit.as_array().unwrap();
+    assert_eq!(audit.len(), 1, "{audit:?}");
+    assert_eq!(audit[0]["kind"], "library");
+    assert_eq!(audit[0]["action"], "棚の公開を拒否");
+    assert_eq!(audit[0]["actor"], "サーバー");
+    assert_eq!(audit[0]["ok"], false);
+    assert_eq!(
+        audit[0]["detail"],
+        format!("送信 ID {id}・引き継ぎ元の棚が変わりました")
+    );
+    stop(serving).await;
+}
+
+#[test]
+fn a_broken_publication_reservation_is_audited() {
+    let temp = TestRoot::created("v2-shipment-broken-reservation");
+    let paths = paths_with_config(&temp.0);
+    let marker = paths.root.join(PENDING);
+    fs::write(&marker, "壊れた予約").unwrap();
+
+    apply_pending(&paths);
+
+    assert!(marker.exists());
+    let store = ServerStore::open(&paths.store()).unwrap();
+    let audit = store
+        .list_audit(Some("library"), Some(false), None, 10)
+        .unwrap();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0].action, "棚の公開に失敗");
+    assert_eq!(audit[0].actor, "サーバー");
+    assert!(!audit[0].ok);
+    assert_eq!(
+        audit[0].detail.as_deref(),
+        Some("棚の切り替え処理を完了できませんでした。次の起動で再試行します")
+    );
 }
 
 #[test]
@@ -712,7 +773,9 @@ async fn stop(serving: Serving) {
 #[tokio::test]
 async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_second_time() {
     use crate::server::store::Role;
-    use crate::server::sync_send::{admin_get, admin_put, ClientCache, RemoteServer, SendHandle};
+    use crate::server::sync_send::{
+        admin_get, admin_post, admin_put, ClientCache, RemoteServer, SendHandle,
+    };
     use std::time::Duration;
 
     let temp = TestRoot::created("v2-shipment-http");
@@ -723,6 +786,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
 
     let (base, store, shelf, serving) = serve(&paths, "127.0.0.1:0").await;
     assert!(shelf.is_none());
+    store.audit("system", "起動", "サーバー", None, true, None);
     let admin = store
         .consume_pairing(
             &store
@@ -937,6 +1001,64 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
             .favorite,
         "携帯が前の世代で付けたお気に入りも残る"
     );
+
+    admin_put(
+        &clients,
+        &remote,
+        &admin.token,
+        &format!("devices/{}/shelf", phone.device_id),
+        &serde_json::json!({"read": false}),
+    )
+    .await
+    .unwrap();
+    assert!(!shelf.reads(&phone.device_id));
+    let opened = admin_post(
+        &clients,
+        &remote,
+        &admin.token,
+        "shelf/shipments",
+        &serde_json::json!({"libraryId": desktop.id}),
+    )
+    .await
+    .unwrap();
+    let aborted_id = opened["shipmentId"].as_str().unwrap();
+    let aborted = reqwest::Client::new()
+        .delete(format!(
+            "{}/api/admin/shelf/shipments/{aborted_id}",
+            remote.url
+        ))
+        .bearer_auth(&admin.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(aborted.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let audit = admin_get(&clients, &remote, &admin.token, "audit?kind=library")
+        .await
+        .unwrap();
+    let audit = audit.as_array().unwrap();
+    let expected = [
+        ("棚の受け取りを中止", "デスクトップ版"),
+        ("棚の受け取りを開始", "デスクトップ版"),
+        ("棚を読む許可の変更", "デスクトップ版"),
+        ("棚を公開", "サーバー"),
+        ("棚の受け取りを確定", "デスクトップ版"),
+        ("棚の受け取りを開始", "デスクトップ版"),
+        ("棚を読む許可の変更", "デスクトップ版"),
+        ("棚を公開", "サーバー"),
+        ("棚の受け取りを確定", "デスクトップ版"),
+        ("棚の受け取りを開始", "デスクトップ版"),
+    ];
+    assert_eq!(audit.len(), expected.len(), "{audit:?}");
+    for (row, (action, actor)) in audit.iter().zip(expected) {
+        assert_eq!(row["kind"], "library");
+        assert_eq!(row["action"], action);
+        assert_eq!(row["actor"], actor);
+        assert_eq!(row["ok"], true);
+    }
+    assert_eq!(audit[0]["detail"], format!("送信 ID {aborted_id}"));
+    assert_eq!(audit[2]["detail"], format!("端末 {}・切", phone.device_id));
+    assert_eq!(audit[6]["detail"], format!("端末 {}・入", phone.device_id));
     stop(serving).await;
 }
 
