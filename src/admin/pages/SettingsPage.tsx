@@ -37,7 +37,7 @@ function NameCard() {
 
 const TLS_CHOICES: Array<{ value: TlsMode; label: string; description: string }> = [
   { value: "none", label: "使わない", description: "サーバーの PC の中だけで使うときや、公開の URL の側で HTTPS を受けているとき。" },
-  { value: "self-signed", label: "自己署名の証明書を作る", description: "家の中のネットワークで直接つなぐとき。携帯は登録のときに証明書を覚えます。" },
+  { value: "self-signed", label: "自己署名の証明書を作る", description: "公開の証明書を使わず、直接つなぐとき。携帯は登録のときに証明書を覚えます。" },
   { value: "files", label: "証明書のファイルを使う", description: "持っている証明書と鍵を使うとき。" },
 ];
 
