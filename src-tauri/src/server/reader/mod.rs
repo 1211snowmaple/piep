@@ -38,6 +38,12 @@ const READERS_PER_DEVICE: usize = 4;
 /// 空きを待つ長さ。越えたら 429 と `Retry-After` を返す。
 const READ_WAIT: Duration = Duration::from_secs(2);
 
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static SEARCH_START_GATE: std::cell::Cell<Option<std::sync::mpsc::Receiver<()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
 pub struct Context {
     library: Arc<Library>,
     library_id: Id,
@@ -91,14 +97,20 @@ impl Context {
     /// 絞り込みだけの一覧は先に答える。配信する棚の写しの索引は、写しの `derived/` に作る。
     pub fn prepare_search(self: &Arc<Self>) {
         let ctx = Arc::clone(self);
+        #[cfg(test)]
+        let gate = SEARCH_START_GATE.take();
         let spawned = std::thread::Builder::new()
             .name("piep-reader-search-index".into())
-            .spawn(
-                move || match ctx.library.sync_search_index(&mut |_, _| {}) {
+            .spawn(move || {
+                #[cfg(test)]
+                if let Some(gate) = gate {
+                    let _ = gate.recv();
+                }
+                match ctx.library.sync_search_index(&mut |_, _| {}) {
                     Ok(_) => ctx.search_ready.store(true, Ordering::Release),
                     Err(error) => log::error!("棚の検索の索引を作れません: {error}"),
-                },
-            );
+                }
+            });
         if let Err(error) = spawned {
             log::error!("棚の検索の索引を作るスレッドを作れません: {error}");
         }
