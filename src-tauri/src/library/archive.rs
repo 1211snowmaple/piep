@@ -2,8 +2,20 @@ use super::{
     store::{regular_directory, sync_directory},
     Error, Fingerprint, Library, LibraryId, Result,
 };
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::path::Path;
+
+const BACKUP_STAGE_PREFIX: &str = ".piep-backup-";
+const BACKUP_STAGE_SUFFIX: &str = ".part";
+
+fn is_backup_stage(name: &str) -> bool {
+    name.strip_prefix(BACKUP_STAGE_PREFIX)
+        .and_then(|name| name.strip_suffix(BACKUP_STAGE_SUFFIX))
+        .is_some_and(|id| {
+            LibraryId::parse_str(id)
+                .is_ok_and(|uuid| uuid.get_version_num() == 7 && id == uuid.to_string())
+        })
+}
 
 impl Library {
     /// 自立したバックアップを別ルートへ作る。元の棚を変更せず、未完成の棚を公開しない。
@@ -15,11 +27,43 @@ impl Library {
         if destination.try_exists()? {
             return Err(Error::UnsafePath(destination.into()));
         }
+        // 同じ親に書く別のバックアップが、作業中のフォルダーを消さないようにする。
+        let lock = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(parent.join(".piep-backup.lock"))?;
+        lock.lock()?;
+        for entry in fs::read_dir(parent)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_name().to_str().is_some_and(is_backup_stage)
+                && regular_directory(&path).is_ok()
+                && !path.join("library.json").try_exists()?
+                && !path.join("library-part.json").try_exists()?
+                && !path.join(".creation.json").try_exists()?
+            {
+                fs::remove_dir_all(path)?;
+            }
+        }
         // 写す途中で、写し元の台帳が参照しなくなった実体を回収されないようにする。
         let _turn = self.storage_gate.lock().map_err(|_| Error::Busy)?;
-        let stage = parent.join(format!(".piep-backup-{}.part", LibraryId::now_v7()));
+        let id = LibraryId::now_v7();
+        let stage = parent.join(format!("{BACKUP_STAGE_PREFIX}{id}{BACKUP_STAGE_SUFFIX}"));
+        fs::create_dir(&stage)?;
+        // 完成した写しだけを作業フォルダーの中から公開する。
+        let result = self.write_backup(&stage.join("copy"), destination);
+        if let Err(error) = fs::remove_dir_all(&stage) {
+            log::warn!("バックアップの作業フォルダーを片付けられません: {error}");
+        }
+        result?;
+        sync_directory(parent)?;
+        Ok(())
+    }
+
+    fn write_backup(&self, stage: &Path, destination: &Path) -> Result<()> {
         // 作成した瞬間から、コピー先を通常の棚としては開けない。
-        let backup = Library::create_backup_stage(&stage, self.id)?;
+        let backup = Library::create_backup_stage(stage, self.id)?;
         {
             let source = self.conn.lock().map_err(|_| Error::Busy)?;
             let mut target = backup.conn.lock().map_err(|_| Error::Busy)?;
@@ -49,16 +93,15 @@ impl Library {
             conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         }
         drop(backup);
+        fs::rename(
+            stage.join(".backup-marker.json"),
+            stage.join("library.json"),
+        )?;
+        sync_directory(stage)?;
         if destination.try_exists()? {
             return Err(Error::UnsafePath(destination.into()));
         }
-        fs::rename(&stage, destination)?;
-        sync_directory(parent)?;
-        fs::rename(
-            destination.join(".backup-marker.json"),
-            destination.join("library.json"),
-        )?;
-        sync_directory(destination)?;
+        fs::rename(stage, destination)?;
         Ok(())
     }
 }
@@ -90,23 +133,47 @@ mod tests {
         .unwrap();
         assert!(source.backup(&destination).is_err());
         assert!(!destination.exists());
-        let stage = fs::read_dir(&root)
+        assert!(!fs::read_dir(&root).unwrap().any(|entry| entry
             .unwrap()
-            .map(|p| p.unwrap().path())
-            .find(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with(".piep-backup-")
-            })
-            .unwrap();
-        assert!(!stage.join("library.json").exists());
-        assert!(stage.join(".backup-marker.json").exists());
-        assert!(Library::open(&stage).is_err());
-        assert!(Library::create(&stage).is_err());
+            .file_name()
+            .to_str()
+            .is_some_and(is_backup_stage)));
         drop(source);
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn a_new_backup_removes_only_stale_backup_stage_directories() {
+        let root = std::env::temp_dir().join(format!("piep-backup-test-{}", LibraryId::now_v7()));
+        fs::create_dir(&root).unwrap();
+        let source = Library::create(&root.join("source")).unwrap();
+        let stale = root.join(format!(".piep-backup-{}.part", LibraryId::now_v7()));
+        fs::create_dir(&stale).unwrap();
+        fs::write(stale.join(".backup-marker.json"), b"incomplete").unwrap();
+        let unrelated = [
+            root.join("other.part"),
+            root.join(".piep-backup-not-an-id.part"),
+            root.join(".piep-backup-00000000-0000-4000-8000-000000000000.part"),
+            root.join(format!(".piep-part-{}.part", LibraryId::now_v7())),
+        ];
+        for path in &unrelated {
+            fs::create_dir(path).unwrap();
+        }
+        let file = root.join(format!(".piep-backup-{}.part", LibraryId::now_v7()));
+        fs::write(&file, b"keep").unwrap();
+        let published = root.join(format!(".piep-backup-{}.part", LibraryId::now_v7()));
+        source.backup(&published).unwrap();
+
+        let destination = root.join("copy");
+        source.backup(&destination).unwrap();
+        assert!(!stale.exists());
+        assert!(unrelated.iter().all(|path| path.is_dir()));
+        assert_eq!(fs::read(&file).unwrap(), b"keep");
+        Library::open(&published).unwrap().verify().unwrap();
+        Library::open(&destination).unwrap().verify().unwrap();
+        drop(source);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_backup_reopens_without_its_source_and_preserves_original_files() {
         let root = std::env::temp_dir().join(format!("piep-backup-test-{}", LibraryId::now_v7()));

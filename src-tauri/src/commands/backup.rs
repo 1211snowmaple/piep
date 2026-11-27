@@ -5,8 +5,8 @@
 //! ので、写しはそのまま開いて検査できる）。
 //!
 //! 復元は、開いている棚を入れ替えることになるので、その場では行わない。検査を通った写しを予約し、次に
-//! 起動したとき、棚を開く前に入れ替える。今の棚は消さずに隣へ退け、写しは手元に残す（写しから
-//! もう一つ写しを作って置く）。入れ替えに失敗したら、退けた棚を元に戻す。
+//! 起動したとき、棚を開く前に入れ替える。検査済みの写しを隣に用意してから今の棚を退ける。
+//! 途中で止まっても予約と退けた棚が残り、次の起動で入れ替えを続けられる。
 //!
 //! 作者・シリーズのアーカイブは、その作品だけを写した棚の部分写し（`Library::copy_works`）。
 //! 棚としては開けず、入れ替えには使えない。取り込みは今の棚に無い行だけを足す（`Library::merge_part`）。
@@ -14,6 +14,8 @@
 use crate::commands::shelf::{library_dir, Shelf};
 use crate::library::{Library, LibraryId, PartTransfer};
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -55,12 +57,37 @@ pub struct ShelfBackupInspection {
 pub struct RestoreRequest {
     pub backup: PathBuf,
     pub requested_at: i64,
+    id: LibraryId,
+    prepared: bool,
+}
+
+impl RestoreRequest {
+    fn new(backup: PathBuf) -> Self {
+        Self {
+            backup,
+            requested_at: now(),
+            id: LibraryId::now_v7(),
+            prepared: false,
+        }
+    }
+
+    fn stage(&self, live: &Path) -> PathBuf {
+        sidecar(live, &format!(".restore-stage-{}", self.id))
+    }
+
+    fn previous(&self, live: &Path) -> PathBuf {
+        sidecar(
+            live,
+            &format!(".before-restore-{}-{}", self.requested_at, self.id),
+        )
+    }
 }
 
 /// 前回の起動での入れ替えの結果。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreOutcome {
+    id: LibraryId,
     pub backup: PathBuf,
     /// 退けた前の棚（成功したとき）。
     pub previous: Option<PathBuf>,
@@ -87,6 +114,25 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or_default()
+}
+
+fn read_request(path: &Path) -> Result<Option<RestoreRequest>, String> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| format!("復元の予約を読めません: {error}")),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("復元の予約を読めません: {error}")),
+    }
+}
+
+fn ensure_restore_can_change(live: &Path, request: &Path) -> Result<(), String> {
+    if let Some(pending) = read_request(request)? {
+        if pending.prepared || exists(&pending.stage(live))? {
+            return Err("棚の入れ替えが始まっているため、復元の予約を変更できません".into());
+        }
+    }
+    Ok(())
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
@@ -300,6 +346,8 @@ pub async fn shelf_schedule_restore(
         }
     }
     let _guard = claim()?;
+    let request = request_path(&live);
+    ensure_restore_can_change(&live, &request)?;
     let inspection = tokio::task::spawn_blocking(move || inspect(&backup, current))
         .await
         .map_err(|e| format!("検査が途中で止まりました: {e}"))??;
@@ -309,13 +357,7 @@ pub async fn shelf_schedule_restore(
                 .into(),
         );
     }
-    write_json(
-        &request_path(&live),
-        &RestoreRequest {
-            backup: canonical_backup,
-            requested_at: now(),
-        },
-    )?;
+    write_json(&request, &RestoreRequest::new(canonical_backup))?;
     Ok(inspection)
 }
 
@@ -346,80 +388,118 @@ pub fn shelf_restore_state(app: tauri::AppHandle) -> Result<RestoreState, String
 /// 予約を取り消す。
 #[tauri::command]
 pub fn shelf_cancel_restore(app: tauri::AppHandle) -> Result<bool, String> {
+    let _guard = claim()?;
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    match std::fs::remove_file(request_path(&library_dir(&app_data))) {
+    let live = library_dir(&app_data);
+    let request = request_path(&live);
+    ensure_restore_can_change(&live, &request)?;
+    match fs::remove_file(request) {
         Ok(()) => Ok(true),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.to_string()),
     }
 }
 
-/// 起動のとき、棚を開く前に呼ぶ。予約があれば入れ替える。結果は隣の記録に残し、予約は必ず消す
-/// （失敗した予約で起動のたびに止まらない）。
-pub fn apply_pending_restore(live: &Path) {
-    let request = request_path(live);
-    let Ok(bytes) = std::fs::read(&request) else {
-        return;
-    };
-    let _ = std::fs::remove_file(&request);
-    let outcome = match serde_json::from_slice::<RestoreRequest>(&bytes) {
-        Ok(pending) => {
-            let result = swap(live, &pending.backup);
-            if let Err(error) = &result {
-                log::error!("棚の復元を行えませんでした（今の棚のまま開きます）: {error}");
-            } else {
-                log::info!(
-                    "棚をバックアップから復元しました: {}",
-                    pending.backup.display()
-                );
-            }
-            RestoreOutcome {
-                backup: pending.backup,
-                previous: result.as_ref().ok().cloned().flatten(),
-                error: result.err(),
-                finished_at: now(),
-            }
-        }
-        Err(error) => RestoreOutcome {
-            backup: PathBuf::new(),
-            previous: None,
-            error: Some(format!("復元の予約を読めません: {error}")),
-            finished_at: now(),
-        },
-    };
-    if let Err(error) = write_json(&outcome_path(live), &outcome) {
-        log::warn!("復元の結果を残せません: {error}");
-    }
+/// 起動のとき、棚を開く前に呼ぶ。入れ替えの途中で止まったら、残った予約から続ける。
+pub fn apply_pending_restore(live: &Path) -> Result<(), String> {
+    let _guard = claim()?;
+    recover_pending_restore(live)
 }
 
-/// 今の棚を隣へ退け、写しからもう一つ写しを作って棚の場所に置く。返すのは退けた場所。
-fn swap(live: &Path, backup: &Path) -> Result<Option<PathBuf>, String> {
-    // 先に写しを開いて検査する（壊れた写しで今の棚を退けない）。
-    let source = Library::open(backup).map_err(|e| format!("バックアップを開けません: {e}"))?;
-    source
-        .verify()
-        .map_err(|e| format!("バックアップの検査を通りません: {e}"))?;
-    let previous = if live.try_exists().map_err(|e| e.to_string())? {
-        let aside = sidecar(live, &format!(".before-restore-{}", now()));
-        std::fs::rename(live, &aside).map_err(|e| format!("今の棚を退けられません: {e}"))?;
-        Some(aside)
-    } else {
-        None
+fn recover_pending_restore(live: &Path) -> Result<(), String> {
+    let request = request_path(live);
+    let Some(mut pending) = read_request(&request)? else {
+        return Ok(());
     };
-    if let Err(error) = source.backup(live) {
-        // 入れ替えに失敗したら、退けた棚を元へ戻す。
-        let _ = std::fs::remove_dir_all(live);
-        if let Some(aside) = &previous {
-            if let Err(back) = std::fs::rename(aside, live) {
-                return Err(format!(
-                    "バックアップを棚の場所へ写せず、退けた棚も戻せません（{}にあります）: {error}; {back}",
-                    aside.display()
-                ));
+    let result_path = outcome_path(live);
+    let recorded = fs::read(&result_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<RestoreOutcome>(&bytes).ok())
+        .is_some_and(|outcome| outcome.id == pending.id);
+    if !recorded {
+        let stage = pending.stage(live);
+        let result = if pending.prepared {
+            Ok(())
+        } else {
+            prepare_restore(&pending, &stage).and_then(|()| {
+                pending.prepared = true;
+                write_json(&request, &pending)
+            })
+        };
+        let (previous, error) = match result {
+            Ok(()) => (
+                install_restore(live, &stage, &pending.previous(live))?,
+                None,
+            ),
+            Err(error)
+                if !pending.prepared && !exists(&stage)? && exists(&live.join("library.json"))? =>
+            {
+                log::error!("棚の復元を行えませんでした（今の棚のまま開きます）: {error}");
+                (None, Some(error))
             }
-        }
-        return Err(format!("バックアップを棚の場所へ写せません: {error}"));
+            Err(error) => return Err(error),
+        };
+        write_json(
+            &result_path,
+            &RestoreOutcome {
+                id: pending.id,
+                backup: pending.backup,
+                previous,
+                error,
+                finished_at: now(),
+            },
+        )
+        .map_err(|error| format!("復元の結果を残せません: {error}"))?;
     }
-    Ok(previous)
+    if !exists(&live.join("library.json"))? {
+        return Err("入れ替え後の棚が見つかりません".into());
+    }
+    fs::remove_file(&request).map_err(|error| format!("復元の予約を片付けられません: {error}"))
+}
+
+fn exists(path: &Path) -> Result<bool, String> {
+    path.try_exists().map_err(|error| {
+        format!(
+            "復元に使う場所を確認できません（{}）: {error}",
+            path.display()
+        )
+    })
+}
+
+fn prepare_restore(pending: &RestoreRequest, stage: &Path) -> Result<(), String> {
+    if !exists(stage)? {
+        let source = Library::open(&pending.backup)
+            .map_err(|error| format!("バックアップを開けません: {error}"))?;
+        source
+            .verify()
+            .map_err(|error| format!("バックアップの検査を通りません: {error}"))?;
+        source
+            .backup(stage)
+            .map_err(|error| format!("復元用の写しを作れません: {error}"))?;
+    }
+    Ok(())
+}
+
+fn install_restore(live: &Path, stage: &Path, previous: &Path) -> Result<Option<PathBuf>, String> {
+    if exists(stage)? {
+        if !exists(&stage.join("library.json"))? {
+            return Err("復元用の写しが完成していません".into());
+        }
+        if exists(live)? {
+            if exists(previous)? {
+                return Err("退けた棚の場所がすでに使われています".into());
+            }
+            fs::rename(live, previous)
+                .map_err(|error| format!("今の棚を退けられません: {error}"))?;
+        }
+        fs::rename(stage, live)
+            .map_err(|error| format!("復元用の写しを棚の場所に置けません: {error}"))?;
+    }
+    // 準備済みの予約で写しが無ければ、棚の場所への改名が済んでいる。
+    if !exists(&live.join("library.json"))? {
+        return Err("入れ替え後の棚が見つかりません".into());
+    }
+    Ok(exists(previous)?.then(|| previous.to_path_buf()))
 }
 
 #[cfg(test)]
