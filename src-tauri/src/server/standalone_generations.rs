@@ -1,11 +1,11 @@
 //! 単独サーバーへ検証済みの棚の写しを置き、停止中に配信する世代を選ぶ。
 use super::{
-    load_config, lock_server, shipment, ReaderShelfConfig, ServerConfig, ServerPaths, CONFIG_FILE,
+    edit_config, load_config, lock_server, shipment, ReaderShelfConfig, ServerConfig, ServerPaths,
 };
 use crate::library::{protocol::Id, Library};
+use crate::server::durable::write_atomic;
 use piep_storage::{regular_directory, regular_file, sync_directory};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use toml_edit::{value, DocumentMut, Item, Table};
 use uuid::Uuid;
@@ -55,12 +55,7 @@ pub(super) fn activate(paths: &ServerPaths, generation: Id) -> Result<(), String
     })
 }
 
-/// 置き場の錠を持ったまま、棚の検査や引き継ぎを済ませてから配る世代を選ぶ。
-pub(super) fn activate_locked(
-    paths: &ServerPaths,
-    generation: Id,
-    prepare: impl FnOnce(Option<&ReaderShelfConfig>, &Library) -> Result<(), String>,
-) -> Result<(), String> {
+fn check_no_trial(paths: &ServerPaths) -> Result<(), String> {
     if paths
         .config_trial()
         .try_exists()
@@ -70,9 +65,20 @@ pub(super) fn activate_locked(
             "接続設定の確認が残っています。一度サーバーを起動して結果を確かめてください".into(),
         );
     }
-    let path = paths.config();
-    regular_file(&path).map_err(|error| error.to_string())?;
-    let text = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// 置き場の錠を持ったまま、棚の検査や引き継ぎを済ませてから配る世代を選ぶ。
+pub(super) fn activate_locked(
+    paths: &ServerPaths,
+    generation: Id,
+    prepare: impl FnOnce(Option<&ReaderShelfConfig>, &Library) -> Result<(), String>,
+) -> Result<(), String> {
+    let text = edit_config(paths, |path| {
+        check_no_trial(paths)?;
+        regular_file(path).map_err(|error| error.to_string())?;
+        fs::read_to_string(path).map_err(|error| error.to_string())
+    })?;
     let config: ServerConfig = toml::from_str(&text).map_err(|error| error.to_string())?;
     config.validate()?;
     let root = generation_path(paths, generation)?;
@@ -89,43 +95,30 @@ pub(super) fn activate_locked(
     {
         return sync_directory(&paths.root).map_err(|error| error.to_string());
     }
-    let mut document: DocumentMut = text
-        .parse()
-        .map_err(|error: toml_edit::TomlError| error.to_string())?;
-    let settings = document
-        .entry("shelf")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_like_mut()
-        .ok_or("棚の配信設定が不正です")?;
-    settings.insert("library_id", value(library.id.to_string()));
-    settings.insert("generation", value(generation.get().to_string()));
-    // 以前の写しに戻す場合も、端末の同期の続きは新しい世代に切り替える。
-    settings.insert("sync_epoch", value(Uuid::now_v7().to_string()));
-    let written = document.to_string();
-    let next: ServerConfig = toml::from_str(&written).map_err(|error| error.to_string())?;
-    next.validate()?;
-    if fs::read(&path).map_err(|error| error.to_string())? != text.as_bytes() {
-        return Err("確認中に設定が変更されました。配信する棚の指定をやり直してください".into());
-    }
-    write_config(paths, written.as_bytes())
-}
-
-pub(super) fn write_config(paths: &ServerPaths, content: &[u8]) -> Result<(), String> {
-    let temporary = paths
-        .root
-        .join(format!(".{CONFIG_FILE}-{}.part", Uuid::now_v7()));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|error| error.to_string())?;
-    let prepared = file.write_all(content).and_then(|()| file.sync_all());
-    drop(file);
-    if let Err(error) = prepared.and_then(|()| fs::rename(&temporary, paths.config())) {
-        let _ = fs::remove_file(temporary);
-        return Err(format!("配信する棚の設定を確定できません: {error}"));
-    }
-    sync_directory(&paths.root).map_err(|error| error.to_string())
+    edit_config(paths, |path| {
+        check_no_trial(paths)?;
+        let mut document: DocumentMut = text
+            .parse()
+            .map_err(|error: toml_edit::TomlError| error.to_string())?;
+        let settings = document
+            .entry("shelf")
+            .or_insert(Item::Table(Table::new()))
+            .as_table_like_mut()
+            .ok_or("棚の配信設定が不正です")?;
+        settings.insert("library_id", value(library.id.to_string()));
+        settings.insert("generation", value(generation.get().to_string()));
+        // 以前の写しに戻す場合も、端末の同期の続きは新しい世代に切り替える。
+        settings.insert("sync_epoch", value(Uuid::now_v7().to_string()));
+        let written = document.to_string();
+        let next: ServerConfig = toml::from_str(&written).map_err(|error| error.to_string())?;
+        next.validate()?;
+        if fs::read(path).map_err(|error| error.to_string())? != text.as_bytes() {
+            return Err(
+                "確認中に設定が変更されました。配信する棚の指定をやり直してください".into(),
+            );
+        }
+        write_atomic(path, written.as_bytes())
+    })
 }
 
 #[cfg(test)]
@@ -241,5 +234,22 @@ mod tests {
         let unknown = Id::new(Uuid::now_v7()).unwrap();
         assert!(activate(&paths, unknown).is_err());
         assert_eq!(fs::read(paths.config()).unwrap(), previous);
+    }
+
+    #[test]
+    fn activation_rejects_a_config_changed_during_preparation() {
+        let (_temp, paths, source) = fixture();
+        let generation = stage(&paths, &source).unwrap();
+        let _lock = lock_server(&paths).unwrap();
+        let error = activate_locked(&paths, generation, |_, _| {
+            crate::server::update::write_update_settings(&paths, true, "01:30-02:30")
+        })
+        .unwrap_err();
+
+        assert!(error.contains("確認中に設定が変更されました"));
+        let config = load_config(&paths).unwrap();
+        assert!(config.shelf.is_none());
+        assert!(config.update.auto);
+        assert_eq!(config.update.window, "01:30-02:30");
     }
 }

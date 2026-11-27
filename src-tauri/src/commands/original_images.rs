@@ -550,7 +550,7 @@ pub async fn shelf_upgrade_images_to_original(
         merge_misses(&mut misses, &known, unix_now());
         match serde_json::to_vec(&misses) {
             Ok(bytes) => {
-                if let Err(error) = crate::server::update::write_atomic(path, &bytes) {
+                if let Err(error) = crate::server::durable::write_atomic(path, &bytes) {
                     log::warn!("公開元に無かった画像の控えを残せません: {error}");
                 }
             }
@@ -734,7 +734,7 @@ mod tests {
             ("revived".to_string(), OriginalLookup::Found("x".into())),
         ]);
         merge_misses(&mut misses, &known, now);
-        crate::server::update::write_atomic(&path, &serde_json::to_vec(&misses).unwrap()).unwrap();
+        crate::server::durable::write_atomic(&path, &serde_json::to_vec(&misses).unwrap()).unwrap();
         let loaded = load_misses(&path, now);
         assert_eq!(loaded.get("recent"), Some(&(now - 2 * day)));
         assert_eq!(loaded.get("new"), Some(&now));

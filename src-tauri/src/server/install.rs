@@ -2,9 +2,10 @@
 //!
 //! 外へどう出すかは利用者が決める。特定の製品を検出も実行もしない。
 
-use super::standalone::{command_admin_pair, ServerPaths};
+use super::durable::write_atomic;
+use super::standalone::{command_admin_pair, create_config, ServerPaths};
 use super::store::ServerStore;
-use super::update::{current_version, write_atomic, VERSION};
+use super::update::{current_version, VERSION};
 use super::watchdog::ReadyMark;
 use std::fs;
 use std::io::{BufRead, Write};
@@ -416,12 +417,11 @@ pub fn lay_out(
 ) -> Result<ServerPaths, String> {
     let paths = ServerPaths::new(root)?;
     fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
-    if !paths.config().exists() {
+    create_config(&paths, || {
         let exposure = exposure.ok_or("出し方が決まっていません")?;
         let url = url.ok_or("URL が決まっていません")?;
-        fs::write(paths.config(), config_text(exposure, url))
-            .map_err(|error| format!("設定を書けません: {error}"))?;
-    }
+        Ok(config_text(exposure, url))
+    })?;
     place_programs(&paths)?;
     Ok(paths)
 }

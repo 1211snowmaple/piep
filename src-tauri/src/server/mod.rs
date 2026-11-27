@@ -6,6 +6,7 @@
 pub mod admin_assets;
 pub mod admin_store;
 pub mod desktop;
+pub(crate) mod durable;
 pub mod http;
 pub mod install;
 #[cfg(windows)]

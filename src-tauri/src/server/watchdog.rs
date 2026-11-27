@@ -2,10 +2,11 @@
 //!
 //! 機能を持たないのは、自分自身はすぐには置き換えられないからである。
 
+use super::durable::write_atomic;
 use super::standalone::ServerPaths;
 use super::update::{
-    self, current_version, read_version_file, restore_databases, write_atomic, UpdateRecord,
-    EXIT_APPLY_UPDATE, EXIT_RESTART, VERSION,
+    self, current_version, read_version_file, restore_databases, UpdateRecord, EXIT_APPLY_UPDATE,
+    EXIT_RESTART, VERSION,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
