@@ -7,22 +7,24 @@ use super::super::admin_store::{TicketKind, RECENT_AUTH};
 use super::super::standalone::{self, ConnectionChange, ServerPaths};
 use super::super::store::Role;
 use super::super::update::{self, UpdateController};
-use super::{require_admin, ApiError, ApiJson, Ctx, ServerContext};
+use super::{bearer, require_admin, ApiError, ApiJson, Ctx, ServerContext};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Path as UrlPath, Query, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::extract::{ConnectInfo, FromRequestParts, Path as UrlPath, Query, Request, State};
+use axum::http::{header, request::Parts, Extensions, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 const COOKIE: &str = "__Host-piep_admin";
 const LOGIN_TICKET: Duration = Duration::from_secs(60);
@@ -33,6 +35,8 @@ const MIN_PASSWORD_CHARS: usize = 15;
 const MAX_PASSWORD_CHARS: usize = 256;
 /// 誤りの文は原因によらず同じにする。
 const LOGIN_FAILED: &str = "ログインできませんでした";
+const PASSWORD_HASH_SLOTS: usize = 2;
+const PASSWORD_WAIT_SLOTS: usize = 8;
 const STORAGE_CACHE: Duration = Duration::from_secs(10 * 60);
 
 /// 画面のファイル。`build.rs` が作る一覧の 1 行。
@@ -54,9 +58,39 @@ pub struct ConnectionInfo {
     pub tls: &'static str,
 }
 
-/// 管理画面を出している口の印。デスクトップ版がつないでいる口に画面がなければ、リンクを出さない。
+/// 管理画面を出している口の印。セッションとログイン用のリンクはこの口だけで扱う。
 #[derive(Clone, Copy)]
 pub struct PageHere;
+
+pub(super) struct AdminHeaders {
+    headers: HeaderMap,
+    page: Option<PageHere>,
+}
+
+impl AdminHeaders {
+    pub(super) fn new(headers: &HeaderMap, extensions: &Extensions) -> Self {
+        Self {
+            headers: headers.clone(),
+            page: extensions.get::<PageHere>().copied(),
+        }
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for AdminHeaders {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self::new(&parts.headers, &parts.extensions))
+    }
+}
+
+impl Deref for AdminHeaders {
+    type Target = HeaderMap;
+
+    fn deref(&self) -> &Self::Target {
+        &self.headers
+    }
+}
 
 /// 管理画面に要るもの。これがある口にだけ画面を出す。
 pub struct AdminWeb {
@@ -66,7 +100,8 @@ pub struct AdminWeb {
     direct_tls: bool,
     throttle: Mutex<LoginThrottle>,
     /// ハッシュの計算でメモリを使い切らせない。
-    hash_slots: Semaphore,
+    hash_slots: Arc<Semaphore>,
+    hash_waiters: Semaphore,
     storage: Mutex<Option<(Instant, serde_json::Value)>>,
     /// 立ち上げ直す。見張り役の下で動いているときだけある。
     restart: OnceLock<Box<dyn Fn() + Send + Sync>>,
@@ -85,7 +120,8 @@ impl AdminWeb {
             connection,
             direct_tls,
             throttle: Mutex::new(LoginThrottle::default()),
-            hash_slots: Semaphore::new(2),
+            hash_slots: Arc::new(Semaphore::new(PASSWORD_HASH_SLOTS)),
+            hash_waiters: Semaphore::new(PASSWORD_WAIT_SLOTS),
             storage: Mutex::new(None),
             restart: OnceLock::new(),
         }
@@ -93,6 +129,32 @@ impl AdminWeb {
 
     pub fn set_restart(&self, restart: Box<dyn Fn() + Send + Sync>) {
         let _ = self.restart.set(restart);
+    }
+
+    fn check_backoff(&self) -> Result<(), ApiError> {
+        let wait = self
+            .throttle
+            .lock()
+            .map_err(|_| ApiError::internal())?
+            .remaining(Instant::now());
+        match wait {
+            Some(wait) => Err(login_busy().retry_after(wait)),
+            None => Ok(()),
+        }
+    }
+
+    async fn password_slot(&self) -> Result<OwnedSemaphorePermit, ApiError> {
+        match Arc::clone(&self.hash_slots).try_acquire_owned() {
+            Ok(slot) => Ok(slot),
+            Err(TryAcquireError::Closed) => Err(ApiError::internal()),
+            Err(TryAcquireError::NoPermits) => {
+                let _waiting = self.hash_waiters.try_acquire().map_err(|_| login_busy())?;
+                Arc::clone(&self.hash_slots)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| ApiError::internal())
+            }
+        }
     }
 }
 
@@ -253,8 +315,13 @@ fn cookie_value(headers: &HeaderMap) -> Option<&str> {
 /// Cookie のセッションを引く。管理画面を出していない口では、Cookie を見ない。
 pub(super) fn session_from(
     ctx: &ServerContext,
-    headers: &HeaderMap,
+    headers: &AdminHeaders,
 ) -> Option<super::super::admin_store::AdminSession> {
+    headers.page?;
+    // 認証ヘッダーを送った要求は、そのヘッダーで認証する。
+    if headers.contains_key(header::AUTHORIZATION) {
+        return None;
+    }
     web(ctx).ok()?;
     let touch = !headers.contains_key("x-piep-background");
     ctx.store
@@ -339,14 +406,14 @@ fn same_origin(headers: &HeaderMap, host: &str) -> bool {
 }
 
 fn rejected(code: &'static str, message: &'static str) -> Response {
-    ApiError(StatusCode::FORBIDDEN, code, message).into_response()
+    ApiError::new(StatusCode::FORBIDDEN, code, message).into_response()
 }
 
 /// 管理の要求すべての前に通す。鍵（Bearer）の要求は Cookie を使わないので見ない。
 async fn guard(State(ctx): State<Ctx>, mut request: Request, next: Next) -> Response {
     let ip = client_ip(&request);
     request.extensions_mut().insert(ip);
-    if request.headers().contains_key(header::AUTHORIZATION) {
+    if bearer(request.headers()).is_some() {
         return next.run(request).await;
     }
     if ctx.web.get().is_some() {
@@ -512,7 +579,7 @@ where
 }
 
 fn actor(headers: &HeaderMap) -> &'static str {
-    if headers.contains_key(header::AUTHORIZATION) {
+    if bearer(headers).is_some() {
         "デスクトップ版"
     } else {
         "ログイン中のブラウザ"
@@ -520,9 +587,9 @@ fn actor(headers: &HeaderMap) -> &'static str {
 }
 
 /// 大事な操作の前に通す。鍵で来たデスクトップ版には聞かない。
-fn require_recent(ctx: &ServerContext, headers: &HeaderMap) -> Result<(), ApiError> {
+fn require_recent(ctx: &ServerContext, headers: &AdminHeaders) -> Result<(), ApiError> {
     require_admin(ctx, headers)?;
-    if headers.contains_key(header::AUTHORIZATION) {
+    if bearer(headers).is_some() {
         return Ok(());
     }
     let recent = session_from(ctx, headers)
@@ -533,7 +600,7 @@ fn require_recent(ctx: &ServerContext, headers: &HeaderMap) -> Result<(), ApiErr
     if recent {
         Ok(())
     } else {
-        Err(ApiError(
+        Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "reauth_required",
             "もう一度パスワードを入力してください",
@@ -541,27 +608,49 @@ fn require_recent(ctx: &ServerContext, headers: &HeaderMap) -> Result<(), ApiErr
     }
 }
 
-async fn hashed(web: &AdminWeb, password: String) -> Result<String, ApiError> {
-    let _slot = web
-        .hash_slots
-        .acquire()
-        .await
-        .map_err(|_| ApiError::internal())?;
-    tokio::task::spawn_blocking(move || hash_password(&password))
-        .await
-        .map_err(|_| ApiError::internal())?
-        .map_err(storage_error)
+fn login_busy() -> ApiError {
+    ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too_many_attempts",
+        LOGIN_FAILED,
+    )
 }
 
-async fn verified(web: &AdminWeb, password: String, stored: String) -> Result<bool, ApiError> {
-    let _slot = web
-        .hash_slots
-        .acquire()
-        .await
-        .map_err(|_| ApiError::internal())?;
-    tokio::task::spawn_blocking(move || verify_password(&password, &stored))
-        .await
-        .map_err(|_| ApiError::internal())
+async fn hashed(web: &AdminWeb, password: String) -> Result<String, ApiError> {
+    let slot = web.password_slot().await?;
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        hash_password(&password)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+    .map_err(storage_error)
+}
+
+async fn verify_attempt(
+    ctx: Ctx,
+    check: impl FnOnce(&ServerContext) -> Result<bool, ApiError> + Send + 'static,
+) -> Result<bool, ApiError> {
+    let site = web(&ctx)?;
+    site.check_backoff()?;
+    let slot = site.password_slot().await?;
+    site.check_backoff()?;
+    tokio::task::spawn_blocking(move || {
+        // HTTP の要求が中断されても、照合と失敗の記録が終わるまで枠を持つ。
+        let _slot = slot;
+        let site = web(&ctx)?;
+        site.check_backoff()?;
+        let ok = check(&ctx)?;
+        let mut throttle = site.throttle.lock().map_err(|_| ApiError::internal())?;
+        if ok {
+            throttle.succeed();
+        } else {
+            throttle.fail(Instant::now());
+        }
+        Ok(ok)
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
 }
 
 fn signed_in(token: &str, body: serde_json::Value) -> Response {
@@ -578,7 +667,7 @@ fn user_agent(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.to_str().ok())
 }
 
-async fn web_state(State(ctx): State<Ctx>, headers: HeaderMap) -> Result<Response, ApiError> {
+async fn web_state(State(ctx): State<Ctx>, headers: AdminHeaders) -> Result<Response, ApiError> {
     web(&ctx)?;
     let account = ctx.store.admin_account().map_err(storage_error)?;
     let session = session_from(&ctx, &headers);
@@ -605,61 +694,42 @@ async fn web_login(
     headers: HeaderMap,
     ApiJson(login): ApiJson<LoginRequest>,
 ) -> Result<Response, ApiError> {
-    let site = web(&ctx)?;
-    let wait = site
-        .throttle
-        .lock()
-        .map_err(|_| ApiError::internal())?
-        .remaining(Instant::now());
-    if let Some(wait) = wait {
-        ctx.store.audit(
-            "login",
-            "ログイン",
-            "ログイン画面",
-            ip.get(),
-            false,
-            Some("待ち時間の間の試行"),
-        );
-        let mut response = (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(serde_json::json!({
-                "code": "too_many_attempts",
-                "message": LOGIN_FAILED,
-                "retryAfterSeconds": wait.as_secs() + 1,
-            })),
-        )
-            .into_response();
-        if let Ok(value) = HeaderValue::from_str(&(wait.as_secs() + 1).to_string()) {
-            response.headers_mut().insert(header::RETRY_AFTER, value);
+    let ok = verify_attempt(Arc::clone(&ctx), move |ctx| {
+        let account = ctx.store.admin_account().map_err(storage_error)?;
+        // 名前が違っても同じだけ計算して、応答の時間で見分けられないようにする。
+        match account {
+            Some(account) => {
+                let right = verify_password(&login.password, &account.password_hash);
+                Ok(right && account.username == login.username.trim())
+            }
+            None => {
+                hash_password(&login.password).map_err(storage_error)?;
+                Ok(false)
+            }
         }
-        return Ok(response);
-    }
-    let account = ctx.store.admin_account().map_err(storage_error)?;
-    // 名前が違っても同じだけ計算して、応答の時間で見分けられないようにする。
-    let ok = match &account {
-        Some(account) => {
-            let right = verified(site, login.password, account.password_hash.clone()).await?;
-            right && account.username == login.username.trim()
+    })
+    .await
+    .inspect_err(|error| {
+        if error.retry_after.is_some() {
+            ctx.store.audit(
+                "login",
+                "ログイン",
+                "ログイン画面",
+                ip.get(),
+                false,
+                Some("待ち時間の間の試行"),
+            );
         }
-        None => {
-            hashed(site, login.password).await?;
-            false
-        }
-    };
-    let mut throttle = site.throttle.lock().map_err(|_| ApiError::internal())?;
+    })?;
     if !ok {
-        throttle.fail(Instant::now());
-        drop(throttle);
         ctx.store
             .audit("login", "ログイン", "ログイン画面", ip.get(), false, None);
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "login_failed",
             LOGIN_FAILED,
         ));
     }
-    throttle.succeed();
-    drop(throttle);
     let (token, session) = ctx
         .store
         .create_admin_session(true, ip.get(), user_agent(&headers))
@@ -697,7 +767,7 @@ async fn web_ticket_info(
 }
 
 fn ticket_rejected() -> ApiError {
-    ApiError(
+    ApiError::new(
         StatusCode::UNAUTHORIZED,
         "ticket_rejected",
         "このリンクは使えません。期限が切れたか、すでに使われています",
@@ -851,7 +921,7 @@ async fn web_setup(
 async fn web_logout(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Response, ApiError> {
     web(&ctx)?;
     if let Some(session) = session_from(&ctx, &headers) {
@@ -883,32 +953,21 @@ struct ReauthRequest {
 async fn web_reauth(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     ApiJson(request): ApiJson<ReauthRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let site = web(&ctx)?;
+    web(&ctx)?;
     let session = session_from(&ctx, &headers).ok_or_else(ApiError::unauthorized)?;
-    let wait = site
-        .throttle
-        .lock()
-        .map_err(|_| ApiError::internal())?
-        .remaining(Instant::now());
-    if wait.is_some() {
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too_many_attempts",
-            LOGIN_FAILED,
-        ));
-    }
-    let account = ctx
-        .store
-        .admin_account()
-        .map_err(storage_error)?
-        .ok_or_else(ApiError::unauthorized)?;
-    if !verified(site, request.password, account.password_hash).await? {
-        if let Ok(mut throttle) = site.throttle.lock() {
-            throttle.fail(Instant::now());
-        }
+    let ok = verify_attempt(Arc::clone(&ctx), move |ctx| {
+        let account = ctx
+            .store
+            .admin_account()
+            .map_err(storage_error)?
+            .ok_or_else(ApiError::unauthorized)?;
+        Ok(verify_password(&request.password, &account.password_hash))
+    })
+    .await?;
+    if !ok {
         ctx.store.audit(
             "login",
             "パスワードの再確認",
@@ -917,14 +976,11 @@ async fn web_reauth(
             false,
             None,
         );
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "login_failed",
             "パスワードが違います",
         ));
-    }
-    if let Ok(mut throttle) = site.throttle.lock() {
-        throttle.succeed();
     }
     ctx.store
         .mark_admin_recent_auth(&session.id)
@@ -936,7 +992,7 @@ async fn web_reauth(
 async fn web_disable(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<StatusCode, ApiError> {
     web(&ctx)?;
     require_recent(&ctx, &headers)?;
@@ -961,22 +1017,21 @@ async fn web_disable(
 async fn issue_ticket(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    page: Option<Extension<PageHere>>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !headers.contains_key(header::AUTHORIZATION) {
+    if bearer(&headers).is_none() {
         return Err(ApiError::forbidden());
     }
     require_admin(&ctx, &headers)?;
     web(&ctx).map_err(|_| {
-        ApiError(
+        ApiError::new(
             StatusCode::CONFLICT,
             "admin_web_unavailable",
             "このサーバーでは管理画面を使えません",
         )
     })?;
-    if page.is_none() {
-        return Err(ApiError(
+    if headers.page.is_none() {
+        return Err(ApiError::new(
             StatusCode::CONFLICT,
             "admin_web_local",
             "このサーバーの管理画面は、サーバーの PCのブラウザでだけ開けます。サーバーの PCで http://127.0.0.1:38778/admin/ を開いてください",
@@ -1019,7 +1074,7 @@ struct PasswordRequest {
 async fn change_password(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     ApiJson(request): ApiJson<PasswordRequest>,
 ) -> Result<StatusCode, ApiError> {
     let site = web(&ctx)?;
@@ -1051,7 +1106,7 @@ async fn change_password(
 
 async fn list_sessions(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&ctx, &headers)?;
     let sessions = ctx.store.list_admin_sessions().map_err(storage_error)?;
@@ -1065,7 +1120,7 @@ async fn list_sessions(
 async fn end_session(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     UrlPath(id): UrlPath<String>,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&ctx, &headers)?;
@@ -1084,7 +1139,7 @@ async fn end_session(
 }
 
 fn controller(ctx: &ServerContext) -> Result<&Arc<UpdateController>, ApiError> {
-    ctx.update.get().ok_or(ApiError(
+    ctx.update.get().ok_or(ApiError::new(
         StatusCode::CONFLICT,
         "not_managed",
         "このサーバーは自分では更新できません。piep-server install で置いてください",
@@ -1093,7 +1148,7 @@ fn controller(ctx: &ServerContext) -> Result<&Arc<UpdateController>, ApiError> {
 
 async fn get_update_settings(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&ctx, &headers)?;
     let status = controller(&ctx)?.status();
@@ -1113,7 +1168,7 @@ struct UpdateSettingsRequest {
 async fn put_update_settings(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     ApiJson(request): ApiJson<UpdateSettingsRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&ctx, &headers)?;
@@ -1154,7 +1209,7 @@ struct ServerNameRequest {
 async fn put_server_name(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     ApiJson(request): ApiJson<ServerNameRequest>,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&ctx, &headers)?;
@@ -1177,13 +1232,13 @@ async fn put_server_name(
 /// 確かめるだけ。当てない。結果はすぐ返す。
 async fn update_check(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<update::UpdateStatus>, ApiError> {
     require_admin(&ctx, &headers)?;
     let updates = controller(&ctx)?;
     if let Err(error) = updates.check_now().await {
         log::warn!("更新を確かめられません: {error}");
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
             "update_check_failed",
             "更新を確かめられませんでした。ネットワークを確認してください",
@@ -1194,7 +1249,7 @@ async fn update_check(
 
 async fn update_history(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<Vec<update::UpdateHistoryEntry>>, ApiError> {
     require_admin(&ctx, &headers)?;
     Ok(Json(controller(&ctx)?.history()))
@@ -1203,7 +1258,7 @@ async fn update_history(
 async fn update_retry(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&ctx, &headers)?;
     controller(&ctx)?.retry_skipped();
@@ -1221,12 +1276,12 @@ async fn update_retry(
 async fn update_rollback(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_recent(&ctx, &headers)?;
     let version = controller(&ctx)?.roll_back().map_err(|error| {
         log::warn!("前の版へ戻せません: {error}");
-        ApiError(
+        ApiError::new(
             StatusCode::CONFLICT,
             "rollback_unavailable",
             "今は前のバージョンへ戻せません",
@@ -1253,7 +1308,7 @@ struct AuditQuery {
 
 async fn audit_list(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     Query(query): Query<AuditQuery>,
 ) -> Result<Json<Vec<super::super::admin_store::AuditEntry>>, ApiError> {
     require_admin(&ctx, &headers)?;
@@ -1288,7 +1343,7 @@ fn directory_bytes(path: &Path) -> u64 {
 /// 容量の内訳。全部のファイルを歩くので、10 分は同じ値を返す。
 async fn storage(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&ctx, &headers)?;
     let site = ctx.web.get().ok_or_else(ApiError::not_found)?;
@@ -1353,7 +1408,7 @@ fn connection_state(site: &AdminWeb) -> ConnectionState {
 
 async fn connection(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<ConnectionState>, ApiError> {
     require_admin(&ctx, &headers)?;
     let site = ctx.web.get().ok_or_else(ApiError::not_found)?;
@@ -1373,7 +1428,7 @@ fn refused(message: String) -> Response {
 async fn put_connection(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     ApiJson(change): ApiJson<ConnectionChange>,
 ) -> Result<Response, ApiError> {
     require_recent(&ctx, &headers)?;
@@ -1425,12 +1480,12 @@ async fn put_connection(
 async fn restart(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<StatusCode, ApiError> {
     require_recent(&ctx, &headers)?;
     let site = web(&ctx)?;
     if site.restart.get().is_none() {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::CONFLICT,
             "restart_unavailable",
             "このサーバーは自分では立ち上がれません。サーバーの PCで動かし直してください",
@@ -1451,7 +1506,7 @@ async fn restart(
 /// 新しい管理者の登録文字列。今の管理者は、これが使われた時点で切れる。
 pub(super) fn require_for_admin_pairing(
     ctx: &ServerContext,
-    headers: &HeaderMap,
+    headers: &AdminHeaders,
     ip: &ClientIp,
 ) -> Result<(), ApiError> {
     require_recent(ctx, headers)?;
@@ -1599,6 +1654,138 @@ pub(super) fn session_as_device(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::{store::ServerStore, tests::TestRoot};
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    fn login_context(root: &Path) -> Ctx {
+        let store = Arc::new(ServerStore::open(&root.join("state.sqlite")).unwrap());
+        let ctx = ServerContext::new(store, root.to_path_buf(), None, None);
+        ctx.set_admin_web(AdminWeb::new(
+            &[],
+            ServerPaths::new(root).unwrap(),
+            ConnectionInfo {
+                listen: "127.0.0.1:1".into(),
+                admin_listen: None,
+                public_url: None,
+                local_admin: None,
+                tls: "none",
+            },
+        ));
+        ctx
+    }
+
+    async fn login_for_test(ctx: &Ctx, password: &str) -> Response {
+        web_login(
+            State(Arc::clone(ctx)),
+            Extension(ClientIp(None)),
+            HeaderMap::new(),
+            ApiJson(LoginRequest {
+                username: "試験管理者".into(),
+                password: password.into(),
+            }),
+        )
+        .await
+        .into_response()
+    }
+
+    #[tokio::test]
+    async fn queued_login_checks_the_backoff_before_verifying() {
+        let root = TestRoot::created("queued-login");
+        let ctx = login_context(&root.0);
+        let password = "夏の終わりに海辺で読む本を探す";
+        ctx.store
+            .put_admin_account("試験管理者", &hash_password(password).unwrap())
+            .unwrap();
+        let site = web(&ctx).unwrap();
+        let slots = site.hash_slots.acquire_many(2).await.unwrap();
+        let mut login = std::pin::pin!(login_for_test(&ctx, password));
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(login.as_mut().poll(&mut task).is_pending());
+        {
+            let mut throttle = site.throttle.lock().unwrap();
+            for _ in 0..5 {
+                throttle.fail(Instant::now());
+            }
+        }
+        drop(slots);
+        let response = login.await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().contains_key(header::RETRY_AFTER));
+        assert!(site
+            .throttle
+            .lock()
+            .unwrap()
+            .remaining(Instant::now())
+            .is_some());
+        assert!(ctx.store.list_admin_sessions().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_reauth_checks_the_backoff_before_verifying() {
+        let root = TestRoot::created("queued-reauth");
+        let ctx = login_context(&root.0);
+        let password = "夏の終わりに海辺で読む本を探す";
+        ctx.store
+            .put_admin_account("試験管理者", &hash_password(password).unwrap())
+            .unwrap();
+        let (token, session) = ctx.store.create_admin_session(false, None, None).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{COOKIE}={token}")).unwrap(),
+        );
+        let mut extensions = Extensions::new();
+        extensions.insert(PageHere);
+        let site = web(&ctx).unwrap();
+        let slots = site.hash_slots.acquire_many(2).await.unwrap();
+        let mut reauth = std::pin::pin!(web_reauth(
+            State(Arc::clone(&ctx)),
+            Extension(ClientIp(None)),
+            AdminHeaders::new(&headers, &extensions),
+            ApiJson(ReauthRequest {
+                password: password.into()
+            }),
+        ));
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(reauth.as_mut().poll(&mut task).is_pending());
+        {
+            let mut throttle = site.throttle.lock().unwrap();
+            for _ in 0..5 {
+                throttle.fail(Instant::now());
+            }
+        }
+        drop(slots);
+        let response = reauth.await.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().contains_key(header::RETRY_AFTER));
+        assert_eq!(ctx.store.list_admin_sessions().unwrap()[0].id, session.id);
+        assert!(ctx.store.list_admin_sessions().unwrap()[0]
+            .recent_auth_at
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn login_queue_rejects_requests_beyond_eight_waiters() {
+        let root = TestRoot::created("login-queue-capacity");
+        let ctx = login_context(&root.0);
+        let site = web(&ctx).unwrap();
+        let slots = site.hash_slots.acquire_many(2).await.unwrap();
+        let mut queued: Vec<_> = (0..8)
+            .map(|_| Box::pin(login_for_test(&ctx, "試験用パスワード")))
+            .collect();
+        let mut task = Context::from_waker(Waker::noop());
+        for login in &mut queued {
+            assert!(login.as_mut().poll(&mut task).is_pending());
+        }
+        let mut overflow = std::pin::pin!(login_for_test(&ctx, "試験用パスワード"));
+        let Poll::Ready(response) = overflow.as_mut().poll(&mut task) else {
+            panic!("待ち行列の上限を越えた要求が待機しました");
+        };
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(!response.headers().contains_key(header::RETRY_AFTER));
+        drop(slots);
+    }
 
     #[test]
     fn password_rules_refuse_short_common_and_patterned() {

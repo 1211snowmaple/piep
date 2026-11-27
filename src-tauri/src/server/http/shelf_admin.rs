@@ -1,11 +1,11 @@
 //! 管理の口：棚の写しの受け取りと、携帯が棚を読む許可（単独サーバーだけ）。
 
-use super::{require_admin, ApiError, ApiJson, Ctx};
+use super::{require_admin, AdminHeaders, ApiError, ApiJson, Ctx};
 use crate::library::{ContentFile, LibraryId};
 use crate::server::standalone::shipment::{self, ShelfShipments, ShipError, WireChunk};
 use axum::body::Bytes;
 use axum::extract::{Path as UrlPath, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -14,7 +14,9 @@ impl From<ShipError> for ApiError {
     fn from(error: ShipError) -> Self {
         match error {
             ShipError::Invalid(message) => ApiError::invalid(message),
-            ShipError::Conflict(message) => ApiError(StatusCode::CONFLICT, "conflict", message),
+            ShipError::Conflict(message) => {
+                ApiError::new(StatusCode::CONFLICT, "conflict", message)
+            }
             ShipError::NotFound => ApiError::not_found(),
             ShipError::Internal(detail) => {
                 log::error!("棚の受け取りに失敗しました: {detail}");
@@ -52,7 +54,7 @@ pub(super) struct OpenRequest {
 /// 受け取りを始める（同じ棚の受け取りが残っていれば続ける）。
 pub(super) async fn open(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     ApiJson(request): ApiJson<OpenRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&ctx, &headers)?;
@@ -64,7 +66,7 @@ pub(super) async fn open(
 /// 受け取りの進み具合。
 pub(super) async fn status(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&ctx, &headers)?;
     json(&shipments(&ctx)?.status())
@@ -73,7 +75,7 @@ pub(super) async fn status(
 /// 指定した送信の公開結果を返す。
 pub(super) async fn result(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&ctx, &headers)?;
@@ -91,7 +93,7 @@ pub(super) struct NeededRequest {
 /// 送ってほしい実体を答える。
 pub(super) async fn needed(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     UrlPath(id): UrlPath<String>,
     ApiJson(request): ApiJson<NeededRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -110,7 +112,7 @@ pub(super) struct ChunkQuery {
 /// 実体を一つ受け取る（圧縮したまま）。
 pub(super) async fn put_chunk(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     UrlPath((id, chunk)): UrlPath<(String, String)>,
     Query(query): Query<ChunkQuery>,
     body: Bytes,
@@ -135,7 +137,7 @@ pub(super) struct CommitRequest {
 /// 受け取りを確定する。棚は別のスレッドで組み、進み具合は `status` で返す。
 pub(super) async fn commit(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     UrlPath(id): UrlPath<String>,
     ApiJson(request): ApiJson<CommitRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -148,7 +150,7 @@ pub(super) async fn commit(
 /// 受け取りをやめる。
 pub(super) async fn abort(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     UrlPath(id): UrlPath<String>,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&ctx, &headers)?;
@@ -185,12 +187,12 @@ pub(super) async fn forget_reader(ctx: &Ctx, device: String) {
 /// 携帯に棚を読む許可を付け外しする。設定に書き、配っている棚にもすぐ効かせる。
 pub(super) async fn set_reader(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     UrlPath(device): UrlPath<String>,
     ApiJson(request): ApiJson<ReaderRequest>,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&ctx, &headers)?;
-    let shelf = ctx.reader_shelf.get().cloned().ok_or(ApiError(
+    let shelf = ctx.reader_shelf.get().cloned().ok_or(ApiError::new(
         StatusCode::CONFLICT,
         "no_shelf",
         "このサーバーはまだ棚を配っていません",
