@@ -7,6 +7,19 @@ use crate::fanbox_api::client::FanboxAPI;
 
 const MAX_FANBOX_HOME_BYTES: usize = 8 * 1024 * 1024;
 
+/// フォロー一覧の読み取りと API の呼び出しで同じ ID の規則を使う。
+pub(crate) fn validate_creator_id(id: &str) -> Result<(), &'static str> {
+    if (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        Ok(())
+    } else {
+        Err("クリエイターIDの形式が正しくありません")
+    }
+}
+
 async fn bounded_home_text(mut response: reqwest::Response) -> Result<String, Box<dyn Error>> {
     if response
         .content_length()

@@ -16,7 +16,7 @@ describe("保存候補の取得元", () => {
     vi.mocked(fetchPixivNovelByUrl).mockResolvedValue({ id: "123", user: { name: "作者" } });
     const rows = await SAVE_SOURCES.pixiv.targets.pixiv_single!.fetch("123", url);
     expect(fetchPixivNovelByUrl).toHaveBeenCalledWith(url);
-    expect(rows).toMatchObject([{ id: "123", title: "題名のない小説", subtitle: "作者" }]);
+    expect(rows).toMatchObject({ items: [{ id: "123", title: "題名のない小説", subtitle: "作者" }], truncated: false });
     expect(targetLabel("pixiv", "pixiv_single")).toBe("小説を保存できます");
   });
 
@@ -24,7 +24,7 @@ describe("保存候補の取得元", () => {
     vi.mocked(fetchFanboxPost).mockResolvedValue({ accountKey: "使用中", data: { id: "456", user: { name: "作者" } } });
     const rows = await SAVE_SOURCES.fanbox.targets.fanbox_single!.fetch("456", "https://www.fanbox.cc/posts/456");
     expect(fetchFanboxPost).toHaveBeenCalledWith("456");
-    expect(rows).toMatchObject([{ id: "456", title: "題名のない投稿", subtitle: "作者", restrictionAccountKey: "使用中" }]);
+    expect(rows).toMatchObject({ items: [{ id: "456", title: "題名のない投稿", subtitle: "作者", restrictionAccountKey: "使用中" }], truncated: false });
     expect(targetLabel("fanbox", "fanbox_single")).toBe("投稿を保存できます");
   });
 });

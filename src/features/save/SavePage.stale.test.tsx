@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
+import type { CandidateList } from "@/services/downloadApi";
 import SavePage from "./SavePage";
 import { resetSaveDraftsForTest } from "./saveDraft";
 
@@ -22,10 +23,7 @@ const browserApi = vi.hoisted(() => ({
   getStandaloneBrowserUrl: vi.fn().mockResolvedValue(null),
 }));
 const pixivApi = vi.hoisted(() => ({
-  fetchPixivSeriesNovels: vi.fn().mockResolvedValue([
-    { id: 1, title: "第一話", user: { name: "作者" } },
-    { id: 2, title: "第二話", user: { name: "作者" } },
-  ]),
+  fetchPixivSeriesNovels: vi.fn(),
 }));
 
 vi.mock("@/services/browserApi", () => browserApi);
@@ -75,10 +73,10 @@ describe("SavePage stale candidates", () => {
     resetSaveDraftsForTest();
     window.location.hash = "#/save/pixiv";
     Object.values(browserApi).forEach((mock) => mock.mockClear());
-    pixivApi.fetchPixivSeriesNovels.mockReset().mockResolvedValue([
+    pixivApi.fetchPixivSeriesNovels.mockReset().mockResolvedValue({ truncated: false, items: [
       { id: 1, title: "第一話", user: { name: "作者" } },
       { id: 2, title: "第二話", user: { name: "作者" } },
-    ]);
+    ] });
   });
 
   it("moves the warning onto the controls it concerns instead of a band", async () => {
@@ -187,10 +185,10 @@ describe("SavePage stale candidates", () => {
   });
 
   it("古い取得が遅れて終わっても、新しい画面の候補を上書きしない", async () => {
-    let finishOld!: (value: { id: number; title: string }[]) => void;
+    let finishOld!: (value: CandidateList<{ id: number; title: string }>) => void;
     pixivApi.fetchPixivSeriesNovels
       .mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
-      .mockResolvedValueOnce([{ id: 3, title: "新しい候補" }]);
+      .mockResolvedValueOnce({ items: [{ id: 3, title: "新しい候補" }], truncated: false });
     const page = renderSavePage();
     await goTo(SERIES);
     fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
@@ -202,7 +200,7 @@ describe("SavePage stale candidates", () => {
     fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
     expect(await screen.findByText("新しい候補")).toBeInTheDocument();
 
-    finishOld([{ id: 1, title: "古い候補" }]);
+    finishOld({ items: [{ id: 1, title: "古い候補" }], truncated: false });
     await waitFor(() => expect(pixivApi.fetchPixivSeriesNovels).toHaveBeenCalledTimes(2));
     expect(screen.queryByText("古い候補")).toBeNull();
     expect(screen.getByText("新しい候補")).toBeInTheDocument();

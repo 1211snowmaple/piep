@@ -3,6 +3,8 @@ use reqwest::{Client, StatusCode};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
 
+use crate::auth::fanbox::validate_creator_id;
+use crate::downloader::candidate_list::CandidateList;
 use crate::fanbox_api::error::FanboxError;
 use crate::fanbox_api::models::*;
 
@@ -221,17 +223,16 @@ impl FanboxAPI {
 
     /// 2. クリエイター情報取得（解釈は保存の側が生の JSON から行う）
     pub async fn get_creator_raw(&self, creator_id: &str) -> Result<String, FanboxError> {
-        let mut url =
-            reqwest::Url::parse("https://api.fanbox.cc/creator.get").expect("fixed API URL");
-        url.query_pairs_mut().append_pair("creatorId", creator_id);
+        validate_creator_id(creator_id)?;
+        let url = request_url("creator.get", &[("creatorId", creator_id)]);
         self.api_get_body(url.as_str()).await
     }
 
     /// 投稿APIは追加フィールドや投稿種別ごとの差が大きいため、保存経路では
     /// 構造を失わない生のJSONを利用する。
     pub async fn get_post_value(&self, post_id: &str) -> Result<serde_json::Value, FanboxError> {
-        let url = format!("https://api.fanbox.cc/post.info?postId={}", post_id);
-        let resp: FanboxResponse<serde_json::Value> = self.api_get(&url).await?;
+        let url = request_url("post.info", &[("postId", post_id)]);
+        let resp: FanboxResponse<serde_json::Value> = self.api_get(url.as_str()).await?;
         crate::fanbox_api::payload::into_post(resp.body).ok_or_else(|| {
             FanboxError::Other(
                 "FANBOX投稿応答の構造を解釈できませんでした（応答形式が変わった可能性があります）"
@@ -240,11 +241,11 @@ impl FanboxAPI {
         })
     }
 
-    /// 8. クリエイターの全投稿を走査して一括取得するヘルパーメソッド (ページネーションの全トラバース)
+    /// クリエイターの投稿を並べ、件数の上限で打ち切ったかを返す。
     pub async fn get_all_creator_posts(
         &self,
         creator_id: &str,
-    ) -> Result<Vec<FanboxPost>, FanboxError> {
+    ) -> Result<CandidateList<FanboxPost>, FanboxError> {
         self.get_creator_posts_since(creator_id, None).await
     }
 
@@ -252,16 +253,14 @@ impl FanboxAPI {
         &self,
         creator_id: &str,
         stop_source_id: Option<&str>,
-    ) -> Result<Vec<FanboxPost>, FanboxError> {
-        let mut all_posts = Vec::new();
+    ) -> Result<CandidateList<FanboxPost>, FanboxError> {
+        validate_creator_id(creator_id)?;
+        let mut candidates = CandidateList::default();
         let mut seen_ids = std::collections::HashSet::new();
 
         // 1. paginateCreatorでページURLの一覧を取得
-        let url = format!(
-            "https://api.fanbox.cc/post.paginateCreator?creatorId={}",
-            creator_id
-        );
-        let resp: FanboxResponse<serde_json::Value> = self.api_get_paged(&url).await?;
+        let url = request_url("post.paginateCreator", &[("creatorId", creator_id)]);
+        let resp: FanboxResponse<serde_json::Value> = self.api_get_paged(url.as_str()).await?;
 
         // Current FANBOX responses wrap the URL array as `{ body: { pageUrls: [...] } }`.
         // Older responses returned the array directly, so accept both deliberately.
@@ -278,30 +277,30 @@ impl FanboxAPI {
                 log::info!("Fetching page: {}", page_url);
                 let page: FanboxResponse<serde_json::Value> = self.api_get_paged(page_url).await?;
                 let (posts, _) = decode_post_list(page.body)?;
-                if append_fanbox_posts(&mut all_posts, &mut seen_ids, posts, stop_source_id)? {
-                    return Ok(all_posts);
+                if append_fanbox_posts(&mut candidates, &mut seen_ids, posts, stop_source_id) {
+                    return Ok(candidates);
                 }
             }
             if !page_urls.is_empty() {
-                return Ok(all_posts);
+                return Ok(candidates);
             }
         } else if post_list_shape(&resp.body) {
             // Some historical versions returned posts from paginateCreator itself.
             let (posts, _) = decode_post_list(resp.body)?;
-            append_fanbox_posts(&mut all_posts, &mut seen_ids, posts, stop_source_id)?;
-            return Ok(all_posts);
+            append_fanbox_posts(&mut candidates, &mut seen_ids, posts, stop_source_id);
+            return Ok(candidates);
         }
 
         // 2. 究極のフォールバック (URL配列が得られなかった場合)
         log::warn!("Pagination empty or unrecognized. Falling back to listCreator API.");
-        let fallback_url = format!(
-            "https://api.fanbox.cc/post.listCreator?creatorId={}&limit=100",
-            creator_id
+        let fallback_url = request_url(
+            "post.listCreator",
+            &[("creatorId", creator_id), ("limit", "100")],
         );
 
         // Follow nextUrl as well. The previous one-shot fallback silently truncated
         // creators with more than 100 posts when paginateCreator changed shape.
-        let mut next_url = Some(fallback_url);
+        let mut next_url = Some(fallback_url.to_string());
         let mut seen_urls = std::collections::HashSet::new();
         let mut page_index = 0usize;
         while let Some(page_url) = next_url.take() {
@@ -320,13 +319,13 @@ impl FanboxAPI {
             }
             let page: FanboxResponse<serde_json::Value> = self.api_get_paged(&page_url).await?;
             let (posts, following_url) = decode_post_list(page.body)?;
-            if append_fanbox_posts(&mut all_posts, &mut seen_ids, posts, stop_source_id)? {
+            if append_fanbox_posts(&mut candidates, &mut seen_ids, posts, stop_source_id) {
                 break;
             }
             next_url = following_url;
             page_index += 1;
         }
-        Ok(all_posts)
+        Ok(candidates)
     }
 }
 
@@ -372,25 +371,24 @@ fn decode_post_list(
 }
 
 fn append_fanbox_posts(
-    output: &mut Vec<FanboxPost>,
+    output: &mut CandidateList<FanboxPost>,
     seen_ids: &mut std::collections::HashSet<String>,
     posts: Vec<FanboxPost>,
     stop_source_id: Option<&str>,
-) -> Result<bool, FanboxError> {
-    for post in posts {
-        if stop_source_id.is_some_and(|stop| stop == post.id) {
-            return Ok(true);
-        }
-        if seen_ids.insert(post.id.clone()) {
-            output.push(post);
-        }
-        if output.len() >= 10_000 {
-            return Err(FanboxError::Other(
-                "FANBOX history exceeded the 10,000-item safety limit".to_string(),
-            ));
-        }
-    }
-    Ok(false)
+) -> bool {
+    output.append_page(
+        posts,
+        seen_ids,
+        |post| post.id.clone(),
+        |id| stop_source_id.is_some_and(|stop| stop == id),
+    )
+}
+
+fn request_url(endpoint: &str, pairs: &[(&str, &str)]) -> reqwest::Url {
+    let mut url =
+        reqwest::Url::parse(&format!("https://api.fanbox.cc/{endpoint}")).expect("fixed API URL");
+    url.query_pairs_mut().extend_pairs(pairs.iter().copied());
+    url
 }
 
 fn allowed_api_url(raw: &str) -> Result<reqwest::Url, FanboxError> {
@@ -427,6 +425,81 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn request_ids_are_encoded_as_single_query_values() {
+        let id = "a&other=1?/ %2F#fragment";
+        for (endpoint, pairs) in [
+            ("post.info", vec![("postId", id)]),
+            ("creator.get", vec![("creatorId", id)]),
+            ("post.paginateCreator", vec![("creatorId", id)]),
+            (
+                "post.listCreator",
+                vec![("creatorId", id), ("limit", "100")],
+            ),
+        ] {
+            let url = request_url(endpoint, &pairs);
+            let decoded: Vec<_> = url
+                .query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect();
+            assert_eq!(
+                decoded,
+                pairs
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(url.fragment(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_creator_ids_before_building_headers() {
+        // 不正な Cookie で、入力の検査をすり抜けても通信させない。
+        let api = FanboxAPI::new("\n".into(), "test".into()).unwrap();
+        for id in ["a&b", "a?b", "a/b", "a%b", "a b", "", &"a".repeat(65)] {
+            let error = api.get_all_creator_posts(id).await.unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "クリエイターIDの形式が正しくありません",
+                "{id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn creator_list_keeps_exact_limit_and_marks_only_an_additional_post() {
+        use crate::downloader::candidate_list::CANDIDATE_LIMIT;
+
+        let post = |id: usize| -> FanboxPost {
+            serde_json::from_value(json!({
+                "id": id.to_string(), "title": "投稿", "creatorId": "creator",
+                "publishedDatetime": "", "updatedDatetime": "",
+            }))
+            .unwrap()
+        };
+        let mut candidates = CandidateList::default();
+        let mut seen = std::collections::HashSet::new();
+        let page = (1..=CANDIDATE_LIMIT).map(post).collect();
+        assert!(!append_fanbox_posts(&mut candidates, &mut seen, page, None));
+        assert_eq!(candidates.items.len(), CANDIDATE_LIMIT);
+        assert!(!candidates.truncated);
+
+        let next_page = vec![post(1), post(CANDIDATE_LIMIT + 1)];
+        assert!(append_fanbox_posts(
+            &mut candidates,
+            &mut seen,
+            next_page,
+            None
+        ));
+        assert_eq!(candidates.items.len(), CANDIDATE_LIMIT);
+        assert_eq!(
+            candidates.items.last().unwrap().id,
+            CANDIDATE_LIMIT.to_string()
+        );
+        assert!(candidates.truncated);
+    }
 
     async fn response_from_wire(wire_response: &'static [u8]) -> reqwest::Response {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

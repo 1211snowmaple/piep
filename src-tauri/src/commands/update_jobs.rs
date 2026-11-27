@@ -150,7 +150,11 @@ impl FanboxUpdateIndex {
             let api =
                 crate::downloader::session::fanbox(cookie.to_string(), user_agent.to_string())
                     .map_err(|error| error.to_string())?;
-            match api.get_all_creator_posts(author_id).await {
+            match api
+                .get_all_creator_posts(author_id)
+                .await
+                .and_then(|list| list.into_complete().map_err(Into::into))
+            {
                 Ok(posts) => {
                     self.posts.insert(author_id.to_string(), posts.clone());
                     self.entries.insert(
@@ -3206,6 +3210,7 @@ async fn process_target_item(
             target.last_seen_source_id.as_deref(),
         )
         .await?
+        .into_complete()?
         .into_iter()
         .map(|item| serde_json::to_value(item).map_err(|e| e.to_string()))
         .collect::<Result<Vec<_>, _>>()?
@@ -3221,6 +3226,7 @@ async fn process_target_item(
             target.last_seen_source_id.as_deref(),
         )
         .await?
+        .into_complete()?
         .into_iter()
         .map(|item| serde_json::to_value(item).map_err(|e| e.to_string()))
         .collect::<Result<Vec<_>, _>>()?
@@ -3243,15 +3249,14 @@ async fn process_target_item(
             .posts_since(&target.source_key, target.last_seen_source_id.as_deref())
         {
             Some(posts) => posts,
-            None => {
-                super::downloader::fetch_fanbox_creator_posts_since(
-                    target.source_key.clone(),
-                    cookie,
-                    user_agent,
-                    target.last_seen_source_id.as_deref(),
-                )
-                .await?
-            }
+            None => super::downloader::fetch_fanbox_creator_posts_since(
+                target.source_key.clone(),
+                cookie,
+                user_agent,
+                target.last_seen_source_id.as_deref(),
+            )
+            .await?
+            .into_complete()?,
         };
         if full_fanbox {
             fanbox_checkpoint = posts
