@@ -31,7 +31,7 @@
 | 操作 | 口 | 応答 |
 | --- | --- | --- |
 | 接続確認 | `GET /api/hello`（無認証） | `apiVersion`、`serverName`、`capabilities` |
-| 登録 | `POST /api/pair`（無認証） | `deviceId`、`token`、`role`、`apiVersion` |
+| 登録 | `POST /api/pair`（無認証） | `deviceId`、`token`、`role`、`apiVersion`。登録を拒否されたときは 401、試行が制限されたときは 429 と `Retry-After` |
 | 登録の確認 | `GET /api/about` | 版と名前。解除された端末には 401 |
 
 応答の `apiVersion` は現在 3。登録応答は、携帯とデスクトップ版が同じ型と検査で版と役割を確認してから鍵を保存する。携帯は `reader`、デスクトップ版は `admin` を求める。接続確認では、Rust が登録済みの認証鍵で `GET /api/about` と `GET /api/identity` を確かめる。棚・利用者・同期 epoch のヘッダーがそろえば、接続状態の `shelf` に `scope` を載せる。画面の `pc_*` コマンドはこの `scope` を受け取る。接続先や棚の識別が変わったら一覧を読み直す。読書位置と未送信の書き込みの保持単位は「読書位置の同期」を参照。
