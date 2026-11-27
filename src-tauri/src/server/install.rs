@@ -3,6 +3,7 @@
 //! 外へどう出すかは利用者が決める。特定の製品を検出も実行もしない。
 
 use super::durable::{write_atomic, StagedWrite};
+use super::endpoint::{server_url, ServerUrlScheme};
 use super::standalone::{command_admin_pair, create_config, ServerPaths};
 use super::store::ServerStore;
 use super::update::{current_version, VERSION};
@@ -51,31 +52,32 @@ pub fn parse_exposure(text: &str) -> Result<Exposure, String> {
 }
 
 fn config_text(exposure: Exposure, url: &str) -> String {
-    match exposure {
-        Exposure::Proxy => format!(
-            r#"# piep-server の設定
-listen = "127.0.0.1:{DEFAULT_PORT_TEXT}"   # トンネルやリバースプロキシからここへ転送する
-public_url = "{url}"
+    const TEMPLATE: &str = r#"# piep-server の設定
+listen = ""
+public_url = ""
 # admin_listen = "127.0.0.1:38778"   # 管理者を別の口に分ける。外へ公開するなら分ける
 
 [update]
 auto = true
 window = "03:00-06:00"
-"#
-        ),
-        Exposure::Direct => format!(
-            r#"# piep-server の設定
-listen = "0.0.0.0:{DEFAULT_PORT_TEXT}"
-public_url = "{url}"
-tls = "self-signed"
-# admin_listen = "127.0.0.1:38778"   # 管理者を別の口に分ける。外へ公開するなら分ける
-
-[update]
-auto = true
-window = "03:00-06:00"
-"#
-        ),
+"#;
+    let mut document: toml_edit::DocumentMut =
+        TEMPLATE.parse().expect("インストール時の設定のひな形");
+    let address = match exposure {
+        Exposure::Proxy => "127.0.0.1",
+        Exposure::Direct => "0.0.0.0",
+    };
+    let mut listen = toml_edit::Value::from(format!("{address}:{DEFAULT_PORT_TEXT}"));
+    if exposure == Exposure::Proxy {
+        listen
+            .decor_mut()
+            .set_suffix("   # トンネルやリバースプロキシからここへ転送する");
+    } else {
+        document["tls"] = toml_edit::value("self-signed");
     }
+    document["listen"] = toml_edit::Item::Value(listen);
+    document["public_url"] = toml_edit::value(url);
+    document.to_string()
 }
 
 /// タスク スケジューラの定義。`schtasks /SC ONSTART` の既定は 3 日で止まり、電池でも止まるので
@@ -174,14 +176,7 @@ fn host_name() -> String {
 }
 
 fn normalized_url(url: &str) -> Result<String, String> {
-    if !url.starts_with("https://") {
-        return Err("URL は https:// で始めてください".into());
-    }
-    Ok(if url.ends_with('/') {
-        url.to_string()
-    } else {
-        format!("{url}/")
-    })
+    Ok(server_url(url, ServerUrlScheme::Https)?.into())
 }
 
 /// 尋ねて足りない項目を埋める。設定がすでにあれば、出し方は尋ねない。
@@ -197,7 +192,12 @@ fn complete_options(
     };
     let paths = ServerPaths::new(&data)?;
     if paths.config().exists() {
-        return Ok((paths.root, None, options.url));
+        let url = options
+            .url
+            .as_deref()
+            .map(|url| server_url(url, ServerUrlScheme::HttpsOrLocalHttp).map(Into::into))
+            .transpose()?;
+        return Ok((paths.root, None, url));
     }
     let exposure = match options.expose {
         Some(exposure) => exposure,
@@ -654,9 +654,9 @@ pub struct InstallDone {
     pub admin_link: Option<String>,
 }
 
-/// `piep-server install` の本体。登録文字列を返す。
+/// インストールを実行し、管理者の登録文字列と、用意できた場合は管理画面のリンクを返す。
+/// 入れ直しで管理者がすでにいれば `None` を返す。
 #[cfg(windows)]
-/// 入れ直しで管理者がすでにいれば、登録文字列は出さない。
 async fn install_inner(options: InstallOptions) -> Result<Option<InstallDone>, String> {
     let no_task = options.no_task;
     let (root, exposure, url) = complete_options(options)?;
@@ -830,6 +830,23 @@ mod tests {
     }
 
     #[test]
+    fn the_generated_config_keeps_quotes_and_newlines_inside_the_url_value() {
+        for exposure in [Exposure::Proxy, Exposure::Direct] {
+            for url in [
+                "https://server.example/\"\nadmin_listen = \"127.0.0.1:1",
+                "https://server.example/a\"b/",
+            ] {
+                let root = crate::server::tests::TestRoot::created("install-config-url");
+                let paths = prepare_layout(&root.0, Some(exposure), Some(url)).unwrap();
+                let written = fs::read_to_string(paths.config()).unwrap();
+                let config: ServerConfig = toml::from_str(&written).unwrap();
+                assert_eq!(config.public_url, url);
+                assert!(config.admin_listen.is_none());
+            }
+        }
+    }
+
+    #[test]
     fn no_product_is_assumed_in_the_generated_config() {
         for exposure in [Exposure::Proxy, Exposure::Direct] {
             let text = config_text(exposure, "https://server.example/").to_lowercase();
@@ -849,6 +866,18 @@ mod tests {
         );
         assert!(normalized_url("http://a.example/").is_err());
         assert!(parse_exposure("funnel").is_err());
+    }
+
+    #[test]
+    fn install_refuses_whitespace_and_url_components_that_cannot_be_paired() {
+        for url in [
+            "https://server.example/a\nb",
+            "https://user@server.example/",
+            "https://server.example/?q=1",
+            "https://server.example/#part",
+        ] {
+            assert!(normalized_url(url).is_err(), "{url:?}");
+        }
     }
 
     #[test]

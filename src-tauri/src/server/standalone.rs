@@ -8,6 +8,7 @@ pub mod shipment;
 use super::admin_assets::ADMIN_ASSETS;
 use super::admin_store::TicketKind;
 use super::durable::write_atomic;
+use super::endpoint::{server_url, ServerUrlScheme};
 use super::http::admin_web::command_ticket;
 use super::http::{
     admin_router, combined_router, reader_router, AdminWeb, ConnectionInfo, ServerContext,
@@ -123,8 +124,18 @@ fn default_listen() -> SocketAddr {
 }
 
 impl ServerConfig {
-    /// 平文で待ち受けてよいのはこの機械の中だけ。それ以外は TLS を必須にする。
+    /// 待ち受けなどの設定を確かめる。
     pub fn validate(&self) -> Result<(), String> {
+        self.checked_public_url().map(drop)
+    }
+
+    fn normalized(mut self) -> Result<Self, String> {
+        self.public_url = self.checked_public_url()?;
+        Ok(self)
+    }
+
+    /// 設定全体を確かめ、使う公開 URL の表記をそろえる。
+    fn checked_public_url(&self) -> Result<String, String> {
         if let Some(TlsSetting::Named(name)) = &self.tls {
             if name != "self-signed" {
                 return Err(format!(
@@ -142,12 +153,8 @@ impl ServerConfig {
             }
         }
         UpdateWindow::parse(&self.update.window)?;
-        if !self.public_url.is_empty() && !self.public_url.starts_with("https://") {
-            return Err(format!(
-                "{CONFIG_FILE} の public_url は https:// で始めてください"
-            ));
-        }
-        Ok(())
+        public_url_of(&self.public_url)
+            .map_err(|error| format!("{CONFIG_FILE} の public_url: {error}"))
     }
 
     pub fn public_url(&self) -> Option<String> {
@@ -235,8 +242,7 @@ pub fn load_config(paths: &ServerPaths) -> Result<ServerConfig, String> {
     })?;
     let config: ServerConfig = toml::from_str(&text)
         .map_err(|error| format!("{CONFIG_FILE} を読み取れません: {error}"))?;
-    config.validate()?;
-    Ok(config)
+    config.normalized()
 }
 
 /// 管理画面から変える接続の設定。`tls` は `none`・`self-signed`・`files`。
@@ -263,22 +269,12 @@ fn parse_address(text: &str, what: &str) -> Result<SocketAddr, String> {
 }
 
 fn public_url_of(text: &str) -> Result<String, String> {
-    let url = text.trim();
-    if url.is_empty() {
+    if text.is_empty() {
         return Ok(String::new());
     }
-    let host = url
-        .strip_prefix("https://")
-        .and_then(|rest| rest.split('/').next())
-        .filter(|host| !host.is_empty() && !host.contains(char::is_whitespace));
-    if host.is_none() {
-        return Err("公開の URL は https:// から始めてください".into());
-    }
-    Ok(if url.ends_with('/') {
-        url.to_string()
-    } else {
-        format!("{url}/")
-    })
+    server_url(text, ServerUrlScheme::Https)
+        .map(Into::into)
+        .map_err(str::to_owned)
 }
 
 /// 送られた設定から、次に使う設定を組む。ファイルには書かない。
@@ -295,7 +291,6 @@ pub(crate) async fn next_connection(
     if admin_listen.is_some_and(|admin| admin.port() == listen.port()) {
         return Err("携帯用と管理用は別のポートにしてください".into());
     }
-    let public_url = public_url_of(&change.public_url)?;
     let tls = match change.tls.as_str() {
         "none" => None,
         "self-signed" => Some(TlsSetting::Named("self-signed".into())),
@@ -339,12 +334,12 @@ pub(crate) async fn next_connection(
     let next = ServerConfig {
         listen,
         admin_listen,
-        public_url,
+        public_url: change.public_url,
         tls,
         shelf: current.shelf.clone(),
         update: current.update.clone(),
-    };
-    next.validate()?;
+    }
+    .normalized()?;
     if let Some(TlsSetting::Files { cert, key }) = &next.tls {
         tls::from_files(cert, key)
             .await
@@ -558,11 +553,12 @@ pub async fn command_admin_pair(
         .or_else(|| config.public_url())
         .or_else(|| default_admin_url(&config))
         .ok_or("このサーバーへデスクトップ版から届く URL を --url で指定してください")?;
+    let url = server_url(&url, ServerUrlScheme::HttpsOrLocalHttp)?;
     let material = tls_material(&paths, &config).await?;
     let fingerprint = material
         .as_ref()
         .and_then(|material| material.fingerprint.as_deref());
-    admin_pairing_text(&store, &url, fingerprint)
+    admin_pairing_text(&store, url.as_str(), fingerprint)
 }
 
 pub fn command_status(data: &Path) -> Result<String, String> {
@@ -1634,6 +1630,66 @@ mod tests {
         assert!(config(r#"public_url = "https://example.com/piep/""#)
             .validate()
             .is_ok());
+    }
+
+    #[test]
+    fn public_url_rules_apply_to_saved_and_edited_settings() {
+        let overlong = format!("https://example.com/{}/", "x".repeat(512));
+        let too_long_with_slash = format!("https://example.com/{}", "x".repeat(492));
+        let invalid = [
+            "http://example.com/",
+            "https://",
+            "https:///example.com/",
+            "https:example.com/path://name",
+            "https://user@example.com/",
+            "https://user:pw@example.com/",
+            "https://@example.com/",
+            "https://example.com/?",
+            "https://example.com/#",
+            " https://example.com/",
+            "https://example.com/a b",
+            "https://example.com/a\u{00a0}b",
+            "https://example.com/a\nb",
+            "https://example.com/a\u{007f}b",
+            overlong.as_str(),
+            too_long_with_slash.as_str(),
+        ];
+        let accepted: Vec<_> = invalid
+            .into_iter()
+            .filter(|url| {
+                let saved = ServerConfig {
+                    public_url: (*url).into(),
+                    ..config("")
+                };
+                saved.validate().is_ok() || public_url_of(url).is_ok()
+            })
+            .collect();
+        assert!(
+            accepted.is_empty(),
+            "無効な URL を受け入れました: {accepted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_pairing_checks_an_explicit_url_and_normalizes_the_configured_url() {
+        let root = crate::server::tests::TestRoot::created("cli-pairing-url");
+        let paths = ServerPaths::new(&root.0).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        fs::write(
+            paths.config(),
+            "public_url = \"https://example.com/piep\"\n",
+        )
+        .unwrap();
+        let invalid =
+            command_admin_pair(&root.0, Some("https://example.com/?q".into()), false).await;
+        assert!(invalid.is_err());
+        assert_eq!(
+            load_config(&paths).unwrap().public_url,
+            "https://example.com/piep/"
+        );
+        let payload = command_admin_pair(&root.0, None, false).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["url"], "https://example.com/piep/");
     }
 
     #[test]

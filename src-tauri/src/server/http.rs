@@ -385,7 +385,7 @@ fn finish(router: Router, ctx: &Ctx) -> Router {
         // 本文と一覧の JSON は大きく縮む。既定の判定は画像を素通りさせる。
         // 頼まれたときだけ圧縮するので、古い端末の受け取り方は変わらない。
         .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))
-        .layer(middleware::from_fn(no_store));
+        .layer(middleware::from_fn(response_headers));
     // 棚の資産は形式とキャッシュの条件を自分で決める。配信時に圧縮し直さない。
     let routes = match ctx.reader_shelf.get() {
         Some(shelf) => routes.merge(super::reader::router(Arc::clone(shelf))),
@@ -394,11 +394,15 @@ fn finish(router: Router, ctx: &Ctx) -> Router {
     routes.layer(middleware::from_fn(observe))
 }
 
-async fn no_store(request: Request, next: Next) -> Response {
+async fn response_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-store"),
+    let headers = response.headers_mut();
+    headers
+        .entry(header::CACHE_CONTROL)
+        .or_insert(HeaderValue::from_static("private, no-store"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
     );
     response
 }
@@ -695,8 +699,7 @@ async fn admin_pairing(
     require_admin(&ctx, &headers)?;
     if request.role.as_deref() == Some("admin") {
         admin_web::require_for_admin_pairing(&ctx, &headers, &ip)?;
-        let url = pairing_url(&ctx, request.url, "http")
-            .ok_or_else(|| ApiError::invalid("このサーバーへ届く URL が決まっていません"))??;
+        let url = pairing_url(&ctx, request.url.as_deref(), Role::Admin)?;
         let lifetime = Duration::from_secs(30 * 60);
         let secret = ctx
             .store
@@ -708,8 +711,7 @@ async fn admin_pairing(
         })));
     }
     admin_web::note_device(&ctx, &headers, &ip, "携帯の登録文字列の発行");
-    let url = pairing_url(&ctx, request.url, "https://")
-        .ok_or_else(|| ApiError::invalid("携帯が接続する https の URL が決まっていません。server.toml の public_url に書いてください"))??;
+    let url = pairing_url(&ctx, request.url.as_deref(), Role::Reader)?;
     let secret = ctx
         .store
         .issue_pairing(Role::Reader, READER_PAIRING_LIFETIME)
@@ -722,30 +724,36 @@ async fn admin_pairing(
 
 /// 登録文字列に載せる URL。公開の URL があればそれを、無ければ画面から渡された URL を使う。
 /// 登録する端末は別の機械なので、この機械の中だけのアドレスは載せない。
-fn pairing_url(
-    ctx: &ServerContext,
-    page: Option<String>,
-    scheme: &str,
-) -> Option<Result<String, ApiError>> {
+fn pairing_url(ctx: &ServerContext, page: Option<&str>, role: Role) -> Result<String, ApiError> {
+    use super::endpoint::{server_url, ServerUrlScheme};
+
+    let (scheme, missing) = match role {
+        Role::Admin => (
+            ServerUrlScheme::HttpsOrLocalHttp,
+            "このサーバーへ届く URL が決まっていません",
+        ),
+        Role::Reader => (
+            ServerUrlScheme::Https,
+            "携帯が接続する https の URL が決まっていません。server.toml の public_url に書いてください",
+        ),
+    };
     let url = ctx
         .public_url
-        .clone()
+        .as_deref()
         .or(page)
-        .filter(|url| url.len() <= 512 && url.starts_with(scheme))?;
+        .ok_or_else(|| ApiError::invalid(missing))?;
+    let url = server_url(url, scheme).map_err(ApiError::invalid)?;
     if only_this_machine(&url) {
-        return Some(Err(ApiError::invalid(
+        return Err(ApiError::invalid(
             "このアドレスはこの PC でしか使えません。登録する端末から届く URL を使ってください",
-        )));
+        ));
     }
-    Some(Ok(url))
+    Ok(url.into())
 }
 
 /// この機械の中からしか届かないアドレスか（ループバックと localhost）。
-fn only_this_machine(url: &str) -> bool {
-    match url::Url::parse(url)
-        .ok()
-        .and_then(|url| url.host().map(|host| host.to_owned()))
-    {
+fn only_this_machine(url: &url::Url) -> bool {
+    match url.host() {
         Some(url::Host::Domain(name)) => {
             let name = name.trim_end_matches('.').to_ascii_lowercase();
             name == "localhost" || name.ends_with(".localhost")

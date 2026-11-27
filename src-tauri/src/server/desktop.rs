@@ -24,8 +24,7 @@ const AUTO_SEND_POLL: Duration = Duration::from_secs(30);
 const AUTO_SEND_STARTUP_DELAY: Duration = Duration::from_secs(2 * 60);
 /// 携帯で変えたお気に入りを、単独サーバーへ聞きに行く間隔。
 const FAVORITES_POLL: Duration = Duration::from_secs(60);
-/// 一度に受け取る携帯のお気に入りの数。
-/// サーバーの棚の読書位置を一度に読む数（サーバーの上限）。
+/// サーバーの棚の読書位置とお気に入りを一度に受け取る件数（サーバーの上限）。
 const SHELF_READING_PAGE: usize = 500;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
