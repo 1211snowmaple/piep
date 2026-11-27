@@ -30,6 +30,7 @@ import { nextAction, remoteView, ServerSection } from "@/features/settings/Serve
 function status(overrides: Partial<DesktopServerStatus> = {}): DesktopServerStatus {
   return {
     remote: null,
+    connectionIssue: null,
     autoSend: false,
     send: { running: false, phase: "", filesTotal: 0, filesDone: 0, bytesTotal: 0, bytesDone: 0, message: null },
     lastSend: { finishedAt: null, works: null, filesAdded: null, error: null },
@@ -82,11 +83,19 @@ describe("ServerSection", () => {
     expect(api.serverStatus).not.toHaveBeenCalled();
   });
 
+  it("asks for registration again when the saved connection could not be read", async () => {
+    api.serverStatus.mockResolvedValue(status({ connectionIssue: "settingsUnreadable" }));
+    renderSection();
+    expect(await screen.findByText("保存した接続設定を読み込めませんでした。サーバーを登録し直してください。")).toBeTruthy();
+    expect(screen.getByLabelText("管理者用の登録文字列")).toBeTruthy();
+  });
+
   it("connects to a standalone server with the pasted string and clears it", async () => {
     api.serverStatus.mockResolvedValue(status());
     api.serverConnectRemote.mockResolvedValue(status());
     renderSection();
     const input = await screen.findByLabelText("管理者用の登録文字列");
+    expect(screen.queryByText("保存した接続設定を読み込めませんでした。サーバーを登録し直してください。")).toBeNull();
     fireEvent.change(input, { target: { value: "  {\"version\":2}  " } });
     fireEvent.click(screen.getByRole("button", { name: "接続" }));
     await waitFor(() => expect(api.serverConnectRemote).toHaveBeenCalledWith("  {\"version\":2}  "));
