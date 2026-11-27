@@ -224,7 +224,7 @@ pub fn open_for_startup(state: Arc<Shelf>, app_data: &Path) -> Result<(), String
     crate::advanced_settings::load(app_data);
     let path = library_dir(app_data);
     // 予約した復元は、棚を開く前に入れ替える。
-    super::backup::apply_pending_restore(&path);
+    super::backup::apply_pending_restore(&path)?;
     state.open(&path)?;
     let spawned = std::thread::Builder::new()
         .name("piep-library-index".into())
@@ -350,6 +350,13 @@ pub(crate) fn adopt_remote_reading(
     shipped: i64,
 ) -> Result<bool, String> {
     let here = changed_here(library, work, "reading_position", shipped)?;
+    // ほかの機械の棚から来た位置なので、この棚の読む画面のページ数で確かめてから写す。
+    let count = |scope| {
+        let provider = library.reading_provider(work)?;
+        Ok(library
+            .render_document(work, scope, &provider)?
+            .page_count())
+    };
     library
         .adopt_reading(
             work,
@@ -357,6 +364,7 @@ pub(crate) fn adopt_remote_reading(
             remote,
             Some(desktop_device(library)),
             here,
+            Some(&count),
         )
         .map_err(|e| e.to_string())
 }
@@ -461,7 +469,12 @@ pub async fn shelf_set_reading_position(
             page: page - 1,
             ratio_ppm: (ratio * f64::from(crate::library::PAGE_RATIO_SCALE)).round() as u32,
         };
-        let location = match scope_of(&card, snapshot) {
+        let scope = scope_of(&card, snapshot);
+        // 読む画面が組んだページ数で確かめる。開いている本文は覚えてあるので組み直さない。
+        let pages = state
+            .document(&library, work, scope, &card.provider)?
+            .page_count();
+        let location = match scope {
             ResourceScope::Snapshot(snapshot) => {
                 crate::library::ReadingLocation::Source { snapshot, anchor }
             }
@@ -480,6 +493,7 @@ pub async fn shelf_set_reading_position(
                 expected,
                 location: Some(location),
                 finished,
+                reader_pages: Some(pages),
             })
             .map_err(|e| e.to_string())?;
         state.forget_derived();
@@ -516,6 +530,7 @@ pub async fn shelf_clear_reading_positions(
                     expected: current.generation,
                     location: None,
                     finished: false,
+                    reader_pages: None,
                 })
                 .map_err(|e| e.to_string())?;
             cleared += 1;
@@ -726,7 +741,7 @@ pub async fn shelf_content(
         let card = library.work_card(work).map_err(|e| e.to_string())?;
         let scope = scope_of(&card, snapshot);
         let document = state.document(&library, work, scope, &card.provider)?;
-        let page_count = document.pages.len().max(1);
+        let page_count = document.page_count();
         let page = page.min(page_count - 1);
         Ok(ContentPageView {
             page,

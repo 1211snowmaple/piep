@@ -87,7 +87,7 @@
 - お気に入りの更新世代が違う（ほかの端末やデスクトップで先に変わった）か、同じ `requestId` を別の変更に使ったときは 409 `{"code": "favorite_conflict", "current": {"favorite": …, "generation": …}}`
 - 棚に無い作品・外した作品は 404、棚が書き込み中なら 503 `busy`
 
-**読書位置**は、読む画面のページ（本文の区切りで数えた 0 からの番号）とその中の割合（百万分率）で、読んでいた版の写しか編集に結ぶ：`{"viewKind": "snapshot"|"edit", "viewId": "<UUID>", "page": n, "ratioPpm": n}`。デスクトップの読む画面と同じ形なので、同じ利用者の位置はデスクトップと携帯で共通。
+**読書位置**は、読む画面のページ（転送用の分割を含めた 0 からの番号）とその中の割合（百万分率）で、読んでいた版の写しか編集に結ぶ：`{"viewKind": "snapshot"|"edit", "viewId": "<UUID>", "page": n, "ratioPpm": n}`。サーバーは同じ分割でページ番号の範囲を確かめる。同じ利用者の位置はデスクトップと携帯で共通。
 
 - 本文は `{"requestId", "expected", "location", "finished"}`
 - 受領と更新世代の扱いはお気に入りと同じで、更新世代が違えば 409 `{"code": "reading_conflict", "current": <位置>}`。本文に無いページや版は 400 `invalid_reading_location`、棚に無い作品や利用者が読めない編集は 404 `resource_unavailable`

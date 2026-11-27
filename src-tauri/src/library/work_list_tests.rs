@@ -374,6 +374,7 @@ fn the_reading_filter_lists_works_part_read_by_this_user_until_they_are_finished
                     },
                 }),
                 finished,
+                reader_pages: Some(1),
             })
             .unwrap();
     };

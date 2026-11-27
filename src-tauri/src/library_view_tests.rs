@@ -835,3 +835,166 @@ fn an_edit_is_laid_out_line_for_line() {
         piep_reader_render::blocks::blocks_to_html(&old_blocks, &old_assets)
     );
 }
+
+fn bare_capture(provider: &str, key: &str, body: SourceBody) -> Capture {
+    Capture {
+        request_id: LibraryId::now_v7(),
+        acquired_at: None,
+        provider: provider.into(),
+        external_key: key.into(),
+        kind: EntityKind::Work,
+        route: "test".into(),
+        raw: b"{}".to_vec().into(),
+        metadata: BTreeMap::new(),
+        field_states: BTreeMap::new(),
+        body: Some(body),
+        media: vec![],
+        attachments: vec![],
+    }
+}
+
+fn long_paragraph() -> String {
+    "あ".repeat(piep_reader_render::pages::READER_PAGE_TARGET_BYTES / 4)
+}
+
+/// 読む画面のページ数を数えて覚え、そのページ数の中の位置だけを書ける。
+fn assert_reader_pages_can_be_saved(
+    library: &Library,
+    work: LibraryId,
+    scope: ResourceScope,
+    pages: usize,
+) {
+    use crate::library::{ReadingAnchor, ReadingLocation, ReadingUpdate, PAGE_RATIO_SCALE};
+    let counts = ReaderPageCounts::default();
+    assert_eq!(counts.count(library, work, scope).unwrap(), pages);
+    assert_eq!(counts.0.lock().unwrap().len(), 1);
+    let at = |page: usize| {
+        let anchor = ReadingAnchor::Page {
+            page: page as u64,
+            ratio_ppm: PAGE_RATIO_SCALE,
+        };
+        match scope {
+            ResourceScope::Snapshot(snapshot) => ReadingLocation::Source { snapshot, anchor },
+            ResourceScope::Edit(edit) => ReadingLocation::Edit { edit, anchor },
+        }
+    };
+    let set = |page: usize, expected: i64, finished: bool| {
+        library.set_reading_position(ReadingUpdate {
+            request: LibraryId::now_v7(),
+            work,
+            user: library.id,
+            device: library.id,
+            expected,
+            location: Some(at(page)),
+            finished,
+            reader_pages: Some(counts.count(library, work, scope).unwrap()),
+        })
+    };
+    for page in 0..pages {
+        let finished = page == pages - 1;
+        let saved = set(page, page as i64, finished).unwrap();
+        assert_eq!(saved.location, Some(at(page)));
+        assert_eq!(saved.finished, finished);
+    }
+    assert!(matches!(
+        set(pages, pages as i64, true),
+        Err(crate::library::Error::InvalidReadingLocation)
+    ));
+    library.verify().unwrap();
+}
+
+#[test]
+fn one_pixiv_source_page_can_save_both_reader_pages() {
+    let dir = temp("pages-pixiv");
+    let library = Library::create(&dir.0).unwrap();
+    let paragraph = long_paragraph();
+    let body = SourceBody::PixivText(format!("{paragraph}\n{paragraph}"));
+    let work = library
+        .capture(bare_capture("pixiv", "long", body))
+        .unwrap();
+    assert_reader_pages_can_be_saved(
+        &library,
+        work.entity_id,
+        ResourceScope::Snapshot(work.snapshot_id),
+        2,
+    );
+}
+
+#[test]
+fn fanbox_body_can_save_both_reader_pages() {
+    let dir = temp("pages-fanbox");
+    let library = Library::create(&dir.0).unwrap();
+    let paragraph = long_paragraph();
+    let body = SourceBody::FanboxBody(json!({
+        "blocks": [{"type": "p", "text": paragraph}, {"type": "p", "text": paragraph}],
+    }));
+    let work = library
+        .capture(bare_capture("fanbox", "long", body))
+        .unwrap();
+    assert_reader_pages_can_be_saved(
+        &library,
+        work.entity_id,
+        ResourceScope::Snapshot(work.snapshot_id),
+        2,
+    );
+}
+
+#[test]
+fn only_the_long_pixiv_source_page_adds_a_reader_page() {
+    let dir = temp("pages-mixed");
+    let library = Library::create(&dir.0).unwrap();
+    let paragraph = long_paragraph();
+    let body = SourceBody::PixivText(format!("前[newpage]{paragraph}\n{paragraph}[newpage]後"));
+    let work = library
+        .capture(bare_capture("pixiv", "mixed", body))
+        .unwrap();
+    assert_reader_pages_can_be_saved(
+        &library,
+        work.entity_id,
+        ResourceScope::Snapshot(work.snapshot_id),
+        4,
+    );
+}
+
+#[test]
+fn edit_without_page_breaks_can_save_both_reader_pages() {
+    use crate::library::{EditBlock, EditRequest};
+    let dir = temp("pages-edit");
+    let library = Library::create(&dir.0).unwrap();
+    let work = library
+        .capture(bare_capture(
+            "local",
+            "edited",
+            SourceBody::PlainText("原本".into()),
+        ))
+        .unwrap();
+    let content = EditContent {
+        format: "piep-edit-v1".into(),
+        title: None,
+        blocks: (0..2)
+            .map(|ordinal| EditBlock {
+                id: LibraryId::now_v7(),
+                ordinal,
+                kind: "paragraph".into(),
+                text: Some(long_paragraph()),
+                attrs: json!({}),
+                media_slot: None,
+            })
+            .collect(),
+        media: vec![],
+        provenance: None,
+    };
+    let edit = library
+        .save_edit(EditRequest {
+            request_id: LibraryId::now_v7(),
+            work: work.entity_id,
+            user: library.id,
+            base: work.snapshot_id,
+            parent: None,
+            expected: 0,
+            content: &content,
+            activate: true,
+        })
+        .unwrap();
+    assert_reader_pages_can_be_saved(&library, work.entity_id, ResourceScope::Edit(edit), 2);
+}

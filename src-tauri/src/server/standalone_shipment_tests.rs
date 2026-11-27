@@ -163,6 +163,7 @@ fn a_shipped_shelf_is_served_after_restart_and_keeps_what_the_phone_wrote_on_the
             expected: 0,
             location: Some(at.clone()),
             finished: false,
+            reader_pages: Some(2),
         })
         .unwrap();
     drop(second);
@@ -242,6 +243,7 @@ fn an_interrupted_swap_keeps_phone_changes_after_restart() {
             expected: 0,
             location: Some(location.clone()),
             finished: false,
+            reader_pages: Some(2),
         })
         .unwrap();
         let favorite = old.user_state(work.entity_id, desktop.id).unwrap();
@@ -728,6 +730,7 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
             expected: 0,
             location: Some(at.clone()),
             finished: false,
+            reader_pages: Some(2),
         })
         .unwrap();
     let reading = admin_get(&remote, &admin.token, "shelf/reading?cursor=&limit=10")

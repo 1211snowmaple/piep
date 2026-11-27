@@ -1,4 +1,4 @@
-use super::{Error, Library, LibraryId, Result, SourceBody};
+use super::{Error, Library, LibraryId, ResourceScope, Result, SourceBody};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -18,10 +18,7 @@ pub enum ReadingAnchor {
         block: LibraryId,
         offset: u64,
     },
-    /// ページで数えた位置（以前の読書画面が記録したもの。棚に残っている）。本文のページ区切り（pixiv の `[newpage]`、編集の
-    /// `page_break`）で数えたページ（0 から）と、そのページの中のスクロールの割合
-    /// （百万分率）。割合は表示の幅で変わるので、文字の位置へ推測して直さない。
-    /// 読書画面はこの位置から開き、次に読み進めたときに文字の位置で書き直す。
+    /// 読書画面のページ（転送用の分割を含めて 0 から）と、そのページ内のスクロールの割合（百万分率）。
     Page {
         page: u64,
         ratio_ppm: u32,
@@ -38,11 +35,6 @@ fn page_within(pages: usize, page: u64, ratio_ppm: u32) -> Result<()> {
     } else {
         Err(invalid_anchor())
     }
-}
-
-/// pixiv の本文のページ数。ページの位置を記録した読書画面と同じく `[newpage]` だけで区切る。
-fn pixiv_pages(text: &str) -> usize {
-    text.matches("[newpage]").count() + 1
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +69,9 @@ pub struct ReadingUpdate {
     /// None は明示的な消去。世代と再送記録を消さずに残す。
     pub location: Option<ReadingLocation>,
     pub finished: bool,
+    /// ページの位置を書くとき、読む画面がその版・編集を組んだページ数。棚は本文をページに
+    /// 組まないので、読む画面の層が同じ組み方で数えて渡す。ページの位置でなければ None。
+    pub reader_pages: Option<usize>,
 }
 
 fn invalid_anchor() -> Error {
@@ -120,38 +115,47 @@ fn check_source_anchor(body: &SourceBody, anchor: &ReadingAnchor) -> Result<()> 
                 *offset,
             )
         }
-        (SourceBody::PixivText(text), ReadingAnchor::Page { page, ratio_ppm }) => {
-            page_within(pixiv_pages(text), *page, *ratio_ppm)
-        }
-        // pixiv 以外の本文は、ページの位置でも一続きの一ページとして記録した。
-        (
-            SourceBody::PlainText(_) | SourceBody::FanboxBody(_),
-            ReadingAnchor::Page { page, ratio_ppm },
-        ) => page_within(1, *page, *ratio_ppm),
         _ => Err(invalid_anchor()),
     }
 }
 
-/// 編集のページ数。`page_break` のブロックで区切る。
-fn edit_pages(breaks: usize) -> usize {
-    breaks + 1
-}
-
 impl Library {
-    pub(super) fn check_reading_location(
+    /// `pages` が None のときはページ番号の範囲を確かめない（整合性検査。書くときに確かめ済み）。
+    fn check_reading_location(
         &self,
+        conn: &rusqlite::Connection,
         work: LibraryId,
         location: &ReadingLocation,
+        pages: Option<usize>,
     ) -> Result<()> {
-        match location {
+        let (scope, anchor) = match location {
             ReadingLocation::Source { snapshot, anchor } => {
+                (ResourceScope::Snapshot(*snapshot), anchor)
+            }
+            ReadingLocation::Edit { edit, anchor } => (ResourceScope::Edit(*edit), anchor),
+        };
+        if let ReadingAnchor::Page { page, ratio_ppm } = anchor {
+            // 版・編集がこの作品のものかは棚で確かめる。ページ数は読む画面の組み方で決まる。
+            match scope {
+                ResourceScope::Snapshot(snapshot) => {
+                    self.source_body_from_conn(conn, work, snapshot)?
+                        .ok_or_else(invalid_anchor)?;
+                }
+                ResourceScope::Edit(edit) => {
+                    self.edit(work, edit)?;
+                }
+            }
+            return page_within(pages.unwrap_or(usize::MAX), *page, *ratio_ppm);
+        }
+        match scope {
+            ResourceScope::Snapshot(snapshot) => {
                 let body = self
-                    .source_body(work, *snapshot)?
+                    .source_body_from_conn(conn, work, snapshot)?
                     .ok_or_else(invalid_anchor)?;
                 check_source_anchor(&body, anchor)
             }
-            ReadingLocation::Edit { edit, anchor } => {
-                let content = self.edit(work, *edit)?.content;
+            ResourceScope::Edit(edit) => {
+                let content = self.edit(work, edit)?.content;
                 match anchor {
                     ReadingAnchor::EditBlock { block, offset } => {
                         let block = content
@@ -160,14 +164,6 @@ impl Library {
                             .find(|b| b.id == *block)
                             .ok_or_else(invalid_anchor)?;
                         text_boundary(block.text.as_deref().unwrap_or(""), *offset)
-                    }
-                    ReadingAnchor::Page { page, ratio_ppm } => {
-                        let breaks = content
-                            .blocks
-                            .iter()
-                            .filter(|b| b.kind == "page_break")
-                            .count();
-                        page_within(edit_pages(breaks), *page, *ratio_ppm)
                     }
                     _ => Err(invalid_anchor()),
                 }
@@ -362,6 +358,16 @@ fn position_from_row(raw: PositionRow) -> Result<ReadingPosition> {
 
 impl Library {
     pub fn set_reading_position(&self, update: ReadingUpdate) -> Result<ReadingPosition> {
+        self.write_reading_position(update, false)
+    }
+
+    /// `copied` は、同じ棚の別の写しで書かれた位置を写すとき。ページ番号はその写しが書いたときに
+    /// 読む画面のページ数で確かめてあり、版・編集の本文は変わらないので数え直さない。
+    pub(super) fn write_reading_position(
+        &self,
+        update: ReadingUpdate,
+        copied: bool,
+    ) -> Result<ReadingPosition> {
         let ReadingUpdate {
             request,
             work,
@@ -370,13 +376,27 @@ impl Library {
             expected,
             location,
             finished,
+            reader_pages,
         } = update;
         if expected < 0 || (location.is_none() && finished) {
             return Err(Error::Integrity("読書位置の更新が不正です".into()));
         }
         // 本文の復元・位置検証中に書き込みの錠を持たない。参照先の版は不変。
         if let Some(location) = &location {
-            self.check_reading_location(work, location)?;
+            let paged = matches!(
+                location,
+                ReadingLocation::Source {
+                    anchor: ReadingAnchor::Page { .. },
+                    ..
+                } | ReadingLocation::Edit {
+                    anchor: ReadingAnchor::Page { .. },
+                    ..
+                }
+            );
+            if !copied && paged != reader_pages.is_some() {
+                return Err(invalid_anchor());
+            }
+            self.check_reading_location(&*self.reader()?, work, location, reader_pages)?;
         }
         let payload = serde_json::json!({"work":work,"user":user,"device":device,"expected":expected,"location":location,"finished":finished});
         let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
@@ -457,27 +477,18 @@ impl Library {
             let snapshot: Option<Vec<u8>> = row.get(1)?;
             let edit: Option<Vec<u8>> = row.get(2)?;
             let anchor: ReadingAnchor = serde_json::from_str(&row.get::<_, String>(3)?)?;
-            match (snapshot, edit) {
-                (Some(snapshot), None) => {
-                    let body = self
-                        .source_body_from_conn(conn, work, id(snapshot)?)?
-                        .ok_or_else(invalid_anchor)?;
-                    check_source_anchor(&body, &anchor)?;
-                }
-                (None, Some(edit)) => match anchor {
-                    ReadingAnchor::EditBlock { block, offset } => {
-                        let text:Option<String> = conn.query_row("SELECT b.text FROM edit_blocks b JOIN edit_revisions e ON e.id=b.edit_id WHERE e.work_id=?1 AND e.id=?2 AND e.sealed=1 AND b.block_id=?3",params![work.as_bytes().as_slice(),edit,block.as_bytes().as_slice()],|r|r.get(0))?;
-                        text_boundary(text.as_deref().unwrap_or(""), offset)?;
-                    }
-                    ReadingAnchor::Page { page, ratio_ppm } => {
-                        let breaks: i64 = conn.query_row("SELECT count(*) FROM edit_blocks b JOIN edit_revisions e ON e.id=b.edit_id WHERE e.work_id=?1 AND e.id=?2 AND e.sealed=1 AND b.kind='page_break'",params![work.as_bytes().as_slice(),edit],|r|r.get(0))?;
-                        let breaks = usize::try_from(breaks).map_err(|_| invalid_anchor())?;
-                        page_within(edit_pages(breaks), page, ratio_ppm)?;
-                    }
-                    _ => return Err(invalid_anchor()),
+            let location = match (snapshot, edit) {
+                (Some(snapshot), None) => ReadingLocation::Source {
+                    snapshot: id(snapshot)?,
+                    anchor,
+                },
+                (None, Some(edit)) => ReadingLocation::Edit {
+                    edit: id(edit)?,
+                    anchor,
                 },
                 _ => return Err(invalid_anchor()),
-            }
+            };
+            self.check_reading_location(conn, work, &location, None)?;
         }
         Ok(())
     }
@@ -537,6 +548,7 @@ mod tests {
             expected,
             location,
             finished: false,
+            reader_pages: None,
         };
         assert_eq!(
             library.reading_position(first.entity_id, user).unwrap(),
@@ -630,6 +642,7 @@ mod tests {
                 expected: 0,
                 location: Some(ReadingLocation::Source { snapshot, anchor }),
                 finished: false,
+                reader_pages: None,
             })
         };
         assert!(set(
@@ -708,17 +721,12 @@ mod tests {
     }
 
     #[test]
-    fn page_positions_follow_the_text_page_breaks_and_stay_within_the_page() {
+    fn page_positions_stay_within_the_pages_the_reader_counted() {
         let temp = Temp::new();
         let library = Library::create(&temp.0).unwrap();
-        let paged = library
-            .capture(capture(
-                "paged",
-                SourceBody::PixivText("前[newpage]後".into()),
-            ))
-            .unwrap();
+        let paged = library.capture(capture("paged", "前".into())).unwrap();
         let plain = library.capture(capture("plain", "一続き".into())).unwrap();
-        let set = |saved: &crate::library::CaptureResult, page, ratio_ppm| {
+        let set = |saved: &crate::library::CaptureResult, page, ratio_ppm, pages| {
             library.set_reading_position(ReadingUpdate {
                 request: LibraryId::now_v7(),
                 work: saved.entity_id,
@@ -733,13 +741,16 @@ mod tests {
                     anchor: ReadingAnchor::Page { page, ratio_ppm },
                 }),
                 finished: false,
+                reader_pages: pages,
             })
         };
-        assert!(set(&paged, 1, PAGE_RATIO_SCALE).is_ok());
-        assert!(set(&paged, 2, 0).is_err());
-        assert!(set(&paged, 0, PAGE_RATIO_SCALE + 1).is_err());
-        assert!(set(&plain, 0, 500_000).is_ok());
-        assert!(set(&plain, 1, 0).is_err());
+        assert!(set(&paged, 1, PAGE_RATIO_SCALE, Some(2)).is_ok());
+        assert!(set(&paged, 2, 0, Some(2)).is_err());
+        assert!(set(&paged, 0, PAGE_RATIO_SCALE + 1, Some(2)).is_err());
+        assert!(set(&plain, 0, 500_000, Some(1)).is_ok());
+        assert!(set(&plain, 1, 0, Some(1)).is_err());
+        // ページ数を数えずにページの位置は書けない。
+        assert!(set(&plain, 0, 0, None).is_err());
         library.verify().unwrap();
     }
 
@@ -786,6 +797,7 @@ mod tests {
                 anchor: ReadingAnchor::EditBlock { block, offset },
             }),
             finished: false,
+            reader_pages: None,
         };
         assert!(library
             .set_reading_position(update(LibraryId::now_v7(), 0, 0))

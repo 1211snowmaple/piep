@@ -200,6 +200,7 @@ fn positions_written_on_the_old_copy_after_shipping_move_to_the_new_copy() {
         expected: 0,
         location: Some(at(1)),
         finished: false,
+        reader_pages: Some(2),
     })
     .unwrap();
     assert_eq!(new.adopt_from_previous(&old).unwrap().0, 1);
@@ -217,6 +218,7 @@ fn positions_written_on_the_old_copy_after_shipping_move_to_the_new_copy() {
         expected: moved.generation,
         location: Some(at(0)),
         finished: false,
+        reader_pages: Some(2),
     })
     .unwrap();
     assert_eq!(new.adopt_from_previous(&old).unwrap().0, 0);
@@ -286,6 +288,7 @@ fn the_phone_wins_unless_the_desktop_changed_it_too_whatever_the_clocks_say() {
                 expected,
                 location: Some(at(page)),
                 finished: false,
+                reader_pages: Some(3),
             })
             .unwrap();
     };

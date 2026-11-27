@@ -16,7 +16,8 @@ use piep_reader_render::document::ReaderView;
 use rusqlite::OptionalExtension;
 use serde::Serialize;
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::Mutex;
 
 #[path = "library_view_snapshot.rs"]
 mod snapshot;
@@ -31,6 +32,46 @@ pub struct RenderedDocument {
     pub source_page_starts: Vec<usize>,
     /// 本文全体の平文の字数。読む画面の残り時間の目安。
     pub text_chars: usize,
+}
+
+impl RenderedDocument {
+    /// デスクトップの読書画面では、本文が空でも空のページを 1 枚表示する。
+    pub(crate) fn page_count(&self) -> usize {
+        self.pages.len().max(1)
+    }
+}
+
+/// 読む画面のページ数の覚え。版と編集の本文は変わらないので、一度数えた値をそのまま使う。
+/// 読書位置を書くたびに本文を組み直さない（長い作品や PDF の添付では重い）。
+#[derive(Default)]
+pub struct ReaderPageCounts(Mutex<VecDeque<(LibraryId, ResourceScope, usize)>>);
+
+/// 覚えておく版・編集の数。一つは数十バイト。
+const READER_PAGE_COUNTS: usize = 512;
+
+impl ReaderPageCounts {
+    /// 携帯が組むのと同じページ数。覚えていなければ一度組んで数える。
+    pub fn count(&self, library: &Library, work: LibraryId, scope: ResourceScope) -> Result<usize> {
+        let cached = self.0.lock().ok().and_then(|counts| {
+            counts
+                .iter()
+                .find(|(w, s, _)| *w == work && *s == scope)
+                .map(|(_, _, pages)| *pages)
+        });
+        if let Some(pages) = cached {
+            return Ok(pages);
+        }
+        let provider = library.reading_provider(work)?;
+        let pages = library
+            .render_document(work, scope, &provider)?
+            .page_count();
+        if let Ok(mut counts) = self.0.lock() {
+            counts.retain(|(w, s, _)| !(*w == work && *s == scope));
+            counts.push_front((work, scope, pages));
+            counts.truncate(READER_PAGE_COUNTS);
+        }
+        Ok(pages)
+    }
 }
 
 /// 保存した版の一つ。同じ改稿の補完は最後のものだけを数える。
@@ -324,15 +365,7 @@ impl Library {
         work: LibraryId,
         scope: ResourceScope,
     ) -> Result<piep_library_protocol::ReaderBundle> {
-        let provider: String = self
-            .reader()?
-            .query_row(
-                "SELECT provider FROM work_current_projection WHERE work_id=?1",
-                rusqlite::params![work.as_bytes().as_slice()],
-                |r| r.get(0),
-            )
-            .optional()?
-            .ok_or(crate::library::Error::ResourceUnavailable)?;
+        let provider = self.reading_provider(work)?;
         let (document, text_chars) = self.reading_document(work, scope, &provider)?;
         self.bundle_of(
             &document,
@@ -343,6 +376,20 @@ impl Library {
                 },
             )?),
         )
+    }
+}
+
+impl Library {
+    /// 携帯へ渡す文書の取得元。携帯はこの取得元の組み方でページに分ける。
+    pub(crate) fn reading_provider(&self, work: LibraryId) -> Result<String> {
+        self.reader()?
+            .query_row(
+                "SELECT provider FROM work_current_projection WHERE work_id=?1",
+                rusqlite::params![work.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(crate::library::Error::ResourceUnavailable)
     }
 }
 

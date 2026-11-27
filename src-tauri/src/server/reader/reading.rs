@@ -18,7 +18,7 @@ use super::{
 use crate::library::protocol::Id;
 use crate::library::{
     server_device, Library, LibraryId, ReadingAnchor, ReadingLocation, ReadingPosition,
-    ReadingUpdate, PAGE_RATIO_SCALE,
+    ReadingUpdate, ResourceScope, PAGE_RATIO_SCALE,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -32,8 +32,6 @@ use std::sync::Arc;
 /// 一ページの既定と上限。
 const PAGE: i64 = 200;
 const MAX_PAGE: i64 = 500;
-/// 読書画面のページ番号の上限。
-const MAX_PAGE_NUMBER: u64 = 1_000_000;
 
 pub(super) fn reading_item(
     work: LibraryId,
@@ -404,7 +402,7 @@ pub(super) async fn put(
         .ok_or_else(invalid)?;
     let expected = decimal(&update.expected).ok_or_else(invalid)?;
     let view = uuid::Uuid::parse_str(&update.location.view_id).map_err(|_| invalid())?;
-    if update.location.page > MAX_PAGE_NUMBER || update.location.ratio_ppm > PAGE_RATIO_SCALE {
+    if update.location.ratio_ppm > PAGE_RATIO_SCALE {
         return Err(invalid());
     }
     let anchor = ReadingAnchor::Page {
@@ -441,15 +439,27 @@ pub(super) async fn put(
                 return Err(not_found());
             }
         }
-        match library.set_reading_position(ReadingUpdate {
-            request,
-            work,
-            user: subject,
-            device,
-            expected,
-            location: Some(reading),
-            finished: update.finished,
-        }) {
+        // ページ番号は、携帯が組むのと同じページ数で確かめる（数えた値は覚えておく）。
+        let scope = match &reading {
+            ReadingLocation::Source { snapshot, .. } => ResourceScope::Snapshot(*snapshot),
+            ReadingLocation::Edit { edit, .. } => ResourceScope::Edit(*edit),
+        };
+        let saved = ctx
+            .page_counts
+            .count(library, work, scope)
+            .and_then(|pages| {
+                library.set_reading_position(ReadingUpdate {
+                    request,
+                    work,
+                    user: subject,
+                    device,
+                    expected,
+                    location: Some(reading),
+                    finished: update.finished,
+                    reader_pages: Some(pages),
+                })
+            });
+        match saved {
             Ok(position) => Ok(Json(reading_item(work, &position, device)).into_response()),
             // 世代の食い違いでは、現在の位置を返す。
             Err(crate::library::Error::Integrity(_)) => {

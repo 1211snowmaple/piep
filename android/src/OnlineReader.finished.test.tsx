@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { OnlineReader } from "./OnlineReader";
 import type { PcWork } from "./pcApi";
@@ -27,6 +27,9 @@ it("最後のページも末尾に届くまでは読みかけとして記録す�
     type={{ fontSize: 16, lineHeight: 1.8, readerWidth: 660, fontFamily: "sans", readerTheme: "white" }}
     behavior={defaultReaderBehavior} onBack={() => {}} onTypeChange={() => {}} onBehaviorChange={() => {}} />);
   await screen.findByText("最後のページの本文");
+  // 本文が出た時点では、スクロールを見張る effect がまだ走っていないことがある（混んだ CI で
+  // 見張る前にスクロールを送って落ちた）。effect を流し切ってからスクロールする。
+  await act(async () => {});
   const viewport = screen.getByRole("main");
   Object.defineProperty(viewport, "scrollHeight", { value: 1000 });
 

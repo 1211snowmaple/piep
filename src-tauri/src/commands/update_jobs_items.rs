@@ -696,6 +696,7 @@ pub(super) mod tests {
                     },
                 }),
                 finished: false,
+                reader_pages: Some(1),
             })
             .unwrap();
         let keys = |scope: &str| {
