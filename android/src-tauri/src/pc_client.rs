@@ -681,12 +681,7 @@ pub async fn pc_pair(
         .send()
         .await
         .map_err(|error| ClientError::from_send(&error, pinned))?;
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(ClientError::invalid_pairing());
-    }
-    if !response.status().is_success() {
-        return Err(ClientError::remote());
-    }
+    check_pair_status(response.status())?;
     let result = parse_pair_reply(response).await?;
     let saved = SavedConnection {
         url: pairing.url,
@@ -699,6 +694,18 @@ pub async fn pc_pair(
     };
     state.save(&saved)?;
     Ok(ConnectionStatus::from_saved(&saved, true, None))
+}
+
+fn check_pair_status(status: reqwest::StatusCode) -> Result<(), ClientError> {
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED => Err(ClientError::invalid_pairing()),
+        reqwest::StatusCode::TOO_MANY_REQUESTS => Err(ClientError {
+            code: "pairing_rate_limited",
+            message: "登録の試行が多すぎます。しばらく待ってからもう一度試してください",
+        }),
+        status if status.is_success() => Ok(()),
+        _ => Err(ClientError::remote()),
+    }
 }
 
 async fn parse_pair_reply(response: reqwest::Response) -> Result<PairReply, ClientError> {
@@ -1540,5 +1547,17 @@ mod tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn pairing_rate_limit_has_its_own_message() {
+        let limited = check_pair_status(reqwest::StatusCode::TOO_MANY_REQUESTS).unwrap_err();
+        let rejected = check_pair_status(reqwest::StatusCode::UNAUTHORIZED).unwrap_err();
+        assert_eq!(limited.code, "pairing_rate_limited");
+        assert_eq!(
+            limited.message,
+            "登録の試行が多すぎます。しばらく待ってからもう一度試してください"
+        );
+        assert_eq!(rejected.code, "invalid_pairing");
     }
 }

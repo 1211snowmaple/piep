@@ -12,6 +12,7 @@ pub use admin_web::{AdminAsset, AdminWeb, ConnectionInfo};
 use super::store::{AuthorizedDevice, PairError, Role, ServerStore};
 use super::update::{UpdateController, UpdateStatus};
 use super::{pairing_payload, API_VERSION};
+use admin_web::AdminHeaders;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{
     DefaultBodyLimit, FromRequest, MatchedPath, Path as UrlPath, Query, Request, State,
@@ -24,8 +25,9 @@ use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tower_http::compression::CompressionLayer;
 use tower_http::CompressionLevel;
 
@@ -35,7 +37,8 @@ const MAX_ADMIN_BYTES: usize = 8 * 1024 * 1024 + 64 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const ADMIN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const READER_PAIRING_LIFETIME: Duration = Duration::from_secs(10 * 60);
-const PAIR_ATTEMPTS_PER_MINUTE: usize = 10;
+const PAIR_FAILURE_LIMIT: usize = 10;
+const PAIR_FAILURE_WINDOW: Duration = Duration::from_secs(60);
 
 /// `hello` と `about` で知らせる機能の一覧。棚を読む口の機能は `/api/identity` が知らせる。
 const CAPABILITIES: &[&str] = &["read"];
@@ -54,7 +57,7 @@ pub struct ServerContext {
     /// 管理画面。管理者の口を持つ単独サーバーにだけある。
     web: OnceLock<AdminWeb>,
     started_at: String,
-    pair_attempts: Mutex<VecDeque<Instant>>,
+    pair_failures: Mutex<VecDeque<Instant>>,
     /// 棚の写しの受け取り。単独サーバーにだけある。
     shipments: OnceLock<Arc<super::standalone::shipment::ShelfShipments>>,
     /// 単独サーバーの置き場（設定を書くため）。
@@ -77,7 +80,7 @@ impl ServerContext {
             update: OnceLock::new(),
             web: OnceLock::new(),
             started_at: chrono::Utc::now().to_rfc3339(),
-            pair_attempts: Mutex::new(VecDeque::new()),
+            pair_failures: Mutex::new(VecDeque::new()),
             shipments: OnceLock::new(),
             paths: OnceLock::new(),
         })
@@ -118,63 +121,71 @@ impl ServerContext {
     pub fn set_admin_web(&self, web: AdminWeb) {
         let _ = self.web.set(web);
     }
-
-    fn pair_attempt_allowed(&self) -> bool {
-        let Ok(mut attempts) = self.pair_attempts.lock() else {
-            return false;
-        };
-        let now = Instant::now();
-        while attempts
-            .front()
-            .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(60))
-        {
-            attempts.pop_front();
-        }
-        if attempts.len() >= PAIR_ATTEMPTS_PER_MINUTE {
-            return false;
-        }
-        attempts.push_back(now);
-        true
-    }
 }
 
 type Ctx = Arc<ServerContext>;
 #[derive(Debug)]
-pub struct ApiError(StatusCode, &'static str, &'static str);
+pub struct ApiError {
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+    retry_after: Option<u64>,
+}
 
 impl ApiError {
+    fn new(status: StatusCode, code: &'static str, message: &'static str) -> Self {
+        Self {
+            status,
+            code,
+            message,
+            retry_after: None,
+        }
+    }
+
+    fn retry_after(mut self, wait: Duration) -> Self {
+        let seconds = wait.as_secs() + u64::from(wait.subsec_nanos() != 0);
+        self.retry_after = Some(seconds.max(1));
+        self
+    }
+
     fn unauthorized() -> Self {
-        Self(
+        Self::new(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "端末が登録されていません",
         )
     }
     fn forbidden() -> Self {
-        Self(StatusCode::FORBIDDEN, "forbidden", "この端末では行えません")
+        Self::new(StatusCode::FORBIDDEN, "forbidden", "この端末では行えません")
     }
     fn internal() -> Self {
-        Self(
+        Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal",
             "処理できませんでした",
         )
     }
     fn not_found() -> Self {
-        Self(StatusCode::NOT_FOUND, "not_found", "見つかりません")
+        Self::new(StatusCode::NOT_FOUND, "not_found", "見つかりません")
     }
     fn invalid(message: &'static str) -> Self {
-        Self(StatusCode::BAD_REQUEST, "invalid_request", message)
+        Self::new(StatusCode::BAD_REQUEST, "invalid_request", message)
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.0,
-            Json(serde_json::json!({ "code": self.1, "message": self.2 })),
-        )
-            .into_response()
+        let mut body = serde_json::json!({ "code": self.code, "message": self.message });
+        if let Some(seconds) = self.retry_after {
+            body["retryAfterSeconds"] = seconds.into();
+            return (
+                self.status,
+                [(header::RETRY_AFTER, seconds.to_string())],
+                Json(body),
+            )
+                .into_response();
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -191,21 +202,32 @@ where
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(request, state).await {
             Ok(Json(value)) => Ok(Self(value)),
-            Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => Err(ApiError(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "too_large",
-                "要求が大きすぎます",
-            )),
+            Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+                Err(ApiError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "too_large",
+                    "要求が大きすぎます",
+                ))
+            }
             Err(_) => Err(ApiError::invalid("要求を読み取れません")),
         }
     }
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+    let (scheme, credentials) = headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .split_once(' ')?;
+    let token = credentials.trim_start_matches(' ');
+    let unpadded = token.trim_end_matches('=');
+    (scheme.eq_ignore_ascii_case("Bearer")
+        && !unpadded.is_empty()
+        && unpadded
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._~+/".contains(&byte)))
+    .then_some(token)
 }
 
 fn require_device(ctx: &ServerContext, headers: &HeaderMap) -> Result<AuthorizedDevice, ApiError> {
@@ -215,14 +237,19 @@ fn require_device(ctx: &ServerContext, headers: &HeaderMap) -> Result<Authorized
     Ok(device)
 }
 
-fn require_admin(ctx: &ServerContext, headers: &HeaderMap) -> Result<AuthorizedDevice, ApiError> {
-    if bearer(headers).is_none() {
-        // Cookie を見るのは管理画面を出している口だけで、別のサイトの守りは `guard` が先に通す。
+fn require_admin(
+    ctx: &ServerContext,
+    headers: &AdminHeaders,
+) -> Result<AuthorizedDevice, ApiError> {
+    let Some(token) = bearer(headers) else {
         return admin_web::session_from(ctx, headers)
             .map(|session| admin_web::session_as_device(&session))
             .ok_or_else(ApiError::unauthorized);
-    }
-    let device = require_device(ctx, headers)?;
+    };
+    let device = ctx
+        .store
+        .authorize(token)
+        .ok_or_else(ApiError::unauthorized)?;
     if device.role == Role::Admin {
         Ok(device)
     } else {
@@ -310,7 +337,7 @@ async fn authorize_device_before_body(
 }
 
 async fn authorize_before_body(ctx: Ctx, request: Request, next: Next, admin: bool) -> Response {
-    let headers = request.headers().clone();
+    let headers = AdminHeaders::new(request.headers(), request.extensions());
     // 本文を待たずに拒否し、状態DBを待つ間もHTTP実行スレッドを止めない。
     let authorized = tokio::task::spawn_blocking(move || {
         if admin {
@@ -411,7 +438,7 @@ async fn admin_timeout(request: Request, next: Next) -> Response {
 async fn time_limited(limit: Duration, request: Request, next: Next) -> Response {
     match tokio::time::timeout(limit, next.run(request)).await {
         Ok(response) => response,
-        Err(_) => ApiError(
+        Err(_) => ApiError::new(
             StatusCode::REQUEST_TIMEOUT,
             "timeout",
             "時間内に終わりませんでした",
@@ -443,13 +470,34 @@ async fn pair(
     if request.secret.len() > 128 || request.device_name.chars().count() > 64 {
         return Err(ApiError::invalid("登録情報が長すぎます"));
     }
-    if !ctx.pair_attempt_allowed() {
-        return Err(ApiError::unauthorized());
-    }
-    match ctx
-        .store
-        .consume_pairing(&request.secret, &request.device_name)
-    {
+    let result = {
+        // 上限の検査から失敗の記録までをまとめ、同時に届いた要求にも同じ上限を適用する。
+        let mut failures = ctx.pair_failures.lock().await;
+        let now = Instant::now();
+        while failures
+            .front()
+            .is_some_and(|at| now.duration_since(*at) >= PAIR_FAILURE_WINDOW)
+        {
+            failures.pop_front();
+        }
+        if failures.len() >= PAIR_FAILURE_LIMIT {
+            let wait = PAIR_FAILURE_WINDOW - now.duration_since(failures[0]);
+            return Err(ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too_many_attempts",
+                "登録の試行が多すぎます。しばらく待ってからもう一度試してください",
+            )
+            .retry_after(wait));
+        }
+        let result = ctx
+            .store
+            .consume_pairing(&request.secret, &request.device_name);
+        if matches!(result, Err(PairError::Rejected | PairError::TooManyDevices)) {
+            failures.push_back(Instant::now());
+        }
+        result
+    };
+    match result {
         Ok(paired) => {
             ctx.store.audit(
                 "device",
@@ -486,7 +534,7 @@ struct ShelfReadingQuery {
 /// 棚の持ち主の位置だけ。棚を配っているサーバーにだけある。
 async fn admin_shelf_reading(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     Query(query): Query<ShelfReadingQuery>,
 ) -> Result<Response, ApiError> {
     require_admin(&ctx, &headers)?;
@@ -501,7 +549,7 @@ async fn admin_shelf_reading(
 /// 棚の持ち主のお気に入り（携帯が付け外ししたものをデスクトップ版が取り込む）。
 async fn admin_shelf_favorites(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     Query(query): Query<ShelfReadingQuery>,
 ) -> Result<Response, ApiError> {
     require_admin(&ctx, &headers)?;
@@ -537,7 +585,7 @@ struct AdminStatus {
 
 async fn admin_status(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<AdminStatus>, ApiError> {
     let status_ctx = Arc::clone(&ctx);
     let (devices, server_name, admin_web) = tokio::task::spawn_blocking(move || {
@@ -617,10 +665,10 @@ async fn about(
 /// 新しい版を確かめて当てるよう頼む。頼めるのはこれだけで、ファイルや URL は渡せない。
 async fn admin_update(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&ctx, &headers)?;
-    let controller = ctx.update.get().ok_or(ApiError(
+    let controller = ctx.update.get().ok_or(ApiError::new(
         StatusCode::CONFLICT,
         "not_managed",
         "このサーバーは自分では更新できません。piep-server install で置いてください",
@@ -641,7 +689,7 @@ struct PairingRequest {
 async fn admin_pairing(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<admin_web::ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     ApiJson(request): ApiJson<PairingRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&ctx, &headers)?;
@@ -680,7 +728,7 @@ async fn admin_pairing(
 
 async fn admin_devices(
     State(ctx): State<Ctx>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
 ) -> Result<Json<Vec<serde_json::Value>>, ApiError> {
     tokio::task::spawn_blocking(move || {
         require_admin(&ctx, &headers)?;
@@ -710,7 +758,7 @@ fn device_rows(ctx: &ServerContext) -> Result<Vec<serde_json::Value>, ApiError> 
 async fn admin_revoke(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<admin_web::ClientIp>,
-    headers: HeaderMap,
+    headers: AdminHeaders,
     UrlPath(id): UrlPath<String>,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&ctx, &headers)?;
