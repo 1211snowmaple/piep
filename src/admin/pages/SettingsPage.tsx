@@ -204,7 +204,7 @@ function ConnectionForm({ state }: { state: ConnectionState }) {
             />
             <TextInput
               label="公開の URL"
-              description="インターネットから使うときの、https で始まるアドレスです。携帯の登録に使います。空のときは、デスクトップ版がつないでいるアドレスを使います。"
+              description="https で始まるアドレスです。管理者と携帯の登録に優先して使います。空のときは、管理画面やデスクトップ版の接続先を使います。"
               placeholder="https://example.com/piep/"
               value={draft.publicUrl}
               onChange={(event) => set({ publicUrl: event.currentTarget.value })}
