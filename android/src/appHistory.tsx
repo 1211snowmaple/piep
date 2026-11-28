@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { defaultPcSearch, type OfflineWork, type PcSearchCriteria, type PcWork } from "./pcApi";
 import type { SelectedWork } from "./WorkDetail";
 
@@ -56,6 +56,54 @@ function placeOf(page: AppPage): string {
 
 const MAX_ENTRIES = 60;
 const RESTORE_LIMIT_MS = 1500;
+const SAVED_PLACE_KEY = "piep.place";
+const PAGE_NAMES = new Set(["library", "entity", "offline", "settings"]);
+
+type SavedPlace = { stack: AppEntry[]; positions: [number, number][] };
+
+/**
+ * OS がアプリを終わらせたあとの起動か。Android は、利用者が閉じたあとは最初の画面から、
+ * OS が裏で終わらせたあとは元の画面から始めることを求める。その区別は Activity が受け取る
+ * 保存状態の有無で分かり、ネイティブの側がそれを伝える。
+ */
+function launchedAfterSystemStop(): boolean {
+  try {
+    return (window as Window & { piepAndroidLaunch?: { restoredBySystem?: () => boolean } }).piepAndroidLaunch?.restoredBySystem?.() === true;
+  } catch {
+    return false;
+  }
+}
+
+function isEntry(value: unknown): value is AppEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Partial<AppEntry>;
+  return typeof entry.id === "number" && Number.isSafeInteger(entry.id)
+    && !!entry.page && typeof entry.page === "object" && PAGE_NAMES.has((entry.page as { name?: unknown }).name as string)
+    && (entry.detail === null || typeof entry.detail === "object")
+    && (entry.reader === null || typeof entry.reader === "object");
+}
+
+/** 書き留めた場所を読む。OS に終わらされたあとの起動でなければ捨てる。 */
+function readSavedPlace(): SavedPlace | null {
+  const restore = launchedAfterSystemStop();
+  try {
+    const raw: unknown = restore ? JSON.parse(window.localStorage.getItem(SAVED_PLACE_KEY) ?? "null") : null;
+    if (!restore) window.localStorage.removeItem(SAVED_PLACE_KEY);
+    if (!raw || typeof raw !== "object") return null;
+    const { stack, positions } = raw as Partial<SavedPlace>;
+    if (!Array.isArray(stack) || !stack.length || stack.length > MAX_ENTRIES || !stack.every(isEntry)) return null;
+    const kept = Array.isArray(positions)
+      ? positions.filter((item): item is [number, number] => Array.isArray(item) && Number.isFinite(item[0]) && Number.isFinite(item[1]))
+      : [];
+    return { stack, positions: kept };
+  } catch {
+    return null;
+  }
+}
+
+function writeSavedPlace(place: SavedPlace) {
+  try { window.localStorage.setItem(SAVED_PLACE_KEY, JSON.stringify(place)); } catch { /* storage unavailable */ }
+}
 
 /**
  * 画面の履歴。デスクトップ版のルーターと同じ考えで、場所の移動を一歩として積み、
@@ -66,11 +114,14 @@ const RESTORE_LIMIT_MS = 1500;
  * それぞれ見ていた場所へ戻れる。
  */
 export function useAppHistory(scroller: RefObject<HTMLElement | null>) {
-  const nextId = useRef(1);
-  const [stack, setStack] = useState<AppEntry[]>(() => [{ id: 0, page: homePage, detail: null, reader: null }]);
+  // OS に終わらされたあとの起動なら、見ていた場所とスクロール位置から始める。
+  const [saved] = useState(readSavedPlace);
+  const nextId = useRef(saved ? Math.max(...saved.stack.map((entry) => entry.id)) + 1 : 1);
+  const [stack, setStack] = useState<AppEntry[]>(() => saved?.stack ?? [{ id: 0, page: homePage, detail: null, reader: null }]);
   const stackRef = useRef(stack);
   stackRef.current = stack;
-  const positions = useRef(new Map<number, number>());
+  const positions = useRef(new Map<number, number>(saved?.positions));
+  const resumeScroll = useRef(Boolean(saved));
   const pending = useRef<{ type: "push" | "pop"; from: AppEntry } | null>(null);
   const recording = useRef(true);
   const stopRestore = useRef<() => void>(() => undefined);
@@ -133,16 +184,18 @@ export function useAppHistory(scroller: RefObject<HTMLElement | null>) {
 
   useLayoutEffect(() => {
     currentId.current = current.id;
+    const resuming = resumeScroll.current;
+    resumeScroll.current = false;
     const move = pending.current;
     pending.current = null;
     const element = scroller.current;
-    if (!move || !element) { recording.current = true; return; }
-    if (placeOf(move.from.page) === placeOf(current.page)) {
+    if (!element || (!move && !resuming)) { recording.current = true; return; }
+    if (move && placeOf(move.from.page) === placeOf(current.page)) {
       positions.current.set(current.id, positions.current.get(move.from.id) ?? element.scrollTop);
       recording.current = true;
       return;
     }
-    if (move.type === "push") {
+    if (move?.type === "push") {
       element.scrollTop = 0;
       recording.current = true;
       return;
@@ -183,6 +236,19 @@ export function useAppHistory(scroller: RefObject<HTMLElement | null>) {
     element.addEventListener("scroll", onScroll, { passive: true });
     return () => element.removeEventListener("scroll", onScroll);
   }, [remember, scroller]);
+
+  // 裏へ回るときに書き留める。OS はそのあと知らせずにアプリを終わらせることがある。
+  useEffect(() => {
+    const save = () => writeSavedPlace({ stack: stackRef.current, positions: [...positions.current] });
+    save();
+    const onHide = () => {
+      if (document.visibilityState !== "hidden") return;
+      remember();
+      save();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => document.removeEventListener("visibilitychange", onHide);
+  }, [stack, remember]);
 
   return { restart, entry: current, depth: stack.length, push, replace, back };
 }
