@@ -31,7 +31,7 @@ const shots: ReadonlyArray<
   ["editor", "/#/editor/101", "雨上がりの図書室で", ["light"]],
   ["updates", "/#/updates", "新作・改稿", ["light"]],
   ["epub", "/#/epub", "EPUB書き出し", ["light"]],
-  ["diagnostics", "/#/diagnostics", "診断とメンテナンス", ["light"]],
+  ["diagnostics", "/#/settings?section=diagnostics", "診断とメンテナンス", ["light"]],
   ["settings", "/#/settings?section=appearance", "表示と操作", ["light"]],
 ];
 
