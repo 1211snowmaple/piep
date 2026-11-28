@@ -24,8 +24,11 @@ class MainActivity : TauriActivity() {
   @Volatile private var systemBottomInsetPx = 0
   @Volatile private var volumeKeysTurnPages = false
   private var readerWebView: WebView? = null
+  // OS が裏で終わらせたあとに作り直されたときだけ、保存状態が渡される。利用者が閉じたあとの起動では null。
+  @Volatile private var restoredBySystem = false
 
   override fun onCreate(savedInstanceState: Bundle?) {
+    restoredBySystem = savedInstanceState != null
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
   }
@@ -47,6 +50,11 @@ class MainActivity : TauriActivity() {
       @JavascriptInterface
       fun systemBottomInsetPx(): Int = systemBottomInsetPx
     }, "piepAndroidAppearance")
+    // 画面はこれを見て、見ていた場所から始めるか、最初の画面から始めるかを決める。
+    webView.addJavascriptInterface(object {
+      @JavascriptInterface
+      fun restoredBySystem(): Boolean = restoredBySystem
+    }, "piepAndroidLaunch")
     // 開けるのは、検証を通ってキャッシュに置かれた APK だけ。OS が毎回確認し、署名を検査する。
     webView.addJavascriptInterface(object {
       @JavascriptInterface
