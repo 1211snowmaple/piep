@@ -96,7 +96,7 @@ axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tower-http = { version = "0.6", features = ["compression-gzip"] }
 rcgen = "0.14.10"
-rustls-pemfile = "2.2"
+x509-parser = { version = "=0.18.1", default-features = false }
 rustls = { version = "0.23", features = ["ring"] }
 subtle = "2.6"
 toml = "1"

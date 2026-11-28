@@ -10,6 +10,7 @@ mod shelf_admin;
 pub use admin_web::{AdminAsset, AdminWeb, ConnectionInfo};
 
 use super::store::{AuthorizedDevice, PairError, Role, ServerStore};
+use super::tls::{CertificateInfo, TlsMaterial};
 use super::update::{UpdateController, UpdateStatus};
 use super::{pairing_payload, API_VERSION};
 use admin_web::AdminHeaders;
@@ -51,6 +52,7 @@ pub struct ServerContext {
     pub public_url: Option<String>,
     /// 自己署名で待ち受けているときの証明書の指紋。
     pub fingerprint: Option<String>,
+    certificate: Option<CertificateInfo>,
     reader_shelf: OnceLock<Arc<super::reader::Context>>,
     /// 自己更新の係。`install` で置いた単独サーバーにだけある。
     update: OnceLock<Arc<UpdateController>>,
@@ -69,13 +71,14 @@ impl ServerContext {
         store: Arc<ServerStore>,
         root: PathBuf,
         public_url: Option<String>,
-        fingerprint: Option<String>,
+        material: Option<&TlsMaterial>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
             root,
             public_url,
-            fingerprint,
+            fingerprint: material.and_then(|material| material.fingerprint.clone()),
+            certificate: material.map(|material| material.certificate.clone()),
             reader_shelf: OnceLock::new(),
             update: OnceLock::new(),
             web: OnceLock::new(),
@@ -574,6 +577,7 @@ struct AdminStatus {
     shelf: Option<super::reader::ShelfStatus>,
     devices: Vec<serde_json::Value>,
     public_url: Option<String>,
+    certificate: Option<CertificateInfo>,
     update: Option<UpdateStatus>,
     server_name: String,
     started_at: String,
@@ -622,6 +626,7 @@ async fn admin_status(
         shelf,
         devices,
         public_url: ctx.public_url.clone(),
+        certificate: ctx.certificate.clone(),
         update: ctx.update.get().map(|controller| controller.status()),
         server_name,
         started_at: ctx.started_at.clone(),

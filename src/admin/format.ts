@@ -100,8 +100,19 @@ export function shipmentLabel(shipment: ShipmentStatus | undefined): string {
 const LOW_FREE_BYTES = 10 * 1024 ** 3;
 
 /** 今ある問題を、重い順に返す。無ければ空。 */
-export function findIssues(status: AdminStatus, storage: Storage | undefined): Issue[] {
+/** 証明書の期限がこれより近ければ知らせる。 */
+const CERTIFICATE_WARNING_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function findIssues(status: AdminStatus, storage: Storage | undefined, now = Date.now()): Issue[] {
   const issues: Issue[] = [];
+  const certificate = status.certificate;
+  if (certificate && Date.parse(certificate.expiresAt) - now < CERTIFICATE_WARNING_MS) {
+    const when = Date.parse(certificate.expiresAt) <= now ? "証明書の期限が切れています" : "証明書の期限が近づいています";
+    const how = certificate.source === "files"
+      ? "ファイルを入れ替えたらサーバーを立ち上げ直してください"
+      : "証明書と秘密鍵を両方削除して立ち上げ直し、端末を登録し直してください";
+    issues.push({ message: `${when}。${how}`, page: "settings" });
+  }
   if (storage?.freeBytes !== null && storage?.freeBytes !== undefined && storage.freeBytes < LOW_FREE_BYTES) {
     issues.push({ message: `ドライブの空きが少なくなっています（${bytes(storage.freeBytes)}）`, page: "library" });
   }
