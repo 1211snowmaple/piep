@@ -57,8 +57,8 @@
 | `GET …/{people\|series}/detail?provider&key` | 作者・シリーズの画面の頭：説明・リンク・タグ・シリーズの数・コレクション |
 | `GET …/people/series?provider&key&text&sort&order&cursor&limit` | 作者の作品が属するシリーズ |
 | `GET …/{people\|series}/cover?provider&key[&variant=banner]` | 作者のアイコン（`banner` はヘッダー）、シリーズの表紙 |
-| `GET …/collections` | コレクションの一覧（更新の新しい順） |
-| `GET …/collections/{collection}` | コレクションの画面。回の作品は一覧と同じ形 |
+| `GET …/collections?[cursor&limit]` | コレクションの一覧（更新の新しい順）。`{items, nextCursor}` |
+| `GET …/collections/{collection}?[cursor&limit]` | コレクションの要約と `members`、`nextCursor`。回の作品は一覧と同じ形 |
 | `GET …/collections/{collection}/cover/{single\|file\|tile-0〜3}` | 表紙に選んだ作品の表紙・選んだ画像・先頭からの回の表紙 |
 | `GET …/entities/{entity}/views/{snapshot\|edit}/{view}/bundle` | 読書 bundle：読書用の文書と、渡せる全部の資産の file 記述を一回で |
 | `GET …/views/{snapshot\|edit}/{view}/resources/{body\|media\|file}/manifest` | 所属と表示の版を固めた一ファイルの記述。media と file は `slot` が要る |
@@ -68,6 +68,7 @@
 
 - **続きの位置。** 一覧の `next` は手を加えずに次の `after` へ渡す。`null` なら終わり。続きの位置は棚・同期 epoch・利用者に結び付き、違えば 409（`stale_cursor`）なので最初から読み直す。ページ番号で開いたページには続きの位置を付けない。件数は最初のページだけ数える
 - **検索。** `limit` は 1〜50（省略時は番号付きのページで 20、続きの位置を使う一覧で 30）。`favorite: true` はお気に入りだけに絞り、省略するとすべてを対象にする。範囲外の件数と `favorite: false` は 400（`invalid_request`）。語の検索は、配る写しの索引が棚に追いつくまで 503（`search_indexing`）で断る。携帯は 503 とこのコードがそろったときに索引の準備中と案内する。絞り込みだけの一覧は先に答える
+- **コレクション。** `limit` の既定は 30 件で、指定値は 1〜50 件に収める。`nextCursor` は次の位置を示す十進の文字列で、同じ口の `cursor` に渡す。`null` で終了。詳細の件数はコレクション全体を数える。携帯は画面内の絞り込みに使う全ページを順に取得する
 - **編集。** 一覧と照合の `editId` は、認証した利用者が反映している編集を指す。編集の bundle・manifest・部分では、その利用者が反映中か以前の編集版に残しているかを確かめる
 - **出さないもの。** 取得したそのままの応答は内部の情報を含みうるので出さない。file は利用者向けの添付と文書に限る。未保存の資産は bundle に載せない。棚から外した作品は、作品の画面も表紙も 404
 - **所属の確認。** ハッシュだけを指す口は無い。manifest と部分の両方で、要求した作品と版からその実体へ届くかを確かめ直す。表紙も指定した写しが作品に属することを確かめる。別の作品の写し、存在しない写し、表紙のない版は 404。携帯は端末に覚える鍵と `snapshot` に同じ写しの UUID を使う

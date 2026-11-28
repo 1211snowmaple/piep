@@ -390,7 +390,22 @@ async fn admin_replacement_pairing_refuses_a_loopback_page_without_a_public_url(
 async fn admin_replacement_pairing_uses_the_page_url_without_a_public_url() {
     let page_url = "https://server.example:38777";
     let response = request_pairing(Role::Admin, None, page_url).await;
-    assert_pairing_url(response, Role::Admin, page_url);
+    assert_pairing_url(response, Role::Admin, "https://server.example:38777/");
+}
+
+#[tokio::test]
+async fn pairing_refuses_unusable_urls() {
+    for (role, url) in [
+        (Role::Admin, "http://server.example/"),
+        (Role::Admin, "https://user@server.example/"),
+        (Role::Reader, "https://server.example/?q=1"),
+        (Role::Reader, "https://server.example/#part"),
+        (Role::Reader, "https://server.example/a\nb"),
+    ] {
+        let (status, body) = request_pairing(role, None, url).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{url:?}");
+        assert!(body.get("payload").is_none());
+    }
 }
 
 #[tokio::test]
@@ -717,6 +732,11 @@ static TEST_ASSETS: &[AdminAsset] = &[
         path: "index.html",
         mime: "text/html; charset=utf-8",
         bytes: b"<!doctype html><title>piep</title>",
+    },
+    AdminAsset {
+        path: "assets/app-Bp8uQe2_.js",
+        mime: "text/javascript; charset=utf-8",
+        bytes: b"console.log(1)",
     },
     AdminAsset {
         path: "assets/app.js",
@@ -1427,6 +1447,55 @@ async fn pages_carry_the_security_headers_and_secrets_stay_out_of_the_record() {
     // パスワードはハッシュだけが残る。
     let account = site.parts.context.store.admin_account().unwrap().unwrap();
     assert!(account.password_hash.starts_with("$argon2id$"));
+}
+
+#[tokio::test]
+async fn admin_assets_and_html_have_the_expected_headers() {
+    let site = AdminSite::new("admin-cache-headers");
+    for (path, status, cache) in [
+        (
+            "/admin/assets/app-Bp8uQe2_.js",
+            StatusCode::OK,
+            "public, max-age=31536000, immutable",
+        ),
+        ("/admin/assets/app.js", StatusCode::OK, "private, no-store"),
+        (
+            "/admin/assets/missing-Bp8uQe2_.js",
+            StatusCode::NOT_FOUND,
+            "private, no-store",
+        ),
+        ("/admin/", StatusCode::OK, "private, no-store"),
+    ] {
+        let response = site.get(path).send().await.unwrap();
+        assert_eq!(response.status(), status, "{path}");
+        assert_eq!(response.headers()[header::CACHE_CONTROL], cache, "{path}");
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff"),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admin_api_errors_have_nosniff_and_are_not_cached() {
+    let site = AdminSite::new("admin-api-headers");
+    let response = site.get("/api/admin/status").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "private, no-store"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(header::X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
 }
 
 #[tokio::test]

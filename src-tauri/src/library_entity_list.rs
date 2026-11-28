@@ -470,7 +470,7 @@ impl Library {
             "EXISTS(SELECT 1 FROM collection_members m JOIN work_current_projection p ON p.work_id=m.work_id
                     WHERE m.collection_id=c.id AND p.snapshot_id IN ({relation}))"
         );
-        collection_summaries(&conn, &condition, &[entity.as_bytes().to_vec()])
+        collection_summaries(&conn, &condition, &[entity.as_bytes().to_vec()], None)
     }
 
     /// 作品の入ったコレクションと、その中での位置。並びはコレクションの一覧と同じ。
@@ -480,6 +480,7 @@ impl Library {
             &conn,
             "EXISTS(SELECT 1 FROM collection_members m WHERE m.collection_id=c.id AND m.work_id=?1)",
             &[work.as_bytes().to_vec()],
+            None,
         )?;
         let mut statement = conn.prepare_cached(
             "SELECT position FROM collection_members WHERE collection_id=?1 AND work_id=?2",
@@ -503,7 +504,9 @@ pub(crate) fn collection_summaries(
     conn: &rusqlite::Connection,
     condition: &str,
     values: &[Vec<u8>],
+    page: Option<(usize, usize)>,
 ) -> Result<Vec<CollectionSummary>> {
+    let (limit, offset) = page.map_or((-1, 0), |(limit, offset)| (limit as i64, offset as i64));
     type Row = (
         Vec<u8>,
         String,
@@ -529,10 +532,16 @@ pub(crate) fn collection_summaries(
                     (SELECT count(*) FROM collection_members m JOIN work_current_projection p ON p.work_id=m.work_id WHERE m.collection_id=c.id),
                     (SELECT coalesce(sum(p.text_length),0) FROM collection_members m JOIN work_current_projection p ON p.work_id=m.work_id WHERE m.collection_id=c.id)
              FROM collections c JOIN entities e ON e.id=c.id AND e.deleted_at IS NULL
-             WHERE {condition}"
+             WHERE {condition}
+             ORDER BY coalesce(c.updated_at,e.created_at) DESC,c.title COLLATE NOCASE,c.id
+             LIMIT ? OFFSET ?"
         ))?;
+    let values = values
+        .iter()
+        .map(|value| value as &dyn rusqlite::ToSql)
+        .chain([&limit as &dyn rusqlite::ToSql, &offset]);
     let rows: Vec<Row> = statement
-        .query_map(params_from_iter(values.iter()), |r| {
+        .query_map(params_from_iter(values), |r| {
             Ok((
                 r.get(0)?,
                 r.get(1)?,
@@ -623,13 +632,6 @@ pub(crate) fn collection_summaries(
             updated_at: updated.unwrap_or(created),
         });
     }
-    collections.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| nocase(&left.name, &right.name))
-            .then_with(|| left.id.as_bytes().cmp(right.id.as_bytes()))
-    });
     Ok(collections)
 }
 

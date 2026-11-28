@@ -11,6 +11,7 @@ use super::sync_send::{
 use crate::{library::protocol::Id, AppState};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -24,8 +25,7 @@ const AUTO_SEND_POLL: Duration = Duration::from_secs(30);
 const AUTO_SEND_STARTUP_DELAY: Duration = Duration::from_secs(2 * 60);
 /// 携帯で変えたお気に入りを、単独サーバーへ聞きに行く間隔。
 const FAVORITES_POLL: Duration = Duration::from_secs(60);
-/// 一度に受け取る携帯のお気に入りの数。
-/// サーバーの棚の読書位置を一度に読む数（サーバーの上限）。
+/// サーバーの棚の読書位置とお気に入りを一度に受け取る件数（サーバーの上限）。
 const SHELF_READING_PAGE: usize = 500;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -144,7 +144,7 @@ pub type FavoritesListener = Arc<dyn Fn() + Send + Sync>;
 
 pub struct DesktopServer {
     dir: PathBuf,
-    settings: Mutex<DesktopServerSettings>,
+    settings: Mutex<SettingsState>,
     clients: ClientCache,
     send: SendHandle,
     send_lock: AsyncMutex<()>,
@@ -153,10 +153,29 @@ pub struct DesktopServer {
     favorites_listener: OnceLock<FavoritesListener>,
 }
 
+#[derive(Clone, Default)]
+struct SettingsState {
+    saved: DesktopServerSettings,
+    recovery: Option<SettingsRecovery>,
+}
+
+#[derive(Clone, Copy)]
+enum SettingsRecovery {
+    Archived,
+    NeedsArchive,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectionIssue {
+    SettingsUnreadable,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopServerStatus {
     pub remote: Option<RemoteServer>,
+    pub connection_issue: Option<ConnectionIssue>,
     pub auto_send: bool,
     pub send: SendProgress,
     pub last_send: LastSend,
@@ -177,6 +196,73 @@ struct PairingText {
     url: String,
     secret: String,
     fingerprint: Option<String>,
+}
+
+fn archive_settings(path: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(io::Error::other("設定のパスが通常のファイルではありません"));
+    }
+    let mut index = 0_u64;
+    loop {
+        let extension = if index == 0 {
+            "json.broken".to_owned()
+        } else {
+            format!("json.{index}.broken")
+        };
+        let backup = path.with_extension(extension);
+        // 退避先を先に確保し、既存の退避ファイルへの上書きを防ぐ。
+        match fs::File::create_new(&backup) {
+            Ok(file) => drop(file),
+            Err(error)
+                if error.kind() == ErrorKind::AlreadyExists
+                    || fs::symlink_metadata(&backup).is_ok() =>
+            {
+                index += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+        if let Err(error) = fs::rename(path, &backup) {
+            let _ = fs::remove_file(&backup);
+            return Err(error);
+        }
+        log::warn!(
+            "読めないサーバーの接続設定を {} に退避しました",
+            backup.file_name().unwrap_or_default().to_string_lossy()
+        );
+        return Ok(());
+    }
+}
+
+fn load_settings(path: &Path) -> SettingsState {
+    match fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(saved) => {
+                return SettingsState {
+                    saved,
+                    recovery: None,
+                }
+            }
+            Err(error) => log::warn!(
+                "サーバーの接続設定を解析できません（{} 行 {} 列）",
+                error.line(),
+                error.column()
+            ),
+        },
+        Err(error) if error.kind() == ErrorKind::NotFound => return SettingsState::default(),
+        Err(error) => log::warn!("サーバーの接続設定を読み込めません: {error}"),
+    }
+    let recovery = match archive_settings(path) {
+        Ok(()) => SettingsRecovery::Archived,
+        Err(error) => {
+            log::warn!("サーバーの接続設定を退避できません: {error}");
+            SettingsRecovery::NeedsArchive
+        }
+    };
+    SettingsState {
+        recovery: Some(recovery),
+        ..SettingsState::default()
+    }
 }
 
 fn save_settings(path: &Path, settings: &DesktopServerSettings) -> Result<(), String> {
@@ -227,10 +313,7 @@ impl DesktopServer {
         let dir = app_data.join("server");
         fs::create_dir_all(&dir)
             .map_err(|error| format!("サーバーの置き場を作れません: {error}"))?;
-        let settings: DesktopServerSettings = fs::read(dir.join("settings.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let settings = load_settings(&dir.join("settings.json"));
         Ok(Self {
             dir,
             settings: Mutex::new(settings),
@@ -255,31 +338,55 @@ impl DesktopServer {
     fn settings(&self) -> DesktopServerSettings {
         self.settings
             .lock()
-            .map(|settings| settings.clone())
+            .map(|settings| settings.saved.clone())
             .unwrap_or_default()
+    }
+
+    fn retry_settings_archive(&self, state: &mut SettingsState) -> Result<(), String> {
+        if matches!(state.recovery, Some(SettingsRecovery::NeedsArchive)) {
+            match archive_settings(&self.dir.join("settings.json")) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("サーバーの接続設定を退避できません: {error}")),
+            }
+            state.recovery = Some(SettingsRecovery::Archived);
+        }
+        Ok(())
     }
 
     fn change_settings(
         &self,
         change: impl FnOnce(&mut DesktopServerSettings),
     ) -> Result<(), String> {
-        let mut settings = self.settings.lock().map_err(|_| "設定を開けません")?;
-        change(&mut settings);
-        save_settings(&self.dir.join("settings.json"), &settings)
+        let mut state = self.settings.lock().map_err(|_| "設定を開けません")?;
+        self.retry_settings_archive(&mut state)?;
+        let mut next = state.saved.clone();
+        change(&mut next);
+        save_settings(&self.dir.join("settings.json"), &next)?;
+        if next.remote.is_some() {
+            state.recovery = None;
+        }
+        state.saved = next;
+        Ok(())
     }
 
     pub async fn status(&self) -> DesktopServerStatus {
-        let settings = self.settings();
+        let state = self
+            .settings
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_default();
         DesktopServerStatus {
-            remote: settings.remote,
-            auto_send: settings.auto_send,
+            remote: state.saved.remote,
+            connection_issue: state.recovery.map(|_| ConnectionIssue::SettingsUnreadable),
+            auto_send: state.saved.auto_send,
             send: self
                 .send
                 .progress
                 .lock()
                 .map(|progress| progress.clone())
                 .unwrap_or_default(),
-            last_send: settings.last_send,
+            last_send: state.saved.last_send,
         }
     }
 
@@ -446,6 +553,11 @@ impl DesktopServer {
             url: parsed.url,
             fingerprint: parsed.fingerprint,
         };
+        // 退避できることを確かめてから、一度きりの登録文字列を使う。
+        {
+            let mut state = self.settings.lock().map_err(|_| "設定を開けません")?;
+            self.retry_settings_archive(&mut state)?;
+        }
         let token = pair_admin(&self.clients, &remote, &parsed.secret, device_name).await?;
         credential::store(&remote.url, &token)?;
         self.change_settings(|settings| {
@@ -827,6 +939,47 @@ fn change_generation(state: &AppState) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn invalid_settings_are_archived_and_reported() {
+        let dir = std::env::temp_dir().join(format!("piep-desktop-{}", uuid::Uuid::now_v7()));
+        let settings_dir = dir.join("server");
+        fs::create_dir_all(&settings_dir).unwrap();
+        let settings = settings_dir.join("settings.json");
+        let previous = settings_dir.join("settings.json.broken");
+        fs::write(&settings, b"{invalid").unwrap();
+        fs::write(&previous, b"previous").unwrap();
+
+        let server = DesktopServer::new(&dir).unwrap();
+        let status = serde_json::to_value(server.status().await).unwrap();
+        let settings_remain = settings.exists();
+        let previous_contents = fs::read(&previous).unwrap();
+        let archived: Vec<_> = fs::read_dir(&settings_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path != &previous && path.extension().is_some_and(|ext| ext == "broken"))
+            .map(|path| fs::read(path).unwrap())
+            .collect();
+        fs::remove_dir_all(dir).unwrap();
+
+        assert!(!settings_remain);
+        assert_eq!(previous_contents, b"previous");
+        assert_eq!(archived, [b"{invalid".to_vec()]);
+        assert!(status["remote"].is_null());
+        assert_eq!(status["connectionIssue"], "settingsUnreadable");
+    }
+
+    #[tokio::test]
+    async fn missing_settings_are_an_ordinary_disconnection() {
+        let dir = std::env::temp_dir().join(format!("piep-desktop-{}", uuid::Uuid::now_v7()));
+        let server = DesktopServer::new(&dir).unwrap();
+        let status = serde_json::to_value(server.status().await).unwrap();
+        assert_eq!(fs::read_dir(dir.join("server")).unwrap().count(), 0);
+        fs::remove_dir_all(dir).unwrap();
+
+        assert!(status["remote"].is_null());
+        assert!(status["connectionIssue"].is_null());
+    }
 
     #[test]
     fn each_server_keeps_its_own_key_name() {

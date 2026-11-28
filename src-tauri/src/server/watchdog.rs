@@ -112,22 +112,24 @@ fn switch_to_pending(paths: &ServerPaths) -> Result<String, String> {
     Ok(pending)
 }
 
-/// 前の版と DB の写しへ戻し、失敗した版を飛ばすよう記録する。
-fn roll_back(paths: &ServerPaths, failed: &str, reason: &str) -> Result<(), String> {
+/// 前の版と DB の写しへ戻し、戻す前の版を飛ばすよう記録する。
+fn roll_back(paths: &ServerPaths, version: &str, failure: Option<&str>) -> Result<(), String> {
     let previous = read_version_file(&paths.previous_version()).ok_or("戻す版がありません")?;
     // DB を戻し始めたあとは、新しい版を再び起動してはいけない。current と
     // pending の間で止まっても、次の起動では切り替えより先に戻しを完了する。
-    write_atomic(&rollback_mark(paths), failed.as_bytes())?;
+    write_atomic(&rollback_mark(paths), version.as_bytes())?;
     restore_databases(paths)?;
     write_atomic(&paths.current_version(), previous.as_bytes())?;
-    let mut record = UpdateRecord::load(paths);
-    if !record.skipped.iter().any(|version| version == failed) {
-        record.skipped.push(failed.to_string());
-    }
-    record.last_error = Some(format!(
-        "版 {failed} に更新できなかったので、{previous} に戻しました: {reason}"
-    ));
-    record.try_save(paths)?;
+    UpdateRecord::try_edit(paths, |record| {
+        record.skip(version);
+        if let Some(reason) = failure {
+            record.note_failed_update(format!(
+                "版 {version} に更新できなかったので、{previous} に戻しました: {reason}"
+            ));
+        } else {
+            record.clear_transient_error();
+        }
+    })?;
     clear_pending(paths)?;
     fs::remove_file(rollback_mark(paths))
         .map_err(|error| format!("戻しの印を消せません: {error}"))?;
@@ -144,8 +146,13 @@ fn resume_rollback(paths: &ServerPaths) -> Result<(), String> {
         .try_exists()
         .map_err(|error| format!("戻しの印を確かめられません: {error}"))?
     {
-        let failed = read_version_file(&mark).ok_or("戻しの印を読めません")?;
-        roll_back(paths, &failed, "中断された旧版への戻しを再開しました")?;
+        let version = read_version_file(&mark).ok_or("戻しの印を読めません")?;
+        // 手で戻す依頼の印は、巻き戻しが済むまで残っている。
+        let requested = requested_rollback_mark(paths)
+            .try_exists()
+            .map_err(|error| format!("頼まれた戻しの印を確かめられません: {error}"))?;
+        let failure = (!requested).then_some("中断された旧版への戻しを再開しました");
+        roll_back(paths, &version, failure)?;
     }
     Ok(())
 }
@@ -195,11 +202,8 @@ fn resume_requested_rollback(paths: &ServerPaths) -> Result<(), String> {
         if read_version_file(&paths.previous_version()).as_deref() != Some(target.as_str()) {
             return Err("戻すバージョンが変わっています".into());
         }
-        roll_back(paths, &current, "利用者が前のバージョンへ戻しました")?;
+        roll_back(paths, &current, None)?;
     }
-    let mut record = UpdateRecord::load(paths);
-    record.last_error = None;
-    record.try_save(paths)?;
     // currentを戻した直後に中断しても、済んだ戻しで旧版をskippedへ足さない。
     fs::remove_file(mark).map_err(|error| format!("頼まれた戻しの印を消せません: {error}"))
 }
@@ -268,10 +272,10 @@ fn settle(paths: &ServerPaths, version: &str) {
             }
         }
     }
-    let mut record = UpdateRecord::load(paths);
-    record.last_error = None;
-    record.last_applied_at = Some(Utc::now().to_rfc3339());
-    record.save(paths);
+    UpdateRecord::edit(paths, |record| {
+        record.clear_error();
+        record.last_applied_at = Some(Utc::now().to_rfc3339());
+    });
 }
 
 /// 起動タスクが指す root の exe は固定の入口にする。Windows で実行中の入口を
@@ -341,7 +345,6 @@ fn delegate_bootstrap(paths: &ServerPaths, executable: &Path) -> Option<i32> {
     }
 }
 
-/// 本体を子として動かす。見張り役が消えたら一緒に消えるようにする。
 /// 起動できない exe で Windows に窓を出させず、失敗として返させる。
 ///
 /// 中身が壊れた exe（PE でない物）を Windows は 16 ビットのプログラムとして扱い、
@@ -362,6 +365,7 @@ pub(crate) fn launch_failures_without_dialogs() {
 #[cfg(not(windows))]
 pub(crate) fn launch_failures_without_dialogs() {}
 
+/// 本体を子として動かし、見張り役が消えたら一緒に終了するようにする。
 fn spawn_body(paths: &ServerPaths, version: &str, job: &JobGuard) -> Result<Child, String> {
     let _ = fs::remove_file(paths.ready_mark());
     let executable = paths.version_dir(version).join("piep-server.exe");
@@ -513,7 +517,7 @@ fn fail_update(paths: &ServerPaths, failed: &str, reason: &str, backoff: &mut Ba
     retry_rollback(
         paths,
         backoff,
-        || roll_back(paths, failed, reason),
+        || roll_back(paths, failed, Some(reason)),
         std::thread::sleep,
     );
 }
@@ -636,7 +640,7 @@ mod tests {
         assert_eq!(current_version(&paths).as_deref(), Some("1.1.0"));
         assert!(paths.pending_version().exists());
 
-        roll_back(&paths, "1.1.0", "起動しない").expect("roll back");
+        roll_back(&paths, "1.1.0", Some("起動しない")).expect("roll back");
         assert!(!paths.pending_version().exists());
         assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
         let record = UpdateRecord::load(&paths);
@@ -672,7 +676,7 @@ mod tests {
             read_version_file(&paths.previous_version()).as_deref(),
             Some("1.0.0")
         );
-        roll_back(&paths, "1.1.0", "起動に失敗").unwrap();
+        roll_back(&paths, "1.1.0", Some("起動に失敗")).unwrap();
         assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
         assert!(!paths.pending_version().exists());
     }
@@ -688,7 +692,7 @@ mod tests {
             read_version_file(&paths.previous_version()).as_deref(),
             Some("1.0.0")
         );
-        roll_back(&paths, "1.1.0", "起動に失敗").unwrap();
+        roll_back(&paths, "1.1.0", Some("起動に失敗")).unwrap();
         assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
     }
 

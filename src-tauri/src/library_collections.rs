@@ -57,14 +57,24 @@ impl Library {
     /// コレクションの一覧。更新の新しい順。
     pub fn list_collections(&self) -> Result<Vec<CollectionSummary>> {
         let conn = self.reader()?;
-        collection_summaries(&conn, "1", &[])
+        collection_summaries(&conn, "1", &[], None)
+    }
+
+    /// コレクションの一覧の一ページ。
+    pub(crate) fn collection_summaries_page(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<CollectionSummary>> {
+        let conn = self.reader()?;
+        collection_summaries(&conn, "1", &[], Some((limit, offset)))
     }
 
     /// コレクションの要約だけ（回と別版は引かない）。無ければ None。
     pub fn collection_summary(&self, collection: LibraryId) -> Result<Option<CollectionSummary>> {
         let conn = self.reader()?;
         Ok(
-            collection_summaries(&conn, "c.id=?1", &[collection.as_bytes().to_vec()])?
+            collection_summaries(&conn, "c.id=?1", &[collection.as_bytes().to_vec()], None)?
                 .into_iter()
                 .next(),
         )
@@ -72,11 +82,31 @@ impl Library {
 
     /// コレクションとその回。回は並べた順、同じ位置は入れた順。
     pub fn collection_detail(&self, collection: LibraryId) -> Result<CollectionDetail> {
+        self.load_collection_detail(collection, None)
+    }
+
+    /// 携帯へ渡すコレクションの一ページ。別版の探索は行わない。
+    pub(crate) fn collection_detail_page(
+        &self,
+        collection: LibraryId,
+        limit: usize,
+        offset: usize,
+    ) -> Result<CollectionDetail> {
+        self.load_collection_detail(collection, Some((limit, offset)))
+    }
+
+    fn load_collection_detail(
+        &self,
+        collection: LibraryId,
+        page: Option<(usize, usize)>,
+    ) -> Result<CollectionDetail> {
         let conn = self.reader()?;
-        let summary = collection_summaries(&conn, "c.id=?1", &[collection.as_bytes().to_vec()])?
-            .into_iter()
-            .next()
-            .ok_or(Error::ResourceUnavailable)?;
+        let summary =
+            collection_summaries(&conn, "c.id=?1", &[collection.as_bytes().to_vec()], None)?
+                .into_iter()
+                .next()
+                .ok_or(Error::ResourceUnavailable)?;
+        let (limit, offset) = page.map_or((-1, 0), |(limit, offset)| (limit as i64, offset as i64));
         type Row = (
             Vec<u8>,
             String,
@@ -107,9 +137,10 @@ impl Library {
                  JOIN external_identities x ON x.entity_id=m.work_id AND x.kind='work'
                  LEFT JOIN work_current_projection p ON p.work_id=m.work_id
                  WHERE m.collection_id=?1
-                 ORDER BY m.position,m.created_at,x.provider,x.external_key",
+                 ORDER BY m.position,m.created_at,x.provider,x.external_key
+                 LIMIT ?2 OFFSET ?3",
             )?
-            .query_map(params![collection.as_bytes().as_slice()], |r| {
+            .query_map(params![collection.as_bytes().as_slice(), limit, offset], |r| {
                 Ok((
                     r.get(0)?,
                     r.get(1)?,
@@ -143,7 +174,11 @@ impl Library {
             .flatten()
             .map(|card| (card.id, card))
             .collect();
-        let mut editions = self.member_editions(&cards)?;
+        let mut editions = if page.is_none() {
+            self.member_editions(&cards)?
+        } else {
+            HashMap::new()
+        };
         let mut members = Vec::with_capacity(rows.len());
         for row in rows {
             let (

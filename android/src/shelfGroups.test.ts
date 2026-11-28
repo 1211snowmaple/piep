@@ -49,8 +49,9 @@ it("作者・シリーズ・コレクションの画面と画像を棚から引�
     if (command === "pc_entities") return { items: [], nextOffset: null, total: 0 };
     if (command === "pc_entity_detail") return { source: "pixiv", sourceKey: "7", displayName: "作者", description: null, workCount: 1, hasCover: true, hasBanner: false, isConcluded: null, publishedCount: null, links: [], tags: [], seriesCount: 0, collections: [summary] };
     if (command === "pc_entity_series") return { items: [], nextCursor: "30", total: 31 };
-    if (command === "pc_collections" || command === "pc_work_collections") return [{ ...summary, position: command === "pc_work_collections" ? 0 : null }];
-    if (command === "pc_collection") return { ...summary, members: [{ title: "題", authorName: "作者", position: 0, work: shelfItem }, { title: "無い回", authorName: "作者", position: 1, work: null }] };
+    if (command === "pc_collections") return { items: [{ ...summary, position: null }], nextCursor: null };
+    if (command === "pc_work_collections") return [{ ...summary, position: 0 }];
+    if (command === "pc_collection") return { ...summary, members: [{ title: "題", authorName: "作者", position: 0, work: shelfItem }, { title: "無い回", authorName: "作者", position: 1, work: null }], nextCursor: null };
     throw new Error(command);
   });
 
@@ -89,4 +90,27 @@ it("棚に届かない接続では、画面も画像も出さない", async () =
   expect(images.entityCoverUrl("series", "pixiv", "9")).toBeNull();
   expect(images.collectionCoverUrl({ id: "other" }, "tile-0", 1)).toBeNull();
   expect(shelf.connectedShelfKey()).toBeNull();
+});
+
+it("コレクションの一覧と回を最後のページまで取得する", async () => {
+  const shelf = await import("./shelf");
+  const pc = await import("./pcApi");
+  shelf.adoptShelf(status());
+  const second = { ...summary, id: "0190a000-0000-7000-8000-000000000008" };
+  api.invoke.mockImplementation(async (command: string, { cursor }: { cursor: string | null }) => {
+    if (command === "pc_collections") {
+      return cursor === "1" ? { items: [second], nextCursor: null } : { items: [summary], nextCursor: "1" };
+    }
+    if (command === "pc_collection") {
+      return cursor === "1"
+        ? { ...summary, members: [{ title: "無い回", authorName: "作者", position: 1, work: null }], nextCursor: null }
+        : { ...summary, members: [{ title: "題", authorName: "作者", position: 0, work: shelfItem }], nextCursor: "1" };
+    }
+    throw new Error(command);
+  });
+  expect((await pc.listPcCollections()).map((item) => item.id)).toEqual([collection, second.id]);
+  expect((await pc.getPcCollection(collection)).members.map((member) => member.position)).toEqual([0, 1]);
+  expect(api.invoke.mock.calls.map(([command, args]) => [command, args.cursor])).toEqual([
+    ["pc_collections", null], ["pc_collections", "1"], ["pc_collection", null], ["pc_collection", "1"],
+  ]);
 });

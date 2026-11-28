@@ -235,8 +235,15 @@ export interface MobileCollectionMember {
   work: MobileWork | null;
 }
 
+/** 棚のコレクションの一覧の一ページ。 */
+export interface MobileCollectionPage {
+  items: MobileCollection[];
+  nextCursor: string | null;
+}
+
 /** 棚のコレクションの画面。`id` は棚の UUID、表紙は `cover_mode` の枠ごとに */
 /** `/collections/{id}/cover/{single|file|tile-N}` から引く。 */
 export interface MobileCollectionDetail extends MobileCollection {
   members: MobileCollectionMember[];
+  nextCursor: string | null;
 }
