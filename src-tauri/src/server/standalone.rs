@@ -486,8 +486,19 @@ fn admin_pairing_text(
     Ok(pairing_payload(Role::Admin, url, fingerprint, &secret))
 }
 
-/// 管理画面だけを出す、この機械の中の口のポート。
+/// 管理画面だけを出す、この機械の中の口。文言に埋め込むので文字列のマクロで持つ。
+macro_rules! local_admin_address {
+    () => {
+        "127.0.0.1:38778"
+    };
+}
+pub(crate) use local_admin_address;
+
+/// 管理画面だけを出す、この機械の中の口のポート（`local_admin_address!` と同じ）。
 const LOCAL_ADMIN_PORT: u16 = 38778;
+
+/// この機械の中の管理の口。画面が書きかけの設定から管理画面の場所を示すのに使う。
+pub(crate) const LOCAL_ADMIN_ADDRESS: &str = local_admin_address!();
 
 /// 公開の URL があって管理の口を分けていないとき、管理画面はこの機械の中の口にだけ出す。
 /// 外へ出している口にはログイン画面を置かない。
@@ -1793,7 +1804,11 @@ tls = \"self-signed\""
             Some("https://127.0.0.1:38777/")
         );
         let info = connection_info(&config(r#"public_url = "https://example.com/""#));
-        assert_eq!(info.local_admin.as_deref(), Some("127.0.0.1:38778"));
+        assert_eq!(info.local_admin.as_deref(), Some(LOCAL_ADMIN_ADDRESS));
+        assert_eq!(
+            LOCAL_ADMIN_ADDRESS.parse::<SocketAddr>().unwrap(),
+            SocketAddr::from(([127, 0, 0, 1], LOCAL_ADMIN_PORT))
+        );
         assert_eq!(
             default_admin_url(&config(r#"public_url = "https://example.com/""#)).as_deref(),
             Some("http://127.0.0.1:38778/")
