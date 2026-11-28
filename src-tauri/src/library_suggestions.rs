@@ -82,7 +82,7 @@ fn bump(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-fn delete_suggestion(tx: &Transaction<'_>, id: &[u8]) -> Result<usize> {
+fn delete_suggestion(tx: &Transaction<'_>, id: &[u8]) -> Result<()> {
     tx.execute(
         "DELETE FROM collection_suggestion_members WHERE suggestion_id=?1",
         [id],
@@ -94,7 +94,8 @@ fn delete_suggestion(tx: &Transaction<'_>, id: &[u8]) -> Result<usize> {
     )
     .map_err(err)?;
     tx.execute("DELETE FROM collection_suggestions WHERE id=?1", [id])
-        .map_err(err)
+        .map_err(err)?;
+    Ok(())
 }
 
 struct NewSuggestion<'a> {
@@ -501,19 +502,6 @@ impl Library {
             Ok(_) => Ok(None),
             Err(_) => Ok(None),
         }
-    }
-
-    /// 候補を消す（「今は要らない」）。`false` は「その候補が無かった」。
-    pub fn dismiss_collection_suggestion_view(&self, id: &str) -> Result<bool> {
-        let id = parse_id(id, "提案")?;
-        let mut conn = self.conn.lock().map_err(|_| "棚が使用中です".to_string())?;
-        let tx = conn.transaction().map_err(err)?;
-        let removed = delete_suggestion(&tx, id.as_bytes().as_slice())?;
-        if removed > 0 {
-            bump(&tx)?;
-        }
-        tx.commit().map_err(err)?;
-        Ok(removed > 0)
     }
 
     /// 走査で作った未判断の候補を一度に消す。組の採否は残さない。

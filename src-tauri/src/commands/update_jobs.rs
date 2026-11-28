@@ -1360,21 +1360,6 @@ fn current_job_summaries(state: &AppState) -> Result<Vec<UpdateJobSummary>, Stri
     state.jobs().list_update_jobs()
 }
 
-fn clear_finished_jobs(state: &AppState, include_shelf: bool) -> Result<usize, String> {
-    let library = state.shelf.library()?;
-    let hidden = if include_shelf {
-        library
-            .set_job_history_hidden(crate::library::LibraryId::now_v7(), None, true)
-            .map_err(|e| e.to_string())?
-    } else {
-        0
-    };
-    state
-        .jobs()
-        .clear_finished_update_jobs()
-        .map(|count| count + hidden)
-}
-
 /// 選んだ候補を保存キューへ積み、ジョブを動かし直す。
 ///
 /// **一件も増えなかったときは何も起こさない**（すでに積んである候補を選び直した
@@ -1446,12 +1431,10 @@ pub async fn clear_update_job(app: tauri::AppHandle, job_id: String) -> Result<(
 
 /// 終わった更新ジョブをまとめて消す。操作履歴の「完了履歴を消去」から呼ぶ。
 #[tauri::command]
-pub async fn clear_finished_update_jobs(
-    app: tauri::AppHandle,
-    include_shelf: Option<bool>,
-) -> Result<usize, String> {
+pub async fn clear_finished_update_jobs(app: tauri::AppHandle) -> Result<usize, String> {
     let state = app.state::<Arc<AppState>>();
-    clear_finished_jobs(&state, include_shelf.unwrap_or(true))
+    state.shelf.library()?;
+    state.jobs().clear_finished_update_jobs()
 }
 
 /// この作品を今後の候補から外す（あるいは、その決定を取り消す）。

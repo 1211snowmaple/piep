@@ -11,11 +11,11 @@
 //! を分けているからである。次に開くのが同じ場所なら、捨てないほうが速い。
 
 use crate::auth::webview::{
-    close_child_webview, close_standalone_webview, destroy_child_webview, get_child_webview_url,
-    go_back_child_webview, go_forward_child_webview, navigate_child_webview, open_child_webview,
-    open_standalone_webview, read_browser_page_users, read_browser_page_works,
-    reload_child_webview, set_child_webview_bounds, set_child_webview_visible,
-    standalone_webview_url, BrowserPageUser, BrowserPageWork,
+    close_standalone_webview, destroy_child_webview, get_child_webview_url, go_back_child_webview,
+    go_forward_child_webview, navigate_child_webview, open_child_webview, open_standalone_webview,
+    read_browser_page_users, read_browser_page_works, reload_child_webview,
+    set_child_webview_bounds, set_child_webview_visible, standalone_webview_url, BrowserPageUser,
+    BrowserPageWork,
 };
 
 /// 表示中の一覧から読み取った作品ひとつ。`saved` は棚にすでにあるかどうか。
@@ -198,15 +198,6 @@ pub async fn navigate_embedded_browser(app: tauri::AppHandle, url: String) -> Re
 #[tauri::command]
 pub async fn get_embedded_browser_url(app: tauri::AppHandle) -> Result<String, String> {
     get_child_webview_url(app)
-}
-
-/// 子 WebView を隠す。**面は残る。**
-///
-/// 同じ場所をまた開くなら、こちらのほうが速い。面ごと捨てたいときは
-/// `destroy_embedded_browser` を使う。
-#[tauri::command]
-pub async fn close_embedded_browser(app: tauri::AppHandle) -> Result<(), String> {
-    close_child_webview(app)
 }
 
 /// 子 WebView を面ごと捨てる。

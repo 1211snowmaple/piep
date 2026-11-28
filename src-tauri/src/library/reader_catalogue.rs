@@ -1,5 +1,5 @@
 use super::{
-    protocol::{Id, ReaderWork, WorkReadingView},
+    protocol::{Id, WorkReadingView},
     Error, Library, LibraryId, Result,
 };
 use rusqlite::{params, Row};
@@ -35,49 +35,5 @@ impl Library {
         )?;
         let mut rows = statement.query(params![subject.as_bytes().as_slice(), provider, key])?;
         rows.next()?.map(view).transpose()
-    }
-
-    /// 携帯の一覧は、デスクトップと同じ保存日と作品 ID の索引から、必要な列だけ引く。
-    pub fn reader_works(
-        &self,
-        subject: LibraryId,
-        limit: u8,
-        after: Option<(i64, LibraryId)>,
-    ) -> Result<Vec<(ReaderWork, i64)>> {
-        let conn = self.reader()?;
-        let boundary = if after.is_some() {
-            "WHERE (p.saved_at,p.work_id)<(?3,?4)"
-        } else {
-            ""
-        };
-        let mut statement = conn.prepare_cached(&format!(
-            "SELECT p.work_id,p.snapshot_id,d.active_id,p.provider,p.external_key,p.title,
-                    p.author_name,p.content_type,p.saved_at
-             FROM work_current_projection p
-             LEFT JOIN edit_documents d ON d.work_id=p.work_id AND d.user_id=?1
-             {boundary} ORDER BY p.saved_at DESC,p.work_id DESC LIMIT ?2",
-        ))?;
-        let user = subject.as_bytes().as_slice();
-        let mut rows = match after {
-            Some((time, work)) => {
-                statement.query(params![user, limit, time, work.as_bytes().as_slice()])?
-            }
-            None => statement.query(params![user, limit])?,
-        };
-        let mut items = Vec::new();
-        while let Some(row) = rows.next()? {
-            items.push((
-                ReaderWork {
-                    view: view(row)?,
-                    provider: row.get(3)?,
-                    key: row.get(4)?,
-                    title: row.get(5)?,
-                    author_name: row.get(6)?,
-                    content_type: row.get(7)?,
-                },
-                row.get(8)?,
-            ));
-        }
-        Ok(items)
     }
 }

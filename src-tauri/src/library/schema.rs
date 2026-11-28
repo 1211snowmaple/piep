@@ -2,7 +2,7 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 34;
+pub(crate) const VERSION: i64 = 35;
 const SQL: &str = include_str!("schema.sql");
 const MIGRATIONS: &[&str] = &[
     SQL,
@@ -39,6 +39,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration_032_library_tasks.sql"),
     include_str!("migration_033_pending_edit_images.sql"),
     include_str!("migration_034_repair_attempts.sql"),
+    include_str!("migration_035_drop_job_history.sql"),
 ];
 /// これらの版の SQL を当てた直後に、触れた版の指紋を計算し直す。
 /// 28: 区分を指紋から外した。30: 移した取得の経路と画像の画質をそろえた。
@@ -53,6 +54,13 @@ pub(super) fn guards_for_tests() -> String {
          CREATE TRIGGER media_renditions_immutable BEFORE UPDATE ON media_renditions BEGIN SELECT RAISE(ABORT,'media renditions are immutable'); END;"
     )
 }
+/// 現行の棚を 21〜34 の形に戻す試験で、当時の履歴表と outbox の形を再現する。
+#[cfg(test)]
+pub(crate) fn restore_legacy_history_schema_for_tests(conn: &Connection) {
+    conn.execute_batch(MIGRATIONS[7]).unwrap();
+    conn.execute_batch(MIGRATIONS[20]).unwrap();
+}
+
 const REFINGERPRINT_AFTER: &[usize] = &[28, 30];
 
 fn run_migration(conn: &Connection, index: usize, sql: &str) -> Result<()> {
@@ -175,6 +183,67 @@ fn configure(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_a_version_34_shelf_removes_legacy_history_and_preserves_execution_and_receipts() {
+        let id = LibraryId::now_v7();
+        let conn = version_one(id);
+        for (index, sql) in MIGRATIONS.iter().enumerate().skip(1).take(33) {
+            run_migration(&conn, index, sql).unwrap();
+            record_migration(&conn, index as i64 + 1, sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 34).unwrap();
+        conn.execute_batch(
+            "INSERT INTO content_files(id,original_size) VALUES(zeroblob(32),0);
+             INSERT INTO job_history(id,origin,scope,mode,status,watch_saved,new_works_only,totals,processed,candidate_count,saved_count,error_count,started_at,updated_at)
+                 VALUES(zeroblob(16),'legacy-update-v1','all','check_only','completed',0,0,1,1,0,0,0,1,2);
+             INSERT INTO job_history_items(id,job_id,sequence,item_type,title,payload_file_id,status,created_at,updated_at)
+                 VALUES(zeroblob(16),zeroblob(16),1,'work','記録',zeroblob(32),'done',1,2);
+             INSERT INTO job_history_logs VALUES(zeroblob(16),zeroblob(16),1,'info','記録',2);
+             UPDATE job_history SET sealed=1;
+             INSERT INTO job_history_visibility VALUES(zeroblob(16),1,3);
+             INSERT INTO outbox(sequence,request_id,watch_catalog_id,operation,payload_json,created_at)
+                 VALUES(10,randomblob(16),1,'watch','{}',3);
+             INSERT INTO outbox(sequence,request_id,history_catalog_id,operation,payload_json,created_at)
+                 VALUES(50,randomblob(16),1,'job_history_visibility','{}',3);
+             INSERT INTO execution_jobs(id,scope,mode,status,watch_saved,new_works_only,started_at,updated_at)
+                 VALUES(zeroblob(16),'all','check_only','paused',0,0,'start','end');
+             INSERT INTO execution_items(job_id,item_type,title,payload_file_id,status)
+                 VALUES(zeroblob(16),'work','記録',zeroblob(32),'done');",
+        ).unwrap();
+
+        open(&conn, id).unwrap();
+        open(&conn, id).unwrap();
+        let count = |sql| conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(
+            count("SELECT count(*) FROM sqlite_schema WHERE name GLOB 'job_history*'"),
+            0
+        );
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM pragma_table_info('outbox') WHERE name='history_catalog_id'"
+            ),
+            0
+        );
+        assert_eq!(count("SELECT count(*) FROM outbox"), 1);
+        assert_eq!(
+            count("SELECT sequence FROM outbox WHERE operation='watch'"),
+            10
+        );
+        assert_eq!(
+            count("SELECT seq FROM sqlite_sequence WHERE name='outbox'"),
+            50
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM execution_jobs WHERE status='paused'"),
+            1
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM execution_items WHERE status='done'"),
+            1
+        );
+        assert_eq!(count("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+    }
 
     #[test]
     fn opening_a_version_32_shelf_adds_pending_edit_images_with_a_file_reference() {
@@ -510,7 +579,7 @@ mod tests {
         );
         conn.execute_batch("DROP TABLE history_outbox_sequence")
             .unwrap();
-        open(&conn, id).unwrap();
+        run_migration(&conn, 20, MIGRATIONS[20]).unwrap();
         assert!(conn.execute("INSERT INTO outbox(request_id,operation,payload_json,created_at) VALUES(?1,'job_history_visibility','{}',0)",[LibraryId::now_v7().as_bytes().as_slice()]).is_err());
         assert!(conn.execute("INSERT INTO outbox(request_id,history_catalog_id,watch_catalog_id,operation,payload_json,created_at) VALUES(?1,1,1,'job_history_visibility','{}',0)",[LibraryId::now_v7().as_bytes().as_slice()]).is_err());
         assert!(conn.execute("INSERT INTO outbox(request_id,history_catalog_id,operation,payload_json,created_at) VALUES(?1,2,'job_history_visibility','{}',0)",[LibraryId::now_v7().as_bytes().as_slice()]).is_err());

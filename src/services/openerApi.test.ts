@@ -8,7 +8,6 @@ vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl }));
 import {
   openExternalUrl,
   openFilesystemPath,
-  revealPathInFileManager,
 } from "@/services/openerApi";
 
 describe("openerApi", () => {
@@ -22,11 +21,6 @@ describe("openerApi", () => {
     await openFilesystemPath("C:/library/work");
     expect(invoke).toHaveBeenLastCalledWith("open_managed_path", {
       path: "C:/library/work",
-    });
-
-    await revealPathInFileManager("C:/library/work/content.json");
-    expect(invoke).toHaveBeenLastCalledWith("reveal_managed_path", {
-      path: "C:/library/work/content.json",
     });
   });
 

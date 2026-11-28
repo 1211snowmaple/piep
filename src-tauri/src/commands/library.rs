@@ -546,8 +546,7 @@ pub async fn suggest_collection_additions(
 ///
 /// 候補は**下書きであって決定ではない**。採るまでコレクションは増えない。
 ///
-/// → 採るのは `accept_collection_suggestion`、捨てるのは
-/// `dismiss_collection_suggestion`
+/// 採否は `accept_collection_suggestion` と `reject_collection_suggestion` で決める。
 #[tauri::command]
 pub async fn generate_collection_suggestion(
     app: tauri::AppHandle,
@@ -585,22 +584,6 @@ pub async fn list_collection_suggestions(
     run_db_blocking(app, move |state| {
         let library = state.shelf.library()?;
         library.collection_suggestion_views(state_filter.as_deref())
-    })
-    .await
-}
-
-/// 候補を「今は要らない」と断る。
-///
-/// 断ったことは覚えるので、同じ組み合わせは次から出てこない。`false` は
-/// 「その候補が無かった」を意味する。
-#[tauri::command]
-pub async fn dismiss_collection_suggestion(
-    app: tauri::AppHandle,
-    suggestion_id: String,
-) -> Result<bool, String> {
-    run_library_write_blocking(app, move |state| {
-        let library = state.shelf.library()?;
-        library.dismiss_collection_suggestion_view(&suggestion_id)
     })
     .await
 }

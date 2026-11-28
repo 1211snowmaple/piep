@@ -297,10 +297,7 @@ fn admin_routes(ctx: Ctx) -> Router {
             "/api/admin/shelf/shipments",
             get(shelf_admin::status).post(admin_open_shipment),
         )
-        .route(
-            "/api/admin/shelf/shipments/{id}",
-            get(shelf_admin::result).delete(shelf_admin::abort),
-        )
+        .route("/api/admin/shelf/shipments/{id}", get(shelf_admin::result))
         .route(
             "/api/admin/shelf/shipments/{id}/needed",
             post(shelf_admin::needed),

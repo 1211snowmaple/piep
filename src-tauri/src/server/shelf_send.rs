@@ -441,7 +441,6 @@ fn publication_result(
             Rejection::Superseded => {
                 "サーバーで配信する棚が変わりました。サーバーの状態を確認してください"
             }
-            Rejection::Canceled => "サーバーで棚の受け取りが中止されました。もう一度送ってください",
         }
         .into()),
     }

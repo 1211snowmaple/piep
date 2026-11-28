@@ -362,7 +362,6 @@ fn authorize_reader_view(
 pub fn router(ctx: Arc<Context>) -> Router {
     Router::new()
         .route("/api/identity",get(identity))
-        .route("/api/libraries/{library}/works",get(works))
         .route("/api/libraries/{library}/works/lookup",get(work_lookup))
         .route("/api/libraries/{library}/works/search",post(list::search))
         .route("/api/libraries/{library}/works/suggest",get(list::suggest))
@@ -383,7 +382,6 @@ pub fn router(ctx: Arc<Context>) -> Router {
         .route("/api/libraries/{library}/collections/{collection}",get(groups::collection))
         .route("/api/libraries/{library}/collections/{collection}/cover/{slot}",get(groups::collection_cover))
         .route("/api/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/bundle",get(bundle))
-        .route("/api/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/manifest",get(manifest))
         .route("/api/libraries/{library}/entities/{entity}/views/{view_kind}/{view_id}/resources/{resource_kind}/files/{file}/chunks/{ordinal}",get(chunk))
         .route_layer(middleware::from_fn_with_state(ctx.clone(),authorize))
         .with_state(ctx)
@@ -403,82 +401,6 @@ async fn identity(
         header::HeaderValue::from_static("no-store"),
     );
     response
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorksQuery {
-    limit: Option<u8>,
-    after: Option<String>,
-}
-
-fn work_page_boundary(value: &str, epoch: Id, subject: Id) -> Result<(i64, uuid::Uuid), ApiError> {
-    let parts: Vec<_> = value.splitn(4, '.').collect();
-    let [saved_epoch, saved_subject, time, work] = parts.as_slice() else {
-        return Err(invalid());
-    };
-    let work_id = uuid::Uuid::parse_str(work).map_err(|_| invalid())?;
-    let saved_at = time.parse::<i64>().map_err(|_| invalid())?;
-    if work_id.is_nil() || work_id.to_string() != *work {
-        return Err(invalid());
-    }
-    if epoch.get().to_string() != *saved_epoch || subject.get().to_string() != *saved_subject {
-        return Err(ApiError(StatusCode::CONFLICT, ErrorCode::StaleCursor));
-    }
-    Ok((saved_at, work_id))
-}
-
-async fn works(
-    State(ctx): State<Arc<Context>>,
-    Extension(principal): Extension<Principal>,
-    path: Result<Path<Id>, axum::extract::rejection::PathRejection>,
-    query: Result<Query<WorksQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Response, ApiError> {
-    let Path(library) = path.map_err(|_| invalid())?;
-    let Query(WorksQuery { limit, after }) = query.map_err(|_| invalid())?;
-    if library != ctx.library_id {
-        return Err(not_found());
-    }
-    let limit = limit.unwrap_or(30);
-    if !(1..=50).contains(&limit) {
-        return Err(invalid());
-    }
-    let subject = principal.subject;
-    let epoch = ctx.sync_epoch;
-    let after = after
-        .as_deref()
-        .map(|value| work_page_boundary(value, epoch, subject))
-        .transpose()?;
-    let permit = read_permit(&ctx, &principal.device).await?;
-    let bytes = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let mut rows = ctx
-            .library
-            .reader_works(subject.get(), limit + 1, after)
-            .map_err(library_error)?;
-        let limit = usize::from(limit);
-        let next = if rows.len() > limit {
-            rows.truncate(limit);
-            rows.last().map(|(work, saved_at)| {
-                format!(
-                    "{}.{}.{saved_at}.{}",
-                    epoch.get(),
-                    subject.get(),
-                    work.view.entity_id.get()
-                )
-            })
-        } else {
-            None
-        };
-        let page = protocol::ReaderWorkPage {
-            items: rows.into_iter().map(|(work, _)| work).collect(),
-            next,
-        };
-        serde_json::to_vec(&page).map_err(|_| internal())
-    })
-    .await
-    .map_err(|_| internal())??;
-    Ok(representation(bytes, "application/json", false))
 }
 
 #[derive(Deserialize)]
@@ -517,14 +439,6 @@ async fn work_lookup(
 }
 
 #[derive(Deserialize)]
-struct Location {
-    library: Id,
-    entity: Id,
-    view_kind: String,
-    view_id: Id,
-    resource_kind: String,
-}
-#[derive(Deserialize)]
 struct ViewLocation {
     library: Id,
     entity: Id,
@@ -550,7 +464,7 @@ struct ResourceQuery {
 
 fn target(
     ctx: &Context,
-    location: Location,
+    location: &ChunkLocation,
     query: ResourceQuery,
 ) -> Result<(uuid::Uuid, ResourceScope, ResourceReference), ApiError> {
     if location.library != ctx.library_id {
@@ -581,7 +495,7 @@ fn target(
     Ok((location.entity.get(), scope, reference))
 }
 /// 中身のハッシュで指定して取るので、取り直しの確認（ETag・304）は持たない。部分実体は
-/// 同じ URL の中身が変わらないので長く持ってよい。記録（manifest・bundle）は毎回確かめる。
+/// 同じ URL の中身が変わらないので長く持ってよい。読書の束は毎回確かめる。
 fn representation(bytes: Vec<u8>, mime: &'static str, immutable: bool) -> Response {
     let mut response = ([(header::CONTENT_TYPE, mime)], Body::from(bytes)).into_response();
     response.headers_mut().insert(
@@ -640,34 +554,6 @@ async fn bundle(
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyQuery {}
-async fn manifest(
-    State(ctx): State<Arc<Context>>,
-    Extension(principal): Extension<Principal>,
-    path: Result<Path<Location>, axum::extract::rejection::PathRejection>,
-    query: Result<Query<ResourceQuery>, axum::extract::rejection::QueryRejection>,
-) -> Result<Response, ApiError> {
-    let Path(location) = path.map_err(|_| invalid())?;
-    let Query(query) = query.map_err(|_| invalid())?;
-    let (entity, scope, reference) = target(&ctx, location, query)?;
-    let permit = read_permit(&ctx, &principal.device).await?;
-    let bytes = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        authorize_reader_view(&ctx, principal.subject, entity, scope)?;
-        reader_resource(&ctx, entity, scope, &reference)?;
-        ctx.library
-            .resource_transfer_manifest(entity, scope, &reference)
-            .map_err(library_error)?
-            .encode()
-            .map_err(|_| internal())
-    })
-    .await
-    .map_err(|_| internal())??;
-    Ok(representation(
-        bytes,
-        "application/vnd.piep.resource-transfer+json",
-        false,
-    ))
-}
 async fn chunk(
     State(ctx): State<Arc<Context>>,
     Extension(principal): Extension<Principal>,
@@ -676,17 +562,7 @@ async fn chunk(
 ) -> Result<Response, ApiError> {
     let Path(location) = path.map_err(|_| invalid())?;
     let Query(query) = query.map_err(|_| invalid())?;
-    let (entity, scope, reference) = target(
-        &ctx,
-        Location {
-            library: location.library,
-            entity: location.entity,
-            view_kind: location.view_kind,
-            view_id: location.view_id,
-            resource_kind: location.resource_kind,
-        },
-        query,
-    )?;
+    let (entity, scope, reference) = target(&ctx, &location, query)?;
     let permit = read_permit(&ctx, &principal.device).await?;
     let bytes = tokio::task::spawn_blocking(move || {
         let _permit = permit;

@@ -168,7 +168,6 @@ pub enum Rejection {
     AssemblyFailed,
     Interrupted,
     Superseded,
-    Canceled,
 }
 
 /// 問い合わせる実体（識別子は 16 進）。
@@ -627,25 +626,6 @@ impl ShelfShipments {
         Ok(assembling)
     }
 
-    /// 受け取りをやめて、受け取ったものを捨てる。
-    pub fn abort(&self, id: &str) -> Result<(), ShipError> {
-        let _write = self
-            .write
-            .lock()
-            .map_err(|_| ShipError::Conflict("受け取りの途中です"))?;
-        if self.assembling() {
-            return Err(ShipError::Conflict("前に送られた棚を組んでいます"));
-        }
-        self.require(id)?;
-        reject(&self.paths, id, Rejection::Canceled)?;
-        fs::remove_dir_all(incoming(&self.paths))?;
-        self.set_status(ShipmentStatus {
-            state: "idle".into(),
-            ..Default::default()
-        });
-        Ok(())
-    }
-
     fn set_status(&self, next: ShipmentStatus) {
         if let Ok(mut status) = self.status.lock() {
             *status = next;
@@ -772,7 +752,6 @@ impl Rejection {
             Rejection::AssemblyFailed => "棚を組めませんでした",
             Rejection::Interrupted => "受け取りの途中で止まりました",
             Rejection::Superseded => "引き継ぎ元の棚が変わりました",
-            Rejection::Canceled => "受け取りを中止しました",
         }
     }
 }

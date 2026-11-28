@@ -300,6 +300,7 @@ fn settle_migrated_acquisitions(stale_bindings: bool) {
              DELETE FROM schema_migrations WHERE version>=30; PRAGMA user_version=29;",
         )
         .unwrap();
+        crate::library::schema::restore_legacy_history_schema_for_tests(&conn);
     }
     let before: Vec<u8> = rusqlite::Connection::open(root.join("library.db"))
         .unwrap()

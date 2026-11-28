@@ -184,6 +184,7 @@ fn migration_moves_the_current_rows_of_both_tables() {
             ],
         )
         .unwrap();
+        crate::library::schema::restore_legacy_history_schema_for_tests(&conn);
         conn.execute_batch(
             "DELETE FROM schema_migrations WHERE version>=34; PRAGMA user_version=33;",
         )
@@ -215,6 +216,7 @@ fn migration_moves_the_current_rows_of_both_tables() {
             ],
         )
         .unwrap();
+        crate::library::schema::restore_legacy_history_schema_for_tests(&conn);
         conn.execute_batch(
             "DELETE FROM schema_migrations WHERE version>=34; PRAGMA user_version=33;",
         )

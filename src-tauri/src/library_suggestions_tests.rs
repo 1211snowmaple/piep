@@ -164,18 +164,9 @@ fn a_seed_suggestion_follows_the_body_links_and_accepting_it_makes_a_collection(
 }
 
 #[test]
-fn rejecting_remembers_the_pairs_and_dismissing_remembers_nothing() {
+fn rejecting_remembers_the_pairs() {
     let (_temp, library) = shelf();
     let works = chain(&library);
-    let first = library
-        .seed_collection_suggestion(&works[..1], None)
-        .unwrap();
-    assert!(library
-        .dismiss_collection_suggestion_view(&first.id)
-        .unwrap());
-    assert!(!library
-        .dismiss_collection_suggestion_view(&first.id)
-        .unwrap());
     let pairs = |library: &Library| -> i64 {
         library
             .reader()

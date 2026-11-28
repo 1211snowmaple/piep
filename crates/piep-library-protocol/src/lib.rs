@@ -24,22 +24,3 @@ pub struct WorkReadingView {
     pub snapshot_id: Id,
     pub edit_id: Option<Id>,
 }
-
-/// 携帯の作品一覧に載せる、棚の作品と読書用の版。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReaderWork {
-    pub view: WorkReadingView,
-    pub provider: String,
-    pub key: String,
-    pub title: String,
-    pub author_name: String,
-    pub content_type: String,
-}
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ReaderWorkPage {
-    pub items: Vec<ReaderWork>,
-    pub next: Option<String>,
-}

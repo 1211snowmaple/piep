@@ -301,10 +301,6 @@ pub fn run() -> tauri::Result<()> {
             commands::shelf::shelf_edit_collection,
             commands::shelf::shelf_editor,
             commands::shelf::shelf_edit_history,
-            commands::shelf::shelf_job_history,
-            commands::shelf::shelf_job_history_items,
-            commands::shelf::shelf_job_history_logs,
-            commands::shelf::shelf_job_history_visibility,
             commands::shelf::shelf_save_editor,
             commands::shelf::shelf_edit_pointer,
             commands::shelf::shelf_import_edit_image,
@@ -375,7 +371,6 @@ pub fn run() -> tauri::Result<()> {
             commands::browser::get_embedded_browser_url,
             commands::browser::read_browser_page_work_candidates,
             commands::browser::read_browser_page_user_candidates,
-            commands::browser::close_embedded_browser,
             commands::browser::destroy_embedded_browser,
             commands::browser::go_back_embedded_browser,
             commands::browser::go_forward_embedded_browser,
@@ -425,7 +420,6 @@ pub fn run() -> tauri::Result<()> {
             commands::library::list_collection_suggestions,
             commands::library::accept_collection_suggestion,
             commands::library::reject_collection_suggestion,
-            commands::library::dismiss_collection_suggestion,
             commands::library::get_search_index_status,
             // バージョン管理・更新監視 (commands::library)
             commands::library::upsert_update_target,
@@ -492,7 +486,6 @@ pub fn run() -> tauri::Result<()> {
             commands::epub::list_template_file_kinds,
             commands::epub::preview_epub_template,
             commands::shell::open_managed_path,
-            commands::shell::reveal_managed_path,
         ])
         .run(context)
 }

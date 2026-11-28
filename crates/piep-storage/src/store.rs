@@ -319,7 +319,7 @@ fn decode_object(source: impl Read, encoded_length: u64, expected: &FileChunk) -
 ///
 /// 書いた直後のファイルを開き直すと、Windows では開くたびに数ミリ秒待たされる
 /// （常駐の検査が新しいファイルを開くところで走る）。棚全体（実体 13 万個）を保管したときの
-/// 実測では、保管の時間の 6 割がこの開き直しだった（`examples/put_cost.rs`）。
+/// 実測では、保管の時間の 6 割がこの開き直しだった。
 /// 確定（`sync_all`）の後に同じ手で読むので、確かめている中身は開き直した場合と同じ。
 fn read_back(mut file: File, expected: &FileChunk) -> Result<Vec<u8>> {
     let length = file.metadata()?.len();

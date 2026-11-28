@@ -87,9 +87,3 @@ export function suggestionNameOverride(proposedName: string, selectedName: strin
 export function rejectCollectionSuggestion(suggestionId: string, memberKeys?: WorkKey[]): Promise<boolean> {
   return invoke<boolean>("reject_collection_suggestion", { suggestionId, memberKeys: memberKeys ?? null });
 }
-
-/** Removes the draft from the inbox without recording negative feedback, so
- *  the same works can be suggested again later. */
-export function dismissCollectionSuggestion(suggestionId: string): Promise<boolean> {
-  return invoke<boolean>("dismiss_collection_suggestion", { suggestionId });
-}
