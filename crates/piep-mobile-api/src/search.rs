@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 pub const MAX_NUMBERED_OFFSET: i64 = 5_000;
 /// 一ページで取得できる作品の上限。
 pub const MAX_SEARCH_LIMIT: i64 = 50;
+/// 検索の続きの位置の長さの上限。サーバーはこれより長い位置を返さない。
+pub const MAX_SEARCH_CURSOR_BYTES: usize = 4096;
 
 /// 作品の並べ方。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,7 +177,7 @@ impl MobileSearchRequest {
         if self
             .cursor
             .as_ref()
-            .is_some_and(|cursor| cursor.len() > 4096)
+            .is_some_and(|cursor| cursor.len() > MAX_SEARCH_CURSOR_BYTES)
         {
             return Err("検索カーソルが長すぎます".into());
         }

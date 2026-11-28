@@ -107,13 +107,13 @@ function ConnectionForm({ state }: { state: ConnectionState }) {
   const status = useStatus();
   const { confirmed } = useReauth();
   const base = state.saved ?? state.running;
-  const [draft, setDraft] = useState<ConnectionDraft>(() => draftConnection(base));
+  const [draft, setDraft] = useState<ConnectionDraft>(() => draftConnection(base, state.localAdminAddress));
   const [problem, setProblem] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [restart, setRestart] = useState<{ startedAt: string | null; expected: Connection; moveTo: string | null } | null>(null);
-  useEffect(() => { setDraft(draftConnection(base)); }, [base]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setDraft(draftConnection(base, state.localAdminAddress)); }, [base]); // eslint-disable-line react-hooks/exhaustive-deps
   const set = (patch: Partial<ConnectionDraft>) => setDraft((current) => ({ ...current, ...patch }));
-  const next = useMemo(() => toConnection(draft), [draft]);
+  const next = useMemo(() => toConnection(draft, state.localAdminAddress), [draft, state.localAdminAddress]);
   const place = adminPlace(next);
   // 名前で開いていることもあるので、ブラウザのアドレスではなく今の設定の場所と比べる。
   const runningPlace = adminPlace(state.running)?.url ?? null;
@@ -122,7 +122,7 @@ function ConnectionForm({ state }: { state: ConnectionState }) {
     return target !== runningPlace ? target : null;
   };
   const moves = (place?.url ?? null) !== runningPlace;
-  const dirty = !sameDraft(draft, draftConnection(base)) || draft.cert.trim() !== "" || draft.key.trim() !== "";
+  const dirty = !sameDraft(draft, draftConnection(base, state.localAdminAddress)) || draft.cert.trim() !== "" || draft.key.trim() !== "";
   const waitingRestart = state.saved !== null && !sameConnection(state.saved, state.running);
 
   const change = (): ConnectionChange => ({
@@ -213,14 +213,14 @@ function ConnectionForm({ state }: { state: ConnectionState }) {
           <Stack gap="xs">
             <Switch
               label="管理画面のアドレスを分ける"
-              description="携帯用のアドレスをインターネットに出すときは分けます。分けずに公開の URL を使うと、管理画面はサーバーの PC のブラウザでだけ開けます（127.0.0.1:38778）。"
+              description={`携帯用のアドレスをインターネットに出すときは分けます。分けずに公開の URL を使うと、管理画面はサーバーの PC のブラウザでだけ開けます（${state.localAdminAddress}）。`}
               checked={draft.split}
               onChange={(event) => set({ split: event.currentTarget.checked })}
             />
             {draft.split && (
               <TextInput
                 aria-label="管理画面のアドレス"
-                placeholder="127.0.0.1:38778"
+                placeholder={state.localAdminAddress}
                 maw={360}
                 ml={54}
                 value={draft.adminListen}
@@ -252,7 +252,7 @@ function ConnectionForm({ state }: { state: ConnectionState }) {
           {problem && <Alert color="red" variant="light">{problem}</Alert>}
           <Group justify="flex-start" gap="sm">
             <Button type="submit" loading={pending} disabled={!dirty}>{state.restartable ? "保存して再起動" : "保存"}</Button>
-            <Button variant="default" disabled={!dirty || pending} onClick={() => { setDraft(draftConnection(base)); setProblem(null); }}>元に戻す</Button>
+            <Button variant="default" disabled={!dirty || pending} onClick={() => { setDraft(draftConnection(base, state.localAdminAddress)); setProblem(null); }}>元に戻す</Button>
           </Group>
           {!state.restartable && <Text size="sm" c="dimmed">このサーバーは install で置いていないので、画面からは再起動できません。保存したあと、サーバーの PCで動かし直してください。</Text>}
         </Stack>
@@ -262,11 +262,13 @@ function ConnectionForm({ state }: { state: ConnectionState }) {
   );
 }
 
-function toConnection(draft: ConnectionDraft): Connection {
+/** 書きかけの設定。管理画面の場所の決め方はサーバーの `local_admin` と同じ。 */
+function toConnection(draft: ConnectionDraft, localAdminAddress: string): Connection {
   const adminListen = draft.split && draft.adminListen.trim() ? draft.adminListen.trim() : null;
   const publicUrl = draft.publicUrl.trim() || null;
   const listen = draft.listen.trim();
-  const localAdmin = !adminListen && publicUrl && !listen.endsWith(":38778") ? "127.0.0.1:38778" : null;
+  const port = (address: string) => address.slice(address.lastIndexOf(":") + 1);
+  const localAdmin = !adminListen && publicUrl && port(listen) !== port(localAdminAddress) ? localAdminAddress : null;
   return { listen, adminListen, publicUrl, localAdmin, tls: draft.tls };
 }
 

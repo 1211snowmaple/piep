@@ -441,8 +441,9 @@ function ExternalLink({ url, children }: { url: string; children: ReactNode }) {
   return <Anchor size="sm" component="button" type="button" onClick={() => void openExternalUrl(url)}>{children}</Anchor>;
 }
 
-function ConnectRemoteCard({ pending, active, perform }: CardProps) {
+function ConnectRemoteCard({ status, pending, active, perform }: CardProps) {
   const [text, setText] = useState("");
+  const settingsUnreadable = status.connectionIssue === "settingsUnreadable";
   return (
     <section className="sv-card sv-status" aria-label="サーバーに接続">
       <Stack gap="lg">
@@ -461,7 +462,11 @@ function ConnectRemoteCard({ pending, active, perform }: CardProps) {
           <span className="sv-step-number" aria-hidden>2</span>
           <div className="sv-step-body">
             <Text size="sm" fw={650}>登録文字列を貼り付ける</Text>
-            <Text size="sm" c="dimmed" mt={2} mb={8}>導入の最後に表示されます。一度だけ使えます。</Text>
+            <Text size="sm" c={settingsUnreadable ? "red" : "dimmed"} mt={2} mb={8}>
+              {settingsUnreadable
+                ? "保存した接続設定を読み込めませんでした。サーバーを登録し直してください。"
+                : "導入の最後に表示されます。一度だけ使えます。"}
+            </Text>
             <Textarea aria-label="管理者用の登録文字列" placeholder="登録文字列を貼り付け" autosize minRows={2} maxRows={5} value={text} onChange={(event) => setText(event.currentTarget.value)} />
             <Group justify="flex-end" mt="sm">
               <Button disabled={!text.trim() || pending} loading={active === "connect"} onClick={() => void perform(async () => { const next = await serverConnectRemote(text); setText(""); return next; }, "connect")}>接続</Button>

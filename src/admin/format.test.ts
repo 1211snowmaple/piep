@@ -11,6 +11,7 @@ const status = (overrides: Partial<AdminStatus> = {}): AdminStatus => ({
   update: null,
   serverName: "Maple",
   startedAt: "2026-11-05T00:00:00Z",
+  adminWeb: "available",
   ...overrides,
 });
 
@@ -55,8 +56,9 @@ describe("format", () => {
     expect(issues[2]?.message).toBe("0.36.1 は起動に失敗したため飛ばしています");
   });
 
-  it("keeps old page names working", () => {
-    expect(pageFromName("security")).toBe("settings");
+  it("現行のページ名だけを受け付ける", () => {
+    expect(pageFromName("settings")).toBe("settings");
+    expect(pageFromName("security")).toBeNull();
     expect(pageFromName("account")).toBe("account");
     expect(pageFromName("nothing")).toBeNull();
   });
@@ -95,8 +97,8 @@ describe("connection", () => {
 
   it("drafts from the saved settings and compares them", () => {
     const saved = connection({ adminListen: "127.0.0.1:40000", publicUrl: "https://example.com/" });
-    expect(draftConnection(saved)).toMatchObject({ split: true, adminListen: "127.0.0.1:40000", publicUrl: "https://example.com/", cert: "", key: "" });
-    expect(draftConnection(connection())).toMatchObject({ split: false, adminListen: "127.0.0.1:38778", publicUrl: "" });
+    expect(draftConnection(saved, "127.0.0.1:38778")).toMatchObject({ split: true, adminListen: "127.0.0.1:40000", publicUrl: "https://example.com/", cert: "", key: "" });
+    expect(draftConnection(connection(), "127.0.0.1:38778")).toMatchObject({ split: false, adminListen: "127.0.0.1:38778", publicUrl: "" });
     expect(sameConnection(saved, { ...saved, localAdmin: "127.0.0.1:38778" })).toBe(true);
     expect(sameConnection(saved, { ...saved, tls: "self-signed" })).toBe(false);
   });

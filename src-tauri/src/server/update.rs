@@ -139,26 +139,79 @@ pub struct UpdateRecord {
     /// 当てて起動しなかった版。もう試さない。
     pub skipped: Vec<String>,
     pub last_error: Option<String>,
+    /// 起動に失敗して戻した理由は、更新の確認結果より優先する。
+    startup_failed: bool,
     pub last_applied_at: Option<String>,
 }
 
 impl UpdateRecord {
     pub fn load(paths: &ServerPaths) -> Self {
-        fs::read(paths.update_record())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        Self::read(&paths.update_record()).unwrap_or_default()
     }
 
-    pub fn save(&self, paths: &ServerPaths) {
-        if let Err(error) = self.try_save(paths) {
+    fn read(path: &Path) -> Result<Self, String> {
+        match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|error| format!("更新の記録を読み取れません: {error}")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(format!("更新の記録を開けません: {error}")),
+        }
+    }
+
+    pub(super) fn edit(paths: &ServerPaths, change: impl FnOnce(&mut Self)) {
+        if let Err(error) = Self::try_edit(paths, change) {
             log::warn!("更新の記録を書けません: {error}");
         }
     }
 
-    pub(super) fn try_save(&self, paths: &ServerPaths) -> Result<(), String> {
-        let bytes = serde_json::to_vec_pretty(self).map_err(|error| error.to_string())?;
-        write_atomic(&paths.update_record(), &bytes)
+    /// 差し替える記録とは別のファイルをロックし、読み直しから同期まで保持する。
+    pub(super) fn try_edit<T>(
+        paths: &ServerPaths,
+        change: impl FnOnce(&mut Self) -> T,
+    ) -> Result<T, String> {
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(paths.state().join("update.lock"))
+            .map_err(|error| format!("更新の記録の鍵を開けません: {error}"))?;
+        lock.lock()
+            .map_err(|error| format!("更新の記録をロックできません: {error}"))?;
+        let path = paths.update_record();
+        let mut record = Self::read(&path)?;
+        let result = change(&mut record);
+        let bytes = serde_json::to_vec_pretty(&record).map_err(|error| error.to_string())?;
+        write_atomic(&path, &bytes)?;
+        drop(lock);
+        Ok(result)
+    }
+
+    pub(super) fn skip(&mut self, version: &str) {
+        if !self.skipped.iter().any(|skipped| skipped == version) {
+            self.skipped.push(version.to_string());
+        }
+    }
+
+    pub(super) fn note_failed_update(&mut self, reason: String) {
+        self.startup_failed = true;
+        self.last_error = Some(reason);
+    }
+
+    pub(super) fn clear_transient_error(&mut self) {
+        if !self.startup_failed {
+            self.last_error = None;
+        }
+    }
+
+    pub(super) fn clear_error(&mut self) {
+        self.startup_failed = false;
+        self.last_error = None;
+    }
+
+    fn note_check(&mut self, version: &str) {
+        self.last_checked_at = Some(Utc::now().to_rfc3339());
+        self.latest = Some(version.to_string());
     }
 }
 
@@ -393,11 +446,10 @@ pub async fn check_latest(source: &UpdateSource, paths: &ServerPaths) -> Result<
         .build()
         .map_err(|error| format!("更新を確かめられません: {error}"))?;
     let manifest = fetch_manifest(&client, source, Duration::from_secs(30)).await?;
-    let mut record = UpdateRecord::load(paths);
-    record.last_checked_at = Some(Utc::now().to_rfc3339());
-    record.latest = Some(manifest.version.clone());
-    record.last_error = None;
-    record.save(paths);
+    UpdateRecord::try_edit(paths, |record| {
+        record.note_check(&manifest.version);
+        record.clear_transient_error();
+    })?;
     Ok(manifest.version)
 }
 
@@ -456,12 +508,16 @@ async fn prepare_latest_with_timeouts(
         .map_err(|error| format!("更新を確かめられません: {error}"))?;
     let manifest = fetch_manifest(&client, source, manifest_timeout).await?;
 
-    let mut record = UpdateRecord::load(paths);
-    record.last_checked_at = Some(Utc::now().to_rfc3339());
-    record.latest = Some(manifest.version.clone());
-    record.save(paths);
-
-    if !is_newer(&manifest.version, current) || record.skipped.contains(&manifest.version) {
+    let has_update = UpdateRecord::try_edit(paths, |record| {
+        record.note_check(&manifest.version);
+        let has_update =
+            is_newer(&manifest.version, current) && !record.skipped.contains(&manifest.version);
+        if !has_update {
+            record.clear_transient_error();
+        }
+        has_update
+    })?;
+    if !has_update {
         return Ok(None);
     }
     if !manifest.url.starts_with(&source.download_prefix) {
@@ -679,9 +735,10 @@ impl UpdateController {
 
     /// 飛ばしている版をもう一度試す。
     pub fn retry_skipped(&self) {
-        let mut record = UpdateRecord::load(&self.paths);
-        record.skipped.clear();
-        record.save(&self.paths);
+        UpdateRecord::edit(&self.paths, |record| {
+            record.skipped.clear();
+            record.clear_error();
+        });
         self.request_now();
     }
 
@@ -710,11 +767,7 @@ impl UpdateController {
         if !idle {
             return Err("更新の処理が終わってからにしてください".into());
         }
-        let mut record = UpdateRecord::load(&self.paths);
-        if !record.skipped.iter().any(|version| version == VERSION) {
-            record.skipped.push(VERSION.to_string());
-        }
-        record.save(&self.paths);
+        UpdateRecord::try_edit(&self.paths, |record| record.skip(VERSION))?;
         self.stop_for(AfterStop::RollBack(previous.clone()));
         Ok(previous)
     }
@@ -752,9 +805,11 @@ impl UpdateController {
 
     fn record_error(&self, error: &str) {
         log::warn!("更新: {error}");
-        let mut record = UpdateRecord::load(&self.paths);
-        record.last_error = Some(error.to_string());
-        record.save(&self.paths);
+        UpdateRecord::edit(&self.paths, |record| {
+            if !record.startup_failed {
+                record.last_error = Some(error.to_string());
+            }
+        });
     }
 
     /// 棚の受け取りが区切りに来るのを待つ。来なければ false。
@@ -805,9 +860,6 @@ impl UpdateController {
         let version = match prepared {
             Ok(Some(version)) => version,
             Ok(None) => {
-                let mut record = UpdateRecord::load(&self.paths);
-                record.last_error = None;
-                record.save(&self.paths);
                 self.set_phase(UpdatePhase::Idle);
                 return false;
             }
@@ -862,16 +914,32 @@ pub(super) fn write_update_settings(
         let mut document: toml_edit::DocumentMut = text
             .parse()
             .map_err(|error| format!("設定を読み取れません: {error}"))?;
+        // 読み込み側は `update = { ... }` の書き方も受け取るので、どちらの表の形でも書き換える。
         let update = document
             .entry("update")
-            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-        let update = update
-            .as_table_mut()
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_like_mut()
             .ok_or("設定の update が表ではありません")?;
-        update["auto"] = toml_edit::value(auto);
-        update["window"] = toml_edit::value(window);
+        set_value_kept(update, "auto", auto.into());
+        set_value_kept(update, "window", window.into());
         write_atomic(path, document.to_string().as_bytes())
     })
+}
+
+/// 値だけを差し替え、行末のコメントなど前後の装飾は残す。
+/// 鍵（とその上の説明の行）は差し替えない。
+fn set_value_kept(table: &mut dyn toml_edit::TableLike, key: &str, mut value: toml_edit::Value) {
+    match table.get_mut(key) {
+        Some(item) => {
+            if let Some(old) = item.as_value() {
+                *value.decor_mut() = old.decor().clone();
+            }
+            *item = toml_edit::Item::Value(value);
+        }
+        None => {
+            table.insert(key, toml_edit::Item::Value(value));
+        }
+    }
 }
 
 /// 当てる前に DB を整合した形で写す。戻すときに使う。
@@ -971,6 +1039,97 @@ mod tests {
     }
 
     #[test]
+    fn update_record_writer_waits_then_keeps_concurrent_skip() {
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+
+        let (_root, paths) = history_paths();
+        let controller = UpdateController::new(
+            paths.clone(),
+            UpdateSource::fixed(),
+            UpdateConfig::default(),
+            Box::new(|| {}),
+        )
+        .unwrap();
+        let lock = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(paths.state().join("update.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+
+        let (started, starting) = channel();
+        let (finished, finishing) = channel();
+        let writer = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            controller.record_error("更新の確認に失敗しました");
+            finished.send(()).unwrap();
+        });
+        starting.recv().unwrap();
+        let before_unlock = finishing.recv_timeout(Duration::from_millis(200));
+        // 見張り役が、鍵を持っている間に飛ばす版を保存する。
+        write_atomic(&paths.update_record(), br#"{"skipped":["1.1.0"]}"#).unwrap();
+        drop(lock);
+        writer.join().unwrap();
+
+        assert_eq!(before_unlock, Err(RecvTimeoutError::Timeout));
+        let record = UpdateRecord::load(&paths);
+        assert_eq!(record.skipped, ["1.1.0"]);
+        assert_eq!(
+            record.last_error.as_deref(),
+            Some("更新の確認に失敗しました")
+        );
+    }
+
+    #[tokio::test]
+    async fn update_record_keeps_watchdog_failure_when_no_update_is_found() {
+        use axum::{routing::get, Json, Router};
+
+        let (_root, paths) = history_paths();
+        let reason = "版 1.1.0 に更新できなかったので、前の版に戻しました";
+        UpdateRecord::try_edit(&paths, |record| {
+            record.skip("1.1.0");
+            record.note_failed_update(reason.into());
+        })
+        .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/manifest",
+            get(|| async {
+                Json(serde_json::json!({"version": VERSION, "url": "", "signature": ""}))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let source = UpdateSource {
+            manifest_url: format!("{base}/manifest"),
+            download_prefix: base,
+            public_key: String::new(),
+        };
+        let controller =
+            UpdateController::new(paths, source, UpdateConfig::default(), Box::new(|| {})).unwrap();
+
+        assert_eq!(controller.check_now().await.unwrap(), VERSION);
+        let after_manual = controller.status().last_error;
+        assert!(!controller.run_once(true, None).await);
+        let after_automatic = controller.status().last_error;
+        server.abort();
+
+        assert_eq!(
+            (after_manual.as_deref(), after_automatic.as_deref()),
+            (Some(reason), Some(reason))
+        );
+        controller.record_error("更新の案内を取得できません");
+        assert_eq!(controller.status().last_error.as_deref(), Some(reason));
+        controller.retry_skipped();
+        let status = controller.status();
+        assert!(status.last_error.is_none());
+        assert!(status.skipped.is_empty());
+    }
+
+    #[test]
     fn starting_records_what_happened_since_the_last_start() {
         let (_root, paths) = history_paths();
         let now = Utc::now();
@@ -990,9 +1149,10 @@ mod tests {
 
         // 当てたが、見張り役が戻した。
         UpdateHistory::note_stopping(&paths, "0.38.0", false);
-        let mut record = UpdateRecord::load(&paths);
-        record.last_error = Some("起動しませんでした".into());
-        record.save(&paths);
+        UpdateRecord::try_edit(&paths, |record| {
+            record.note_failed_update("起動しませんでした".into());
+        })
+        .unwrap();
         UpdateHistory::reconcile(&paths, "0.37.0", now);
         let entry = UpdateHistory::load(&paths).entries[0].clone();
         assert_eq!(entry.result, "failed");
@@ -1016,6 +1176,35 @@ mod tests {
         assert!(written.contains("# 上のコメント"));
         assert!(written.contains("# 時間帯の説明"));
         assert!(written.contains("listen = \"127.0.0.1:1234\""));
+        let config: crate::server::standalone::ServerConfig = toml::from_str(&written).unwrap();
+        assert!(!config.update.auto);
+        assert_eq!(config.update.window, "01:30-02:30");
+    }
+
+    #[test]
+    fn changing_the_settings_keeps_comments_after_the_values() {
+        let (_root, paths) = history_paths();
+        let text = "[update]\nauto = true # 自動で当てる\nwindow = \"03:00-06:00\" # 夜中だけ\n";
+        fs::write(paths.config(), text).unwrap();
+        write_update_settings(&paths, false, "01:30-02:30").unwrap();
+        let written = fs::read_to_string(paths.config()).unwrap();
+        assert!(written.contains("auto = false # 自動で当てる"), "{written}");
+        assert!(
+            written.contains("window = \"01:30-02:30\" # 夜中だけ"),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn settings_written_as_an_inline_table_can_be_changed() {
+        let (_root, paths) = history_paths();
+        let text =
+            "listen = \"127.0.0.1:1234\"\nupdate = { auto = true, window = \"03:00-06:00\" }\n";
+        fs::write(paths.config(), text).unwrap();
+        // 読み込み側が受け取る書き方であることを先に確かめる。
+        toml::from_str::<crate::server::standalone::ServerConfig>(text).unwrap();
+        write_update_settings(&paths, false, "01:30-02:30").unwrap();
+        let written = fs::read_to_string(paths.config()).unwrap();
         let config: crate::server::standalone::ServerConfig = toml::from_str(&written).unwrap();
         assert!(!config.update.auto);
         assert_eq!(config.update.window, "01:30-02:30");

@@ -124,6 +124,17 @@ fn cursor_offset(cursor: Option<&str>) -> Result<usize, ApiError> {
     Ok(offset)
 }
 
+/// 次のページの位置。受け付ける上限を超える位置は返さない（返した位置を次に断らない）。
+fn next_offset(offset: usize, page_len: usize, total: usize) -> Option<i64> {
+    let end = offset + page_len;
+    (end < total && end <= MAX_OFFSET).then(|| count(end as u64))
+}
+
+/// 十進の続きの位置。上限は `cursor_offset` と同じ。
+fn offset_cursor(offset: usize) -> Option<String> {
+    (offset <= MAX_OFFSET).then(|| offset.to_string())
+}
+
 /// 画像のファイルの識別子（16 進の 64 文字）。
 fn file(hex: &str) -> Option<Fingerprint> {
     Fingerprint::parse(hex).ok()
@@ -251,9 +262,8 @@ async fn list(
         let page = library
             .entity_page(&rows, kind, sort, ascending, offset, limit)
             .map_err(library_error)?;
-        let end = offset + page.items.len();
         json(&MobileEntityPage {
-            next_offset: (end < page.total).then(|| count(end as u64)),
+            next_offset: next_offset(offset, page.items.len(), page.total),
             total: count(page.total as u64),
             items: page
                 .items
@@ -292,11 +302,28 @@ pub(super) struct KeyQuery {
     key: String,
 }
 
-/// プロフィールのリンク。外へ開くものだけを渡す。
+/// プロフィールのリンクの長さの上限（解析の前と後）。
+const MAX_PROFILE_LINK_BYTES: usize = 2048;
+
+/// プロフィールのリンク。携帯はそのまま外へ開くので、ホストのある http(s) の URL だけを渡す。
 fn profile_links(links: Vec<String>) -> Vec<String> {
     links
         .into_iter()
-        .filter(|link| link.starts_with("https://") || link.starts_with("http://"))
+        .filter(|link| link.len() <= MAX_PROFILE_LINK_BYTES)
+        .filter_map(|link| {
+            // 空の利用者名（`https://@host`）や空のホスト（`https:///x`）は解析で形が変わるので、解析の前に見る。
+            let authority = link.split_once("://")?.1.split(['/', '?', '#']).next()?;
+            if authority.is_empty() || authority.contains('@') {
+                return None;
+            }
+            let url = url::Url::parse(&link).ok()?;
+            let usable = matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some_and(|host| !host.is_empty())
+                && url.username().is_empty()
+                && url.password().is_none();
+            let url = String::from(url);
+            (usable && url.len() <= MAX_PROFILE_LINK_BYTES).then_some(url)
+        })
         .take(20)
         .collect()
 }
@@ -435,7 +462,7 @@ pub(super) async fn person_series(
             .person_series(person, &needle, sort, ascending, offset, limit)
             .map_err(library_error)?;
         json(&MobileEntitySeriesPage {
-            next_cursor: page.next.map(|next| next.to_string()),
+            next_cursor: page.next.and_then(offset_cursor),
             total: count(page.total as u64),
             items: page
                 .items
@@ -739,4 +766,55 @@ pub(super) async fn work_collections(
     .await
     .map_err(|_| internal())??;
     Ok(super::representation(bytes, "application/json", false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entity_pages_stop_at_the_offset_limit() {
+        let total = MAX_OFFSET + 2;
+        assert_eq!(
+            next_offset(MAX_OFFSET - 1, 1, total),
+            Some(MAX_OFFSET as i64)
+        );
+        assert_eq!(next_offset(MAX_OFFSET, 1, total), None);
+        assert_eq!(next_offset(MAX_OFFSET - 1, 1, MAX_OFFSET), None);
+    }
+
+    #[test]
+    fn group_cursors_stop_at_the_offset_limit() {
+        let cursor = offset_cursor(MAX_OFFSET).unwrap();
+        assert_eq!(cursor_offset(Some(&cursor)).unwrap(), MAX_OFFSET);
+        assert_eq!(offset_cursor(MAX_OFFSET + 1), None);
+        assert!(cursor_offset(Some(&(MAX_OFFSET + 1).to_string())).is_err());
+
+        let mut items = vec![1, 2];
+        assert_eq!(
+            collection_cursor(&mut items, MAX_OFFSET - 1, 1),
+            Some(cursor)
+        );
+        assert_eq!(items, [1]);
+        let mut items = vec![1, 2];
+        assert_eq!(collection_cursor(&mut items, MAX_OFFSET, 1), None);
+        assert_eq!(items, [1]);
+    }
+
+    #[test]
+    fn profile_links_require_bounded_http_urls_without_userinfo() {
+        let https = "https://example.test/profile?item=1#links";
+        let http = "http://example.test/profile";
+        let links = vec![
+            "https://user:pw@example.test/".into(),
+            "https://:pw@example.test/".into(),
+            "https://@example.test/".into(),
+            "javascript:void(0)".into(),
+            "https:///x".into(),
+            format!("https://example.test/{}", "x".repeat(8192)),
+            https.into(),
+            http.into(),
+        ];
+        assert_eq!(profile_links(links), [https, http]);
+    }
 }

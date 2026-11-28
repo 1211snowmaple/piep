@@ -22,7 +22,7 @@ export const adminQueryClient = new QueryClient({
     queries: {
       retry: (failures, error) => !(error instanceof ApiFailure) && failures < 1,
       refetchOnWindowFocus: true,
-      // 読めなくなっても、最後に読んだ内容を残す。
+      // 読んだ内容は 5 秒間、新しいものとして扱う。
       staleTime: 5_000,
     },
   },

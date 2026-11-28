@@ -218,9 +218,17 @@ URL の形に限り、大きさの指定・原寸か master か・変換の末�
 | 検証 | 未確定の記録・外部キー・`integrity_check` を確かめ、全ファイルを部分実体から復元してハッシュを照合する |
 | 回収 | どこからも参照されない実体を片付ける（上の「外すことと、実体の回収」） |
 
-アプリの外からは `piep-library`（`src-tauri/src/bin/piep-library.rs`）で、棚の `verify`・
-`backup`・`reclaim` などを行える。アプリと同じ `.library.lock` を取るので、アプリを閉じてから
-使う。
+アプリの外から棚を操作するには `piep-library`（`src-tauri/src/bin/piep-library.rs`）を使う。
+アプリと同じ `.library.lock` を取るので、アプリを閉じてから使う。
+
+| 操作 | コマンド |
+| --- | --- |
+| 棚の作成・一覧・検証 | `init`、`list`（最大 1,000 件）、`verify` |
+| 提案・取得・取得元の状態・保存した検索の確認 | `suggestion`、`acquisition`、`source-state`、`saved-searches` |
+| ジョブの履歴・項目・記録・項目の内容の確認 | `job-history`、`job-history-items`、`job-history-logs`、`job-history-payload` |
+| 資産・本文の確認、書き出し、転送記録の生成と検証 | `resources`、`reader`、`export-resource`、`transfer-manifest`、`verify-transfer` |
+| バックアップ・実体の回収・原本の復元 | `backup`、`reclaim`、`export-original` |
+| 意味検索の索引の同期と、アプリと同じ手順での棚・索引・検索の確認 | `semantic-sync`、`app-open` |
 
 ## 作品と、その周りのもの
 
