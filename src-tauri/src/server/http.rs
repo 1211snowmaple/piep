@@ -287,6 +287,7 @@ fn admin_routes(ctx: Ctx) -> Router {
         .merge(admin_web::api_routes())
         .route("/api/admin/status", get(admin_status))
         .route("/api/admin/update", post(admin_update))
+        .route("/api/admin/update/scheduled", post(admin_update_scheduled))
         .route("/api/admin/pairings", post(admin_pairing))
         .route("/api/admin/devices", get(admin_devices))
         .route("/api/admin/devices/{id}", delete(admin_revoke))
@@ -692,6 +693,21 @@ async fn admin_update(
     controller
         .request_now()
         .map_err(|message| ApiError::new(StatusCode::CONFLICT, "update_busy", message))?;
+    Ok(Json(serde_json::json!({ "accepted": true })))
+}
+
+/// 新しい版を今すぐ確かめてもらい、当てるのは更新の時間帯に任せる。デスクトップ版が自動で頼む。
+async fn admin_update_scheduled(
+    State(ctx): State<Ctx>,
+    headers: AdminHeaders,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&ctx, &headers)?;
+    let controller = ctx.update.get().ok_or(ApiError::new(
+        StatusCode::CONFLICT,
+        "not_managed",
+        "このサーバーは自分では更新できません。piep-server install で置いてください",
+    ))?;
+    controller.request_in_window();
     Ok(Json(serde_json::json!({ "accepted": true })))
 }
 

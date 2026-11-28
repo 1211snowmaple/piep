@@ -924,7 +924,17 @@ impl UpdateController {
 
     /// 今すぐ確かめて当てる。時間帯を待たない。
     pub fn request_now(&self) -> Result<(), &'static str> {
-        self.reserve_check(true)
+        self.reserve_check(true)?;
+        self.requested.notify_one();
+        Ok(())
+    }
+
+    /// 次の周期を待たずに確かめ、取ってきた版は時間帯に当てる。デスクトップ版が自分の更新に
+    /// 合わせて頼む。確かめや待機がもう進んでいれば、それに任せる。
+    pub fn request_in_window(&self) {
+        if self.reserve_check(false).is_ok() {
+            self.requested.notify_one();
+        }
     }
 
     fn reserve_check(&self, immediate: bool) -> Result<(), &'static str> {
@@ -936,9 +946,6 @@ impl UpdateController {
             _ => return Err(UPDATE_BUSY),
         }
         operation.immediate = immediate;
-        if immediate {
-            self.requested.notify_one();
-        }
         Ok(())
     }
 
@@ -1156,10 +1163,10 @@ impl UpdateController {
             let now = tokio::select! {
                 _ = self.requested.notified() => {
                     let operation = self.operation();
-                    if !matches!(operation.phase, UpdatePhase::Checking) || !operation.immediate {
+                    if !matches!(operation.phase, UpdatePhase::Checking) {
                         continue;
                     }
-                    true
+                    operation.immediate
                 }
                 _ = tokio::time::sleep(delay) => {
                     if self.reserve_check(false).is_err() {
@@ -1447,6 +1454,29 @@ mod tests {
             controller.stop_for(AfterStop::RollBack("1.0.0".into())),
             Err(UPDATE_BUSY.into())
         );
+    }
+
+    #[test]
+    fn a_scheduled_request_checks_now_but_leaves_applying_to_the_window() {
+        let (_root, paths) = history_paths();
+        let controller = UpdateController::new(
+            paths,
+            UpdateSource::fixed(),
+            UpdateConfig::default(),
+            Box::new(|| {}),
+        )
+        .unwrap();
+        controller.request_in_window();
+        assert!(matches!(controller.status().phase, UpdatePhase::Checking));
+        assert!(!controller.operation().immediate);
+
+        // 時間帯を待っている更新に重ねて頼んでも、今すぐには変わらない。
+        controller.operation().phase = UpdatePhase::Waiting("2.0.0".into());
+        controller.request_in_window();
+        assert!(!controller.operation().immediate);
+        // 手で「今すぐ」と頼めば、待っている更新を早められる。
+        controller.request_now().unwrap();
+        assert!(controller.operation().immediate);
     }
 
     #[tokio::test]

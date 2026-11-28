@@ -621,6 +621,18 @@ async fn the_public_side_refuses_what_it_should() {
         .await
         .unwrap();
     assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let scheduled_url = format!("{url}/api/admin/update/scheduled");
+    assert_eq!(
+        client.post(&scheduled_url).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let scheduled = client
+        .post(&scheduled_url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(scheduled.status(), StatusCode::CONFLICT);
     assert_eq!(
         client
             .get(format!("{url}/secret"))
