@@ -14,10 +14,6 @@ const USAGE: &str = concat!(
     "  acquisition <棚> <取得UUID>\n",
     "  source-state <棚> <対象UUID>\n",
     "  saved-searches <棚> <利用者UUID>\n",
-    "  job-history <棚> [前のページ末尾のジョブUUID]\n",
-    "  job-history-items <棚> <ジョブUUID> [前のページ末尾のsequence]\n",
-    "  job-history-logs <棚> <ジョブUUID> [前のページ末尾のsequence]\n",
-    "  job-history-payload <棚> <ジョブUUID> <項目UUID>\n",
     "  resources <棚> <対象UUID> snapshot|edit <保存状態UUID>\n",
     "  reader <棚> <対象UUID> snapshot|edit <保存状態UUID>\n",
     "  export-resource <棚> <対象UUID> snapshot|edit <保存状態UUID> ",
@@ -43,10 +39,6 @@ enum Command {
     Acquisition,
     SourceState,
     SavedSearches,
-    JobHistory,
-    JobHistoryItems,
-    JobHistoryLogs,
-    JobHistoryPayload,
     Resources,
     Reader,
     ExportResource,
@@ -70,9 +62,7 @@ impl Command {
             | Self::SavedSearches
             | Self::Backup
             | Self::SemanticSync => 2..=2,
-            Self::JobHistory => 1..=2,
-            Self::JobHistoryItems | Self::JobHistoryLogs => 2..=3,
-            Self::JobHistoryPayload | Self::VerifyTransfer | Self::ExportOriginal => 3..=3,
+            Self::VerifyTransfer | Self::ExportOriginal => 3..=3,
             Self::Resources | Self::Reader => 4..=4,
             Self::TransferManifest => 5..=6,
             Self::ExportResource => 6..=7,
@@ -152,39 +142,6 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&library.saved_searches(user)?)?
-            );
-        }
-        Command::JobHistory => {
-            let library = Library::open(Path::new(&args[2]))?;
-            let before = args.get(3).map(|s| LibraryId::parse_str(s)).transpose()?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&library.job_history_page(before, 100)?)?
-            );
-        }
-        Command::JobHistoryItems | Command::JobHistoryLogs => {
-            let library = Library::open(Path::new(&args[2]))?;
-            let job = LibraryId::parse_str(&args[3])?;
-            let after = args.get(4).map(|s| s.parse::<i64>()).transpose()?;
-            if matches!(command, Command::JobHistoryItems) {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&library.job_history_items(job, after, 100)?)?
-                );
-            } else {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&library.job_history_logs(job, after, 100)?)?
-                );
-            }
-        }
-        Command::JobHistoryPayload => {
-            let library = Library::open(Path::new(&args[2]))?;
-            let job = LibraryId::parse_str(&args[3])?;
-            let item = LibraryId::parse_str(&args[4])?;
-            println!(
-                "{}",
-                serde_json::to_string(&library.job_history_payload(job, item)?)?
             );
         }
         Command::Resources => {
@@ -422,10 +379,6 @@ mod tests {
             ("acquisition", 2),
             ("source-state", 2),
             ("saved-searches", 2),
-            ("job-history", 1),
-            ("job-history-items", 2),
-            ("job-history-logs", 2),
-            ("job-history-payload", 3),
             ("resources", 4),
             ("reader", 4),
             ("export-resource", 6),

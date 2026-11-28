@@ -1846,14 +1846,6 @@ pub fn get_child_webview_url(app: AppHandle) -> Result<String, String> {
     }
 }
 
-/// WebViewを非表示にする（メモリには残る）
-pub fn close_child_webview(app: AppHandle) -> Result<(), String> {
-    if let Some(existing) = app.get_webview("embedded_browser") {
-        existing.hide().map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
 /// WebViewを完全に破棄する（メモリから解放）
 pub fn destroy_child_webview(app: AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview("embedded_browser") {

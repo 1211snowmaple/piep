@@ -503,15 +503,6 @@ fn a_shipment_from_another_shelf_is_refused_and_an_interrupted_one_resumes() {
         ),
         Err(ShipError::Invalid(_))
     ));
-    again.abort(&resumed.shipment_id).unwrap();
-    assert!(!incoming(&paths).exists());
-    let restarted = ShelfShipments::new(paths.clone(), None);
-    assert_eq!(
-        restarted.result(&resumed.shipment_id).unwrap().state,
-        PublicationState::Rejected {
-            reason: Rejection::Canceled
-        }
-    );
 }
 
 #[test]
@@ -1118,24 +1109,23 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
     )
     .await
     .unwrap();
-    let aborted_id = opened["shipmentId"].as_str().unwrap();
-    let aborted = reqwest::Client::new()
-        .delete(format!(
-            "{}/api/admin/shelf/shipments/{aborted_id}",
-            remote.url
-        ))
-        .bearer_auth(&admin.token)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(aborted.status(), reqwest::StatusCode::NO_CONTENT);
+    let shipment_id = opened["shipmentId"].as_str().unwrap();
+    let result = admin_get(
+        &clients,
+        &remote,
+        &admin.token,
+        &format!("shelf/shipments/{shipment_id}"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["shipmentId"], shipment_id);
+    assert_eq!(result["state"], "receiving");
 
     let audit = admin_get(&clients, &remote, &admin.token, "audit?kind=library")
         .await
         .unwrap();
     let audit = audit.as_array().unwrap();
     let expected = [
-        ("棚の受け取りを中止", "デスクトップ版"),
         ("棚の受け取りを開始", "デスクトップ版"),
         ("棚を読む許可の変更", "デスクトップ版"),
         ("棚を公開", "サーバー"),
@@ -1153,9 +1143,9 @@ async fn the_desktop_sends_its_shelf_over_http_and_only_changed_parts_go_the_sec
         assert_eq!(row["actor"], actor);
         assert_eq!(row["ok"], true);
     }
-    assert_eq!(audit[0]["detail"], format!("送信 ID {aborted_id}"));
-    assert_eq!(audit[2]["detail"], format!("端末 {}・切", phone.device_id));
-    assert_eq!(audit[6]["detail"], format!("端末 {}・入", phone.device_id));
+    assert_eq!(audit[0]["detail"], format!("送信 ID {shipment_id}"));
+    assert_eq!(audit[1]["detail"], format!("端末 {}・切", phone.device_id));
+    assert_eq!(audit[5]["detail"], format!("端末 {}・入", phone.device_id));
     drop(shelf);
     stop(serving).await;
 }

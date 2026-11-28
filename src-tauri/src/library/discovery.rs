@@ -138,7 +138,7 @@ impl Library {
         let prepared = finding
             .map(|(_, value)| -> Result<super::repository::PreparedFile> {
                 let bytes = serde_json::to_vec(value)?;
-                if bytes.len() as u64 > super::job_history::MAX_JOB_PAYLOAD_BYTES {
+                if bytes.len() as u64 > super::execution_payload::MAX_JOB_PAYLOAD_BYTES {
                     return Err(Error::Unsupported(
                         "候補が読み込み上限を超えています".into(),
                     ));
@@ -273,7 +273,7 @@ impl Library {
                 .map_err(|_| Error::Integrity("候補の原本識別子が不正です".into()))?,
         );
         let file = Self::file_from_conn(&conn, hash)?;
-        if file.length > super::job_history::MAX_JOB_PAYLOAD_BYTES {
+        if file.length > super::execution_payload::MAX_JOB_PAYLOAD_BYTES {
             return Err(Error::Unsupported(
                 "候補の原本が読み込み上限を超えています".into(),
             ));
@@ -319,7 +319,7 @@ impl Library {
             _ => return Err(Error::Integrity("候補の種類が不正です".into())),
         };
         if input.title.chars().count() > 2000
-            || input.payload.len() as u64 > super::job_history::MAX_JOB_PAYLOAD_BYTES
+            || input.payload.len() as u64 > super::execution_payload::MAX_JOB_PAYLOAD_BYTES
         {
             return Err(Error::Unsupported(
                 "候補が読み込み上限を超えています".into(),
@@ -494,7 +494,7 @@ impl Library {
                 ),
             )?;
             let mut bytes = Vec::new();
-            if file.length > super::job_history::MAX_JOB_PAYLOAD_BYTES {
+            if file.length > super::execution_payload::MAX_JOB_PAYLOAD_BYTES {
                 return Err(Error::Unsupported(
                     "候補の原本が読み込み上限を超えています".into(),
                 ));

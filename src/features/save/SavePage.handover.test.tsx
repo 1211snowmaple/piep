@@ -12,7 +12,6 @@ const browserApi = vi.hoisted(() => ({
   setEmbeddedBrowserVisible: vi.fn().mockResolvedValue(true),
   navigateEmbeddedBrowser: vi.fn().mockResolvedValue(undefined),
   getEmbeddedBrowserUrl: vi.fn().mockResolvedValue("https://www.pixiv.net/"),
-  closeEmbeddedBrowser: vi.fn().mockResolvedValue(undefined),
   destroyEmbeddedBrowser: vi.fn().mockResolvedValue(undefined),
   goBackEmbeddedBrowser: vi.fn().mockResolvedValue(undefined),
   goForwardEmbeddedBrowser: vi.fn().mockResolvedValue(undefined),

@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { discoverySuggestion } from "./discoveryTestData";
 
-const api = vi.hoisted(() => ({ listCollectionSuggestions: vi.fn(), acceptCollectionSuggestion: vi.fn(), rejectCollectionSuggestion: vi.fn(), dismissCollectionSuggestion: vi.fn(), shelfContent: vi.fn(), navigate: vi.fn(), suggestionNameOverride: (proposed: string, selected: string) => proposed === selected ? undefined : selected }));
+const api = vi.hoisted(() => ({ listCollectionSuggestions: vi.fn(), acceptCollectionSuggestion: vi.fn(), rejectCollectionSuggestion: vi.fn(), shelfContent: vi.fn(), navigate: vi.fn(), suggestionNameOverride: (proposed: string, selected: string) => proposed === selected ? undefined : selected }));
 vi.mock("@/services/collectionApi", () => api);
 vi.mock("@/services/dbApi", () => ({ isTauriRuntime: () => true, getAssetUrl: (path: string) => path }));
 vi.mock("@/services/shelfApi", () => ({ shelfContent: api.shelfContent, shelfFileUrl: (path: string) => path }));
@@ -75,7 +75,6 @@ describe("SuggestionInbox", () => {
     await userEvent.click(screen.getByRole("button", { name: "保留 1" }));
     expect(screen.getByRole("heading", { name: "雨の連作" })).toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: "作品2を含める" })).not.toBeChecked();
-    expect(api.dismissCollectionSuggestion).not.toHaveBeenCalled();
     expect(api.rejectCollectionSuggestion).not.toHaveBeenCalled();
   });
 

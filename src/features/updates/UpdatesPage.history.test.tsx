@@ -4,7 +4,21 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 
-const mocks = vi.hoisted(() => ({ select: vi.fn(), items: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  select: vi.fn(),
+  items: vi.fn(),
+  loadJobs: vi.fn().mockResolvedValue(undefined),
+  shelfReady: false,
+  emptyQueue: false,
+}));
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@tauri-apps/api/core")>(),
+  invoke: () => new Promise(() => {}),
+}));
+vi.mock("@/features/library/shelf", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/features/library/shelf")>(),
+  useShelfStatus: () => ({ data: mocks.shelfReady ? { state: "ready" } : undefined }),
+}));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
@@ -24,7 +38,12 @@ vi.mock("@/features/updates/updateJobs", async (importOriginal) => {
     candidateCount: 0, savedCount: 0, errorCount: 0, heldCount: 7,
     activeLabel: "完了しました", startedAt: "2026-10-07T10:32:14Z", updatedAt: "2026-10-07T10:32:25Z", finishedAt: "2026-10-07T10:32:25Z",
   };
-  return { ...original, useUpdateJobs: () => ({ jobs: [summary], activeSnapshot: { ...summary, logs: [], candidates: [], nextCandidateCursor: null, previousLogCursor: null }, selectJob: mocks.select }) };
+  return { ...original, useUpdateJobs: () => ({
+    jobs: mocks.emptyQueue ? [] : [summary],
+    activeSnapshot: mocks.emptyQueue ? null : { ...summary, logs: [], candidates: [], nextCandidateCursor: null, previousLogCursor: null },
+    selectJob: mocks.select,
+    loadJobs: mocks.loadJobs,
+  }) };
 });
 vi.mock("@/features/updates/useUpdateScheduler", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/features/updates/useUpdateScheduler")>()),
@@ -36,6 +55,22 @@ vi.mock("@/features/updates/updateSchedule", async (importOriginal) => ({
   loadSchedule: async () => ({ enabled: false, mode: "check_only", watchSaved: false }),
 }));
 import UpdatesPage from "./UpdatesPage";
+
+it("棚を開いたら現在の履歴を読み直し、空の履歴をすぐ表示する", async () => {
+  mocks.shelfReady = true;
+  mocks.emptyQueue = true;
+  mocks.loadJobs.mockClear();
+  window.location.hash = "#/updates";
+  try {
+    render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><AppRouter><UpdatesPage /></AppRouter></QueryClientProvider></MantineProvider>);
+    fireEvent.click(screen.getByRole("tab", { name: /履歴/ }));
+    expect(screen.getByText("履歴はまだありません")).toBeVisible();
+    await waitFor(() => expect(mocks.loadJobs).toHaveBeenCalled());
+  } finally {
+    mocks.shelfReady = false;
+    mocks.emptyQueue = false;
+  }
+});
 
 it("opens the selected history run's result and its job-only holds", async () => {
   mocks.select.mockResolvedValue({ jobId: "job-history-review" });

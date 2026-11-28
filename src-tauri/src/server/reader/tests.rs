@@ -204,10 +204,10 @@ fn capture(key: &str, bytes: Option<&[u8]>) -> Capture {
 async fn one_device_cannot_take_every_reader_and_a_short_wait_comes_before_refusing() {
     let server = Server::start().await;
     let saved = save(&server.library, capture("one", Some(b"image")));
-    let path = format!(
-        "{}/manifest?slot=cover",
-        server.resource(saved.entity_id, saved.snapshot_id)
-    );
+    let path = server.shelf(&format!(
+        "/entities/{}/views/snapshot/{}/bundle",
+        saved.entity_id, saved.snapshot_id
+    ));
     let mut held = Vec::new();
     for _ in 0..READERS_PER_DEVICE {
         held.push(read_permit(&server.context, "phone").await.unwrap());
@@ -257,15 +257,17 @@ async fn raw_response_archives_are_not_exposed_by_the_reader_gateway() {
         .library
         .resource_manifest(saved.entity_id, ResourceScope::Snapshot(saved.snapshot_id))
         .unwrap();
-    let observation = resources
+    let (observation, file) = resources
         .resources
         .iter()
         .find_map(|info| match info.reference {
-            ResourceReference::Original { observation } => Some(observation),
+            ResourceReference::Original { observation } => {
+                Some((observation, info.file.as_ref()?.id))
+            }
             _ => None,
         })
         .unwrap();
-    let path=format!("/api/libraries/{}/entities/{}/views/snapshot/{}/resources/original/manifest?observation={observation}",server.library.id,saved.entity_id,saved.snapshot_id);
+    let path=format!("/api/libraries/{}/entities/{}/views/snapshot/{}/resources/original/files/{file}/chunks/0?observation={observation}",server.library.id,saved.entity_id,saved.snapshot_id);
     assert_eq!(
         server.get(&path).send().await.unwrap().status(),
         StatusCode::FORBIDDEN
@@ -327,7 +329,10 @@ async fn transfer_roundtrips_and_every_read_rechecks_authority_and_ownership() {
     let foreign = save(&server.library, capture("two", None));
     let resource = server.resource(saved.entity_id, saved.snapshot_id);
     let response = server
-        .get(&format!("{resource}/manifest?slot=cover"))
+        .get(&server.shelf(&format!(
+            "/entities/{}/views/snapshot/{}/bundle",
+            saved.entity_id, saved.snapshot_id
+        )))
         .send()
         .await
         .unwrap();
@@ -338,11 +343,20 @@ async fn transfer_roundtrips_and_every_read_rechecks_authority_and_ownership() {
         "private, no-cache, no-transform"
     );
     let bytes = response.bytes().await.unwrap();
-    let transfer = protocol::ValidatedTransfer::parse(&bytes).unwrap();
-    let path = format!(
-        "{resource}/files/{}/chunks/0?slot=cover",
-        transfer.file().id
-    );
+    let bundle = protocol::ReaderBundle::parse(&bytes).unwrap();
+    let file = bundle
+        .files
+        .iter()
+        .find(|item| {
+            item.resource
+                == (protocol::ResourceReference::Media {
+                    slot: "cover".into(),
+                })
+        })
+        .unwrap()
+        .file
+        .to_content_file();
+    let path = format!("{resource}/files/{}/chunks/0?slot=cover", file.id);
     let response = server
         .get(&path)
         .header(header::IF_NONE_MATCH, "*")
@@ -358,7 +372,7 @@ async fn transfer_roundtrips_and_every_read_rechecks_authority_and_ownership() {
         .contains("immutable"));
     let encoded = response.bytes().await.unwrap();
     assert_eq!(
-        piep_storage::decode_chunk(&encoded, &transfer.file().chunks[0]).unwrap(),
+        piep_storage::decode_chunk(&encoded, &file.chunks[0]).unwrap(),
         original
     );
     let wrong = path.replace(&saved.entity_id.to_string(), &foreign.entity_id.to_string());
@@ -367,7 +381,7 @@ async fn transfer_roundtrips_and_every_read_rechecks_authority_and_ownership() {
         StatusCode::NOT_FOUND
     );
     let wrong = path.replace(
-        &transfer.file().id.to_string(),
+        &file.id.to_string(),
         &crate::library::Fingerprint::of(b"other").to_string(),
     );
     assert_eq!(
@@ -476,6 +490,12 @@ async fn one_bundle_describes_every_readable_file_and_each_chunk_comes_back_thro
     }
 }
 
+async fn read_bundle(server: &Server, view: &str) -> protocol::ReaderBundle {
+    let response = server.get(&format!("{view}/bundle")).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    protocol::ReaderBundle::parse(&response.bytes().await.unwrap()).unwrap()
+}
+
 #[tokio::test]
 async fn removing_a_work_hides_its_saved_view_without_hiding_shared_chunks() {
     let server = Server::start().await;
@@ -500,39 +520,44 @@ async fn removing_a_work_hides_its_saved_view_without_hiding_shared_chunks() {
         format!("{removed_view}/bundle"),
         server.shelf(&format!("/works/{}/cover", removed.entity_id)),
     ];
-    let mut descriptors = Vec::new();
-    for (kind, query) in [
-        ("body", ""),
-        ("media", "?slot=cover"),
-        ("file", "?slot=appendix"),
-    ] {
-        let resource = format!("{removed_view}/resources/{kind}");
-        let manifest = format!("{resource}/manifest{query}");
-        let response = server.get(&manifest).send().await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "{manifest}");
-        let transfer =
-            protocol::ValidatedTransfer::parse(&response.bytes().await.unwrap()).unwrap();
-        let chunk = format!("{resource}/files/{}/chunks/0{query}", transfer.file().id);
-        paths.extend([manifest, chunk]);
-        descriptors.push(transfer);
+    let removed_bundle = read_bundle(&server, &removed_view).await;
+    let kept_view = view(&kept);
+    let kept_bundle = read_bundle(&server, &kept_view).await;
+    let mut removed_cover = None;
+    for item in removed_bundle.files {
+        let (kind, query) = match item.resource {
+            protocol::ResourceReference::Body => ("body", String::new()),
+            protocol::ResourceReference::Media { slot } => {
+                removed_cover = Some(item.file.to_content_file());
+                ("media", format!("?slot={slot}"))
+            }
+            protocol::ResourceReference::File { slot } => ("file", format!("?slot={slot}")),
+            other => panic!("読書に使わない資産: {other:?}"),
+        };
+        paths.push(format!(
+            "{removed_view}/resources/{kind}/files/{}/chunks/0{query}",
+            item.file.id.get()
+        ));
     }
-
-    let kept_resource = format!("{}/resources/media", view(&kept));
-    let response = server
-        .get(&format!("{kept_resource}/manifest?slot=cover"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let shared = protocol::ValidatedTransfer::parse(&response.bytes().await.unwrap()).unwrap();
-    assert_eq!(shared.file().id, descriptors[1].file().id);
-    assert_eq!(
-        shared.file().chunks[0].id,
-        descriptors[1].file().chunks[0].id
-    );
+    assert_eq!(paths.len(), 5);
+    let shared = kept_bundle
+        .files
+        .iter()
+        .find(|item| {
+            item.resource
+                == (protocol::ResourceReference::Media {
+                    slot: "cover".into(),
+                })
+        })
+        .unwrap()
+        .file
+        .to_content_file();
+    let removed_cover = removed_cover.unwrap();
+    assert_eq!(shared.id, removed_cover.id);
+    assert_eq!(shared.chunks[0].id, removed_cover.chunks[0].id);
     let kept_chunk = format!(
-        "{kept_resource}/files/{}/chunks/0?slot=cover",
-        shared.file().id
+        "{kept_view}/resources/media/files/{}/chunks/0?slot=cover",
+        shared.id
     );
 
     for path in paths.iter().chain(std::iter::once(&kept_chunk)) {
@@ -550,8 +575,7 @@ async fn removing_a_work_hides_its_saved_view_without_hiding_shared_chunks() {
     let response = server.get(&kept_chunk).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        piep_storage::decode_chunk(&response.bytes().await.unwrap(), &shared.file().chunks[0])
-            .unwrap(),
+        piep_storage::decode_chunk(&response.bytes().await.unwrap(), &shared.chunks[0]).unwrap(),
         cover
     );
     let mut unexpected = Vec::new();
@@ -572,8 +596,9 @@ async fn missing_resources_invalid_parameters_and_wrong_libraries_do_not_fall_ba
     let server = Server::start().await;
     let saved = save(&server.library, capture("one", None));
     let path = format!(
-        "{}/manifest?slot=cover",
-        server.resource(saved.entity_id, saved.snapshot_id)
+        "{}/files/{}/chunks/0?slot=cover",
+        server.resource(saved.entity_id, saved.snapshot_id),
+        crate::library::Fingerprint::of(b"missing")
     );
     assert_eq!(
         server.get(&path).send().await.unwrap().status(),
@@ -723,91 +748,6 @@ async fn provider_keys_resolve_to_the_current_reading_view_only_while_on_the_she
     server.authority.active.store(false, Ordering::SeqCst);
     assert_eq!(
         server.get(&url).send().await.unwrap().status(),
-        StatusCode::UNAUTHORIZED
-    );
-}
-
-#[tokio::test]
-async fn the_works_list_pages_tied_dates_and_keeps_cursors_with_the_reader_and_epoch() {
-    let server = Server::start().await;
-    let north = save(&server.library, capture("north", None));
-    let south = save(&server.library, capture("south", None));
-    let removed = save(&server.library, capture("removed", None));
-    server
-        .library
-        .remove_work(uuid::Uuid::now_v7(), removed.entity_id, 1)
-        .unwrap();
-    let route = format!("/api/libraries/{}/works", server.library.id);
-    let first = format!("{route}?limit=1");
-    let response = server
-        .get(&first)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-    assert_eq!(response.headers()[header::VARY], "Authorization");
-    assert_eq!(
-        response.headers()["x-piep-sync-epoch"],
-        server.context.sync_epoch.get().to_string()
-    );
-    let page: protocol::ReaderWorkPage = response.json().await.unwrap();
-    assert_eq!(page.items.len(), 1);
-    let item = &page.items[0];
-    assert_eq!(
-        item.view.entity_id.get(),
-        north.entity_id.max(south.entity_id)
-    );
-    assert_eq!(item.provider, "pixiv");
-    assert_eq!(item.title, item.key);
-    let cursor = page.next.unwrap();
-    let second = format!("{first}&after={cursor}");
-    let last: protocol::ReaderWorkPage = server
-        .get(&second)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(last.items.len(), 1);
-    assert_eq!(
-        last.items[0].view.entity_id.get(),
-        north.entity_id.min(south.entity_id)
-    );
-    assert!(last.next.is_none());
-    let stale = second.replace(
-        &server.context.sync_epoch.get().to_string(),
-        &uuid::Uuid::now_v7().to_string(),
-    );
-    assert_eq!(
-        server.get(&stale).send().await.unwrap().status(),
-        StatusCode::CONFLICT
-    );
-    assert_eq!(
-        server
-            .get_as(&second, "second")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::CONFLICT
-    );
-    for path in [
-        format!("{route}?limit=0"),
-        format!("{route}?limit=51"),
-        format!("{first}&after=broken"),
-    ] {
-        assert_eq!(
-            server.get(&path).send().await.unwrap().status(),
-            StatusCode::BAD_REQUEST
-        );
-    }
-    server.authority.active.store(false, Ordering::SeqCst);
-    assert_eq!(
-        server.get(&route).send().await.unwrap().status(),
         StatusCode::UNAUTHORIZED
     );
 }
@@ -1486,17 +1426,6 @@ async fn edit_reads_are_limited_to_the_subjects_published_and_archived_views() {
             .await
             .unwrap();
         assert_eq!(view.edit_id, Some(Id::new(expected).unwrap()));
-        let list: protocol::ReaderWorkPage = server
-            .get_as(&format!("{shelf}/works"), token)
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(list.items[0].view, view);
     }
 
     let edit_path = |edit| format!("{shelf}/entities/{}/views/edit/{edit}", saved.entity_id);
@@ -1512,7 +1441,6 @@ async fn edit_reads_are_limited_to_the_subjects_published_and_archived_views() {
             .unwrap();
         [
             format!("{view}/bundle"),
-            format!("{view}/resources/body/manifest"),
             format!(
                 "{view}/resources/body/files/{}/chunks/0",
                 descriptor.file.id.get()
@@ -1999,12 +1927,10 @@ async fn removing_a_work_hides_it_from_lists_search_and_group_pages() {
                 .remove_work(uuid::Uuid::now_v7(), removed, 1)
                 .unwrap();
         }
-        let page: protocol::ReaderWorkPage = server.read("/works", "fixture").await;
+        let page = shelf_page(server.search(json!({})).send().await.unwrap()).await;
         assert_eq!(page.items.len(), if on_shelf { 3 } else { 2 });
         assert_eq!(
-            page.items
-                .iter()
-                .any(|work| work.view.entity_id.get() == removed),
+            page.items.iter().any(|work| work.id == removed.to_string()),
             on_shelf
         );
 

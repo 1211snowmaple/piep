@@ -10,9 +10,9 @@ mod discovery;
 mod editing;
 mod execution;
 pub use execution::ExecutionMetadata;
+mod execution_payload;
 mod identity;
 mod integrity;
-mod job_history;
 mod operations;
 mod partial;
 pub use partial::{PartTransfer, PART_MARKER};
@@ -61,7 +61,6 @@ pub use catalogue::{CollectionInfo, CollectionMember, CollectionSave};
 pub use editing::{EditBlock, EditContent, EditInfo, EditMedia, EditState};
 pub use identity::{cover_identity, image_identity, Fingerprint, LibraryId};
 pub(crate) use identity::{is_pixiv_placeholder_image, masked_pixiv_metadata};
-pub use job_history::{JobHistory, JobHistoryItem, JobHistoryLog};
 pub use operations::{EditPointerChange, EditRequest, SnapshotInfo, UserState, UserStateChange};
 pub use reader::{
     ReaderBinding, ReaderBindingSet, ReaderBody, ReaderDocument, ResolvedReaderBinding,

@@ -36,7 +36,7 @@ import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
 import { updateJobStatusMeta, invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { DeferredCandidatesPanel } from "./DeferredCandidatesPanel";
-import { StoredJobHistoryPanel } from "./StoredJobHistoryPanel";
+import { useShelfStatus } from "@/features/library/shelf";
 import { UpdateWorkLinks } from "./UpdateWorkLinks";
 import { UpdateStatusBadge } from "./UpdateStatusBadge";
 import { heldAcquisitionKind, heldReason, summarizeUpdateJobItems, updateJobSubject } from "./updateJobOutcome";
@@ -105,6 +105,12 @@ export default function UpdatesPage() {
   const workId = parseWorkId(searchParams.get("work"));
   const queryClient = useQueryClient();
   const updateJobs = useUpdateJobs(undefined, runtime);
+  const shelf = useShelfStatus(runtime);
+  const shelfReady = runtime && shelf.data?.state === "ready";
+  const { loadJobs } = updateJobs;
+  useEffect(() => {
+    if (shelfReady) void loadJobs().catch((error) => console.error("現在の実行記録を読み直せません", error));
+  }, [shelfReady, loadJobs]);
   // 確認が終わったら OS の通知で知らせる。画面を見ていないときのための足。
   useUpdateJobNotifications(runtime ? updateJobs.activeSnapshot : null, runtime);
   const [previewSnapshot, setPreviewSnapshot] = useState<UpdateJobSnapshot>(demoSnapshot);
@@ -301,7 +307,7 @@ export default function UpdatesPage() {
   const clearFinishedJobsMutation = useMutation({
     mutationFn: async () => {
       if (!runtime) return 0;
-      const removed = await clearFinishedUpdateJobsCommand(false);
+      const removed = await clearFinishedUpdateJobsCommand();
       await updateJobs.loadJobs();
       return removed;
     },
@@ -655,7 +661,7 @@ export default function UpdatesPage() {
         </Tabs.Panel>
 
         <Tabs.Panel value="history" pt="lg">
-          <StoredJobHistoryPanel runtime={runtime} hasCurrent={jobs.length > 0} onShelfReady={updateJobs.loadJobs} current={<JobHistoryPanel
+          <JobHistoryPanel
             jobs={jobs}
             activeJobId={activeSnapshot?.jobId ?? null}
             finishedCount={finishedJobCount}
@@ -669,7 +675,7 @@ export default function UpdatesPage() {
             }}
             onClear={(jobId) => clearJobMutation.mutate(jobId)}
             onClearFinished={confirmClearFinishedJobs}
-          />} />
+          />
         </Tabs.Panel>
 
         <Tabs.Panel value="schedule" pt="lg">

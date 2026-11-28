@@ -19,7 +19,7 @@ MANUAL = ["経路", "場面", "使われ方", "状態"]
 
 def tracked(*paths: str) -> list[str]:
     out = subprocess.run(["git", "ls-files", "-z", "--", *paths], check=True, capture_output=True).stdout
-    return [f for f in out.decode("utf-8").split("\0") if f]
+    return [f for f in out.decode("utf-8").split("\0") if f and Path(f).is_file()]
 
 
 def read(path: str) -> str:

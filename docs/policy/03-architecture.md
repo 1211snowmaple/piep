@@ -62,9 +62,9 @@ Tauri の外（ブラウザでの開発）でモックに差し替えられる�
 
 | 境界 | 数 | 繋ぎ方 | 生成した一覧 |
 |---|---:|---|---|
-| コマンド | <!--stat:commands.total-->192<!--/stat--> | `invoke("名前")` | [IPC コマンド契約](../reference/ipc.md) |
+| コマンド | <!--stat:commands.total-->185<!--/stat--> | `invoke("名前")` | [IPC コマンド契約](../reference/ipc.md) |
 | イベント | <!--stat:events.total-->12<!--/stat-->種 | `emit` / `subscribeTauriEvent` | [イベント契約](../reference/events.md) |
-| 棚の台帳 | <!--stat:tables.total-->79<!--/stat-->テーブル | SQL の文字列 | [スキーマ](../reference/schema.md) |
+| 棚の台帳 | <!--stat:tables.total-->75<!--/stat-->テーブル | SQL の文字列 | [スキーマ](../reference/schema.md) |
 
 この三つはソースから自動で抽出し、**両側の食い違いを CI で検査している**。
 フロントが呼ぶ名前の実体が Rust に無ければビルドが落ちる。

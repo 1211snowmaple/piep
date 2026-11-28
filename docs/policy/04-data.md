@@ -225,7 +225,6 @@ URL の形に限り、大きさの指定・原寸か master か・変換の末�
 | --- | --- |
 | 棚の作成・一覧・検証 | `init`、`list`（最大 1,000 件）、`verify` |
 | 提案・取得・取得元の状態・保存した検索の確認 | `suggestion`、`acquisition`、`source-state`、`saved-searches` |
-| ジョブの履歴・項目・記録・項目の内容の確認 | `job-history`、`job-history-items`、`job-history-logs`、`job-history-payload` |
 | 資産・本文の確認、書き出し、転送記録の生成と検証 | `resources`、`reader`、`export-resource`、`transfer-manifest`、`verify-transfer` |
 | バックアップ・実体の回収・原本の復元 | `backup`、`reclaim`、`export-original` |
 | 意味検索の索引の同期と、アプリと同じ手順での棚・索引・検索の確認 | `semantic-sync`、`app-open` |

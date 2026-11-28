@@ -1526,7 +1526,6 @@ mod tests {
         };
         let response = open().await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body: serde_json::Value = response.json().await.unwrap();
 
         let version = "1.0.1";
         controller.reserve_check(false).unwrap();
@@ -1535,9 +1534,9 @@ mod tests {
         assert!(!controller
             .stop_when_quiet(Some(&shipments), &after)
             .unwrap());
-        shipments
-            .abort(body["shipmentId"].as_str().unwrap())
-            .unwrap();
+        // 再起動後に受け取りが残っていない状態を用意する。
+        fs::remove_dir_all(controller.paths.root.join("shelf-incoming")).unwrap();
+        let shipments = ShelfShipments::new(controller.paths.clone(), None);
         let opening = controller
             .shipment_access
             .get()

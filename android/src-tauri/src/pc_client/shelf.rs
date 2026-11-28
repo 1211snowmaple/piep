@@ -4,8 +4,8 @@ use super::{
     SavedConnection, bounded_response_bytes, check_response,
 };
 use piep_library_protocol::{
-    Id, LibraryIdentity, MAX_IDENTITY_BYTES, MAX_MANIFEST_BYTES, ReaderBundle, ReaderWorkPage,
-    ResourceReference, ResourceScope, WorkReadingView,
+    Id, LibraryIdentity, MAX_IDENTITY_BYTES, MAX_MANIFEST_BYTES, ReaderBundle, ResourceReference,
+    ResourceScope, WorkReadingView,
 };
 use piep_mobile_api::{
     MobileCollection, MobileCollectionDetail, MobileCollectionPage, MobileEntityDetail,
@@ -522,39 +522,6 @@ pub(super) async fn work_detail(
     .await
 }
 
-#[tauri::command]
-pub async fn pc_works(
-    state: State<'_, PcClientState>,
-    scope: ShelfScope,
-    after: Option<String>,
-) -> Result<ReaderWorkPage, ClientError> {
-    let mut endpoint = format!("/api/libraries/{}/works", scope.library_id.get());
-    if let Some(after) = after {
-        if after.is_empty() || after.len() > 256 {
-            return Err(ClientError::remote());
-        }
-        let query = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("after", &after)
-            .finish();
-        endpoint.push('?');
-        endpoint.push_str(&query);
-    }
-    read(&state, scope, &endpoint, |bytes| {
-        let page: ReaderWorkPage =
-            serde_json::from_slice(bytes).map_err(|_| ClientError::protocol())?;
-        if page.items.len() > 50
-            || page
-                .next
-                .as_ref()
-                .is_some_and(|after| after.is_empty() || after.len() > 256)
-        {
-            return Err(ClientError::protocol());
-        }
-        Ok(page)
-    })
-    .await
-}
-
 fn query(pairs: &[(&str, &str)]) -> String {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     for (name, value) in pairs {
@@ -979,16 +946,6 @@ pub(super) async fn chunk(
         |bytes| Ok(bytes.to_vec()),
     )
     .await
-}
-
-#[tauri::command]
-pub async fn pc_bundle(
-    state: State<'_, PcClientState>,
-    scope: ShelfScope,
-    entity: Id,
-    view: ResourceScope,
-) -> Result<ReaderBundle, ClientError> {
-    bundle(&state, scope, entity, view).await
 }
 
 #[cfg(test)]

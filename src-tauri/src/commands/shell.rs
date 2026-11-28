@@ -94,16 +94,6 @@ pub async fn open_managed_path(app: tauri::AppHandle, path: String) -> Result<()
         .map_err(|error| format!("この場所を開けません: {error}"))
 }
 
-/// 管理しているファイルを、起動せずにファイルマネージャー上で選択する。
-/// WebView へ opener の無制限 reveal 権限は渡さず、この検証を唯一の入口にする。
-#[tauri::command]
-pub async fn reveal_managed_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    let canonical = resolve_allowed_path(&app, &path)?;
-    app.opener()
-        .reveal_item_in_dir(&canonical)
-        .map_err(|error| format!("この場所をファイルマネージャーで表示できません: {error}"))
-}
-
 /// 配布しているのは Windows 版だけで、`resolve_allowed_path` は判定の前に
 /// `canonicalize` を通す。Windows の `canonicalize` が返すのは `\\?\C:\...`
 /// という verbatim 接頭辞つきのパスであって、`/app/data` のような形ではない。

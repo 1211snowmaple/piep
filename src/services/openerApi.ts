@@ -16,7 +16,3 @@ export function openExternalUrl(url: string): Promise<void> {
 export function openFilesystemPath(path: string): Promise<void> {
   return invoke<void>("open_managed_path", { path });
 }
-
-export function revealPathInFileManager(path: string): Promise<void> {
-  return invoke<void>("reveal_managed_path", { path });
-}

@@ -461,7 +461,6 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
              DROP TABLE edit_archive;
              DROP TABLE discovery_state;
              DROP TABLE discovery_summaries;
-             DROP TABLE job_history_visibility;
              DROP TABLE execution_logs;
              DROP TABLE ai_notes;
              DROP INDEX acquisition_attempt_entity;
@@ -487,6 +486,8 @@ fn an_older_shelf_lists_the_edits_nothing_points_to_or_builds_on() {
              DELETE FROM schema_migrations WHERE version>=18; PRAGMA user_version=17;",
         )
         .unwrap();
+        conn.execute_batch(include_str!("library/migration_008_job_history.sql"))
+            .unwrap();
     }
     drop(library);
     let library = Library::open(&temp.0).unwrap();

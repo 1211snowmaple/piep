@@ -175,20 +175,6 @@ pub(super) async fn commit(
     Ok((StatusCode::ACCEPTED, json(&status)?))
 }
 
-/// 受け取りをやめる。
-pub(super) async fn abort(
-    State(ctx): State<Ctx>,
-    headers: AdminHeaders,
-    UrlPath(id): UrlPath<String>,
-) -> Result<StatusCode, ApiError> {
-    require_admin(&ctx, &headers)?;
-    let shipments = shipments(&ctx)?;
-    let detail = format!("送信 ID {id}");
-    run(move || shipments.abort(&id)).await?;
-    audit(&ctx, &headers, "棚の受け取りを中止", detail).await;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReaderRequest {

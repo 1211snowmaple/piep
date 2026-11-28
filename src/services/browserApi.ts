@@ -62,10 +62,6 @@ export function readBrowserPageUserCandidates(browser: "embedded" | "standalone"
   return invoke<BrowserPageUsers>("read_browser_page_user_candidates", { browser, source });
 }
 
-export function closeEmbeddedBrowser(): Promise<void> {
-  return invoke<void>("close_embedded_browser");
-}
-
 export function destroyEmbeddedBrowser(): Promise<void> {
   return invoke<void>("destroy_embedded_browser");
 }
