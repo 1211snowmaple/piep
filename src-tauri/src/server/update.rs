@@ -11,18 +11,17 @@ use chrono::{DateTime, Local, NaiveTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{Cursor, Read, Seek, Write};
+use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Command;
 use tokio::sync::{watch, Mutex as AsyncMutex, Notify};
 
-/// この版のプログラムの版。更新の試験では組み立てるときに差し替える。
-pub const VERSION: &str = match option_env!("PIEP_SERVER_TEST_VERSION") {
-    Some(version) => version,
-    None => env!("CARGO_PKG_VERSION"),
-};
+/// このプログラムの版。
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 本体が「更新を当ててほしい」と見張り役へ伝える終了コード。
 pub const EXIT_APPLY_UPDATE: i32 = 75;
@@ -34,9 +33,6 @@ const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6ID
 const MANIFEST_URL: &str =
     "https://github.com/1211snowmaple/piep/releases/latest/download/latest-server.json";
 const DOWNLOAD_PREFIX: &str = "https://github.com/1211snowmaple/piep/releases/download/";
-
-/// `manifest_url|download_prefix|public_key`。試験の組み立てだけで効く。
-const TEST_SOURCE: Option<&str> = option_env!("PIEP_SERVER_TEST_SOURCE");
 
 const EXECUTABLE: &str = "piep-server.exe";
 /// zip の中で受け入れるファイル。これ以外があれば、その配布物は使わない。
@@ -54,6 +50,10 @@ const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 const PREPARED_PACKAGE: &str = ".prepared.zip";
+const PREVIOUS_DIRECTORY_PREFIX: &str = ".previous-";
+const VERSION_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_VERSION_OUTPUT_BYTES: u64 = 1024;
+static PACKAGE_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(5 * 60);
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -71,18 +71,6 @@ pub struct UpdateSource {
 
 impl UpdateSource {
     pub fn fixed() -> Self {
-        if let Some(text) = TEST_SOURCE {
-            let mut parts = text.split('|').map(str::to_string);
-            if let (Some(manifest_url), Some(download_prefix), Some(public_key)) =
-                (parts.next(), parts.next(), parts.next())
-            {
-                return Self {
-                    manifest_url,
-                    download_prefix,
-                    public_key,
-                };
-            }
-        }
         Self {
             manifest_url: MANIFEST_URL.into(),
             download_prefix: DOWNLOAD_PREFIX.into(),
@@ -351,21 +339,48 @@ pub fn verify_signature(public_key: &str, signature: &str, data: &[u8]) -> Resul
 
 /// CI が、できた配布物を組み込みの鍵で確かめる。
 pub fn verify_package_file(package: &Path, signature_file: &Path) -> Result<(), String> {
-    let data = fs::read(package).map_err(|error| format!("配布物を読めません: {error}"))?;
+    let data = read_package(package)?;
     let signature =
         fs::read_to_string(signature_file).map_err(|error| format!("署名を読めません: {error}"))?;
-    verify_signature(&UpdateSource::fixed().public_key, &signature, &data)
+    verify_signature(PUBLIC_KEY, &signature, &data)
 }
 
-/// zip を展開する。知らないファイルが 1 つでもあれば、配布物ごと受け入れない。
-fn extract_package(package: impl Read + Seek, destination: &Path) -> Result<(), String> {
+fn read_package(package: &Path) -> Result<Vec<u8>, String> {
+    let read_error = |error| format!("配布物を読めません: {error}");
+    let mut file = File::open(package).map_err(read_error)?;
+    let size = file.metadata().map_err(read_error)?.len();
+    if size > MAX_PACKAGE_BYTES {
+        return Err("新しいバージョンが大きすぎます".into());
+    }
+    let mut data = Vec::new();
+    data.try_reserve_exact(size as usize)
+        .map_err(|error| format!("配布物を読むためのメモリを確保できません: {error}"))?;
+    data.resize(size as usize, 0);
+    file.read_exact(&mut data).map_err(read_error)?;
+    if file.read(&mut [0]).map_err(read_error)? != 0 {
+        return Err("読み取り中に配布物の大きさが変わりました".into());
+    }
+    Ok(data)
+}
+
+/// 一時ディレクトリに展開し、版を照合する。失敗した展開は片付ける。
+fn extract_package(
+    package: impl Read + Seek,
+    staging: &Path,
+    check: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    fs::create_dir(staging).map_err(|error| format!("展開先を作れません: {error}"))?;
+    let result = unpack_package(package, staging).and_then(|()| check(staging));
+    if result.is_err() {
+        let _ = fs::remove_dir_all(staging);
+    }
+    result
+}
+
+/// 知らないファイルや大小文字だけが違う同名ファイルを受け入れない。
+fn unpack_package(package: impl Read + Seek, staging: &Path) -> Result<(), String> {
     let mut archive = zip::ZipArchive::new(package)
         .map_err(|error| format!("配布物を読み取れません: {error}"))?;
-    if destination.exists() {
-        fs::remove_dir_all(destination)
-            .map_err(|error| format!("展開先を空にできません: {error}"))?;
-    }
-    fs::create_dir_all(destination).map_err(|error| format!("展開先を作れません: {error}"))?;
     let mut total = 0_u64;
     let mut has_executable = false;
     for index in 0..archive.len() {
@@ -376,19 +391,22 @@ fn extract_package(package: impl Read + Seek, destination: &Path) -> Result<(), 
             .name()
             .map_err(|error| format!("配布物を読み取れません: {error}"))?
             .into_owned();
-        if !PACKAGE_FILES
-            .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(&name))
-        {
+        let canonical = name.to_ascii_lowercase();
+        if !PACKAGE_FILES.contains(&canonical.as_str()) {
             return Err(format!("配布物に知らないファイルがあります: {name}"));
         }
         total = total.saturating_add(entry.size());
         if total > MAX_EXTRACTED_BYTES {
             return Err("配布物が大きすぎます".into());
         }
-        has_executable |= name.eq_ignore_ascii_case(EXECUTABLE);
-        let mut output = File::create(destination.join(name.to_ascii_lowercase()))
-            .map_err(|error| format!("展開できません: {error}"))?;
+        let mut output = File::create_new(staging.join(&canonical)).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("配布物に同じ名前のファイルが複数あります: {name}")
+            } else {
+                format!("展開できません: {error}")
+            }
+        })?;
+        has_executable |= canonical == EXECUTABLE;
         std::io::copy(&mut entry, &mut output)
             .map_err(|error| format!("展開できません: {error}"))?;
     }
@@ -399,17 +417,109 @@ fn extract_package(package: impl Read + Seek, destination: &Path) -> Result<(), 
     }
 }
 
+fn recover_package_directory(previous: &Path, destination: &Path) -> std::io::Result<()> {
+    if destination.try_exists()? {
+        fs::remove_dir_all(previous)
+    } else {
+        fs::rename(previous, destination)
+    }
+}
+
+fn recover_package_directories(versions: &Path) -> std::io::Result<()> {
+    let entries = match fs::read_dir(versions) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if let Some(version) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(PREVIOUS_DIRECTORY_PREFIX))
+            .filter(|version| parse_version(version).is_some())
+        {
+            recover_package_directory(&entry.path(), &versions.join(version))?;
+        }
+    }
+    Ok(())
+}
+
+fn replace_package_directory(staging: &Path, destination: &Path) -> Result<(), String> {
+    let name = destination.file_name().expect("version directory");
+    let previous = destination.with_file_name(format!(
+        "{PREVIOUS_DIRECTORY_PREFIX}{}",
+        name.to_string_lossy()
+    ));
+    // 新しい展開が所定の位置に来るまで、元の展開を完全なディレクトリのまま残す。
+    let had_previous = destination
+        .try_exists()
+        .map_err(|error| format!("前の展開を確かめられません: {error}"))?;
+    if had_previous {
+        fs::rename(destination, &previous)
+            .map_err(|error| format!("前の展開を退避できません: {error}"))?;
+    }
+    if let Err(error) = fs::rename(staging, destination) {
+        if had_previous {
+            fs::rename(&previous, destination).map_err(|restore_error| {
+                format!(
+                    "新しいバージョンを置けず、退避した展開も戻せません: {error} / {restore_error}"
+                )
+            })?;
+        }
+        return Err(format!("新しいバージョンを置けません: {error}"));
+    }
+    if had_previous {
+        if let Err(error) = fs::remove_dir_all(&previous) {
+            log::warn!("退避した展開を消せません: {error}");
+        }
+    }
+    Ok(())
+}
+
 /// 展開したプログラムに版を尋ねる。署名を確かめたあとにだけ呼ぶ。
 fn reported_version(executable: &Path) -> Result<String, String> {
     crate::server::watchdog::launch_failures_without_dialogs();
-    let output = Command::new(executable)
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("新しいバージョンを動かせません: {error}"))?;
-    if !output.status.success() {
-        return Err("新しいバージョンが自分のバージョンを答えません".into());
+    let mut command = Command::new(executable);
+    command.arg("--version");
+    tokio::runtime::Handle::current().block_on(query_version(command, VERSION_QUERY_TIMEOUT))
+}
+
+async fn query_version(mut command: Command, timeout: Duration) -> Result<String, String> {
+    let run_error = |error| format!("新しいバージョンを動かせません: {error}");
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(run_error)?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let result = tokio::time::timeout(timeout, async {
+        let mut output = Vec::new();
+        (&mut stdout)
+            .take(MAX_VERSION_OUTPUT_BYTES + 1)
+            .read_to_end(&mut output)
+            .await
+            .map_err(run_error)?;
+        if output.len() as u64 > MAX_VERSION_OUTPUT_BYTES {
+            return Err("新しいバージョンの照会結果が長すぎます".into());
+        }
+        if !child.wait().await.map_err(run_error)?.success() {
+            return Err("新しいバージョンが自分のバージョンを答えません".into());
+        }
+        Ok(String::from_utf8_lossy(&output).trim().to_string())
+    })
+    .await;
+    match result {
+        Ok(result) => result,
+        Err(_) => {
+            if let Err(error) = child.kill().await {
+                log::warn!("バージョンの照会を終了できません: {error}");
+            }
+            Err("新しいバージョンの照会が時間内に終わりませんでした".into())
+        }
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 async fn download(client: &reqwest::Client, url: &str, destination: &Path) -> Result<(), String> {
@@ -419,7 +529,8 @@ async fn download(client: &reqwest::Client, url: &str, destination: &Path) -> Re
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(|error| format!("新しいバージョンを取ってこられません: {error}"))?;
-    let mut output = File::create(destination)
+    let mut output = tokio::fs::File::create(destination)
+        .await
         .map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
     let mut stream = response.bytes_stream();
     let mut total = 0_u64;
@@ -432,9 +543,13 @@ async fn download(client: &reqwest::Client, url: &str, destination: &Path) -> Re
         }
         output
             .write_all(&chunk)
+            .await
             .map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
     }
-    Ok(())
+    output
+        .flush()
+        .await
+        .map_err(|error| format!("新しいバージョンを保存できません: {error}"))
 }
 
 /// 公開されている最新の版を確かめて記録する。取ってはこない。
@@ -477,6 +592,41 @@ async fn fetch_manifest(
     serde_json::from_slice(&body).map_err(|error| format!("更新の案内を読み取れません: {error}"))
 }
 
+struct PackageWorkspace {
+    extracted: PathBuf,
+    package: PathBuf,
+    // 呼び出しが取り消されても、検証が終わるまでは次の更新が作業場所を消せない。
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl PackageWorkspace {
+    fn new(versions: &Path, lock: tokio::sync::MutexGuard<'static, ()>) -> Result<Self, String> {
+        let extracted = versions.join(".incoming");
+        let package = versions.join(".incoming.zip");
+        fs::create_dir_all(versions)
+            .map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
+        if extracted.exists() {
+            fs::remove_dir_all(&extracted)
+                .map_err(|error| format!("前の展開を消せません: {error}"))?;
+        }
+        if package.exists() {
+            fs::remove_file(&package).map_err(|error| format!("前の取得を消せません: {error}"))?;
+        }
+        Ok(Self {
+            extracted,
+            package,
+            _lock: lock,
+        })
+    }
+}
+
+impl Drop for PackageWorkspace {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.extracted);
+        let _ = fs::remove_file(&self.package);
+    }
+}
+
 /// 新しいバージョンがあれば取ってきて検証し、`versions\<版>\` に置く。置いた版を返す。
 pub async fn prepare_latest(
     source: &UpdateSource,
@@ -500,7 +650,7 @@ async fn prepare_latest_with_timeouts(
     current: &str,
     manifest_timeout: Duration,
     package_timeout: Duration,
-    report: impl Fn(&Path) -> Result<String, String>,
+    report: impl Fn(&Path) -> Result<String, String> + Clone + Send + 'static,
 ) -> Result<Option<String>, String> {
     let client = reqwest::Client::builder()
         .user_agent(concat!("piep-server/", env!("CARGO_PKG_VERSION")))
@@ -508,6 +658,10 @@ async fn prepare_latest_with_timeouts(
         .timeout(package_timeout)
         .build()
         .map_err(|error| format!("更新を確かめられません: {error}"))?;
+    let lock = PACKAGE_LOCK.lock().await;
+    let versions = paths.versions();
+    recover_package_directories(&versions)
+        .map_err(|error| format!("中断した展開を片付けられません: {error}"))?;
     let manifest = fetch_manifest(&client, source, manifest_timeout).await?;
 
     let has_update = UpdateRecord::try_edit(paths, |record| {
@@ -519,7 +673,7 @@ async fn prepare_latest_with_timeouts(
         }
         has_update
     })?;
-    let cached = paths.versions().join(PREPARED_PACKAGE);
+    let cached = versions.join(PREPARED_PACKAGE);
     if !has_update {
         let _ = fs::remove_file(&cached);
         return Ok(None);
@@ -528,69 +682,70 @@ async fn prepare_latest_with_timeouts(
         return Err("更新の案内が決められた場所以外を指しています".into());
     }
 
+    let workspace = Arc::new(PackageWorkspace::new(&versions, lock)?);
+    let verify = |package: PathBuf| {
+        let workspace = Arc::clone(&workspace);
+        let public_key = source.public_key.clone();
+        let manifest = manifest.clone();
+        let report = report.clone();
+        tokio::task::spawn_blocking(move || {
+            verify_and_extract(
+                &package,
+                &workspace.extracted,
+                &public_key,
+                &manifest,
+                report,
+            )
+        })
+    };
+    let task_error = |error| format!("配布物の検証を終えられません: {error}");
+    // 延期した版も、最新の案内に対して署名と版を確かめ、検証した内容から展開し直す。
+    let reused = if cached.is_file() {
+        verify(cached.clone())
+            .await
+            .map_err(task_error)?
+            .inspect_err(|error| log::warn!("保存済みの配布物を取り直します: {error}"))
+            .is_ok()
+    } else {
+        false
+    };
+    if !reused {
+        download(&client, &manifest.url, &workspace.package).await?;
+        verify(workspace.package.clone())
+            .await
+            .map_err(task_error)??;
+        if let Err(error) = fs::rename(&workspace.package, &cached) {
+            log::warn!("延期に備えて配布物を保存できません: {error}");
+        }
+    }
     let installed = paths.version_dir(&manifest.version);
-    let incoming = paths.versions().join(".incoming");
-    if incoming.exists() {
-        fs::remove_dir_all(&incoming).map_err(|error| format!("前の取得を消せません: {error}"))?;
-    }
-    fs::create_dir_all(&incoming)
-        .map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
-    let package = incoming.join("package.zip");
-    let extracted = incoming.join("extracted");
-    let result = async {
-        let verify = |path| verify_and_extract(path, &extracted, source, &manifest, &report);
-        // 延期した版も、最新の案内に対して署名と版を確かめ、検証した内容から展開し直す。
-        let reused = cached.is_file()
-            && verify(&cached)
-                .inspect_err(|error| {
-                    log::warn!("保存済みの配布物を取り直します: {error}");
-                })
-                .is_ok();
-        if !reused {
-            download(&client, &manifest.url, &package).await?;
-            verify(&package)?;
-            if let Err(error) = fs::rename(&package, &cached) {
-                log::warn!("延期に備えて配布物を保存できません: {error}");
-            }
-        }
-        if installed.exists() {
-            fs::remove_dir_all(&installed)
-                .map_err(|error| format!("前の展開を消せません: {error}"))?;
-        }
-        fs::rename(&extracted, &installed)
-            .map_err(|error| format!("新しいバージョンを置けません: {error}"))?;
-        Ok::<(), String>(())
-    }
-    .await;
-    let _ = fs::remove_dir_all(&incoming);
-    result?;
+    tokio::task::spawn_blocking(move || {
+        replace_package_directory(&workspace.extracted, &installed)
+    })
+    .await
+    .map_err(task_error)??;
     Ok(Some(manifest.version))
 }
 
 fn verify_and_extract(
     package: &Path,
-    extracted: &Path,
-    source: &UpdateSource,
+    staging: &Path,
+    public_key: &str,
     manifest: &Manifest,
     report: impl Fn(&Path) -> Result<String, String>,
 ) -> Result<(), String> {
-    let mut data = Vec::new();
-    File::open(package)
-        .and_then(|file| file.take(MAX_PACKAGE_BYTES + 1).read_to_end(&mut data))
-        .map_err(|error| format!("配布物を読めません: {error}"))?;
-    if data.len() as u64 > MAX_PACKAGE_BYTES {
-        return Err("新しいバージョンが大きすぎます".into());
-    }
-    verify_signature(&source.public_key, &manifest.signature, &data)?;
-    extract_package(Cursor::new(data), extracted)?;
-    let reported = report(&extracted.join(EXECUTABLE))?;
-    if reported != manifest.version {
-        return Err(format!(
-            "案内のバージョン {} と中身のバージョン {reported} が違います",
-            manifest.version
-        ));
-    }
-    Ok(())
+    let data = read_package(package)?;
+    verify_signature(public_key, &manifest.signature, &data)?;
+    extract_package(Cursor::new(data), staging, |extracted| {
+        let reported = report(&extracted.join(EXECUTABLE))?;
+        if reported != manifest.version {
+            return Err(format!(
+                "案内のバージョン {} と中身のバージョン {reported} が違います",
+                manifest.version
+            ));
+        }
+        Ok(())
+    })
 }
 
 /// `03:00-06:00` の形の時間帯。日をまたいでもよい。
@@ -1151,6 +1306,7 @@ fn database_pairs(paths: &ServerPaths) -> [(PathBuf, &'static str); 1] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn history_paths() -> (crate::server::tests::TestRoot, ServerPaths) {
         let root = crate::server::tests::TestRoot::created("history");
@@ -1640,6 +1796,7 @@ mod tests {
                     "通信が止まった理由を返す: {phase}"
                 );
                 assert!(!paths.versions().join(".incoming").exists());
+                assert!(!paths.versions().join(".incoming.zip").exists());
             }
             server.abort();
         }
@@ -1705,12 +1862,17 @@ mod tests {
         let dir = crate::server::tests::TestRoot::created("update");
         let package = dir.0.join("p.zip");
         let target = dir.0.join("out");
+        let staging = dir.0.join(".incoming");
+        let extract = || {
+            extract_package(File::open(&package).unwrap(), &staging, |_| Ok(()))?;
+            replace_package_directory(&staging, &target)
+        };
 
         zip_with(
             &package,
             &["piep-server.exe", "MSVCP140.dll", "pdfium-licenses.txt"],
         );
-        extract_package(File::open(&package).unwrap(), &target).expect("extract");
+        extract().expect("extract");
         assert!(target.join("piep-server.exe").exists());
         assert!(target.join("msvcp140.dll").exists());
         assert!(target.join("pdfium-licenses.txt").exists());
@@ -1718,13 +1880,141 @@ mod tests {
         // パスの外へ出る名前も、知らない名前も受け入れない。
         for bad in ["../piep-server.exe", "sub/piep-server.exe", "evil.dll"] {
             zip_with(&package, &["piep-server.exe", bad]);
-            assert!(
-                extract_package(File::open(&package).unwrap(), &target).is_err(),
-                "{bad}"
-            );
+            assert!(extract().is_err(), "{bad}");
         }
         zip_with(&package, &["msvcp140.dll"]);
-        assert!(extract_package(File::open(&package).unwrap(), &target).is_err());
+        assert!(extract().is_err());
+    }
+
+    #[test]
+    fn case_only_duplicates_are_rejected() {
+        let dir = crate::server::tests::TestRoot::created("update_duplicate");
+        let package = dir.0.join("p.zip");
+        zip_with(&package, &["piep-server.exe", "PIEP-SERVER.EXE"]);
+        let staging = dir.0.join(".incoming");
+        let error =
+            extract_package(File::open(package).unwrap(), &staging, |_| Ok(())).unwrap_err();
+        assert!(error.contains("同じ名前"));
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn failed_extraction_preserves_the_previous_directory() {
+        let dir = crate::server::tests::TestRoot::created("update_extraction_failure");
+        let package = dir.0.join("p.zip");
+        let target = dir.0.join("out");
+        let staging = dir.0.join(".incoming");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join(EXECUTABLE), b"previous executable").unwrap();
+        fs::write(target.join("pdfium.dll"), b"previous library").unwrap();
+        zip_with(&package, &[EXECUTABLE, "unknown.dll"]);
+
+        assert!(
+            extract_package(File::open(package).unwrap(), &staging, |_| {
+                panic!("展開に失敗した配布物は版を照合しない");
+            })
+            .is_err()
+        );
+        assert_eq!(
+            fs::read(target.join(EXECUTABLE)).unwrap(),
+            b"previous executable"
+        );
+        assert_eq!(
+            fs::read(target.join("pdfium.dll")).unwrap(),
+            b"previous library"
+        );
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn failed_version_check_preserves_the_previous_directory() {
+        let dir = crate::server::tests::TestRoot::created("update_version_failure");
+        let package = dir.0.join("p.zip");
+        let target = dir.0.join("1.0.1");
+        let staging = dir.0.join(".incoming");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join(EXECUTABLE), b"previous executable").unwrap();
+        zip_with(&package, &[EXECUTABLE, "pdfium.dll"]);
+
+        let result = extract_package(File::open(package).unwrap(), &staging, |extracted| {
+            assert!(extracted.join(EXECUTABLE).is_file());
+            assert!(extracted.join("pdfium.dll").is_file());
+            Err("版が違います".into())
+        });
+        assert_eq!(result.unwrap_err(), "版が違います");
+        assert_eq!(
+            fs::read(target.join(EXECUTABLE)).unwrap(),
+            b"previous executable"
+        );
+        assert!(!target.join("pdfium.dll").exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn a_failed_rename_restores_the_previous_directory() {
+        let dir = crate::server::tests::TestRoot::created("update_rename_failure");
+        let target = dir.0.join("1.0.1");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join(EXECUTABLE), b"previous executable").unwrap();
+
+        assert!(replace_package_directory(&dir.0.join("missing"), &target).is_err());
+        assert_eq!(
+            fs::read(target.join(EXECUTABLE)).unwrap(),
+            b"previous executable"
+        );
+        assert!(!dir.0.join(".previous-1.0.1").exists());
+    }
+
+    #[test]
+    fn an_interrupted_replacement_recovers_a_complete_directory() {
+        let dir = crate::server::tests::TestRoot::created("update_interrupted");
+        let previous = dir.0.join(".previous-1.0.1");
+        let target = dir.0.join("1.0.1");
+        for installed in [false, true] {
+            fs::create_dir(&previous).unwrap();
+            fs::write(previous.join(EXECUTABLE), b"previous executable").unwrap();
+            fs::write(previous.join("pdfium.dll"), b"previous library").unwrap();
+            if installed {
+                fs::write(target.join(EXECUTABLE), b"new executable").unwrap();
+                fs::write(target.join("pdfium.dll"), b"new library").unwrap();
+            }
+
+            recover_package_directories(&dir.0).unwrap();
+            let name = if installed { "new" } else { "previous" };
+            assert_eq!(
+                fs::read(target.join(EXECUTABLE)).unwrap(),
+                format!("{name} executable").as_bytes()
+            );
+            assert_eq!(
+                fs::read(target.join("pdfium.dll")).unwrap(),
+                format!("{name} library").as_bytes()
+            );
+            assert!(!previous.exists());
+        }
+    }
+
+    #[test]
+    fn version_query_fixture() {
+        if std::env::var_os("PIEP_VERSION_QUERY_FIXTURE").is_some() {
+            std::thread::sleep(Duration::from_millis(250));
+            println!("1.0.1");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stalled_version_query_is_stopped() {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "server::update::tests::version_query_fixture",
+                "--nocapture",
+            ])
+            .env("PIEP_VERSION_QUERY_FIXTURE", "1");
+        let error = query_version(command, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert_eq!(error, "新しいバージョンの照会が時間内に終わりませんでした");
     }
 
     /// 試験専用の鍵で署名した例。配布には使っていない。
