@@ -73,7 +73,7 @@ pub struct ReaderShelfConfig {
 
 impl ReaderShelfConfig {
     /// 配る世代の棚の置き場。
-    fn root(&self, paths: &ServerPaths) -> Result<PathBuf, String> {
+    pub(super) fn root(&self, paths: &ServerPaths) -> Result<PathBuf, String> {
         match self.generation {
             Some(generation) => generations::generation_path(paths, generation),
             None => Ok(paths.shelf()),

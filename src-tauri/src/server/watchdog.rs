@@ -154,8 +154,8 @@ pub(super) fn roll_back(
     failure: Option<&str>,
 ) -> Result<(), String> {
     let previous = read_version_file(&paths.previous_version()).ok_or("戻す版がありません")?;
-    // DB を戻し始めたあとは、新しい版を再び起動してはいけない。current と
-    // pending の間で止まっても、次の起動では切り替えより先に戻しを完了する。
+    // 本体の終了後に状態 DB と棚の台帳を戻す。差し替えの途中や current と pending の
+    // 間で止まっても、次の起動では新版を立ち上げる前に戻しを完了する。
     write_atomic(&rollback_mark(paths), version.as_bytes())?;
     restore_databases(paths)?;
     write_atomic(&paths.current_version(), previous.as_bytes())?;
@@ -675,6 +675,7 @@ mod tests {
         let dir = crate::server::tests::TestRoot::created("watchdog");
         let paths = ServerPaths::new(&dir.0).expect("paths");
         fs::create_dir_all(paths.state()).expect("state");
+        fs::write(paths.config(), "").expect("config");
         fs::write(paths.root.join("piep-server.exe"), b"fixed bootstrap").expect("bootstrap");
         for version in ["1.0.0", "1.1.0"] {
             fs::create_dir_all(paths.version_dir(version)).expect("version");

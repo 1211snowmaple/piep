@@ -6,9 +6,10 @@
 
 use super::durable::write_atomic;
 use super::standalone::shipment::ShelfShipments;
-use super::standalone::{edit_config, ServerPaths, UpdateConfig};
+use super::standalone::{edit_config, load_config, ServerPaths, UpdateConfig};
 use chrono::{DateTime, Local, NaiveTime, Utc};
 use futures_util::StreamExt;
+use piep_storage::{regular_directory, regular_file, sync_directory};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Seek};
@@ -417,7 +418,7 @@ fn unpack_package(package: impl Read + Seek, staging: &Path) -> Result<(), Strin
     }
 }
 
-fn recover_package_directory(previous: &Path, destination: &Path) -> std::io::Result<()> {
+fn recover_retired_directory(previous: &Path, destination: &Path) -> std::io::Result<()> {
     if destination.try_exists()? {
         fs::remove_dir_all(previous)
     } else {
@@ -439,7 +440,7 @@ fn recover_package_directories(versions: &Path) -> std::io::Result<()> {
             .and_then(|name| name.strip_prefix(PREVIOUS_DIRECTORY_PREFIX))
             .filter(|version| parse_version(version).is_some())
         {
-            recover_package_directory(&entry.path(), &versions.join(version))?;
+            recover_retired_directory(&entry.path(), &versions.join(version))?;
         }
     }
     Ok(())
@@ -983,7 +984,7 @@ impl UpdateController {
         let previous = read_version_file(&self.paths.previous_version())?;
         (is_newer(VERSION, &previous)
             && self.paths.version_dir(&previous).join(EXECUTABLE).exists()
-            && self.paths.update_backup().exists())
+            && read_database_backup(&self.paths).is_ok_and(|backup| backup.is_some()))
         .then_some(previous)
     }
 
@@ -1044,7 +1045,7 @@ impl UpdateController {
     ) -> Result<bool, String> {
         // 開始処理の途中も含めて送信がないことを確かめ、同じ排他の中で停止を予約する。
         // 予約後は新しい開始を断り、先に始まった送信はこの予約の前に区切りまで進める。
-        // 組み終えて公開を待つ棚は、止めたあとの起動で公開されるので妨げにしない。
+        // 公開を待つ棚は現在の版で先に配る。試行中に棚が切り替わると台帳の写しと合わなくなる。
         let _opening = if let Some(access) = self.shipment_access.get() {
             let Ok(opening) = access.opening.try_lock() else {
                 return Ok(false);
@@ -1053,7 +1054,7 @@ impl UpdateController {
         } else {
             None
         };
-        if shipments.is_some_and(|shipments| shipments.busy()) {
+        if shipments.is_some_and(|shipments| shipments.busy() || shipments.pending()) {
             return Ok(false);
         }
         self.stop_for(after.clone())?;
@@ -1218,89 +1219,180 @@ fn set_value_kept(table: &mut dyn toml_edit::TableLike, key: &str, mut value: to
     }
 }
 
+const DATABASE_MANIFEST: &str = "databases.json";
+const PREVIOUS_DATABASE_BACKUP: &str = ".previous-update-backup";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DatabaseBackup {
+    state: bool,
+    shelf: Option<PathBuf>,
+}
+
 /// 当てる前に DB を整合した形で写す。戻すときに使う。
 pub fn back_up_databases(paths: &ServerPaths) -> Result<(), String> {
+    let manifest = DatabaseBackup {
+        state: paths
+            .store()
+            .try_exists()
+            .map_err(|error| error.to_string())?,
+        shelf: shelf_database(paths)?,
+    };
     let backup = paths.update_backup();
-    if backup.exists() {
-        fs::remove_dir_all(&backup).map_err(|error| format!("前の写しを消せません: {error}"))?;
+    let previous = paths.state().join(PREVIOUS_DATABASE_BACKUP);
+    if previous.try_exists().map_err(|error| error.to_string())? {
+        // 差し替えの途中で止まっていたら、完成した写しを所定の位置に戻す。
+        recover_retired_directory(&previous, &backup)
+            .map_err(|error| format!("前の写しを整理できません: {error}"))?;
+        sync_directory(&paths.state()).map_err(|error| error.to_string())?;
     }
-    fs::create_dir_all(&backup).map_err(|error| format!("写しの置き場を作れません: {error}"))?;
-    let mut present = Vec::new();
-    for (source, name) in database_pairs(paths) {
-        if !source.exists() {
+    let staging = paths.state().join(".incoming-update-backup");
+    match fs::remove_dir_all(&staging) {
+        Ok(()) => (),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(format!("作業中の写しを片付けられません: {error}")),
+    }
+    fs::create_dir(&staging).map_err(|error| format!("写しの置き場を作れません: {error}"))?;
+    // 棚を開くと台帳は移行されるが、library.json は読み取るだけで、
+    // objects/ の既存の実体は内容で識別され、起動時の移行で上書きされない。
+    for (source, name, was_present) in database_pairs(paths, &manifest) {
+        if !was_present {
             continue;
         }
+        regular_file(&source).map_err(|error| format!("{name} を開けません: {error}"))?;
         let connection = rusqlite::Connection::open_with_flags(
             &source,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .map_err(|error| format!("{name} を開けません: {error}"))?;
+        let copy = staging.join(name);
+        let destination = copy.to_str().ok_or("写しのパスを読み取れません")?;
         connection
-            .execute(
-                "VACUUM INTO ?1",
-                [backup.join(name).to_string_lossy().as_ref()],
-            )
+            .execute("VACUUM INTO ?1", [destination])
             .map_err(|error| format!("{name} を写せません: {error}"))?;
-        present.push(name);
+        sync_database(&copy)?;
     }
-    // 初回の送信前には本棚の DB がない。更新した版が新しく作った DB も、
-    // 旧版へ戻すときは取り除かないと新しい形式だけが残ってしまう。
-    let manifest = serde_json::to_vec(&present).map_err(|error| error.to_string())?;
-    write_atomic(&backup.join("databases.json"), &manifest)?;
+    let bytes = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
+    write_atomic(&staging.join(DATABASE_MANIFEST), &bytes)?;
+
+    // 新しい写しが完成するまで前の写しを残し、差し替えの途中でも退避先から戻せるようにする。
+    let had_previous = backup.try_exists().map_err(|error| error.to_string())?;
+    if had_previous {
+        fs::rename(&backup, &previous)
+            .map_err(|error| format!("前の写しを退避できません: {error}"))?;
+        sync_directory(&paths.state()).map_err(|error| error.to_string())?;
+    }
+    fs::rename(&staging, &backup).map_err(|error| format!("新しい写しを置けません: {error}"))?;
+    sync_directory(&paths.state()).map_err(|error| error.to_string())?;
+    if had_previous {
+        if let Err(error) = fs::remove_dir_all(&previous) {
+            log::warn!("前の写しを片付けられません: {error}");
+        }
+    }
     Ok(())
 }
 
-/// 写しへ戻す。WAL が残っていると古い変更が混ざるので一緒に消す。
-pub fn restore_databases(paths: &ServerPaths) -> Result<(), String> {
-    let backup = paths.update_backup();
-    // 写しを作る前に戻すときは、戻すものが無い。
-    if !backup.exists() {
-        return Ok(());
+fn read_database_backup(paths: &ServerPaths) -> Result<Option<(PathBuf, DatabaseBackup)>, String> {
+    let mut backup = paths.update_backup();
+    if !backup.try_exists().map_err(|error| error.to_string())? {
+        backup = paths.state().join(PREVIOUS_DATABASE_BACKUP);
+        if !backup.try_exists().map_err(|error| error.to_string())? {
+            return Ok(None);
+        }
     }
-    let bytes = fs::read(backup.join("databases.json"))
+    let bytes = fs::read(backup.join(DATABASE_MANIFEST))
         .map_err(|error| format!("写しの目録を読めません: {error}"))?;
-    let names: Vec<String> = serde_json::from_slice(&bytes)
+    let manifest: DatabaseBackup = serde_json::from_slice(&bytes)
         .map_err(|error| format!("写しの目録を読めません: {error}"))?;
+    if shelf_database(paths)? != manifest.shelf {
+        return Err("配信中の棚が更新前の写しと一致しません".into());
+    }
     // どれかの写しが欠けていれば、いずれの DB にも手を付けない。
-    for name in &names {
-        if !database_pairs(paths)
-            .iter()
-            .any(|(_, allowed)| name == allowed)
-            || !backup.join(name).is_file()
-        {
-            return Err("DB の写しが欠けているか、目録が正しくありません".into());
+    for (_, name, was_present) in database_pairs(paths, &manifest) {
+        if was_present {
+            regular_file(&backup.join(name))
+                .map_err(|error| format!("{name} の写しを読めません: {error}"))?;
         }
     }
-    for (target, name) in database_pairs(paths) {
-        let copy = backup.join(name);
-        let was_present = names.iter().any(|saved| saved == name);
-        // 全部写してから置き換える。写している途中で中断しても、今の DB を
-        // 途中までの内容で壊さず、戻しの印からもう一度始められる。
-        let temporary = target.with_extension("restore");
+    Ok(Some((backup, manifest)))
+}
+
+/// 写しへ戻す。WAL が残っていると新しい版での変更が混ざるので一緒に消す。
+pub fn restore_databases(paths: &ServerPaths) -> Result<(), String> {
+    let Some((backup, manifest)) = read_database_backup(paths)? else {
+        return Ok(());
+    };
+    // 一時ファイルをすべて作ってから、巻き戻し先に手を付ける。
+    // 置き換えの途中で中断しても、戻しの印から同じ写しでやり直せる。
+    for (target, name, was_present) in database_pairs(paths, &manifest) {
         if was_present {
-            fs::copy(&copy, &temporary).map_err(|error| format!("{name} を戻せません: {error}"))?;
-        }
-        for suffix in ["-wal", "-shm"] {
-            let mut sidecar = target.clone().into_os_string();
-            sidecar.push(suffix);
-            let sidecar = PathBuf::from(sidecar);
-            if sidecar.exists() {
-                fs::remove_file(&sidecar)
-                    .map_err(|error| format!("{name} の作業ファイルを消せません: {error}"))?;
-            }
-        }
-        if was_present {
-            fs::rename(&temporary, &target)
+            let temporary = target.with_extension("restore");
+            fs::copy(backup.join(name), &temporary)
                 .map_err(|error| format!("{name} を戻せません: {error}"))?;
-        } else if target.exists() {
-            fs::remove_file(&target).map_err(|error| format!("{name} を消せません: {error}"))?;
+            sync_database(&temporary)?;
         }
+    }
+    for (target, name, _) in database_pairs(paths, &manifest) {
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = target.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            remove_if_present(Path::new(&sidecar))
+                .map_err(|error| format!("{name} の作業ファイルを消せません: {error}"))?;
+        }
+    }
+    for (target, name, was_present) in database_pairs(paths, &manifest) {
+        if was_present {
+            fs::rename(target.with_extension("restore"), &target)
+                .map_err(|error| format!("{name} を戻せません: {error}"))?;
+        } else {
+            // 更新した版が新しく作った状態 DB は、旧版へ戻すときは取り除く。
+            remove_if_present(&target).map_err(|error| format!("{name} を消せません: {error}"))?;
+        }
+        sync_directory(target.parent().expect("DB の親"))
+            .map_err(|error| format!("{name} の置き場を同期できません: {error}"))?;
     }
     Ok(())
 }
 
-fn database_pairs(paths: &ServerPaths) -> [(PathBuf, &'static str); 1] {
-    [(paths.store(), "state.db")]
+fn shelf_database(paths: &ServerPaths) -> Result<Option<PathBuf>, String> {
+    load_config(paths)?
+        .shelf
+        .map(|settings| {
+            let root = settings.root(paths)?;
+            regular_directory(&root).map_err(|error| error.to_string())?;
+            let root = root
+                .canonicalize()
+                .map_err(|error| format!("配信中の棚を確かめられません: {error}"))?;
+            Ok(root.join("library.db"))
+        })
+        .transpose()
+}
+
+fn database_pairs(
+    paths: &ServerPaths,
+    manifest: &DatabaseBackup,
+) -> impl Iterator<Item = (PathBuf, &'static str, bool)> {
+    let shelf = manifest
+        .shelf
+        .clone()
+        .map(|path| (path, "library.db", true));
+    std::iter::once((paths.store(), "state.db", manifest.state)).chain(shelf)
+}
+
+fn sync_database(path: &Path) -> Result<(), String> {
+    File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("DB の写しを同期できません: {error}"))
+}
+
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -1427,6 +1519,11 @@ mod tests {
             .stop_when_quiet(Some(&shipments), &after)
             .unwrap());
         drop(opening);
+        let pending_shelf = controller.paths.root.join("shelf-pending.json");
+        fs::write(&pending_shelf, "{}").unwrap();
+        let stopped_before_publication = controller.stop_when_quiet(Some(&shipments), &after);
+        fs::remove_file(pending_shelf).unwrap();
+        assert!(!stopped_before_publication.unwrap());
         assert!(controller
             .stop_when_quiet(Some(&shipments), &after)
             .unwrap());
@@ -2048,9 +2145,7 @@ mod tests {
 
     #[test]
     fn databases_are_backed_up_and_restored() {
-        let dir = crate::server::tests::TestRoot::created("update");
-        let paths = ServerPaths::new(&dir.0).expect("paths");
-        fs::create_dir_all(paths.state()).expect("state");
+        let (_dir, paths) = database_paths("update");
         let database = rusqlite::Connection::open(paths.store()).expect("db");
         database
             .execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(v); INSERT INTO t VALUES (1);")
@@ -2068,47 +2163,194 @@ mod tests {
     }
     #[test]
     fn rollback_removes_databases_that_did_not_exist_before_the_update() {
-        let dir = crate::server::tests::TestRoot::created("update_absent_db");
-        let paths = ServerPaths::new(&dir.0).unwrap();
-        fs::create_dir_all(paths.state()).unwrap();
+        let (_dir, paths) = database_paths("update_absent_db");
         back_up_databases(&paths).unwrap();
 
-        for (path, _) in database_pairs(&paths) {
-            fs::write(&path, b"created by the new version").unwrap();
-            for suffix in ["-wal", "-shm"] {
-                let mut sidecar = path.clone().into_os_string();
-                sidecar.push(suffix);
-                fs::write(sidecar, b"new journal").unwrap();
-            }
+        let path = paths.store();
+        fs::write(&path, b"created by the new version").unwrap();
+        for suffix in ["state.db-wal", "state.db-shm"] {
+            fs::write(paths.state().join(suffix), b"new journal").unwrap();
         }
         restore_databases(&paths).unwrap();
         restore_databases(&paths).unwrap();
-        for (path, _) in database_pairs(&paths) {
-            assert!(!path.exists());
-            for suffix in ["-wal", "-shm"] {
-                let mut sidecar = path.clone().into_os_string();
-                sidecar.push(suffix);
-                assert!(!PathBuf::from(sidecar).exists());
-            }
+        assert!(!path.exists());
+        for sidecar in ["state.db-wal", "state.db-shm"] {
+            assert!(!paths.state().join(sidecar).exists());
         }
     }
 
     #[test]
     fn a_missing_snapshot_is_refused_before_any_database_is_restored() {
-        let dir = crate::server::tests::TestRoot::created("update_missing_snapshot");
-        let paths = ServerPaths::new(&dir.0).unwrap();
-        fs::create_dir_all(paths.state()).unwrap();
-        for (path, _) in database_pairs(&paths) {
-            rusqlite::Connection::open(path)
-                .unwrap()
-                .execute_batch("CREATE TABLE t(v);")
-                .unwrap();
-        }
+        let (_dir, paths) = database_paths("update_missing_snapshot");
+        rusqlite::Connection::open(paths.store())
+            .unwrap()
+            .execute_batch("CREATE TABLE t(v);")
+            .unwrap();
         back_up_databases(&paths).unwrap();
         fs::write(paths.store(), b"current database").unwrap();
         fs::remove_file(paths.update_backup().join("state.db")).unwrap();
 
         assert!(restore_databases(&paths).is_err());
         assert_eq!(fs::read(paths.store()).unwrap(), b"current database");
+    }
+
+    fn database_paths(name: &str) -> (crate::server::tests::TestRoot, ServerPaths) {
+        let root = crate::server::tests::TestRoot::created(name);
+        let paths = ServerPaths::new(&root.0).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        fs::write(paths.config(), "").unwrap();
+        (root, paths)
+    }
+
+    fn configure_shelf(paths: &ServerPaths, generation: Option<uuid::Uuid>) -> PathBuf {
+        let library = uuid::Uuid::now_v7();
+        let epoch = uuid::Uuid::now_v7();
+        let (root, setting) = match generation {
+            Some(id) => (
+                paths.root.join("shelf-generations").join(id.to_string()),
+                format!("generation = \"{id}\"\n"),
+            ),
+            None => (paths.shelf(), String::new()),
+        };
+        fs::write(
+            paths.config(),
+            format!("[shelf]\nlibrary_id = \"{library}\"\nsync_epoch = \"{epoch}\"\n{setting}"),
+        )
+        .unwrap();
+        fs::create_dir_all(&root).unwrap();
+        root.join("library.db")
+    }
+
+    #[test]
+    fn a_failed_trial_rolls_back_the_served_shelf_migration() {
+        let (_dir, paths) = database_paths("update_shelf_migration");
+        for generation in [None, Some(uuid::Uuid::now_v7())] {
+            let shelf = configure_shelf(&paths, generation);
+            let database = rusqlite::Connection::open(&shelf).unwrap();
+            database
+                .execute_batch(
+                    "PRAGMA journal_mode=WAL; PRAGMA user_version=1;
+                    CREATE TABLE works(id); INSERT INTO works VALUES (42);",
+                )
+                .unwrap();
+            back_up_databases(&paths).unwrap();
+            write_atomic(&paths.previous_version(), b"1.0.0").unwrap();
+            write_atomic(&paths.current_version(), b"1.1.0").unwrap();
+            write_atomic(&paths.pending_version(), b"1.1.0").unwrap();
+
+            database
+                .execute_batch(
+                    "PRAGMA user_version=2; ALTER TABLE works ADD COLUMN title;
+                    DELETE FROM works;",
+                )
+                .unwrap();
+            drop(database);
+            super::super::watchdog::roll_back(&paths, "1.1.0", Some("準備確認に失敗")).unwrap();
+
+            assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
+            assert!(!paths.pending_version().exists());
+            let database = rusqlite::Connection::open(&shelf).unwrap();
+            let version: i64 = database
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 1);
+            let id: i64 = database
+                .query_row("SELECT id FROM works", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(id, 42);
+        }
+    }
+
+    #[test]
+    fn a_changed_shelf_generation_refuses_restore_before_touching_either_database() {
+        let (_dir, paths) = database_paths("update_shelf_changed");
+        let previous = configure_shelf(&paths, Some(uuid::Uuid::now_v7()));
+        for path in [paths.store(), previous.clone()] {
+            rusqlite::Connection::open(path)
+                .unwrap()
+                .execute_batch("CREATE TABLE t(v);")
+                .unwrap();
+        }
+        back_up_databases(&paths).unwrap();
+        let current = configure_shelf(&paths, Some(uuid::Uuid::now_v7()));
+        fs::write(paths.store(), b"current state").unwrap();
+        fs::write(&previous, b"previous shelf").unwrap();
+        fs::write(&current, b"current shelf").unwrap();
+
+        assert!(restore_databases(&paths).is_err());
+        assert_eq!(fs::read(paths.store()).unwrap(), b"current state");
+        assert_eq!(fs::read(previous).unwrap(), b"previous shelf");
+        assert_eq!(fs::read(current).unwrap(), b"current shelf");
+    }
+
+    #[test]
+    fn a_failed_backup_keeps_the_previous_complete_backup() {
+        let (_dir, paths) = database_paths("update_backup_interrupted");
+        let database = rusqlite::Connection::open(paths.store()).unwrap();
+        database
+            .execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1);")
+            .unwrap();
+        back_up_databases(&paths).unwrap();
+        drop(database);
+        fs::write(paths.store(), b"not a database").unwrap();
+
+        assert!(back_up_databases(&paths).is_err());
+        restore_databases(&paths).unwrap();
+        let database = rusqlite::Connection::open(paths.store()).unwrap();
+        let value: i64 = database
+            .query_row("SELECT v FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, 1);
+    }
+
+    #[test]
+    fn an_interrupted_backup_swap_can_restore_the_retired_backup() {
+        let (_dir, paths) = database_paths("update_backup_swap");
+        let database = rusqlite::Connection::open(paths.store()).unwrap();
+        database
+            .execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1);")
+            .unwrap();
+        back_up_databases(&paths).unwrap();
+        database.execute("UPDATE t SET v = 2", []).unwrap();
+        drop(database);
+        // 前の写しを退けた直後に止まり、新しい写しはまだ公開されていない。
+        fs::rename(
+            paths.update_backup(),
+            paths.state().join(".previous-update-backup"),
+        )
+        .unwrap();
+
+        restore_databases(&paths).unwrap();
+        let database = rusqlite::Connection::open(paths.store()).unwrap();
+        let value: i64 = database
+            .query_row("SELECT v FROM t", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(value, 1);
+    }
+
+    #[test]
+    fn a_failed_shelf_restore_stage_leaves_state_database_untouched() {
+        let (_dir, paths) = database_paths("update_restore_stage");
+        let shelf = configure_shelf(&paths, None);
+        for path in [paths.store(), shelf.clone()] {
+            rusqlite::Connection::open(path)
+                .unwrap()
+                .execute_batch("CREATE TABLE t(v);")
+                .unwrap();
+        }
+        back_up_databases(&paths).unwrap();
+        fs::write(paths.store(), b"current state").unwrap();
+        fs::create_dir(shelf.with_extension("restore")).unwrap();
+
+        assert!(restore_databases(&paths).is_err());
+        assert_eq!(fs::read(paths.store()).unwrap(), b"current state");
+
+        fs::remove_dir(shelf.with_extension("restore")).unwrap();
+        restore_databases(&paths).unwrap();
+        restore_databases(&paths).unwrap();
+        assert!(rusqlite::Connection::open(paths.store())
+            .unwrap()
+            .prepare("SELECT v FROM t")
+            .is_ok());
     }
 }
