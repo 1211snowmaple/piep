@@ -29,7 +29,6 @@ const EpubPage = lazy(() => import("@/features/epub/EpubPage"));
 const TemplateStudioPage = lazy(() => import("@/features/epub/TemplateStudioPage"));
 const UpdatesPage = lazy(() => import("@/features/updates/UpdatesPage"));
 const OperationsPage = lazy(() => import("@/features/jobs/OperationsPage"));
-const DiagnosticsPage = lazy(() => import("@/features/diagnostics/DiagnosticsPage"));
 const SettingsPage = lazy(() => import("@/features/settings/SettingsPage"));
 
 function RouteFallback() {
@@ -51,7 +50,6 @@ function CurrentRoute() {
   if (pathname === "/epub/templates") return <TemplateStudioPage />;
   if (pathname === "/updates") return <UpdatesPage />;
   if (pathname === "/operations") return <OperationsPage />;
-  if (pathname === "/diagnostics") return <DiagnosticsPage />;
   if (pathname === "/settings") return <SettingsPage />;
   return <DashboardPage />;
 }

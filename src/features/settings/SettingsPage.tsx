@@ -349,7 +349,7 @@ export default function SettingsPage() {
           {section === "server" && <ServerSection runtime={runtime} />}
           {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => startRebuild(includeSemantic)} cancel={() => { if (rebuildOperationRef.current) { void requestOperationCancel(rebuildOperationRef.current.id); return; } if (rebuild) reportJobAction(cancelSearchRebuildIndex(rebuild.jobId), "索引の作り直しを中止できません"); }} />)}
           {section === "assist" && <AssistSection />}
-          {section === "diagnostics" && <DiagnosticsPage embedded />}
+          {section === "diagnostics" && <DiagnosticsPage />}
           {section === "advanced" && <AdvancedSection />}
           {section === "appearance" && <AppearanceSection colorScheme={colorScheme} setColorScheme={setColorScheme} />}
           {section === "about" && <AboutSection runtime={runtime} />}
