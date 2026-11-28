@@ -11,12 +11,12 @@ use chrono::{DateTime, Local, NaiveTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{watch, Mutex as AsyncMutex, Notify};
 
 /// この版のプログラムの版。更新の試験では組み立てるときに差し替える。
 pub const VERSION: &str = match option_env!("PIEP_SERVER_TEST_VERSION") {
@@ -53,6 +53,7 @@ const PACKAGE_FILES: [&str; 7] = [
 const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+const PREPARED_PACKAGE: &str = ".prepared.zip";
 
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(5 * 60);
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -357,10 +358,9 @@ pub fn verify_package_file(package: &Path, signature_file: &Path) -> Result<(), 
 }
 
 /// zip を展開する。知らないファイルが 1 つでもあれば、配布物ごと受け入れない。
-pub fn extract_package(package: &Path, destination: &Path) -> Result<(), String> {
-    let file = File::open(package).map_err(|error| format!("配布物を開けません: {error}"))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|error| format!("配布物を読み取れません: {error}"))?;
+fn extract_package(package: impl Read + Seek, destination: &Path) -> Result<(), String> {
+    let mut archive = zip::ZipArchive::new(package)
+        .map_err(|error| format!("配布物を読み取れません: {error}"))?;
     if destination.exists() {
         fs::remove_dir_all(destination)
             .map_err(|error| format!("展開先を空にできません: {error}"))?;
@@ -489,6 +489,7 @@ pub async fn prepare_latest(
         current,
         Duration::from_secs(30),
         Duration::from_secs(30 * 60),
+        reported_version,
     )
     .await
 }
@@ -499,6 +500,7 @@ async fn prepare_latest_with_timeouts(
     current: &str,
     manifest_timeout: Duration,
     package_timeout: Duration,
+    report: impl Fn(&Path) -> Result<String, String>,
 ) -> Result<Option<String>, String> {
     let client = reqwest::Client::builder()
         .user_agent(concat!("piep-server/", env!("CARGO_PKG_VERSION")))
@@ -517,7 +519,9 @@ async fn prepare_latest_with_timeouts(
         }
         has_update
     })?;
+    let cached = paths.versions().join(PREPARED_PACKAGE);
     if !has_update {
+        let _ = fs::remove_file(&cached);
         return Ok(None);
     }
     if !manifest.url.starts_with(&source.download_prefix) {
@@ -525,8 +529,6 @@ async fn prepare_latest_with_timeouts(
     }
 
     let installed = paths.version_dir(&manifest.version);
-    // 既存exeが答える版だけでは信頼せず、毎回署名済み配布物から配置し直す。
-
     let incoming = paths.versions().join(".incoming");
     if incoming.exists() {
         fs::remove_dir_all(&incoming).map_err(|error| format!("前の取得を消せません: {error}"))?;
@@ -534,18 +536,22 @@ async fn prepare_latest_with_timeouts(
     fs::create_dir_all(&incoming)
         .map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
     let package = incoming.join("package.zip");
+    let extracted = incoming.join("extracted");
     let result = async {
-        download(&client, &manifest.url, &package).await?;
-        let data = fs::read(&package).map_err(|error| format!("配布物を読めません: {error}"))?;
-        verify_signature(&source.public_key, &manifest.signature, &data)?;
-        let extracted = incoming.join("extracted");
-        extract_package(&package, &extracted)?;
-        let reported = reported_version(&extracted.join(EXECUTABLE))?;
-        if reported != manifest.version {
-            return Err(format!(
-                "案内のバージョン {} と中身のバージョン {reported} が違います",
-                manifest.version
-            ));
+        let verify = |path| verify_and_extract(path, &extracted, source, &manifest, &report);
+        // 延期した版も、最新の案内に対して署名と版を確かめ、検証した内容から展開し直す。
+        let reused = cached.is_file()
+            && verify(&cached)
+                .inspect_err(|error| {
+                    log::warn!("保存済みの配布物を取り直します: {error}");
+                })
+                .is_ok();
+        if !reused {
+            download(&client, &manifest.url, &package).await?;
+            verify(&package)?;
+            if let Err(error) = fs::rename(&package, &cached) {
+                log::warn!("延期に備えて配布物を保存できません: {error}");
+            }
         }
         if installed.exists() {
             fs::remove_dir_all(&installed)
@@ -559,6 +565,32 @@ async fn prepare_latest_with_timeouts(
     let _ = fs::remove_dir_all(&incoming);
     result?;
     Ok(Some(manifest.version))
+}
+
+fn verify_and_extract(
+    package: &Path,
+    extracted: &Path,
+    source: &UpdateSource,
+    manifest: &Manifest,
+    report: impl Fn(&Path) -> Result<String, String>,
+) -> Result<(), String> {
+    let mut data = Vec::new();
+    File::open(package)
+        .and_then(|file| file.take(MAX_PACKAGE_BYTES + 1).read_to_end(&mut data))
+        .map_err(|error| format!("配布物を読めません: {error}"))?;
+    if data.len() as u64 > MAX_PACKAGE_BYTES {
+        return Err("新しいバージョンが大きすぎます".into());
+    }
+    verify_signature(&source.public_key, &manifest.signature, &data)?;
+    extract_package(Cursor::new(data), extracted)?;
+    let reported = report(&extracted.join(EXECUTABLE))?;
+    if reported != manifest.version {
+        return Err(format!(
+            "案内のバージョン {} と中身のバージョン {reported} が違います",
+            manifest.version
+        ));
+    }
+    Ok(())
 }
 
 /// `03:00-06:00` の形の時間帯。日をまたいでもよい。
@@ -631,17 +663,28 @@ pub enum AfterStop {
     RollBack(String),
 }
 
+const UPDATE_BUSY: &str = "更新の処理が終わってから、もう一度お試しください";
+
+struct UpdateOperation {
+    phase: UpdatePhase,
+    immediate: bool,
+    after_stop: Option<AfterStop>,
+    stop: Option<Box<dyn FnOnce() + Send>>,
+}
+
+struct ShipmentAccess {
+    shipments: Arc<ShelfShipments>,
+    opening: Arc<AsyncMutex<()>>,
+}
+
 /// 本体の中で動く更新の係。頼めるのは「確かめて当てる」だけで、ファイルや URL は渡せない。
 pub struct UpdateController {
     paths: ServerPaths,
     source: UpdateSource,
-    settings: Mutex<LiveSettings>,
-    phase: Mutex<UpdatePhase>,
+    settings: Mutex<watch::Sender<LiveSettings>>,
+    operation: Mutex<UpdateOperation>,
     requested: Notify,
-    /// 設定が変わったら、待っている係を起こす。
-    changed: Notify,
-    apply: Mutex<Option<AfterStop>>,
-    stop: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    shipment_access: OnceLock<ShipmentAccess>,
 }
 
 impl UpdateController {
@@ -655,24 +698,52 @@ impl UpdateController {
         Ok(Arc::new(Self {
             paths,
             source,
-            settings: Mutex::new(LiveSettings {
+            settings: Mutex::new(watch::Sender::new(LiveSettings {
                 auto: config.auto,
                 window_text: config.window,
                 window,
+            })),
+            operation: Mutex::new(UpdateOperation {
+                phase: UpdatePhase::Idle,
+                immediate: false,
+                after_stop: None,
+                stop: Some(stop),
             }),
-            phase: Mutex::new(UpdatePhase::Idle),
             requested: Notify::new(),
-            changed: Notify::new(),
-            apply: Mutex::new(None),
-            stop: Mutex::new(Some(stop)),
+            shipment_access: OnceLock::new(),
         }))
     }
 
     fn live(&self) -> LiveSettings {
+        self.subscribe_settings().borrow().clone()
+    }
+
+    fn subscribe_settings(&self) -> watch::Receiver<LiveSettings> {
         self.settings
             .lock()
-            .map(|settings| settings.clone())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+            .unwrap_or_else(PoisonError::into_inner)
+            .subscribe()
+    }
+
+    fn operation(&self) -> MutexGuard<'_, UpdateOperation> {
+        self.operation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) fn set_shipment_access(
+        &self,
+        shipments: Arc<ShelfShipments>,
+        opening: Arc<AsyncMutex<()>>,
+    ) {
+        let _ = self
+            .shipment_access
+            .set(ShipmentAccess { shipments, opening });
+    }
+
+    /// 呼ぶ側は発送開始の排他を持つ。停止を予約済みなら HTTP の口を閉じる途中でも開始を断る。
+    pub(super) fn allows_shipment_start(&self) -> bool {
+        !matches!(self.operation().phase, UpdatePhase::Applying(_))
     }
 
     pub fn status(&self) -> UpdateStatus {
@@ -681,11 +752,7 @@ impl UpdateController {
         UpdateStatus {
             auto: settings.auto,
             window: settings.window_text,
-            phase: self
-                .phase
-                .lock()
-                .map(|phase| phase.clone())
-                .unwrap_or(UpdatePhase::Idle),
+            phase: self.operation().phase.clone(),
             latest: record.latest,
             last_checked_at: record.last_checked_at,
             last_error: record.last_error,
@@ -700,8 +767,23 @@ impl UpdateController {
     }
 
     /// 今すぐ確かめて当てる。時間帯を待たない。
-    pub fn request_now(&self) {
-        self.requested.notify_one();
+    pub fn request_now(&self) -> Result<(), &'static str> {
+        self.reserve_check(true)
+    }
+
+    fn reserve_check(&self, immediate: bool) -> Result<(), &'static str> {
+        let mut operation = self.operation();
+        match operation.phase {
+            UpdatePhase::Idle => operation.phase = UpdatePhase::Checking,
+            // 時間帯を待つ自動更新があれば、その処理を一度だけ早められる。
+            UpdatePhase::Waiting(_) if immediate && !operation.immediate => {}
+            _ => return Err(UPDATE_BUSY),
+        }
+        operation.immediate = immediate;
+        if immediate {
+            self.requested.notify_one();
+        }
+        Ok(())
     }
 
     /// 確かめるだけ。取ってこないので、結果はすぐ返る。
@@ -718,18 +800,17 @@ impl UpdateController {
     /// 自動更新と時間帯を変える。`server.toml` に書き戻し、再起動せずに効かせる。
     pub fn set_settings(&self, auto: bool, window_text: &str) -> Result<(), String> {
         let window = UpdateWindow::parse(window_text)?;
-        write_update_settings(&self.paths, auto, window_text)?;
-        let mut settings = self
+        // 保存と通知を同じ順にする。設定変更が重なっても、ファイルと待つ側に同じ値が残る。
+        let settings = self
             .settings
             .lock()
             .map_err(|_| "設定を変えられません".to_string())?;
-        *settings = LiveSettings {
+        write_update_settings(&self.paths, auto, window_text)?;
+        settings.send_replace(LiveSettings {
             auto,
             window_text: window_text.to_string(),
             window,
-        };
-        drop(settings);
-        self.changed.notify_waiters();
+        });
         Ok(())
     }
 
@@ -739,7 +820,7 @@ impl UpdateController {
             record.skipped.clear();
             record.clear_error();
         });
-        self.request_now();
+        let _ = self.request_now();
     }
 
     /// 戻せる版。版の置き場と DB の写しの両方があるときだけ。
@@ -759,48 +840,69 @@ impl UpdateController {
         let previous = self
             .rollback_target()
             .ok_or("戻せるバージョンがありません".to_string())?;
-        let idle = self
-            .phase
-            .lock()
-            .map(|phase| matches!(*phase, UpdatePhase::Idle))
-            .unwrap_or(false);
-        if !idle {
-            return Err("更新の処理が終わってからにしてください".into());
+        let after = AfterStop::RollBack(previous.clone());
+        let shipments = self
+            .shipment_access
+            .get()
+            .map(|access| access.shipments.as_ref());
+        if !self.stop_when_quiet(shipments, &after)? {
+            return Err("送信が区切りに来てから、もう一度お試しください".into());
         }
-        UpdateRecord::try_edit(&self.paths, |record| record.skip(VERSION))?;
-        self.stop_for(AfterStop::RollBack(previous.clone()));
         Ok(previous)
     }
 
     /// 本体が止まったあとに行うこと。
     pub fn take_after_stop(&self) -> Option<AfterStop> {
-        self.apply.lock().ok().and_then(|mut apply| apply.take())
+        self.operation().after_stop.take()
     }
 
-    fn stop_for(&self, after: AfterStop) {
-        match &after {
-            AfterStop::Apply(version) => {
-                UpdateHistory::note_stopping(&self.paths, version, false);
-                self.set_phase(UpdatePhase::Applying(version.clone()));
+    fn stop_for(&self, after: AfterStop) -> Result<(), String> {
+        let mut operation = self.operation();
+        let (version, rollback) = match (&after, &operation.phase) {
+            (AfterStop::Apply(version), UpdatePhase::Waiting(waiting)) if version == waiting => {
+                (version, false)
             }
-            AfterStop::RollBack(version) => {
-                UpdateHistory::note_stopping(&self.paths, version, true);
-                self.set_phase(UpdatePhase::Applying(version.clone()));
-            }
+            (AfterStop::RollBack(version), UpdatePhase::Idle) => (version, true),
+            _ => return Err(UPDATE_BUSY.into()),
+        };
+        if rollback {
+            UpdateRecord::try_edit(&self.paths, |record| record.skip(VERSION))?;
         }
-        if let Ok(mut apply) = self.apply.lock() {
-            *apply = Some(after);
+        UpdateHistory::note_stopping(&self.paths, version, rollback);
+        operation.phase = UpdatePhase::Applying(version.clone());
+        operation.after_stop = Some(after);
+        let stop = operation.stop.take();
+        drop(operation);
+        if !rollback {
+            let _ = fs::remove_file(self.paths.versions().join(PREPARED_PACKAGE));
         }
-        let stop = self.stop.lock().ok().and_then(|mut stop| stop.take());
         if let Some(stop) = stop {
             stop();
         }
+        Ok(())
     }
 
-    fn set_phase(&self, phase: UpdatePhase) {
-        if let Ok(mut current) = self.phase.lock() {
-            *current = phase;
+    fn stop_when_quiet(
+        &self,
+        shipments: Option<&ShelfShipments>,
+        after: &AfterStop,
+    ) -> Result<bool, String> {
+        // 開始処理の途中も含めて送信がないことを確かめ、同じ排他の中で停止を予約する。
+        // 予約後は新しい開始を断り、先に始まった送信はこの予約の前に区切りまで進める。
+        // 組み終えて公開を待つ棚は、止めたあとの起動で公開されるので妨げにしない。
+        let _opening = if let Some(access) = self.shipment_access.get() {
+            let Ok(opening) = access.opening.try_lock() else {
+                return Ok(false);
+            };
+            Some(opening)
+        } else {
+            None
+        };
+        if shipments.is_some_and(|shipments| shipments.busy()) {
+            return Ok(false);
         }
+        self.stop_for(after.clone())?;
+        Ok(true)
     }
 
     fn record_error(&self, error: &str) {
@@ -812,34 +914,40 @@ impl UpdateController {
         });
     }
 
-    /// 棚の受け取りが区切りに来るのを待つ。来なければ false。
-    async fn wait_until_quiet(&self, shipments: Option<&ShelfShipments>) -> bool {
-        let Some(shipments) = shipments else {
-            return true;
-        };
+    /// 棚の受け取りが区切りに来たら適用を予約する。来なければ次の回へ延ばす。
+    async fn apply_when_quiet(
+        &self,
+        shipments: Option<&ShelfShipments>,
+        version: String,
+    ) -> Result<(), String> {
+        let after = AfterStop::Apply(version);
         let deadline = tokio::time::Instant::now() + QUIET_LIMIT;
-        while shipments.busy() {
+        while !self.stop_when_quiet(shipments, &after)? {
             if tokio::time::Instant::now() >= deadline {
-                return false;
+                return Err("送信が終わらないので、更新を次に延ばします".into());
             }
             tokio::time::sleep(QUIET_POLL).await;
         }
-        true
+        Ok(())
     }
 
     /// 時間帯に入るか、今すぐと頼まれるまで待つ。自動を切られたら false。
-    async fn wait_for_window(&self) -> bool {
+    async fn wait_for_window(&self, local_time: impl Fn() -> NaiveTime) -> bool {
+        let mut changed = self.subscribe_settings();
         loop {
-            let settings = self.live();
+            if self.operation().immediate {
+                return true;
+            }
+            let settings = changed.borrow_and_update().clone();
             if !settings.auto {
                 return false;
             }
-            if settings.window.contains(Local::now().time()) {
+            if settings.window.contains(local_time()) {
                 return true;
             }
             tokio::select! {
-                _ = self.requested.notified() => return true,
-                _ = self.changed.notified() => {}
+                _ = self.requested.notified() => {}
+                _ = changed.changed() => {}
                 _ = tokio::time::sleep(WINDOW_POLL) => {}
             }
         }
@@ -847,39 +955,41 @@ impl UpdateController {
 
     /// 1 回分。当てることになったら true を返し、本体を止める。
     async fn run_once(&self, now: bool, shipments: Option<&ShelfShipments>) -> bool {
-        self.set_phase(UpdatePhase::Checking);
         if !now && !self.live().auto {
             // 自動を切っていても、新しいバージョンがあることは知らせる。取ってはこない。
             if let Err(error) = check_latest(&self.source, &self.paths).await {
                 self.record_error(&error);
             }
-            self.set_phase(UpdatePhase::Idle);
+            self.operation().phase = UpdatePhase::Idle;
             return false;
         }
         let prepared = prepare_latest(&self.source, &self.paths, VERSION).await;
         let version = match prepared {
             Ok(Some(version)) => version,
             Ok(None) => {
-                self.set_phase(UpdatePhase::Idle);
+                self.operation().phase = UpdatePhase::Idle;
                 return false;
             }
             Err(error) => {
                 self.record_error(&error);
-                self.set_phase(UpdatePhase::Idle);
+                self.operation().phase = UpdatePhase::Idle;
                 return false;
             }
         };
-        self.set_phase(UpdatePhase::Waiting(version.clone()));
-        if !now && !self.wait_for_window().await {
-            self.set_phase(UpdatePhase::Idle);
+        self.operation().phase = UpdatePhase::Waiting(version.clone());
+        if !now && !self.wait_for_window(|| Local::now().time()).await {
+            let mut operation = self.operation();
+            // 自動を切って待機を終える直前に「今すぐ」が届いたら、その依頼を処理する。
+            if !operation.immediate {
+                operation.phase = UpdatePhase::Idle;
+                return false;
+            }
+        }
+        if let Err(error) = self.apply_when_quiet(shipments, version).await {
+            self.record_error(&error);
+            self.operation().phase = UpdatePhase::Idle;
             return false;
         }
-        if !self.wait_until_quiet(shipments).await {
-            self.record_error("送信が終わらないので、更新を次に延ばします");
-            self.set_phase(UpdatePhase::Idle);
-            return false;
-        }
-        self.stop_for(AfterStop::Apply(version));
         true
     }
 
@@ -888,8 +998,19 @@ impl UpdateController {
         let mut delay = FIRST_CHECK_DELAY;
         loop {
             let now = tokio::select! {
-                _ = self.requested.notified() => true,
-                _ = tokio::time::sleep(delay) => false,
+                _ = self.requested.notified() => {
+                    let operation = self.operation();
+                    if !matches!(operation.phase, UpdatePhase::Checking) || !operation.immediate {
+                        continue;
+                    }
+                    true
+                }
+                _ = tokio::time::sleep(delay) => {
+                    if self.reserve_check(false).is_err() {
+                        continue;
+                    }
+                    false
+                }
             };
             if self.run_once(now, shipments.as_deref()).await {
                 return;
@@ -1039,6 +1160,155 @@ mod tests {
     }
 
     #[test]
+    fn stopping_keeps_the_first_reserved_action() {
+        let (_root, paths) = history_paths();
+        let controller = UpdateController::new(
+            paths,
+            UpdateSource::fixed(),
+            UpdateConfig::default(),
+            Box::new(|| {}),
+        )
+        .unwrap();
+        controller
+            .stop_for(AfterStop::RollBack("1.0.0".into()))
+            .unwrap();
+        assert_eq!(
+            controller.stop_for(AfterStop::Apply("2.0.0".into())),
+            Err(UPDATE_BUSY.into())
+        );
+        assert_eq!(
+            controller.take_after_stop(),
+            Some(AfterStop::RollBack("1.0.0".into()))
+        );
+    }
+
+    #[test]
+    fn manual_apply_reserves_before_the_worker_wakes() {
+        let (_root, paths) = history_paths();
+        let controller = UpdateController::new(
+            paths,
+            UpdateSource::fixed(),
+            UpdateConfig::default(),
+            Box::new(|| {}),
+        )
+        .unwrap();
+        controller.request_now().unwrap();
+        assert!(matches!(controller.status().phase, UpdatePhase::Checking));
+        assert_eq!(controller.request_now(), Err(UPDATE_BUSY));
+        assert_eq!(
+            controller.stop_for(AfterStop::RollBack("1.0.0".into())),
+            Err(UPDATE_BUSY.into())
+        );
+    }
+
+    #[tokio::test]
+    async fn shipment_opening_and_update_stop_exclude_each_other() {
+        use crate::server::http::{combined_router, ServerContext};
+        use crate::server::store::{Role, ServerStore};
+        use reqwest::StatusCode;
+
+        let (_root, paths) = history_paths();
+        fs::write(paths.config(), "").unwrap();
+        let store = Arc::new(ServerStore::open(&paths.store()).unwrap());
+        let secret = store
+            .issue_pairing(Role::Admin, Duration::from_secs(60))
+            .unwrap();
+        let admin = store.consume_pairing(&secret, "管理者").unwrap();
+        let context = ServerContext::new(store, paths.root.clone(), None, None);
+        let shipments = Arc::new(ShelfShipments::new(paths.clone(), None));
+        context.set_shipments(paths.clone(), Arc::clone(&shipments));
+        let controller = UpdateController::new(
+            paths,
+            UpdateSource::fixed(),
+            UpdateConfig::default(),
+            Box::new(|| {}),
+        )
+        .unwrap();
+        context.set_update(Arc::clone(&controller));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/api/admin/shelf/shipments",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, combined_router(context))
+                .await
+                .unwrap()
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let open = || {
+            client
+                .post(&url)
+                .bearer_auth(&admin.token)
+                .json(&serde_json::json!({
+                    "libraryId": uuid::Uuid::now_v7().to_string()
+                }))
+                .send()
+        };
+        let response = open().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+
+        let version = "1.0.1";
+        controller.reserve_check(false).unwrap();
+        controller.operation().phase = UpdatePhase::Waiting(version.into());
+        let after = AfterStop::Apply(version.into());
+        assert!(!controller
+            .stop_when_quiet(Some(&shipments), &after)
+            .unwrap());
+        shipments
+            .abort(body["shipmentId"].as_str().unwrap())
+            .unwrap();
+        let opening = controller
+            .shipment_access
+            .get()
+            .unwrap()
+            .opening
+            .lock()
+            .await;
+        assert!(!controller
+            .stop_when_quiet(Some(&shipments), &after)
+            .unwrap());
+        drop(opening);
+        assert!(controller
+            .stop_when_quiet(Some(&shipments), &after)
+            .unwrap());
+
+        let response = open().await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(!shipments.busy());
+        assert_eq!(controller.take_after_stop(), Some(after));
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn window_wait_observes_settings_changed_before_awaiting() {
+        let (_root, paths) = history_paths();
+        let controller = UpdateController::new(
+            paths,
+            UpdateSource::fixed(),
+            UpdateConfig {
+                auto: true,
+                window: "03:00-06:00".into(),
+            },
+            Box::new(|| {}),
+        )
+        .unwrap();
+        let wait = controller.wait_for_window(|| {
+            // 待つ側が設定を読んでから、変更を待ち始めるまでの間に書き換える。
+            controller.set_settings(false, "03:00-06:00").unwrap();
+            NaiveTime::from_hms_opt(12, 0, 0).unwrap()
+        });
+        tokio::pin!(wait);
+        assert_eq!(
+            futures_util::poll!(&mut wait),
+            std::task::Poll::Ready(false)
+        );
+    }
+
+    #[test]
     fn update_record_writer_waits_then_keeps_concurrent_skip() {
         use std::sync::mpsc::{channel, RecvTimeoutError};
 
@@ -1113,6 +1383,7 @@ mod tests {
 
         assert_eq!(controller.check_now().await.unwrap(), VERSION);
         let after_manual = controller.status().last_error;
+        controller.request_now().unwrap();
         assert!(!controller.run_once(true, None).await);
         let after_automatic = controller.status().last_error;
         server.abort();
@@ -1221,6 +1492,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deferred_package_is_reused_without_another_download() {
+        check_deferred_package(false).await;
+    }
+
+    #[tokio::test]
+    async fn deferred_package_with_invalid_signature_is_downloaded_again() {
+        check_deferred_package(true).await;
+    }
+
+    async fn check_deferred_package(tamper: bool) {
+        use axum::{routing::get, Json, Router};
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // 試験専用の鍵で署名した ZIP。中の実行ファイルは版番号を書いたテキスト。
+        const ZIP: &str = "UEsDBBQAAAAIAMtmfF2gUjxkBwAAAAUAAAAPAAAAcGllcC1zZXJ2ZXIuZXhlM9Qz0DMEAFBLAQIUABQAAAAIAMtmfF2gUjxkBwAAAAUAAAAPAAAAAAAAAAAAAAAAAAAAAABwaWVwLXNlcnZlci5leGVQSwUGAAAAAAEAAQA9AAAANAAAAAAA";
+        const KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHRlc3Qga2V5ClJXUjBaWE4wTFhwcGNKSFFqRm5zeE0rbmxROWFMbXVHRU9pMlhrUlJTUnFhSkViNmVQNHBJa3huCg==";
+        const SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHRlc3Qgc2lnbmF0dXJlClJVUjBaWE4wTFhwcGNLRU93MkxWWDZTbHRRWmlSaXNLRC9zaUh0MmJMY0NtaXdTbko0cHRSMkdLd1YxMVlibHN5TEdLaEFjTy8yNkdCM2VZZUUyTGltejJ0bmJJN3hTQjBBZz0KdHJ1c3RlZCBjb21tZW50OiBmaWxlOnBhY2thZ2UuemlwCktIbitzNU1vMSsvU2k3bS9HdjdiRTFEMllnMnpqY09EamVxNlRpV1BPemJGV01xZUFmcEs4RmxPcmRrZ09jZVlYWHhCSjZLVUR3R21aYkRpM0pGYUJnPT0K";
+        let (_root, paths) = history_paths();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let url = format!("{base}/package");
+        let downloads = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&downloads);
+        let app = Router::new()
+            .route(
+                "/manifest",
+                get(move || {
+                    let url = url.clone();
+                    async move {
+                        Json(serde_json::json!({
+                            "version": "1.0.1", "url": url, "signature": SIGNATURE
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/package",
+                get(move || {
+                    let counted = Arc::clone(&counted);
+                    async move {
+                        counted.fetch_add(1, Ordering::Relaxed);
+                        STANDARD.decode(ZIP).unwrap()
+                    }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let source = UpdateSource {
+            manifest_url: format!("{base}/manifest"),
+            download_prefix: base,
+            public_key: KEY.into(),
+        };
+        let prepare = || {
+            prepare_latest_with_timeouts(
+                &source,
+                &paths,
+                "1.0.0",
+                Duration::from_secs(3),
+                Duration::from_secs(3),
+                |path| fs::read_to_string(path).map_err(|error| error.to_string()),
+            )
+        };
+        assert_eq!(prepare().await.unwrap().as_deref(), Some("1.0.1"));
+        let cache = paths.versions().join(PREPARED_PACKAGE);
+        if tamper {
+            fs::write(&cache, b"changed").unwrap();
+        }
+        assert_eq!(prepare().await.unwrap().as_deref(), Some("1.0.1"));
+        assert_eq!(
+            downloads.load(Ordering::Relaxed),
+            if tamper { 2 } else { 1 }
+        );
+        assert_eq!(fs::read(cache).unwrap(), STANDARD.decode(ZIP).unwrap());
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn stalled_update_requests_end_and_can_be_retried() {
         use axum::{body::Body, response::Response, routing::get, Json, Router};
 
@@ -1282,6 +1630,7 @@ mod tests {
                         "1.0.0",
                         Duration::from_millis(100),
                         Duration::from_millis(100),
+                        reported_version,
                     ),
                 )
                 .await;
@@ -1361,7 +1710,7 @@ mod tests {
             &package,
             &["piep-server.exe", "MSVCP140.dll", "pdfium-licenses.txt"],
         );
-        extract_package(&package, &target).expect("extract");
+        extract_package(File::open(&package).unwrap(), &target).expect("extract");
         assert!(target.join("piep-server.exe").exists());
         assert!(target.join("msvcp140.dll").exists());
         assert!(target.join("pdfium-licenses.txt").exists());
@@ -1369,10 +1718,13 @@ mod tests {
         // パスの外へ出る名前も、知らない名前も受け入れない。
         for bad in ["../piep-server.exe", "sub/piep-server.exe", "evil.dll"] {
             zip_with(&package, &["piep-server.exe", bad]);
-            assert!(extract_package(&package, &target).is_err(), "{bad}");
+            assert!(
+                extract_package(File::open(&package).unwrap(), &target).is_err(),
+                "{bad}"
+            );
         }
         zip_with(&package, &["msvcp140.dll"]);
-        assert!(extract_package(&package, &target).is_err());
+        assert!(extract_package(File::open(&package).unwrap(), &target).is_err());
     }
 
     /// 試験専用の鍵で署名した例。配布には使っていない。
