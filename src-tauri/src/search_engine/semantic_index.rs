@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(not(test))]
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 #[cfg(not(test))]
 use std::sync::Mutex;
@@ -18,8 +18,11 @@ use super::normalization::{query_variants, search_index_text};
 const INDEX_DIR_NAME: &str = "search";
 const INDEX_VERSION_DIR: &str = "semantic-v2";
 const INDEX_FILE_NAME: &str = "index.sqlite";
+const INDEX_SCHEMA_VERSION: i64 = 1;
 const MODEL_ID: &str = "intfloat/multilingual-e5-small";
 const VECTOR_DIMENSION: usize = 384;
+// 本文の分割規則を変えるときに上げる。既存行に付ける初期値とは独立させる。
+const CHUNKING_VERSION: i64 = 1;
 const CHUNK_TARGET_CHARS: usize = 620;
 const CHUNK_OVERLAP_CHARS: usize = 80;
 
@@ -195,7 +198,10 @@ pub fn upsert_documents_reusing(
             embedded.len()
         ));
     }
-    // 断片ごとのベクトルに戻す。写せた断片は空のまま（使わない）。
+    for vector in &embedded {
+        validate_embedding(vector)?;
+    }
+    // 断片ごとのベクトルに戻す。再利用した断片は計算していないので None にする。
     let mut embedded = embedded.into_iter();
     let mut vectors = Vec::new();
     for (chunks, previous) in chunks_by_doc.iter().zip(&previous) {
@@ -207,14 +213,16 @@ pub fn upsert_documents_reusing(
                 _ => content_known,
             };
             vectors.push(if known {
-                Vec::new()
+                None
             } else {
-                embedded.next().unwrap_or_default()
+                Some(
+                    embedded
+                        .next()
+                        .ok_or("Semantic work vector range is incomplete")?,
+                )
             });
         }
     }
-    let vectors = vectors;
-    let passage_count = vectors.len();
 
     let conn = open_index(storage_dir)?;
     let tx = conn
@@ -227,28 +235,12 @@ pub fn upsert_documents_reusing(
         )
         .map_err(|e| format!("Semantic clear failed: {}", e))?;
     }
-    // **`zip` は短いほうで黙って打ち切る。** 直前にその作品の断片を全部
-    // 消しているので、返ったベクトルが足りなければ、消したぶんの一部が二度と
-    // 入らない。エラーにもならず、意味検索からその作品が静かに欠ける。
-    if passage_count != chunks_by_doc.iter().map(Vec::len).sum::<usize>() {
-        return Err("Semantic work vector range is incomplete".to_string());
-    }
-    for vector in vectors.iter().filter(|vector| !vector.is_empty()) {
-        if vector.len() != VECTOR_DIMENSION {
-            return Err(format!(
-                "Semantic model dimension mismatch: expected {}, got {}",
-                VECTOR_DIMENSION,
-                vector.len()
-            ));
-        }
-    }
-
     let mut offset = 0usize;
     let mut indexed = Vec::with_capacity(docs.len());
     for ((doc, chunks), previous) in docs.iter().zip(chunks_by_doc.iter()).zip(&previous) {
         let end = offset.saturating_add(chunks.len());
         let doc_vectors = vectors
-            .get(offset..end)
+            .get_mut(offset..end)
             .ok_or_else(|| "Semantic work vector range is incomplete".to_string())?;
         offset = end;
 
@@ -263,36 +255,30 @@ pub fn upsert_documents_reusing(
                         .iter()
                         .zip(doc_vectors.iter())
                         .filter(|(chunk, _)| chunk.field == "body")
-                        .map(|(_, vector)| vector.as_slice())
-                        .collect::<Vec<_>>();
+                        .map(|(_, vector)| {
+                            vector
+                                .as_deref()
+                                .ok_or("Semantic body embedding is missing")
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     (
                         mean_normalized_vector(&body_vectors),
                         body_vectors.len() as i64,
                     )
                 }
             };
-        let content_preview = chunks
-            .iter()
-            .find(|chunk| chunk.field == "body")
-            .map(|chunk| chunk.text.as_str())
-            .unwrap_or("");
         let metadata_index = chunks.iter().position(|chunk| chunk.field == "metadata");
         let reused_metadata = previous.as_ref().and_then(|p| p.metadata.clone());
-        // A body-only work is still searchable. Previously it was skipped here
-        // but its SQLite coverage row was recorded as successful, making it
-        // permanently absent from semantic results. Use the normalized body
-        // centroid as its metadata fallback and report only actually inserted
-        // ids to the caller.
-        let (metadata_text, metadata_vector) = match metadata_index {
-            Some(index) if reused_metadata.is_some() => {
+        let (metadata_text, metadata_vector) = match (metadata_index, reused_metadata) {
+            (Some(index), Some(vector)) => {
                 report.reused_metadata += 1;
-                (
-                    chunks[index].text.as_str(),
-                    reused_metadata.unwrap_or_default(),
-                )
+                (chunks[index].text.as_str(), vector)
             }
-            Some(index) => {
-                let Some(vector) = unit_vector(doc_vectors[index].clone()) else {
+            (Some(index), None) => {
+                let vector = doc_vectors[index]
+                    .take()
+                    .ok_or("Semantic metadata embedding is missing")?;
+                let Some(vector) = unit_vector(vector) else {
                     log::warn!(
                         "Semantic metadata vector for {} had no direction; skipping",
                         doc.download_id
@@ -301,24 +287,27 @@ pub fn upsert_documents_reusing(
                 };
                 (chunks[index].text.as_str(), vector)
             }
-            None => {
+            (None, _) => {
+                // 説明がない作品では本文の重心と先頭の断片を説明の代わりに使う。
                 let Some(vector) = content_vector.clone() else {
                     continue;
                 };
-                (content_preview, vector)
+                (
+                    chunks.first().map_or("", |chunk| chunk.text.as_str()),
+                    vector,
+                )
             }
         };
 
         tx.execute(
             "INSERT OR REPLACE INTO semantic_works (
-                download_id, metadata_text, content_preview, metadata_hash, content_hash,
+                download_id, metadata_text, metadata_hash, content_hash,
                 model_id, dimension, metadata_vector, content_vector, content_chunk_count,
-                updated_at
+                chunking_version, updated_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 doc.download_id,
                 metadata_text,
-                content_preview,
                 hash_text(metadata_text),
                 hash_text(&doc.body),
                 MODEL_ID,
@@ -326,6 +315,7 @@ pub fn upsert_documents_reusing(
                 vector_to_blob(&metadata_vector),
                 content_vector.as_deref().map(vector_to_blob),
                 content_chunk_count,
+                CHUNKING_VERSION,
                 chrono::Utc::now().to_rfc3339(),
             ],
         )
@@ -339,7 +329,7 @@ pub fn upsert_documents_reusing(
 }
 
 /// 前の索引から、文字列が同じ部分のベクトルを読む。説明は説明の断片の文字列、本文は本文の
-/// 全文のハッシュで比べる（本文の重心は全文と断片の切り方だけで決まる）。
+/// 全文のハッシュ・断片数・分割規則の版で比べる。
 fn previous_vectors(
     reuse: &ReusableVectors<'_>,
     docs: &[SemanticIndexDocument],
@@ -351,7 +341,8 @@ fn previous_vectors(
     let conn = open_index(reuse.storage_dir)?;
     let mut statement = conn
         .prepare_cached(
-            "SELECT metadata_hash,content_hash,metadata_vector,content_vector,content_chunk_count
+            "SELECT metadata_hash,content_hash,metadata_vector,content_vector,content_chunk_count,
+                    chunking_version
                FROM semantic_works WHERE download_id=?1 AND model_id=?2 AND dimension=?3",
         )
         .map_err(|e| format!("Semantic reuse prepare failed: {e}"))?;
@@ -369,39 +360,53 @@ fn previous_vectors(
                     row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, Option<Vec<u8>>>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             })
             .optional()
             .map_err(|e| format!("Semantic reuse read failed: {e}"))?;
-        let Some((metadata_hash, content_hash, metadata_blob, content_blob, chunk_count)) = row
+        let Some((
+            metadata_hash,
+            content_hash,
+            metadata_blob,
+            content_blob,
+            chunk_count,
+            chunking_version,
+        )) = row
         else {
             previous.push(None);
             continue;
         };
         let body_chunks = chunks.iter().filter(|chunk| chunk.field == "body").count() as i64;
-        let content = (content_hash == hash_text(&doc.body) && chunk_count == body_chunks)
-            .then(|| {
-                content_blob
-                    .filter(|blob| blob.len() == VECTOR_DIMENSION * std::mem::size_of::<f32>())
-                    .map(|blob| blob_to_vector(&blob))
-            })
-            .filter(|vector| vector.is_some() || body_chunks == 0)
-            .map(|vector| (vector, chunk_count));
+        let content = if content_hash == hash_text(&doc.body)
+            && chunk_count == body_chunks
+            && chunking_version == CHUNKING_VERSION
+        {
+            match content_blob.as_deref() {
+                Some(blob) => {
+                    decode_vector(blob).map(|vector| (Some(vector.to_vec()), chunk_count))
+                }
+                None if body_chunks == 0 => Some((None, 0)),
+                None => None,
+            }
+        } else {
+            None
+        };
         let metadata = chunks
             .iter()
             .find(|chunk| chunk.field == "metadata")
             .filter(|chunk| hash_text(&chunk.text) == metadata_hash)
-            .filter(|_| metadata_blob.len() == VECTOR_DIMENSION * std::mem::size_of::<f32>())
-            .map(|_| blob_to_vector(&metadata_blob));
+            .and_then(|_| decode_vector(&metadata_blob))
+            .map(|vector| vector.to_vec());
         previous.push(Some(Previous { metadata, content }));
     }
     Ok(previous)
 }
 
 #[derive(Debug)]
-struct RankedSemanticCandidate {
-    download_id: i64,
-    score: f64,
+pub(crate) struct RankedSemanticCandidate {
+    pub download_id: i64,
+    pub score: f64,
     content: bool,
 }
 
@@ -434,9 +439,7 @@ pub fn index_exists(storage_dir: &Path) -> bool {
     index_path(storage_dir).exists()
 }
 
-/// Removes several works in one SQLite transaction and invalidates the ANN
-/// cache once. Bulk library deletion used to rebuild this cache boundary once
-/// per work, which made a large delete needlessly expensive.
+/// 複数の作品を一つのトランザクションで削除する。
 pub fn clear_documents(storage_dir: &Path, download_ids: &[i64]) -> Result<(), String> {
     if download_ids.is_empty() {
         return Ok(());
@@ -468,36 +471,70 @@ pub fn clear_all_works(storage_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn search(
+/// 候補を絞り込み、同じ索引のスナップショットから表示対象の説明を読む。
+pub(crate) fn search_selected<T, E>(
     storage_dir: &Path,
     query: &str,
-    limit: usize,
-) -> Result<Vec<SemanticSearchHit>, String> {
-    search_with_query_text(storage_dir, &semantic_query_text(query), limit)
-}
-
-/// 問いの作り方だけを差し替えて測るための口。
-///
-/// 索引側は本文をそのまま `passage:` として渡すのに、検索側が何を `query:` と
-/// して渡すかで結果が変わる。**どちらが良いかは実測でしか言えない**ので、
-/// 前処理を外から与えられるようにしてある。
-pub fn search_with_query_text(
-    storage_dir: &Path,
-    query_text: &str,
-    limit: usize,
-) -> Result<Vec<SemanticSearchHit>, String> {
-    if query_text.trim().is_empty() || limit == 0 {
-        return Ok(Vec::new());
+    select: impl FnOnce(&mut Vec<RankedSemanticCandidate>) -> Result<T, E>,
+    index_error: impl Fn(String) -> E,
+) -> Result<(T, Vec<SemanticSearchHit>), E> {
+    let query_text = semantic_query_text(query);
+    if query_text.is_empty() {
+        return Ok((select(&mut Vec::new())?, Vec::new()));
     }
 
-    let query_vector = embed_texts(vec![format!("query: {}", query_text)])?
+    let vectors = embed_texts(vec![format!("query: {query_text}")]).map_err(&index_error)?;
+    let query_vector = normalize_query_embedding(vectors).map_err(&index_error)?;
+    let mut conn = open_index(storage_dir).map_err(&index_error)?;
+    search_snapshot(&mut conn, &query_vector, usize::MAX, select, index_error)
+}
+
+fn normalize_query_embedding(vectors: Vec<Vec<f32>>) -> Result<Vec<f32>, String> {
+    let vector = vectors
         .into_iter()
         .next()
-        .and_then(unit_vector)
-        .ok_or_else(|| "Semantic query embedding returned no vector".to_string())?;
+        .ok_or("Semantic query embedding returned no vector")?;
+    validate_embedding(&vector)?;
+    unit_vector(vector).ok_or_else(|| "Semantic query embedding has no direction".to_string())
+}
 
-    let conn = open_index(storage_dir)?;
-    let mut statement = conn
+fn search_snapshot<T, E>(
+    conn: &mut Connection,
+    query_vector: &[f32],
+    limit: usize,
+    select: impl FnOnce(&mut Vec<RankedSemanticCandidate>) -> Result<T, E>,
+    index_error: impl Fn(String) -> E,
+) -> Result<(T, Vec<SemanticSearchHit>), E> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| index_error(format!("Semantic search transaction failed: {e}")))?;
+    let mut candidates = score_search_candidates(&tx, query_vector, limit).map_err(&index_error)?;
+    let selected = select(&mut candidates)?;
+    let hits = read_search_hits(&tx, candidates).map_err(index_error)?;
+    Ok((selected, hits))
+}
+
+#[cfg(test)]
+fn search_by_vector(
+    conn: &mut Connection,
+    query_vector: &[f32],
+    limit: usize,
+) -> Result<Vec<SemanticSearchHit>, String> {
+    let ((), mut hits) = search_snapshot(conn, query_vector, limit, |_| Ok(()), |error| error)?;
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| a.download_id.cmp(&b.download_id))
+    });
+    Ok(hits)
+}
+
+fn score_search_candidates(
+    tx: &Transaction<'_>,
+    query_vector: &[f32],
+    limit: usize,
+) -> Result<Vec<RankedSemanticCandidate>, String> {
+    let mut statement = tx
         .prepare(
             "SELECT download_id, metadata_vector, content_vector
                FROM semantic_works
@@ -513,18 +550,19 @@ pub fn search_with_query_text(
             ))
         })
         .map_err(|e| format!("Semantic work search failed: {e}"))?;
-    // Keep only the requested top-k while scanning. The former Vec retained
-    // and sorted every qualifying work, and also loaded both preview strings
-    // for the entire library. Text is fetched only for the final results.
+    // 点数を付けながら、返す件数分の上位候補だけを保持する。
     let mut candidates = BinaryHeap::<Reverse<RankedSemanticCandidate>>::new();
     for row in rows {
         let (download_id, metadata_blob, content_blob) =
             row.map_err(|e| format!("Semantic work search read failed: {e}"))?;
-        let metadata_score = cosine_similarity_blob(&query_vector, &metadata_blob);
+        let Some(metadata) = decode_vector(&metadata_blob) else {
+            continue;
+        };
+        let metadata_score = cosine_similarity(query_vector, &metadata);
         let content_score = content_blob
             .as_deref()
-            .filter(|blob| blob.len() == VECTOR_DIMENSION * std::mem::size_of::<f32>())
-            .map(|blob| cosine_similarity_blob(&query_vector, blob));
+            .and_then(decode_vector)
+            .map(|vector| cosine_similarity(query_vector, &vector));
         let (score, content) = match content_score {
             Some(content_score) => {
                 let combined = metadata_score * 0.35 + content_score * 0.65;
@@ -551,40 +589,53 @@ pub fn search_with_query_text(
         }
     }
 
-    let mut candidates = candidates
-        .into_iter()
-        .map(|entry| entry.0)
-        .collect::<Vec<_>>();
-    candidates.sort_by(|a, b| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| a.download_id.cmp(&b.download_id))
-    });
-    let mut text_statement = conn
-        .prepare("SELECT metadata_text FROM semantic_works WHERE download_id = ?1")
-        .map_err(|e| format!("Semantic result text prepare failed: {e}"))?;
+    Ok(candidates.into_iter().map(|entry| entry.0).collect())
+}
+
+fn read_search_hits(
+    tx: &Transaction<'_>,
+    candidates: Vec<RankedSemanticCandidate>,
+) -> Result<Vec<SemanticSearchHit>, String> {
+    // 本文の重心で選ばれた候補には定型文を使う。説明を表示する候補だけを一度に読む。
+    let ids: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| !candidate.content)
+        .map(|candidate| candidate.download_id)
+        .collect();
+    let mut texts = HashMap::<i64, String>::new();
+    if !ids.is_empty() {
+        let keys =
+            serde_json::to_string(&ids).map_err(|e| format!("Semantic result keys failed: {e}"))?;
+        let mut statement = tx
+            .prepare(
+                "SELECT w.download_id, w.metadata_text
+                   FROM json_each(?1) j JOIN semantic_works w ON w.download_id = j.value",
+            )
+            .map_err(|e| format!("Semantic result text prepare failed: {e}"))?;
+        texts = statement
+            .query_map([keys], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("Semantic result text query failed: {e}"))?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(|e| format!("Semantic result text read failed: {e}"))?;
+    }
     candidates
         .into_iter()
         .map(|candidate| {
-            let metadata: String = text_statement
-                .query_row(params![candidate.download_id], |row| row.get(0))
-                .map_err(|e| format!("Semantic result text read failed: {e}"))?;
+            let (field, text) = if candidate.content {
+                (
+                    "content",
+                    "本文全体の傾向が近い候補です。個別の一致箇所は特定していません。".to_string(),
+                )
+            } else {
+                let text = texts.remove(&candidate.download_id).ok_or_else(|| {
+                    format!("Semantic result text missing for {}", candidate.download_id)
+                })?;
+                ("metadata", text)
+            };
             Ok(SemanticSearchHit {
                 download_id: candidate.download_id,
-                field: if candidate.content {
-                    "content"
-                } else {
-                    "metadata"
-                }
-                .to_string(),
-                // The content score comes from the centroid of every body
-                // chunk. The stored preview is only the first chunk and is
-                // not evidence that a query matched those particular words.
-                text: if candidate.content {
-                    "本文全体の傾向が近い候補です。個別の一致箇所は特定していません。".to_string()
-                } else {
-                    metadata
-                },
+                field: field.to_string(),
+                text,
                 score: candidate.score,
             })
         })
@@ -592,9 +643,6 @@ pub fn search_with_query_text(
 }
 
 /// 作品ごとの本文ベクトル。全チャンクの平均を、長さ1にそろえて返す。
-///
-/// 検索は「問いに近いチャンク」を探すが、束ねるときに要るのは
-/// **作品そのものがどのあたりにあるか**である。章の平均はその代わりになる。
 ///
 /// 索引には削除済み作品の行が残っていることがあるので、呼び出し側が
 /// 実在する id を渡す。ここでは渡された id 以外を返さない。
@@ -624,19 +672,14 @@ pub fn work_centroids(
         if !wanted.contains(&download_id) {
             continue;
         }
-        let vector = blob_to_vector(&blob);
-        if vector.len() != VECTOR_DIMENSION {
-            continue;
+        if let Some(vector) = decode_vector(&blob) {
+            out.insert(download_id, vector.to_vec());
         }
-        out.insert(download_id, vector);
     }
     Ok(out)
 }
 
-/// Finds related works from already-indexed work vectors without loading the
-/// embedding model.  Collection suggestions use this path: their input is a
-/// work, not a free-form query, so embedding its title again only loses
-/// information and can unexpectedly start a model download.
+/// 索引済みの作品ベクトルから類似作品を探す。埋め込みモデルは読み込まない。
 pub fn similar_works(
     storage_dir: &Path,
     seed_ids: &[i64],
@@ -645,9 +688,12 @@ pub fn similar_works(
     if seed_ids.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
-    let conn = open_index(storage_dir)?;
+    let mut conn = open_index(storage_dir)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Semantic related-work transaction failed: {e}"))?;
     let seed_set = seed_ids.iter().copied().collect::<HashSet<_>>();
-    let mut seed_statement = conn
+    let mut seed_statement = tx
         .prepare(
             "SELECT metadata_vector, content_vector
                FROM semantic_works
@@ -662,23 +708,27 @@ pub fn similar_works(
             })
             .optional()
             .map_err(|e| format!("Semantic seed read failed: {e}"))?;
-        if let Some((metadata, content)) = row {
-            let metadata = blob_to_vector(&metadata);
-            let content = content.as_deref().map(blob_to_vector);
-            if metadata.len() == VECTOR_DIMENSION
-                && content
-                    .as_ref()
-                    .is_none_or(|vector| vector.len() == VECTOR_DIMENSION)
-            {
-                seeds.push((metadata, content));
-            }
-        }
+        let Some((metadata, content)) = row else {
+            continue;
+        };
+        let Some(metadata) = decode_vector(&metadata) else {
+            continue;
+        };
+        let content = match content.as_deref() {
+            Some(blob) => match decode_vector(blob) {
+                Some(vector) => Some(vector),
+                None => continue,
+            },
+            None => None,
+        };
+        seeds.push((metadata, content));
     }
+    drop(seed_statement);
     if seeds.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut statement = conn
+    let mut statement = tx
         .prepare(
             "SELECT download_id, metadata_vector, content_vector
                FROM semantic_works
@@ -702,13 +752,17 @@ pub fn similar_works(
         if seed_set.contains(&id) {
             continue;
         }
+        let Some(metadata) = decode_vector(&metadata) else {
+            continue;
+        };
+        let content = content.as_deref().and_then(decode_vector);
         let score = seeds
             .iter()
             .map(|(seed_metadata, seed_content)| {
-                let metadata_score = cosine_similarity_blob(seed_metadata, &metadata);
-                match (seed_content.as_deref(), content.as_deref()) {
+                let metadata_score = cosine_similarity(seed_metadata, &metadata);
+                match (seed_content.as_ref(), content.as_ref()) {
                     (Some(seed), Some(candidate)) => {
-                        metadata_score * 0.30 + cosine_similarity_blob(seed, candidate) * 0.70
+                        metadata_score * 0.30 + cosine_similarity(seed, candidate) * 0.70
                     }
                     _ => metadata_score,
                 }
@@ -729,6 +783,8 @@ pub fn similar_works(
             candidates.push(Reverse(candidate));
         }
     }
+    drop(statement);
+    drop(tx);
     let mut scored = candidates
         .into_iter()
         .map(|entry| (entry.0.download_id, entry.0.score))
@@ -866,13 +922,44 @@ fn open_index(storage_dir: &Path) -> Result<Connection, String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Semantic index dir creation failed: {}", e))?;
     }
-    let conn = Connection::open(&path).map_err(|e| format!("Semantic index open failed: {}", e))?;
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         CREATE TABLE IF NOT EXISTS semantic_works (
+    let mut conn =
+        Connection::open(&path).map_err(|e| format!("Semantic index open failed: {}", e))?;
+    init_index_schema(&mut conn).map_err(|e| format!("Semantic schema init failed: {e}"))?;
+    Ok(conn)
+}
+
+fn init_index_schema(conn: &mut Connection) -> Result<(), Box<dyn std::error::Error>> {
+    let version =
+        |conn: &Connection| conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0));
+    match version(conn)? {
+        INDEX_SCHEMA_VERSION => return Ok(()),
+        0 => {}
+        other => return Err(format!("Unsupported semantic index schema version: {other}").into()),
+    }
+
+    conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    match version(&tx)? {
+        INDEX_SCHEMA_VERSION => return Ok(()),
+        0 => {}
+        other => return Err(format!("Unsupported semantic index schema version: {other}").into()),
+    }
+    let has_works = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='semantic_works')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if has_works {
+        // 既存索引の分割規則は版1。行やベクトルを作り直さずに列だけ移行する。
+        tx.execute_batch(
+            "ALTER TABLE semantic_works ADD COLUMN chunking_version INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE semantic_works DROP COLUMN content_preview;",
+        )?;
+    } else {
+        tx.execute_batch(
+            "CREATE TABLE semantic_works (
             download_id INTEGER PRIMARY KEY,
             metadata_text TEXT NOT NULL,
-            content_preview TEXT NOT NULL,
             metadata_hash TEXT NOT NULL,
             content_hash TEXT NOT NULL,
             model_id TEXT NOT NULL,
@@ -880,13 +967,15 @@ fn open_index(storage_dir: &Path) -> Result<Connection, String> {
             metadata_vector BLOB NOT NULL,
             content_vector BLOB,
             content_chunk_count INTEGER NOT NULL,
+            chunking_version INTEGER NOT NULL DEFAULT 1,
             updated_at TEXT NOT NULL
-         );
-         CREATE INDEX IF NOT EXISTS idx_semantic_works_model
-            ON semantic_works(model_id, dimension);",
-    )
-    .map_err(|e| format!("Semantic schema init failed: {}", e))?;
-    Ok(conn)
+             );
+             CREATE INDEX idx_semantic_works_model ON semantic_works(model_id, dimension);",
+        )?;
+    }
+    tx.pragma_update(None, "user_version", INDEX_SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(())
 }
 
 fn index_path(storage_dir: &Path) -> PathBuf {
@@ -1102,13 +1191,30 @@ fn vector_to_blob(vector: &[f32]) -> Vec<u8> {
     blob
 }
 
-fn blob_to_vector(blob: &[u8]) -> Vec<f32> {
-    // 4バイトずつ。長さが型で決まるので、添字で取り出す必要がなくなる。
-    blob.as_chunks::<4>()
-        .0
+fn decode_vector(blob: &[u8]) -> Option<[f32; VECTOR_DIMENSION]> {
+    let (bytes, remainder) = blob.as_chunks::<4>();
+    if !remainder.is_empty() {
+        return None;
+    }
+    let bytes: &[[u8; 4]; VECTOR_DIMENSION] = bytes.try_into().ok()?;
+    let vector = bytes.map(f32::from_le_bytes);
+    vector
         .iter()
-        .map(|chunk| f32::from_le_bytes(*chunk))
-        .collect()
+        .all(|value| value.is_finite())
+        .then_some(vector)
+}
+
+fn validate_embedding(vector: &[f32]) -> Result<(), String> {
+    if vector.len() != VECTOR_DIMENSION {
+        return Err(format!(
+            "Semantic model dimension mismatch: expected {VECTOR_DIMENSION}, got {}",
+            vector.len()
+        ));
+    }
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err("Semantic embedding contains a non-finite value".to_string());
+    }
+    Ok(())
 }
 
 fn mean_normalized_vector(vectors: &[&[f32]]) -> Option<Vec<f32>> {
@@ -1156,25 +1262,11 @@ fn unit_vector(vector: Vec<f32>) -> Option<Vec<f32>> {
     })
 }
 
-#[cfg(test)]
 fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
-    if left.len() != right.len() || left.is_empty() {
-        return 0.0;
-    }
+    debug_assert_eq!(left.len(), right.len());
     left.iter()
         .zip(right.iter())
         .map(|(left, right)| *left as f64 * *right as f64)
-        .sum::<f64>()
-        .clamp(0.0, 1.0)
-}
-
-fn cosine_similarity_blob(left: &[f32], right: &[u8]) -> f64 {
-    if right.len() != std::mem::size_of_val(left) || left.is_empty() {
-        return 0.0;
-    }
-    left.iter()
-        .zip(right.as_chunks::<4>().0.iter())
-        .map(|(left, bytes)| *left as f64 * f32::from_le_bytes(*bytes) as f64)
         .sum::<f64>()
         .clamp(0.0, 1.0)
 }
@@ -1207,6 +1299,260 @@ fn hash_text(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TempIndex(PathBuf);
+
+    impl TempIndex {
+        fn new() -> Self {
+            Self(
+                std::env::temp_dir()
+                    .join(format!("piep-semantic-{}", uuid::Uuid::now_v7()))
+                    .join("semantic"),
+            )
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempIndex {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
+        }
+    }
+
+    fn first_axis() -> [f32; VECTOR_DIMENSION] {
+        let mut vector = [0.0; VECTOR_DIMENSION];
+        vector[0] = 1.0;
+        vector
+    }
+
+    #[test]
+    fn malformed_centroids_are_never_returned() {
+        let temp = TempIndex::new();
+        let conn = open_index(temp.path()).unwrap();
+        let mut direction = first_axis();
+        assert!(validate_embedding(&direction).is_ok());
+        let valid = vector_to_blob(&direction);
+        let mut trailing_byte = valid.clone();
+        trailing_byte.push(0);
+        direction[0] = f32::NAN;
+        let nan = vector_to_blob(&direction);
+        assert!(validate_embedding(&[]).is_err());
+        assert!(validate_embedding(&direction[..VECTOR_DIMENSION - 1]).is_err());
+        assert!(validate_embedding(&direction).is_err());
+        let cases = [
+            (1, None),
+            (2, Some(Vec::new())),
+            (3, Some(trailing_byte)),
+            (4, Some(nan)),
+            (5, Some(valid.clone())),
+            (6, Some(valid[..valid.len() - 4].to_vec())),
+        ];
+        for (id, content) in cases {
+            conn.execute(
+                "INSERT INTO semantic_works (
+                    download_id, metadata_text, metadata_hash, content_hash,
+                    model_id, dimension, metadata_vector, content_vector, content_chunk_count,
+                    updated_at
+                 ) VALUES (?1, '', '', '', ?2, ?3, ?4, ?5, 1, '')",
+                params![id, MODEL_ID, VECTOR_DIMENSION as i64, valid, content],
+            )
+            .unwrap();
+        }
+        let centroids = work_centroids(temp.path(), &HashSet::from([1, 2, 3, 4, 5, 6])).unwrap();
+        assert_eq!(
+            centroids.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([5])
+        );
+        // NULL は本文が未計算の種として使えるが、不正な BLOB がある種は使わない。
+        assert!(!similar_works(temp.path(), &[1], 10).unwrap().is_empty());
+        for id in [2, 3, 4, 6] {
+            assert!(similar_works(temp.path(), &[id], 10).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn centroid_reuse_requires_the_same_chunking_rule() {
+        let temp = TempIndex::new();
+        let doc = SemanticIndexDocument {
+            download_id: 1,
+            title: "題".into(),
+            author_name: String::new(),
+            tags: String::new(),
+            series_title: String::new(),
+            excerpt: String::new(),
+            body: "本文".into(),
+        };
+        let path = index_path(temp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let metadata = vector_to_blob(&first_axis());
+        let mut direction = first_axis();
+        direction.swap(0, 1);
+        let body = vector_to_blob(&direction);
+        {
+            let old = Connection::open(path).unwrap();
+            old.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE semantic_works (
+                    download_id INTEGER PRIMARY KEY,
+                    metadata_text TEXT NOT NULL,
+                    content_preview TEXT NOT NULL,
+                    metadata_hash TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    dimension INTEGER NOT NULL,
+                    metadata_vector BLOB NOT NULL,
+                    content_vector BLOB,
+                    content_chunk_count INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_semantic_works_model ON semantic_works(model_id, dimension);",
+            )
+            .unwrap();
+            old.execute(
+                "INSERT INTO semantic_works VALUES (1, ?1, '本文', ?2, ?3, ?4, ?5, ?6, ?7, 1, '')",
+                params![
+                    doc.title,
+                    hash_text(&doc.title),
+                    hash_text(&doc.body),
+                    MODEL_ID,
+                    VECTOR_DIMENSION as i64,
+                    metadata,
+                    body,
+                ],
+            )
+            .unwrap();
+        }
+        let docs = [doc];
+        let reuse = ReusableVectors {
+            storage_dir: temp.path(),
+            previous_ids: &HashMap::from([(1, 1)]),
+        };
+        let conn = open_index(temp.path()).unwrap();
+        let migrated: (i64, Vec<u8>, Vec<u8>) = conn.query_row(
+            "SELECT chunking_version, metadata_vector, content_vector FROM semantic_works WHERE download_id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(migrated, (1, metadata, body));
+        let preview_count: i64 = conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('semantic_works') WHERE name='content_preview'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(preview_count, 0);
+        let chunks = [build_chunks(&docs[0])];
+        let read = || {
+            previous_vectors(&reuse, &docs, &chunks)
+                .unwrap()
+                .pop()
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(read().content, Some((Some(direction.to_vec()), 1)));
+        conn.execute(
+            "UPDATE semantic_works SET chunking_version=?1",
+            [CHUNKING_VERSION + 1],
+        )
+        .unwrap();
+        let previous = read();
+        assert!(previous.metadata.is_some());
+        assert!(previous.content.is_none());
+    }
+
+    #[test]
+    fn scored_work_remains_visible_after_concurrent_delete() {
+        let temp = TempIndex::new();
+        let mut reader = open_index(temp.path()).unwrap();
+        let writer = open_index(temp.path()).unwrap();
+        let query = first_axis();
+        writer
+            .execute(
+                "INSERT INTO semantic_works (
+                download_id, metadata_text, metadata_hash, content_hash,
+                model_id, dimension, metadata_vector, content_chunk_count, updated_at
+             ) VALUES (1, '採点時の説明', '', '', ?1, ?2, ?3, 0, ''),
+                      (2, X'FF', '', '', ?1, ?2, ?3, 0, '')",
+                params![MODEL_ID, VECTOR_DIMENSION as i64, vector_to_blob(&query)],
+            )
+            .unwrap();
+
+        let ((), hits) = search_snapshot(
+            &mut reader,
+            &query,
+            2,
+            |candidates| {
+                assert_eq!(candidates.len(), 2);
+                // 表示しない作品の説明を読めば、型の違う値で検索が失敗する。
+                candidates.retain(|candidate| candidate.download_id == 1);
+                writer
+                    .execute("DELETE FROM semantic_works WHERE download_id=1", [])
+                    .unwrap();
+                Ok(())
+            },
+            |error| error,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].download_id, 1);
+        assert_eq!(hits[0].text, "採点時の説明");
+        assert_eq!(hits[0].score, 1.0);
+        writer
+            .execute("DELETE FROM semantic_works WHERE download_id=2", [])
+            .unwrap();
+        assert!(search_by_vector(&mut reader, &query, 1).unwrap().is_empty());
+    }
+
+    /// `PIEP_SEMANTIC_PROBE` に意味索引 DB の**写し**、`PIEP_SEMANTIC_PROBE_MODEL` に
+    /// 使用したモデルのスナップショットを指定する。写しには本番と同じ索引の移行を当ててから、
+    /// モデルをダウンロードせずに固定の3問の上位10件を出す（実物の索引を指さないこと）。
+    // 通常の単体試験は疑似埋め込みを使う。実モデルのリンクは比較を行うときだけ有効にする。
+    #[cfg(feature = "semantic-probe")]
+    #[test]
+    #[ignore]
+    fn probe_semantic_ranking() {
+        use fastembed::{
+            InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles,
+            UserDefinedEmbeddingModel,
+        };
+
+        let path =
+            std::env::var_os("PIEP_SEMANTIC_PROBE").expect("意味索引DBの写しを指定してください");
+        let model_dir = PathBuf::from(
+            std::env::var_os("PIEP_SEMANTIC_PROBE_MODEL")
+                .expect("埋め込みモデルのスナップショットの写しを指定してください"),
+        );
+        let mut conn = Connection::open(path).expect("意味索引DBの写しを開けません");
+        init_index_schema(&mut conn).expect("意味索引DBの写しを移行できません");
+        let read = |name| std::fs::read(model_dir.join(name)).unwrap();
+        let files = TokenizerFiles {
+            tokenizer_file: read("tokenizer.json"),
+            config_file: read("config.json"),
+            special_tokens_map_file: read("special_tokens_map.json"),
+            tokenizer_config_file: read("tokenizer_config.json"),
+        };
+        let model = UserDefinedEmbeddingModel::new(read("onnx/model.onnx"), files)
+            .with_pooling(Pooling::Mean);
+        let mut model =
+            TextEmbedding::try_new_from_user_defined(model, InitOptionsUserDefined::new())
+                .expect("埋め込みモデルを読み込めません");
+        for query in [
+            "幼なじみとの再会",
+            "失われた記憶を取り戻す旅",
+            "静かな日常に起きた小さな変化",
+        ] {
+            let vectors = model
+                .embed(vec![format!("query: {}", semantic_query_text(query))], None)
+                .unwrap();
+            let vector = normalize_query_embedding(vectors).unwrap();
+            println!("検索語 {query}");
+            for hit in search_by_vector(&mut conn, &vector, 10).unwrap() {
+                println!("{}\t{:.17}", hit.download_id, hit.score);
+            }
+        }
+    }
 
     /// 内積を余弦として使う以上、しまう向きは長さ1でなければならない。
     ///
