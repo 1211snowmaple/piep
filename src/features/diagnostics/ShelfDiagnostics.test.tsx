@@ -54,7 +54,7 @@ function view() {
     <MantineProvider>
       <ModalsProvider>
         <QueryClientProvider client={client}>
-          <AppRouter><DiagnosticsPage embedded /></AppRouter>
+          <AppRouter><DiagnosticsPage /></AppRouter>
         </QueryClientProvider>
       </ModalsProvider>
     </MantineProvider>,

@@ -1148,18 +1148,6 @@ fn controller(ctx: &ServerContext) -> Result<&Arc<UpdateController>, ApiError> {
     ))
 }
 
-async fn get_update_settings(
-    State(ctx): State<Ctx>,
-    headers: AdminHeaders,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    require_admin(&ctx, &headers)?;
-    let status = controller(&ctx)?.status();
-    Ok(Json(serde_json::json!({
-        "auto": status.auto,
-        "window": status.window,
-    })))
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateSettingsRequest {
@@ -1627,10 +1615,7 @@ pub(super) fn api_routes() -> Router<Ctx> {
         .route("/api/admin/password", put(change_password))
         .route("/api/admin/sessions", get(list_sessions))
         .route("/api/admin/sessions/{id}", delete(end_session))
-        .route(
-            "/api/admin/settings/update",
-            get(get_update_settings).put(put_update_settings),
-        )
+        .route("/api/admin/settings/update", put(put_update_settings))
         .route("/api/admin/settings/server-name", put(put_server_name))
         .route("/api/admin/update/check", post(update_check))
         .route("/api/admin/update/history", get(update_history))

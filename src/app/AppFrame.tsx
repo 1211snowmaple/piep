@@ -293,7 +293,6 @@ export function AppFrame({ children }: { children: ReactNode }) {
     if (location.pathname.startsWith("/epub")) return "EPUB";
     if (location.pathname.startsWith("/updates")) return "新作・改稿";
     if (location.pathname.startsWith("/operations")) return "操作履歴";
-    if (location.pathname.startsWith("/diagnostics")) return "診断とメンテナンス";
     if (location.pathname.startsWith("/settings")) return "設定";
     return "piep";
   }, [location.pathname]);

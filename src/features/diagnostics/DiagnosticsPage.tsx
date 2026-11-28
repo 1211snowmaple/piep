@@ -25,7 +25,6 @@ import { Icons, IconSize } from "@/lib/icons";
 import { ErrorState } from "@/components/AsyncState";
 import { JobProgress } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
-import { RuntimeNotice } from "@/components/RuntimeNotice";
 import { useAppNavigate } from "@/app/router";
 import { requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
@@ -146,7 +145,7 @@ function useElapsedSeconds(active: boolean, startedAt?: number) {
  * app's own housekeeping rather than about the works, so settings is where it
  * belongs - but the route stays valid for anything already pointing at it.
  */
-export default function DiagnosticsPage({ embedded = false, previewData = previewDiagnostics }: { embedded?: boolean; previewData?: LibraryDiagnostics } = {}) {
+export default function DiagnosticsPage({ previewData = previewDiagnostics }: { previewData?: LibraryDiagnostics } = {}) {
   const runtime = isTauriRuntime();
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
@@ -314,10 +313,9 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
   });
   };
 
-  return <div className={embedded ? "diagnostics-page" : "page page--contained diagnostics-page"}>
+  return <div className="diagnostics-page">
     <PageHeader title="診断とメンテナンス" description="保存状態を確認し、見つかった問題に合わせて修復します。" />
     {/* Settings already carries one at the top of the screen. */}
-    {!embedded && <RuntimeNotice />}
 
     {runtime && <ShelfDiagnosticsSection runtime={runtime} busy={profileRunning} />}
     {legacyView && <Card p="lg" mt="lg">
