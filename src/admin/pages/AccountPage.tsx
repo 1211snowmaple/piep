@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Alert, Button, Group, Skeleton, Stack, Text } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { DangerButton } from "@/components/DangerButton";
 import { Icons, IconSize } from "@/lib/icons";
 import { adminApi, failureMessage, type AdminSession } from "../api";
 import { NewPasswordFields, newPasswordReady } from "../Entry";
@@ -79,7 +80,7 @@ function SessionTable({ sessions, currentId, onEnd }: { sessions: AdminSession[]
                 <td data-label="ログイン" className="adm-num">{relativeTime(session.createdAt)}</td>
                 <td data-label="最後の操作" className="adm-num">{relativeTime(session.lastSeenAt)}</td>
                 <td className="adm-cell-action">
-                  {!current && <Button size="compact-sm" variant="default" onClick={() => onEnd(session.id)}>ログアウトさせる</Button>}
+                  {!current && <DangerButton size="compact-sm" onClick={() => onEnd(session.id)}>ログアウトさせる</DangerButton>}
                 </td>
               </tr>
             );

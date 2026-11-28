@@ -11,6 +11,7 @@ const status = (overrides: Partial<AdminStatus> = {}): AdminStatus => ({
   update: null,
   serverName: "Maple",
   startedAt: "2026-11-05T00:00:00Z",
+  adminWeb: "available",
   ...overrides,
 });
 
@@ -55,8 +56,9 @@ describe("format", () => {
     expect(issues[2]?.message).toBe("0.36.1 は起動に失敗したため飛ばしています");
   });
 
-  it("keeps old page names working", () => {
-    expect(pageFromName("security")).toBe("settings");
+  it("現行のページ名だけを受け付ける", () => {
+    expect(pageFromName("settings")).toBe("settings");
+    expect(pageFromName("security")).toBeNull();
     expect(pageFromName("account")).toBe("account");
     expect(pageFromName("nothing")).toBeNull();
   });

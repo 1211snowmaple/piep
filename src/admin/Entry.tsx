@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Alert, Button, Loader, PasswordInput, Stack, Text, TextInput, Title } from "@mantine/core";
 import { PiepLockup } from "@/components/PiepLockup";
-import { adminApi, ApiFailure, failureMessage, type TicketKind } from "./api";
+import { adminApi, ApiFailure, failureMessage } from "./api";
 
 /** アドレスから券を取り出して、すぐに消す。履歴と転送元に残さない。 */
 export function takeTicket(): string | null {
@@ -57,7 +57,6 @@ export function NewPasswordFields({ label = "パスワード", password, again, 
 
 interface TicketState {
   ticket: string;
-  kind: TicketKind;
   username: string | null;
 }
 
@@ -211,7 +210,7 @@ export function TicketEntry({ ticket, onDone, onInvalid }: { ticket: string; onD
         const info = await adminApi.ticketInfo(ticket);
         if (!live) return;
         if (info.kind === "setup") {
-          setState({ ticket, kind: info.kind, username: info.username });
+          setState({ ticket, username: info.username });
           return;
         }
         await adminApi.useTicket(ticket);

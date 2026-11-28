@@ -69,6 +69,8 @@ export interface Device {
   role: "reader" | "admin";
   createdAt: string;
   lastSeenAt: string | null;
+  /** 棚を配っているときだけ返る。 */
+  readsShelf?: boolean;
 }
 
 /** 棚の受け取りの進み具合。 */
@@ -93,6 +95,9 @@ export interface AdminStatus {
   update: UpdateStatus | null;
   serverName: string;
   startedAt: string;
+  adminWeb: "available" | "public-only" | "disabled" | "none";
+  /** 組み終えた棚が、次の起動で配られるのを待っているか。 */
+  shelfPending?: boolean;
 }
 
 export interface WebState {
@@ -128,6 +133,7 @@ export interface AdminSession {
   createdAt: number;
   lastSeenAt: number;
   expiresAt: number;
+  recentAuthAt: number | null;
   ip: string | null;
   label: string | null;
 }

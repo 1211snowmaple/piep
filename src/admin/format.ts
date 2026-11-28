@@ -3,12 +3,31 @@ import type { AdminStatus, Connection, ShipmentStatus, Storage } from "./api";
 
 export { dayTime, isNewer, relativeTime, windowLabel } from "@/lib/serverFormat";
 
+const two = (value: number) => String(value).padStart(2, "0");
+
+function stampParts(at: Date) {
+  return {
+    year: at.getFullYear(),
+    month: two(at.getMonth() + 1),
+    day: two(at.getDate()),
+    time: `${two(at.getHours())}:${two(at.getMinutes())}:${two(at.getSeconds())}`,
+  };
+}
+
 /** 記録の日時。並べたときに桁がそろうよう、秒まで同じ形で出す。年は今年でなければ付ける。 */
 export function stamp(at: Date, now = new Date()): string {
-  const two = (value: number) => String(value).padStart(2, "0");
-  const day = `${two(at.getMonth() + 1)}/${two(at.getDate())}`;
-  const time = `${two(at.getHours())}:${two(at.getMinutes())}:${two(at.getSeconds())}`;
-  return at.getFullYear() === now.getFullYear() ? `${day} ${time}` : `${at.getFullYear()}/${day} ${time}`;
+  const { year, month, day, time } = stampParts(at);
+  const date = `${month}/${day}`;
+  return year === now.getFullYear() ? `${date} ${time}` : `${year}/${date} ${time}`;
+}
+
+/** コピーする日時には、年とその日時の UTC オフセットを付ける。 */
+export function stampWithOffset(at: Date): string {
+  const { year, month, day, time } = stampParts(at);
+  const offset = -at.getTimezoneOffset();
+  const sign = offset < 0 ? "-" : "+";
+  const minutes = Math.abs(offset);
+  return `${year}-${month}-${day} ${time} ${sign}${two(Math.floor(minutes / 60))}:${two(minutes % 60)}`;
 }
 
 export function bytes(value: number | null | undefined): string {
@@ -25,9 +44,7 @@ export function bytes(value: number | null | undefined): string {
 
 export type AdminPage = "overview" | "updates" | "devices" | "library" | "records" | "settings" | "account";
 
-/** 前の版の名前で開かれたページを、今の名前へ寄せる。 */
 export function pageFromName(name: string): AdminPage | null {
-  if (name === "security") return "settings";
   const pages: AdminPage[] = ["overview", "updates", "devices", "library", "records", "settings", "account"];
   return pages.includes(name as AdminPage) ? (name as AdminPage) : null;
 }
