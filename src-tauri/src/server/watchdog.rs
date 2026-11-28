@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 
 /// 本体が起動して応答するまでの猶予。
 const READY_LIMIT: Duration = Duration::from_secs(60);
+/// 棚の台帳は全体を読むので、応答を待つ時間とは別に猶予を取る。
+const DATABASE_CHECK_LIMIT: Duration = Duration::from_secs(15 * 60);
 const POLL: Duration = Duration::from_millis(250);
 /// これだけ動いたら、立ち上げ直しの間隔を戻す。
 const STABLE_AFTER: Duration = Duration::from_secs(10 * 60);
@@ -30,11 +32,44 @@ const FAILURES_BEFORE_DOWN: u32 = 5;
 const DOWN_RETRY: Duration = Duration::from_secs(60 * 60);
 const DEFERRED_ROLLBACK_ENV: &str = "PIEP_SERVER_DEFERRED_ROLLBACK";
 
-/// 本体が、起動して自分の口に `hello` を通したあとに書く。
+/// 起動確認の各段階を、起動した版とプロセスに結び付ける。
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReadyMark {
     pub version: String,
     pub pid: u32,
+}
+
+pub(super) struct StartupDeadline {
+    started: Instant,
+    checking_since: Option<Instant>,
+}
+
+impl StartupDeadline {
+    pub(super) fn new(started: Instant) -> Self {
+        Self {
+            started,
+            checking_since: None,
+        }
+    }
+
+    pub(super) fn observe_checking(&mut self, now: Instant) {
+        // 同じ印を読み直しても、検査の期限を延ばさない。
+        self.checking_since.get_or_insert(now);
+    }
+
+    pub(super) fn timeout_reason(&self, now: Instant) -> Option<String> {
+        if let Some(since) = self.checking_since {
+            (now.duration_since(since) >= DATABASE_CHECK_LIMIT).then(|| {
+                format!(
+                    "棚の DB の検査が {} 秒以内に終わりませんでした",
+                    DATABASE_CHECK_LIMIT.as_secs()
+                )
+            })
+        } else {
+            (now.duration_since(self.started) >= READY_LIMIT)
+                .then(|| format!("{} 秒以内に応答しませんでした", READY_LIMIT.as_secs()))
+        }
+    }
 }
 
 /// 立ち上げ直すまでの間隔を決める。
@@ -113,7 +148,11 @@ fn switch_to_pending(paths: &ServerPaths) -> Result<String, String> {
 }
 
 /// 前の版と DB の写しへ戻し、戻す前の版を飛ばすよう記録する。
-fn roll_back(paths: &ServerPaths, version: &str, failure: Option<&str>) -> Result<(), String> {
+pub(super) fn roll_back(
+    paths: &ServerPaths,
+    version: &str,
+    failure: Option<&str>,
+) -> Result<(), String> {
     let previous = read_version_file(&paths.previous_version()).ok_or("戻す版がありません")?;
     // DB を戻し始めたあとは、新しい版を再び起動してはいけない。current と
     // pending の間で止まっても、次の起動では切り替えより先に戻しを完了する。
@@ -256,10 +295,9 @@ fn resume_pending_update(
 }
 
 /// 更新が定着したあとの片付け。直前の版だけ残す。
-fn settle(paths: &ServerPaths, version: &str) {
-    if let Err(error) = clear_pending(paths) {
-        note(paths, &error);
-    }
+fn settle(paths: &ServerPaths, version: &str) -> Result<(), String> {
+    // この印が消えたことを本体が確認してから、成功を履歴に書く。
+    clear_pending(paths)?;
     let previous = read_version_file(&paths.previous_version());
     if let Ok(entries) = fs::read_dir(paths.versions()) {
         for entry in entries.flatten() {
@@ -276,6 +314,7 @@ fn settle(paths: &ServerPaths, version: &str) {
         record.clear_error();
         record.last_applied_at = Some(Utc::now().to_rfc3339());
     });
+    Ok(())
 }
 
 /// 起動タスクが指す root の exe は固定の入口にする。Windows で実行中の入口を
@@ -368,6 +407,7 @@ pub(crate) fn launch_failures_without_dialogs() {}
 /// 本体を子として動かし、見張り役が消えたら一緒に終了するようにする。
 fn spawn_body(paths: &ServerPaths, version: &str, job: &JobGuard) -> Result<Child, String> {
     let _ = fs::remove_file(paths.ready_mark());
+    let _ = fs::remove_file(paths.checking_mark());
     let executable = paths.version_dir(version).join("piep-server.exe");
     launch_failures_without_dialogs();
     let child = body_command(paths, version)
@@ -388,18 +428,13 @@ fn body_command(paths: &ServerPaths, version: &str) -> Command {
 }
 
 /// 本体が準備できたか、終わったかを待つ。
-fn wait_until_ready(
-    paths: &ServerPaths,
-    version: &str,
-    child: &mut Child,
-    limit: Duration,
-) -> Result<(), String> {
-    let started = Instant::now();
+fn wait_until_ready(paths: &ServerPaths, version: &str, child: &mut Child) -> Result<(), String> {
+    let mut deadline = StartupDeadline::new(Instant::now());
     loop {
         if let Ok(Some(status)) = child.try_wait() {
             return Err(format!("起動中に終わりました（{status}）"));
         }
-        if let Some(mark) = read_ready_mark(paths) {
+        if let Some(mark) = read_ready_mark(&paths.ready_mark()) {
             if mark.pid == child.id() && mark.version == version {
                 return Ok(());
             }
@@ -407,15 +442,21 @@ fn wait_until_ready(
                 return Err(format!("別の版 {} として起動しました", mark.version));
             }
         }
-        if started.elapsed() >= limit {
-            return Err(format!("{} 秒以内に応答しませんでした", limit.as_secs()));
+        let now = Instant::now();
+        if read_ready_mark(&paths.checking_mark())
+            .is_some_and(|mark| mark.pid == child.id() && mark.version == version)
+        {
+            deadline.observe_checking(now);
+        }
+        if let Some(reason) = deadline.timeout_reason(now) {
+            return Err(reason);
         }
         std::thread::sleep(POLL);
     }
 }
 
-fn read_ready_mark(paths: &ServerPaths) -> Option<ReadyMark> {
-    let bytes = fs::read(paths.ready_mark()).ok()?;
+pub(super) fn read_ready_mark(path: &Path) -> Option<ReadyMark> {
+    let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -461,10 +502,11 @@ fn run_watchdog(
             }
         };
         if let Some(target) = applying.take() {
-            match wait_until_ready(paths, &target, &mut child, READY_LIMIT) {
+            let ready =
+                wait_until_ready(paths, &target, &mut child).and_then(|()| settle(paths, &target));
+            match ready {
                 Ok(()) => {
                     note(paths, &format!("版 {target} へ更新しました"));
-                    settle(paths, &target);
                 }
                 Err(reason) => {
                     let _ = child.kill();
@@ -577,14 +619,14 @@ impl JobGuard {
     fn adopt(&self, _child: &Child) {}
 }
 
-/// 本体が準備できたことを書く。
-pub fn write_ready_mark(paths: &ServerPaths) -> Result<(), String> {
+/// 本体の応答または準備完了を、段階に対応する印に書く。
+pub(super) fn write_ready_mark(path: &Path) -> Result<(), String> {
     let mark = ReadyMark {
         version: VERSION.to_string(),
         pid: std::process::id(),
     };
     let bytes = serde_json::to_vec(&mark).map_err(|error| error.to_string())?;
-    write_atomic(&paths.ready_mark(), &bytes)
+    write_atomic(path, &bytes)
 }
 
 #[cfg(test)]
@@ -593,6 +635,24 @@ mod tests {
 
     fn seconds(value: u64) -> Duration {
         Duration::from_secs(value)
+    }
+
+    #[test]
+    fn database_check_has_its_own_deadline() {
+        let started = Instant::now();
+        let mut deadline = StartupDeadline::new(started);
+        assert!(deadline.timeout_reason(started + READY_LIMIT).is_some());
+
+        let checking = started + READY_LIMIT - seconds(1);
+        deadline.observe_checking(checking);
+        assert!(deadline.timeout_reason(started + READY_LIMIT).is_none());
+        let almost_done = checking + DATABASE_CHECK_LIMIT - seconds(1);
+        deadline.observe_checking(almost_done);
+        assert!(deadline.timeout_reason(almost_done).is_none());
+        assert!(deadline
+            .timeout_reason(checking + DATABASE_CHECK_LIMIT)
+            .unwrap()
+            .contains("棚の DB の検査"));
     }
 
     #[test]
@@ -856,7 +916,7 @@ mod tests {
         write_atomic(&paths.previous_version(), b"1.0.0").expect("previous");
         write_atomic(&paths.current_version(), b"1.1.0").expect("current");
         write_atomic(&paths.pending_version(), b"1.1.0").expect("pending");
-        settle(&paths, "1.1.0");
+        settle(&paths, "1.1.0").unwrap();
         assert!(!paths.pending_version().exists());
         assert_eq!(current_version(&paths).as_deref(), Some("1.1.0"));
         assert!(paths.version_dir("1.1.0").exists());
@@ -906,7 +966,7 @@ mod tests {
         write_atomic(&paths.previous_version(), b"1.0.0").unwrap();
         write_atomic(&paths.current_version(), b"1.1.0").unwrap();
         write_atomic(&paths.pending_version(), b"1.1.0").unwrap();
-        settle(&paths, "1.1.0");
+        settle(&paths, "1.1.0").unwrap();
         assert!(entry.exists());
         assert!(!paths.root.join("piep-server.new.exe").exists());
         assert!(!paths.root.join("piep-server.old.exe").exists());
