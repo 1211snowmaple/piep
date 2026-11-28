@@ -528,7 +528,7 @@ fn default_admin_url(config: &ServerConfig) -> Option<String> {
     })
 }
 
-/// 自己署名の指紋を、待ち受けを始めずに読む。
+/// 待ち受けを始めずに TLS の設定と証明書を読み込む。
 async fn tls_material(
     paths: &ServerPaths,
     config: &ServerConfig,
@@ -636,11 +636,11 @@ pub struct StandaloneParts {
 pub fn assemble(
     paths: &ServerPaths,
     public_url: Option<String>,
-    fingerprint: Option<String>,
+    material: Option<&TlsMaterial>,
 ) -> Result<StandaloneParts, String> {
     fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
     let store = Arc::new(ServerStore::open(&paths.store())?);
-    let context = ServerContext::new(store, paths.root.clone(), public_url, fingerprint);
+    let context = ServerContext::new(store, paths.root.clone(), public_url, material);
     Ok(StandaloneParts { context })
 }
 
@@ -913,11 +913,8 @@ async fn run_locked(paths: ServerPaths) -> Result<i32, String> {
     }
     let config = load_config(&paths)?;
     let material = tls_material(&paths, &config).await?;
-    let fingerprint = material
-        .as_ref()
-        .and_then(|material| material.fingerprint.clone());
+    let parts = assemble(&paths, config.public_url(), material.as_ref())?;
     let tls_config = material.map(|material| material.config);
-    let parts = assemble(&paths, config.public_url(), fingerprint)?;
     let mut served = None;
     if let Some(settings) = &config.shelf {
         let shelf = settings.open(&paths, Arc::clone(&parts.context.store))?;

@@ -8,6 +8,7 @@ const status = (overrides: Partial<AdminStatus> = {}): AdminStatus => ({
   shelf: { libraryId: "0190", syncEpoch: "0191", works: "10" },
   devices: [],
   publicUrl: null,
+  certificate: null,
   update: null,
   serverName: "Maple",
   startedAt: "2026-11-05T00:00:00Z",

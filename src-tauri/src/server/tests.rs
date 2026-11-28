@@ -218,6 +218,53 @@ pub(super) fn spawn_plain(router: axum::Router) -> String {
 }
 
 #[tokio::test]
+async fn admin_status_reports_tls_certificate_expiry_and_source() {
+    let root = TestRoot::created("certificate-status");
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+    params.not_after = rcgen::date_time_ymd(2036, 3, 15);
+    let signing_key = rcgen::KeyPair::generate().unwrap();
+    let leaf = params.self_signed(&signing_key).unwrap();
+    let chain_tail = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let cert = root.0.join("certificate.pem");
+    let key = root.0.join("private-key.pem");
+    fs::write(&cert, format!("{}{}", leaf.pem(), chain_tail.cert.pem())).unwrap();
+    fs::write(&key, signing_key.serialize_pem()).unwrap();
+
+    let files = super::tls::from_files(&cert, &key).await.unwrap();
+    let self_signed = super::tls::self_signed(&root.0).await.unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    for (material, source) in [
+        (Some(&files), "files"),
+        (Some(&self_signed), "self-signed"),
+        (None, "plain"),
+    ] {
+        let paths = ServerPaths::new(&root.0.join(source)).unwrap();
+        let parts = assemble(&paths, None, material).unwrap();
+        let url = spawn_plain(combined_router(Arc::clone(&parts.context)));
+        let credentials = pair_with(&client, &url, &admin_secret(&paths)).await;
+        let status: serde_json::Value = client
+            .get(format!("{url}/api/admin/status"))
+            .bearer_auth(credentials["token"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let expected = material.map_or(serde_json::Value::Null, |material| {
+            assert_eq!(
+                material.certificate.expires_at.timestamp(),
+                params.not_after.unix_timestamp()
+            );
+            serde_json::json!({ "expiresAt": "2036-03-15T00:00:00Z", "source": source })
+        });
+        assert_eq!(status.get("certificate"), Some(&expected));
+    }
+}
+
+#[tokio::test]
 async fn repeated_admin_requests_probe_only_once_per_remote_setting() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 

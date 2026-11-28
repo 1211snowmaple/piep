@@ -2,18 +2,36 @@
 
 use super::durable::StagedWrite;
 use axum_server::tls_rustls::RustlsConfig;
+use chrono::{DateTime, Utc};
 use rcgen::{generate_simple_self_signed, CertifiedKey};
+use rustls::pki_types::{pem::PemObject, CertificateDer};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{BufReader, Cursor};
 use std::path::Path;
+use x509_parser::parse_x509_certificate;
 
 const SELF_SIGNED_RECOVERY: &str = "自己署名の証明書と秘密鍵を両方削除すると、次の起動で作り直します。登録済みの端末は再登録してください";
 
 pub struct TlsMaterial {
     pub config: RustlsConfig,
+    pub certificate: CertificateInfo,
     /// 自己署名のときだけ。OS が信頼する CA の証明書はホスト名で検証する。
     pub fingerprint: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateInfo {
+    pub expires_at: DateTime<Utc>,
+    pub source: CertificateSource,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CertificateSource {
+    Files,
+    SelfSigned,
 }
 
 fn install_crypto_provider() {
@@ -30,13 +48,30 @@ pub fn certificate_fingerprint(der: &[u8]) -> String {
         .collect()
 }
 
-fn pem_fingerprint(certificate: &[u8]) -> Result<String, String> {
-    let mut reader = BufReader::new(Cursor::new(certificate));
-    let first = rustls_pemfile::certs(&mut reader)
+async fn material_from_pem(
+    certificate: Vec<u8>,
+    private_key: Vec<u8>,
+    source: CertificateSource,
+) -> Result<TlsMaterial, String> {
+    // 待ち受けに渡す証明書列の先頭が、サーバー自身の証明書。
+    let leaf = CertificateDer::pem_slice_iter(&certificate)
         .next()
         .ok_or("証明書が空です")?
         .map_err(|error| format!("証明書を解析できません: {error}"))?;
-    Ok(certificate_fingerprint(first.as_ref()))
+    let (_, parsed) = parse_x509_certificate(&leaf)
+        .map_err(|error| format!("証明書を解析できません: {error}"))?;
+    let expires_at = DateTime::from_timestamp(parsed.validity().not_after.timestamp(), 0)
+        .ok_or("証明書の有効期限が範囲外です")?;
+    let fingerprint =
+        matches!(source, CertificateSource::SelfSigned).then(|| certificate_fingerprint(&leaf));
+    let config = RustlsConfig::from_pem(certificate, private_key)
+        .await
+        .map_err(|error| format!("証明書か秘密鍵を読み込めません: {error}"))?;
+    Ok(TlsMaterial {
+        config,
+        certificate: CertificateInfo { expires_at, source },
+        fingerprint,
+    })
 }
 
 /// 置き場の自己署名証明書を読む。無ければ作る。
@@ -76,29 +111,21 @@ pub async fn self_signed(dir: &Path) -> Result<TlsMaterial, String> {
         cert.commit()?;
         pair
     };
-    let fingerprint = pem_fingerprint(&certificate)
-        .map_err(|error| format!("{error}。{SELF_SIGNED_RECOVERY}"))?;
-    let config = RustlsConfig::from_pem(certificate, private_key)
+    material_from_pem(certificate, private_key, CertificateSource::SelfSigned)
         .await
-        .map_err(|error| {
-            format!("証明書か秘密鍵を読み込めません: {error}。{SELF_SIGNED_RECOVERY}")
-        })?;
-    Ok(TlsMaterial {
-        config,
-        fingerprint: Some(fingerprint),
-    })
+        .map_err(|error| format!("{error}。{SELF_SIGNED_RECOVERY}"))
 }
 
 /// 利用者が用意した証明書ファイルを読む。
 pub async fn from_files(cert: &Path, key: &Path) -> Result<TlsMaterial, String> {
     install_crypto_provider();
-    let config = RustlsConfig::from_pem_file(cert, key)
+    let certificate = tokio::fs::read(cert)
         .await
-        .map_err(|error| format!("証明書ファイルを読み込めません: {error}"))?;
-    Ok(TlsMaterial {
-        config,
-        fingerprint: None,
-    })
+        .map_err(|error| format!("証明書ファイルを読めません（{}）: {error}", cert.display()))?;
+    let private_key = tokio::fs::read(key)
+        .await
+        .map_err(|error| format!("秘密鍵ファイルを読めません（{}）: {error}", key.display()))?;
+    material_from_pem(certificate, private_key, CertificateSource::Files).await
 }
 
 #[cfg(test)]

@@ -92,6 +92,8 @@ export interface AdminStatus {
   devices: Device[];
   shipment?: ShipmentStatus;
   publicUrl: string | null;
+  /** 起動時に読み込んだ TLS 証明書。TLS が無効なら null。 */
+  certificate: { expiresAt: string; source: "files" | "self-signed" } | null;
   update: UpdateStatus | null;
   serverName: string;
   startedAt: string;

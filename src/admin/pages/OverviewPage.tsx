@@ -1,8 +1,8 @@
-import { Button, Group, Skeleton, Text } from "@mantine/core";
+import { Box, Button, Group, Skeleton, Text } from "@mantine/core";
 import { useQuery } from "@tanstack/react-query";
 import { adminApi } from "../api";
-import { bytes, findIssues, relativeTime, shipmentLabel, type AdminPage } from "../format";
-import { Card, PageHead, useStatus } from "../shared";
+import { bytes, findIssues, relativeTime, shipmentLabel, stampWithOffset, type AdminPage } from "../format";
+import { Card, Facts, PageHead, useStatus } from "../shared";
 
 function NumberTile({ label, value }: { label: string; value: string | undefined }) {
   return (
@@ -19,6 +19,7 @@ export function OverviewPage({ go }: { go: (page: AdminPage) => void }) {
   const recent = useQuery({ queryKey: ["audit", "recent"], queryFn: () => adminApi.audit(null, false, null), refetchInterval: 30_000 });
   const data = status.data;
   const issues = data ? findIssues(data, storage.data) : [];
+  const certificate = data?.certificate;
   return (
     <div className="adm-section">
       <PageHead title="概要" lead="サーバーの今の状態です。" />
@@ -40,6 +41,13 @@ export function OverviewPage({ go }: { go: (page: AdminPage) => void }) {
               </div>
             ))}
           </div>
+        )}
+        {certificate && (
+          <Box mt={12}>
+            <Facts items={[["証明書の有効期限", (
+              <time key="certificate-expiry" dateTime={certificate.expiresAt}>{stampWithOffset(new Date(certificate.expiresAt))}</time>
+            )]]} />
+          </Box>
         )}
       </section>
       <div className="adm-numbers">
