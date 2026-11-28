@@ -98,8 +98,8 @@ describe("connection", () => {
 
   it("drafts from the saved settings and compares them", () => {
     const saved = connection({ adminListen: "127.0.0.1:40000", publicUrl: "https://example.com/" });
-    expect(draftConnection(saved)).toMatchObject({ split: true, adminListen: "127.0.0.1:40000", publicUrl: "https://example.com/", cert: "", key: "" });
-    expect(draftConnection(connection())).toMatchObject({ split: false, adminListen: "127.0.0.1:38778", publicUrl: "" });
+    expect(draftConnection(saved, "127.0.0.1:38778")).toMatchObject({ split: true, adminListen: "127.0.0.1:40000", publicUrl: "https://example.com/", cert: "", key: "" });
+    expect(draftConnection(connection(), "127.0.0.1:38778")).toMatchObject({ split: false, adminListen: "127.0.0.1:38778", publicUrl: "" });
     expect(sameConnection(saved, { ...saved, localAdmin: "127.0.0.1:38778" })).toBe(true);
     expect(sameConnection(saved, { ...saved, tls: "self-signed" })).toBe(false);
   });

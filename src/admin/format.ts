@@ -140,11 +140,12 @@ export interface ConnectionDraft {
   key: string;
 }
 
-export function draftConnection(connection: Connection): ConnectionDraft {
+/** `localAdmin` は分けたときの管理の口の初期値（サーバーが答えるこの機械の中の口）。 */
+export function draftConnection(connection: Connection, localAdmin: string): ConnectionDraft {
   return {
     listen: connection.listen,
     split: connection.adminListen !== null,
-    adminListen: connection.adminListen ?? "127.0.0.1:38778",
+    adminListen: connection.adminListen ?? localAdmin,
     publicUrl: connection.publicUrl ?? "",
     tls: connection.tls,
     cert: "",
