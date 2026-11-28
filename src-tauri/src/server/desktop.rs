@@ -441,7 +441,8 @@ impl DesktopServer {
         admin_get(&self.clients, &remote, &token, "status").await
     }
 
-    /// デスクトップ版の方が新しければ、サーバーにも更新を頼む。
+    /// デスクトップ版の方が新しければ、サーバーに新しい版を確かめてもらう。当てるのはサーバーの
+    /// 更新の時間帯で、携帯が読んでいる最中に止めない。
     async fn update_remote_if_behind(&self) {
         let Ok(status) = self.remote_status().await else {
             return;
@@ -451,7 +452,7 @@ impl DesktopServer {
             .is_some_and(|version| super::update::is_newer(env!("CARGO_PKG_VERSION"), version));
         // 自動更新を切っているサーバーは、押されるまで変えない。
         if behind && status["update"]["auto"].as_bool() == Some(true) {
-            if let Err(error) = self.update_remote().await {
+            if let Err(error) = self.request_remote_update("update/scheduled").await {
                 log::warn!("サーバーの更新を頼めません: {error}");
             }
         }
@@ -497,21 +498,19 @@ impl DesktopServer {
         Ok(format!("{}{path}", remote.url.trim_end_matches('/')))
     }
 
+    /// 「サーバーを今すぐ更新」。時間帯を待たない。
     pub async fn update_remote(&self) -> Result<(), String> {
+        self.request_remote_update("update").await
+    }
+
+    async fn request_remote_update(&self, path: &str) -> Result<(), String> {
         let remote = self
             .settings()
             .remote
             .ok_or("単独サーバーにつないでいません")?;
         let token = credential::load(&remote.url)?
             .ok_or("サーバーの鍵がありません。登録し直してください")?;
-        admin_post(
-            &self.clients,
-            &remote,
-            &token,
-            "update",
-            &serde_json::json!({}),
-        )
-        .await?;
+        admin_post(&self.clients, &remote, &token, path, &serde_json::json!({})).await?;
         Ok(())
     }
 
