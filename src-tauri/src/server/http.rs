@@ -62,6 +62,8 @@ pub struct ServerContext {
     pair_failures: Mutex<VecDeque<Instant>>,
     /// 棚の写しの受け取り。単独サーバーにだけある。
     shipments: OnceLock<Arc<super::standalone::shipment::ShelfShipments>>,
+    /// 棚の受け取り開始と、更新による停止予約を一列に並べる。
+    shipment_opening: Arc<Mutex<()>>,
     /// 単独サーバーの置き場（設定を書くため）。
     paths: OnceLock<super::standalone::ServerPaths>,
 }
@@ -85,6 +87,7 @@ impl ServerContext {
             started_at: chrono::Utc::now().to_rfc3339(),
             pair_failures: Mutex::new(VecDeque::new()),
             shipments: OnceLock::new(),
+            shipment_opening: Arc::new(Mutex::new(())),
             paths: OnceLock::new(),
         })
     }
@@ -100,6 +103,10 @@ impl ServerContext {
     }
 
     pub fn set_update(&self, controller: Arc<UpdateController>) {
+        if let Some(shipments) = self.shipments.get() {
+            controller
+                .set_shipment_access(Arc::clone(shipments), Arc::clone(&self.shipment_opening));
+        }
         let _ = self.update.set(controller);
     }
 
@@ -287,7 +294,7 @@ fn admin_routes(ctx: Ctx) -> Router {
         .route("/api/admin/shelf/favorites", get(admin_shelf_favorites))
         .route(
             "/api/admin/shelf/shipments",
-            get(shelf_admin::status).post(shelf_admin::open),
+            get(shelf_admin::status).post(admin_open_shipment),
         )
         .route(
             "/api/admin/shelf/shipments/{id}",
@@ -682,8 +689,36 @@ async fn admin_update(
         "not_managed",
         "このサーバーは自分では更新できません。piep-server install で置いてください",
     ))?;
-    controller.request_now();
+    controller
+        .request_now()
+        .map_err(|message| ApiError::new(StatusCode::CONFLICT, "update_busy", message))?;
     Ok(Json(serde_json::json!({ "accepted": true })))
+}
+
+async fn admin_open_shipment(
+    State(ctx): State<Ctx>,
+    headers: AdminHeaders,
+    request: ApiJson<shelf_admin::OpenRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let opening = Arc::clone(&ctx.shipment_opening).lock_owned().await;
+    if ctx
+        .update
+        .get()
+        .is_some_and(|update| !update.allows_shipment_start())
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "update_busy",
+            "サーバーの更新が終わってから、もう一度送信してください",
+        ));
+    }
+    // HTTP の待ち時間が切れても、受け取り開始が完了するまでは排他を持ち続ける。
+    tokio::spawn(async move {
+        let _opening = opening;
+        shelf_admin::open(State(ctx), headers, request).await
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
 }
 
 #[derive(Debug, Deserialize)]
