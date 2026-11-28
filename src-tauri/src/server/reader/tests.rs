@@ -935,6 +935,28 @@ async fn unfinished_search_index_returns_a_code() {
 }
 
 #[tokio::test]
+async fn work_search_omits_a_cursor_longer_than_it_accepts() {
+    let server = Server::start().await;
+    let mut long = capture("long-title", None);
+    long.metadata
+        .insert("title".into(), json!("a".repeat(4096)));
+    let first = save(&server.library, long);
+    save(&server.library, capture("z", None));
+
+    let page = shelf_page(
+        server
+            .search(json!({"limit": 1, "sortBy": "title", "sortOrder": "asc"}))
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(page.total_estimate, Some(2));
+    assert_eq!(page.items[0].id, first.entity_id.to_string());
+    assert!(page.next_cursor.is_none());
+}
+
+#[tokio::test]
 async fn the_phone_list_sorts_filters_and_pages_the_shelf() {
     let server = Server::start().await;
     let north = save(&server.library, capture("north", None));

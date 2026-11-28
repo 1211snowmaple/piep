@@ -340,7 +340,9 @@ pub(super) async fn search(
         let keys = library.card_keys(&page.page.items).map_err(library_error)?;
         let next_cursor = match (&page.page.next, numbered) {
             // ページ番号で開いたページに続きの位置はない（次のページも番号で開く）。
-            (Some(next), false) => Some(encode_cursor(next, epoch, subject)?),
+            (Some(next), false) => Some(encode_cursor(next, epoch, subject)?)
+                // 並べ替えの値が長いと位置も長くなる。受け付けない長さの位置は返さない。
+                .filter(|cursor| cursor.len() <= piep_mobile_api::MAX_SEARCH_CURSOR_BYTES),
             _ => None,
         };
         let items = page
