@@ -225,6 +225,9 @@ impl ServerPaths {
     pub fn ready_mark(&self) -> PathBuf {
         self.state().join("ready.json")
     }
+    pub fn checking_mark(&self) -> PathBuf {
+        self.state().join("checking.json")
+    }
     pub fn watchdog_log(&self) -> PathBuf {
         self.state().join("watchdog.log")
     }
@@ -687,9 +690,13 @@ pub async fn run_listener(
     served.map_err(|error| format!("{address} の待ち受けが止まりました: {error}"))
 }
 
-/// 自分の口に `hello` を通し、棚の台帳を検査してから、準備できた印を書く。
-/// 見張り役はこの印を見て、更新が定着したと判断する。
-async fn report_ready(paths: &ServerPaths, config: &ServerConfig) -> Result<(), String> {
+/// `hello` に応答したら、棚の台帳を読む前に検査開始の印を書く。
+/// 応答の期限を切り分けつつ、台帳に異常があれば確定前に前の版へ戻せる。
+async fn report_ready(
+    paths: &ServerPaths,
+    config: &ServerConfig,
+    check: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
     let address = config.admin_listen.unwrap_or(config.listen);
     let host = match address.ip() {
         std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
@@ -729,13 +736,14 @@ async fn report_ready(paths: &ServerPaths, config: &ServerConfig) -> Result<(), 
     }
     // 配っている棚の台帳を検査する。まだ棚を受け取っていなければ検査する物は無い。
     let Some(shelf) = &config.shelf else {
-        return watchdog::write_ready_mark(paths);
+        return watchdog::write_ready_mark(&paths.ready_mark());
     };
     let database = shelf.root(paths)?.join("library.db");
-    tokio::task::spawn_blocking(move || check_database(&database))
+    watchdog::write_ready_mark(&paths.checking_mark())?;
+    tokio::task::spawn_blocking(move || check(&database))
         .await
         .map_err(|error| format!("DB の検査が異常終了しました: {error}"))??;
-    watchdog::write_ready_mark(paths)
+    watchdog::write_ready_mark(&paths.ready_mark())
 }
 
 fn check_database(path: &Path) -> Result<(), String> {
@@ -755,7 +763,7 @@ fn check_database(path: &Path) -> Result<(), String> {
     }
 }
 
-/// 動き出したら、前回との違いを更新の履歴と記録に足す。
+/// 起動が確定したら、前回との違いを更新の履歴と記録に足す。
 fn note_started(paths: &ServerPaths, store: &ServerStore) {
     if !UpdateHistory::reconcile(paths, update::VERSION, chrono::Utc::now()) {
         return;
@@ -860,7 +868,7 @@ pub fn command_admin_web(data: &Path, enable: bool) -> Result<(), String> {
 pub async fn command_run(data: &Path) -> Result<i32, String> {
     let paths = ServerPaths::new(data)?;
     let _lock = lock_server(&paths)?;
-    match run_locked(paths.clone()).await {
+    match run_locked(paths.clone(), check_database).await {
         Err(error) => {
             let (action, message, restored) = match restore_trial(&paths) {
                 Ok(false) => return Err(error),
@@ -900,7 +908,13 @@ fn lock_server(paths: &ServerPaths) -> Result<File, String> {
     Ok(lock)
 }
 
-async fn run_locked(paths: ServerPaths) -> Result<i32, String> {
+async fn run_locked(
+    paths: ServerPaths,
+    check: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
+) -> Result<i32, String> {
+    // 試行中の印は、見張り役がこの版の準備完了を受理するまで残る。
+    let update_trial =
+        update::read_version_file(&paths.pending_version()).as_deref() == Some(update::VERSION);
     // 送られた棚を組み終えていれば、設定を読む前に配る棚をそれへ切り替える。
     {
         let paths = paths.clone();
@@ -925,7 +939,6 @@ async fn run_locked(paths: ServerPaths) -> Result<i32, String> {
     parts
         .context
         .set_shipments(paths.clone(), Arc::clone(&shipments));
-    note_started(&paths, &parts.context.store);
     let handle = axum_server::Handle::new();
     let restart = Arc::new(AtomicBool::new(false));
     // 送られた棚を組み終えたら立ち上げ直して配る（見張り役がいるときだけ。いなければ手で）。
@@ -1009,58 +1022,60 @@ async fn run_locked(paths: ServerPaths) -> Result<i32, String> {
             config.update.clone(),
             Box::new(move || stop_handle.graceful_shutdown(Some(Duration::from_secs(5)))),
         )?;
-        parts.context.set_update(Arc::clone(&controller));
-        tokio::spawn(Arc::clone(&controller).run(Some(Arc::clone(&shipments))));
         Some(controller)
     } else {
         None
     };
-    let ready_paths = paths.clone();
-    let ready_config = config.clone();
-    tokio::spawn(async move {
-        let ready = report_ready(&ready_paths, &ready_config)
-            .await
-            .and_then(|()| {
-                edit_config(&ready_paths, |_| {
-                    // 起動の確認中に保存された別の接続設定には、試行の印を残す。
-                    if ready_paths
-                        .config_trial()
-                        .try_exists()
-                        .map_err(|error| error.to_string())?
-                    {
-                        let current = load_config(&ready_paths)?;
-                        if current.listen == ready_config.listen
-                            && current.admin_listen == ready_config.admin_listen
-                            && current.public_url == ready_config.public_url
-                            && current.tls == ready_config.tls
-                        {
-                            clear_config_trial(&ready_paths)?;
-                        }
-                    }
-                    Ok(())
-                })
-            });
-        if let Err(error) = ready {
-            log::error!("起動の確認に失敗しました: {error}");
+    let ready = async {
+        report_ready(&paths, &config, check).await?;
+        if update_trial {
+            let pending = paths.pending_version();
+            while pending.try_exists().map_err(|error| error.to_string())? {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
-    });
+        Ok(())
+    };
+    tokio::pin!(ready);
     let stop_handle = handle.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             stop_handle.graceful_shutdown(Some(Duration::from_secs(5)));
         }
     });
+    let mut starting = true;
     let mut result = Ok(());
-    while let Some(joined) = tasks.join_next().await {
-        match joined {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                result = Err(error);
-                handle.shutdown();
+    while !tasks.is_empty() {
+        let step = tokio::select! {
+            biased;
+            joined = tasks.join_next() => match joined {
+                Some(Ok(result)) => result,
+                Some(Err(error)) => Err(format!("待ち受けが異常終了しました: {error}")),
+                None => break,
+            },
+            ready = &mut ready, if starting => {
+                starting = false;
+                if let Err(error) = &ready {
+                    log::error!("起動の確認に失敗しました: {error}");
+                }
+                ready.map(|()| {
+                    if let Err(error) = confirm_config_trial(&paths, &config) {
+                        log::error!("接続設定の試行を確定できません: {error}");
+                    }
+                    note_started(&paths, &parts.context.store);
+                    // 起動試行中は、次の更新を準備して待機中の印を書き換えない。
+                    if let Some(controller) = &updates {
+                        parts.context.set_update(Arc::clone(controller));
+                        tokio::spawn(Arc::clone(controller).run(Some(Arc::clone(&shipments))));
+                    }
+                })
             }
-            Err(error) => {
-                result = Err(format!("待ち受けが異常終了しました: {error}"));
-                handle.shutdown();
+        };
+        if let Err(error) = step {
+            starting = false;
+            handle.shutdown();
+            if result.is_ok() {
+                result = Err(error);
             }
         }
     }
@@ -1089,6 +1104,27 @@ async fn run_locked(paths: ServerPaths) -> Result<i32, String> {
     write_atomic(&paths.pending_version(), version.as_bytes())?;
     log::info!("版 {version} へ切り替えるので止まります");
     Ok(EXIT_APPLY_UPDATE)
+}
+
+fn confirm_config_trial(paths: &ServerPaths, config: &ServerConfig) -> Result<(), String> {
+    edit_config(paths, |_| {
+        // 起動の確認中に保存された別の接続設定には、試行の印を残す。
+        if paths
+            .config_trial()
+            .try_exists()
+            .map_err(|error| error.to_string())?
+        {
+            let current = load_config(paths)?;
+            if current.listen == config.listen
+                && current.admin_listen == config.admin_listen
+                && current.public_url == config.public_url
+                && current.tls == config.tls
+            {
+                clear_config_trial(paths)?;
+            }
+        }
+        Ok(())
+    })
 }
 
 const ADMIN_EXISTS: &str = "管理者はすでに登録されています。新しく登録すると、今の管理者は接続できなくなります。管理者の PC を入れ替えるとき、または今の PC の接続を解除したあとだけ、--replace を付けて実行してください。";
@@ -1370,6 +1406,125 @@ mod tests {
 
     fn config(text: &str) -> ServerConfig {
         toml::from_str(text).expect("config")
+    }
+
+    fn readiness_fixture(trial: bool) -> (TestRoot, ServerPaths, std::net::SocketAddr) {
+        let root = TestRoot::created("readiness");
+        let paths = ServerPaths::new(&root.0).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reserved.local_addr().unwrap();
+        let library = crate::library::Library::create(&paths.shelf()).unwrap();
+        fs::write(
+            paths.config(),
+            format!(
+                "listen = \"{address}\"\n[shelf]\nlibrary_id = \"{}\"\nsync_epoch = \"{}\"\n",
+                library.id,
+                uuid::Uuid::now_v7()
+            ),
+        )
+        .unwrap();
+        if trial {
+            write_atomic(&paths.current_version(), update::VERSION.as_bytes()).unwrap();
+            write_atomic(&paths.pending_version(), update::VERSION.as_bytes()).unwrap();
+            UpdateHistory::reconcile(&paths, "0.0.0", chrono::Utc::now());
+            UpdateHistory::note_stopping(&paths, update::VERSION, false);
+        }
+        (root, paths, address)
+    }
+
+    #[tokio::test]
+    async fn failed_trial_leaves_the_update_outcome_for_rollback() {
+        let (_root, paths, _) = readiness_fixture(true);
+        write_atomic(&paths.previous_version(), b"0.0.0").unwrap();
+        let (checking, checked) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(run_locked(paths.clone(), move |_| {
+            checking.send(()).unwrap();
+            Err("棚の検査に失敗".into())
+        }));
+        tokio::time::timeout(Duration::from_secs(3), checked)
+            .await
+            .unwrap()
+            .unwrap();
+        let history = UpdateHistory::load(&paths);
+        assert!(history.entries.is_empty());
+        assert_eq!(history.stopping_to.as_deref(), Some(update::VERSION));
+        let result = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, Err("棚の検査に失敗".into()));
+        assert!(!paths.ready_mark().exists());
+        assert!(paths.pending_version().exists());
+
+        watchdog::roll_back(&paths, update::VERSION, Some("棚の検査に失敗")).unwrap();
+        let now = chrono::Utc::now();
+        assert!(UpdateHistory::reconcile(&paths, "0.0.0", now));
+        assert!(!UpdateHistory::reconcile(&paths, "0.0.0", now));
+        let history = UpdateHistory::load(&paths);
+        assert_eq!(history.entries.len(), 1);
+        let failed = &history.entries[0];
+        assert_eq!(failed.result, "failed");
+        assert_eq!(failed.to, update::VERSION);
+        assert!(failed.reason.as_deref().unwrap().contains("棚の検査に失敗"));
+    }
+
+    async fn wait_for_readiness_test(condition: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn trial_signals_hello_during_check_and_records_success_once_after_confirmation() {
+        let (_root, paths, _) = readiness_fixture(true);
+        let (checking, checked) = tokio::sync::oneshot::channel();
+        let (finish, continue_check) = std::sync::mpsc::channel();
+        let server = tokio::spawn(run_locked(paths.clone(), move |_| {
+            checking.send(()).unwrap();
+            continue_check
+                .recv_timeout(Duration::from_secs(3))
+                .map_err(|error| error.to_string())
+        }));
+        tokio::time::timeout(Duration::from_secs(3), checked)
+            .await
+            .unwrap()
+            .unwrap();
+        let mark = watchdog::read_ready_mark(&paths.checking_mark()).unwrap();
+        assert_eq!(mark.version, update::VERSION);
+        assert_eq!(mark.pid, std::process::id());
+        assert!(!paths.ready_mark().exists());
+        assert!(UpdateHistory::load(&paths).entries.is_empty());
+        finish.send(()).unwrap();
+        wait_for_readiness_test(|| paths.ready_mark().exists()).await;
+        assert!(UpdateHistory::load(&paths).entries.is_empty());
+        // 見張り役が準備完了を受理すると、待機中の印が消える。
+        fs::remove_file(paths.pending_version()).unwrap();
+        let store = ServerStore::open(&paths.store()).unwrap();
+        let audit = || store.list_audit(Some("update"), None, None, 10).unwrap();
+        wait_for_readiness_test(|| !audit().is_empty()).await;
+        assert_eq!(UpdateHistory::load(&paths).entries[0].result, "applied");
+        note_started(&paths, &store);
+        assert_eq!(UpdateHistory::load(&paths).entries.len(), 1);
+        assert_eq!(audit().len(), 1);
+        assert_eq!(audit()[0].action, "更新した");
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn standalone_closes_its_listener_when_the_ready_mark_cannot_be_written() {
+        let (_root, paths, address) = readiness_fixture(false);
+        fs::create_dir(paths.ready_mark()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), run_locked(paths, |_| Ok(())))
+            .await
+            .expect("準備完了を記録できなければ停止する");
+        assert!(result.is_err());
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
     }
 
     #[test]
