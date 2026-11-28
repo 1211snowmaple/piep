@@ -7,7 +7,7 @@ use super::endpoint::{server_url, ServerUrlScheme};
 use super::standalone::{command_admin_pair, create_config, ServerPaths};
 use super::store::ServerStore;
 use super::update::{current_version, VERSION};
-use super::watchdog::ReadyMark;
+use super::watchdog::{read_ready_mark, StartupDeadline};
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -530,23 +530,27 @@ foreach ($task in $scheduler.GetFolder('\').GetTasks(1)) {{
     TaskDefinition::prepare(paths, xml).map(Some)
 }
 
-/// 本体が `hello` を通すまで待つ。
+/// 起動時の応答と棚の検査を、見張り役と同じ別々の期限で待つ。
 async fn wait_for_ready(paths: &ServerPaths) -> Result<(), String> {
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(60) {
-        if let Ok(bytes) = fs::read(paths.ready_mark()) {
-            if let Ok(mark) = serde_json::from_slice::<ReadyMark>(&bytes) {
-                if Some(mark.version) == current_version(paths) {
-                    return Ok(());
-                }
-            }
+    let mut deadline = StartupDeadline::new(Instant::now());
+    loop {
+        let version = current_version(paths);
+        if read_ready_mark(&paths.ready_mark()).is_some_and(|mark| Some(mark.version) == version) {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if read_ready_mark(&paths.checking_mark()).is_some_and(|mark| Some(mark.version) == version)
+        {
+            deadline.observe_checking(now);
+        }
+        if let Some(reason) = deadline.timeout_reason(now) {
+            return Err(format!(
+                "サーバーの起動を確認できませんでした。{reason}。{} を見てください",
+                paths.watchdog_log().display()
+            ));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    Err(format!(
-        "サーバーが 60 秒以内に動きませんでした。{} を見てください",
-        paths.watchdog_log().display()
-    ))
 }
 
 fn pause_if_own_window(interactive: bool) {
@@ -599,6 +603,7 @@ async fn install_scheduled(
 ) -> Result<(), String> {
     let mut changes = prepare_programs(paths)?;
     changes.push(FileChange::prepare(paths.ready_mark(), |_| Ok(None))?);
+    changes.push(FileChange::prepare(paths.checking_mark(), |_| Ok(None))?);
     let task = TaskDefinition::prepare(paths, &task_xml(&paths.root))?;
     let previous = find_previous(paths)?;
     if previous.is_some() {
