@@ -85,6 +85,9 @@ API の版と自分の役割（携帯は `reader`、デスクトップ版は `ad
 公開の URL があって分けていないときは、管理画面をこの機械の中の口（`127.0.0.1:38778`）にだけ出す。
 この口はサーバーの `LOCAL_ADMIN_ADDRESS` だけが決め、管理画面は接続設定の応答（`localAdminAddress`）で受け取って使う。
 
+読み手用と管理用を明示して同じポートを使うなら、設定ファイルでも管理画面でも、異なる具体的な IP アドレスを指定する。
+同じ IP、またはどちらかが未指定アドレス（`0.0.0.0` や `[::]`）なら、待ち受けが重なるため設定を拒否する。
+
 ## サーバーの作り
 
 `piep-server` は WebView を持たない常駐のプログラムで、本体は `piep_lib::server::standalone` にあり、デスクトップ版と
@@ -101,6 +104,9 @@ API の版と自分の役割（携帯は `reader`、デスクトップ版は `ad
 | `piep-server admin-pair --data <dir> [--replace]` | 管理者用の登録文字列を出し直す |
 | `piep-server status --data <dir>` | 状態を出す |
 | `piep-server stage-library`・`activate-library` | 手で運んだ棚の写しを置いて選ぶ（下の「手で写しを置く」） |
+
+値を取る引数（`--data`、`--url`、`--expose`、`--shelf`、`--generation`）は、指定する場合は値と組にして一度だけ書く。
+値がないときや重複したときは、引数名を示すエラーで止まる。
 
 置き場（`<dir>`）:
 

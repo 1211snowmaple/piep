@@ -123,6 +123,12 @@ fn default_listen() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT))
 }
 
+fn listen_addresses_overlap(first: SocketAddr, second: SocketAddr) -> bool {
+    let (first_ip, second_ip) = (first.ip(), second.ip());
+    first.port() == second.port()
+        && (first_ip == second_ip || first_ip.is_unspecified() || second_ip.is_unspecified())
+}
+
 impl ServerConfig {
     /// 待ち受けなどの設定を確かめる。
     pub fn validate(&self) -> Result<(), String> {
@@ -136,6 +142,15 @@ impl ServerConfig {
 
     /// 設定全体を確かめ、使う公開 URL の表記をそろえる。
     fn checked_public_url(&self) -> Result<String, String> {
+        if self
+            .admin_listen
+            .is_some_and(|admin| listen_addresses_overlap(self.listen, admin))
+        {
+            return Err(
+                "携帯用と管理用の待ち受けが重なっています。アドレスを分けるか、別のポートにしてください"
+                    .into(),
+            );
+        }
         if let Some(TlsSetting::Named(name)) = &self.tls {
             if name != "self-signed" {
                 return Err(format!(
@@ -291,9 +306,6 @@ pub(crate) async fn next_connection(
         None | Some("") => None,
         Some(text) => Some(parse_address(text, "管理用のアドレス")?),
     };
-    if admin_listen.is_some_and(|admin| admin.port() == listen.port()) {
-        return Err("携帯用と管理用は別のポートにしてください".into());
-    }
     let tls = match change.tls.as_str() {
         "none" => None,
         "self-signed" => Some(TlsSetting::Named("self-signed".into())),
@@ -348,9 +360,12 @@ pub(crate) async fn next_connection(
             .await
             .map_err(|error| format!("証明書を使えません: {error}"))?;
     }
-    // 今待ち受けているポートは自分が使っているので、確かめられない。
+    // 自分の待ち受けと重なるアドレスは、再起動前には開けない。
     for address in std::iter::once(listen).chain(admin_listen) {
-        if running.iter().any(|bound| bound.port() == address.port()) {
+        if running
+            .iter()
+            .any(|&bound| listen_addresses_overlap(bound, address))
+        {
             continue;
         }
         TcpListener::bind(address).map_err(|_| {
@@ -1172,37 +1187,55 @@ struct Arguments {
     generation: Option<crate::library::protocol::Id>,
 }
 
+fn take_argument_value<'a>(
+    argument: &str,
+    already_set: bool,
+    values: &mut impl Iterator<Item = &'a str>,
+) -> Result<&'a str, String> {
+    if already_set {
+        return Err(format!("{argument} は一度だけ指定してください"));
+    }
+    values
+        .next()
+        .filter(|value| !value.is_empty() && !value.starts_with("--"))
+        .ok_or_else(|| format!("{argument} に値を指定してください"))
+}
+
 fn parse_arguments(args: &[String]) -> Result<Arguments, String> {
-    let mut iter = args.iter();
+    let mut iter = args.iter().map(String::as_str);
     // 引数なしはエクスプローラーから開いたとき。
     let mut parsed = Arguments {
-        command: iter.next().cloned().unwrap_or_else(|| "install".into()),
+        command: iter.next().unwrap_or("install").into(),
         pause: args.is_empty(),
         ..Arguments::default()
     };
     while let Some(argument) = iter.next() {
-        match argument.as_str() {
-            "--data" => parsed.data = iter.next().cloned().map(PathBuf::from),
-            "--url" => parsed.url = iter.next().cloned(),
+        match argument {
+            "--data" => {
+                let value = take_argument_value(argument, parsed.data.is_some(), &mut iter)?;
+                parsed.data = Some(value.into());
+            }
+            "--url" => {
+                let value = take_argument_value(argument, parsed.url.is_some(), &mut iter)?;
+                parsed.url = Some(value.into());
+            }
             "--expose" => {
-                parsed.expose = Some(install::parse_exposure(
-                    iter.next().map_or("", String::as_str),
-                )?);
+                let value = take_argument_value(argument, parsed.expose.is_some(), &mut iter)?;
+                parsed.expose = Some(install::parse_exposure(value)?);
             }
             "--no-task" => parsed.no_task = true,
             "--pause" => parsed.pause = true,
             "--replace" => parsed.replace = true,
             "--enable" => parsed.enable = true,
             "--disable" => parsed.disable = true,
-            "--shelf" if parsed.command == "stage-library" && parsed.shelf.is_none() => {
-                parsed.shelf = Some(PathBuf::from(iter.next().ok_or_else(|| USAGE.to_string())?));
+            "--shelf" if parsed.command == "stage-library" => {
+                let value = take_argument_value(argument, parsed.shelf.is_some(), &mut iter)?;
+                parsed.shelf = Some(value.into());
             }
-            "--generation"
-                if parsed.command == "activate-library" && parsed.generation.is_none() =>
-            {
-                let value = iter.next().ok_or_else(|| USAGE.to_string())?;
+            "--generation" if parsed.command == "activate-library" => {
+                let value = take_argument_value(argument, parsed.generation.is_some(), &mut iter)?;
                 parsed.generation = Some(
-                    serde_json::from_value(serde_json::Value::String(value.clone()))
+                    serde_json::from_value(serde_json::Value::String(value.into()))
                         .map_err(|error| format!("棚の世代が不正です: {error}"))?,
                 );
             }
@@ -1406,6 +1439,56 @@ mod tests {
 
     fn config(text: &str) -> ServerConfig {
         toml::from_str(text).expect("config")
+    }
+
+    const VALUED_ARGUMENTS: [(&str, &str, &str); 5] = [
+        ("install", "--data", "server-data"),
+        ("install", "--url", "https://example.com/"),
+        ("install", "--expose", "proxy"),
+        ("stage-library", "--shelf", "staged-shelf"),
+        (
+            "activate-library",
+            "--generation",
+            "01900000-0000-7000-8000-000000000001",
+        ),
+    ];
+
+    fn argument_error(args: &[&str]) -> Option<String> {
+        parse_arguments(&args.iter().map(|arg| (*arg).into()).collect::<Vec<_>>()).err()
+    }
+
+    #[test]
+    fn valued_arguments_reject_missing_values() {
+        let mut failures = Vec::new();
+        for (command, flag, _) in VALUED_ARGUMENTS {
+            let expected = format!("{flag} に値を指定してください");
+            for args in [
+                vec![command, flag],
+                vec![command, flag, "--no-task"],
+                vec![command, flag, ""],
+            ] {
+                let actual = argument_error(&args);
+                if actual.as_deref() != Some(expected.as_str()) {
+                    failures.push((args, actual));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "値不足の検査に失敗: {failures:#?}");
+    }
+
+    #[test]
+    fn valued_arguments_reject_repeated_values() {
+        let mut failures = Vec::new();
+        for (command, flag, value) in VALUED_ARGUMENTS {
+            let expected = format!("{flag} は一度だけ指定してください");
+            assert!(argument_error(&[command, flag, value]).is_none(), "{flag}");
+            let args = [command, flag, value, flag, value];
+            let actual = argument_error(&args);
+            if actual.as_deref() != Some(expected.as_str()) {
+                failures.push((args, actual));
+            }
+        }
+        assert!(failures.is_empty(), "重複の検査に失敗: {failures:#?}");
     }
 
     fn readiness_fixture(trial: bool) -> (TestRoot, ServerPaths, std::net::SocketAddr) {
@@ -1879,6 +1962,67 @@ mod tests {
         }
     }
 
+    const LISTENER_PAIRS: [(&str, &str, bool); 8] = [
+        ("127.0.0.1:38777", "127.0.0.1:38777", true),
+        ("127.0.0.1:38777", "127.0.0.2:38777", false),
+        ("0.0.0.0:38777", "127.0.0.1:38777", true),
+        ("[::1]:38777", "[::]:38777", true),
+        ("[::]:38777", "127.0.0.1:38777", true),
+        ("[::1]:38777", "[0:0:0:0:0:0:0:1]:38777", true),
+        ("[::1]:38777", "[::2]:38777", false),
+        ("0.0.0.0:38777", "[::]:38778", false),
+    ];
+
+    #[test]
+    fn config_file_checks_listener_address_overlap() {
+        let root = TestRoot::created("listener-pair-config");
+        let paths = ServerPaths::new(&root.0).unwrap();
+        for (listen, admin, conflict) in LISTENER_PAIRS {
+            fs::write(
+                paths.config(),
+                format!(
+                    "listen = \"{listen}\"\nadmin_listen = \"{admin}\"\ntls = \"self-signed\"\n"
+                ),
+            )
+            .unwrap();
+            let result = load_config(&paths);
+            assert_eq!(result.is_err(), conflict, "{listen} / {admin}: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_connection_checks_listener_address_overlap() {
+        let current = config("");
+        for (listen, admin, conflict) in LISTENER_PAIRS {
+            // 既に待ち受けているアドレスとして渡し、実際の bind は行わない。
+            let running = [listen.parse().unwrap(), admin.parse().unwrap()];
+            let result = next_connection(
+                &current,
+                &running,
+                change(listen, Some(admin), "", "self-signed"),
+            )
+            .await;
+            assert_eq!(result.is_err(), conflict, "{listen} / {admin}: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_connection_probes_port_used_on_a_different_host() {
+        let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = occupied.local_addr().unwrap();
+        let running = [SocketAddr::from((
+            std::net::Ipv6Addr::LOCALHOST,
+            address.port(),
+        ))];
+        let result = next_connection(
+            &config(""),
+            &running,
+            change(&address.to_string(), None, "", "none"),
+        )
+        .await;
+        assert!(result.unwrap_err().contains("では待ち受けられません"));
+    }
+
     #[tokio::test]
     async fn connection_changes_are_checked_before_saving() {
         let current = config("");
@@ -2017,9 +2161,8 @@ auto = false
 
     #[test]
     fn a_connection_that_cannot_start_is_rolled_back() {
-        let root = std::env::temp_dir().join(format!("piep_trial_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let paths = ServerPaths::new(&root).unwrap();
+        let root = TestRoot::created("restore-connection-trial");
+        let paths = ServerPaths::new(&root.0).unwrap();
         fs::create_dir_all(paths.state()).unwrap();
         fs::write(paths.config(), CONFIG_TEMPLATE).unwrap();
         // 試していなければ何もしない。
@@ -2039,7 +2182,6 @@ auto = false
         assert!(restore_trial(&paths).unwrap());
         assert!(!paths.config_trial().exists());
         assert_eq!(fs::read_to_string(paths.config()).unwrap(), CONFIG_TEMPLATE);
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
