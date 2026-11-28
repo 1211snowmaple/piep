@@ -29,7 +29,9 @@ def read(path: str) -> str:
 def ipc_commands() -> list[tuple[str, str, str]]:
     lib = read("src-tauri/src/lib.rs")
     body = re.search(r"generate_handler!\[(.*?)\]", lib, re.S).group(1)
-    names = [c.strip() for c in body.split(",") if c.strip() and not c.strip().startswith("//")]
+    # 行の注釈を先に落とす。注釈の行と次の名前が同じ区切りに入ると、名前ごと落ちていた。
+    body = re.sub(r"//[^\n]*", "", body)
+    names = [c.strip() for c in body.split(",") if c.strip()]
     defs: dict[str, str] = {}
     for f in tracked("src-tauri/src"):
         if not f.endswith(".rs"):
@@ -46,6 +48,10 @@ def http_routes() -> list[tuple[str, str, str]]:
         if not f.endswith(".rs") or "tests" in f:
             continue
         text = read(f)
+        # 試験の中で立てる口（`#[cfg(test)]` の後ろ）は製品の口ではない。
+        test_module = text.find("#[cfg(test)]\nmod tests")
+        if test_module >= 0:
+            text = text[:test_module]
         for m in re.finditer(r'\.route\(\s*"([^"]+)"\s*,\s*([^\n]+)', text):
             methods = ",".join(sorted(set(re.findall(r"\b(get|post|put|delete|patch)\(", m.group(2)))))
             rows.append(("HTTP", f"{methods.upper() or '?'} {m.group(1)}", f"{f}:{text.count(chr(10), 0, m.start()) + 1}"))
