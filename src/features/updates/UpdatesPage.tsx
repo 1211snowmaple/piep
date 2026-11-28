@@ -1,5 +1,6 @@
 import { UpdateWorkMetadata } from "./UpdateWorkMetadata";
 import { useEffect, useRef, useState } from "react";
+import { parseUpdateCheckChoices, useUpdateCheckChoices } from "./updateCheckChoices";
 import { transitionContent } from "@/lib/contentTransition";
 import {
   ActionIcon,
@@ -143,8 +144,11 @@ export default function UpdatesPage() {
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
   // 非表示にした候補は、この画面ではすぐ消す（次のジョブでは元から出てこない）。
   const [dismissedIds, setDismissedIds] = useState<number[]>([]);
+  // 範囲・内容・処理方法は画面を離れても覚えておく。作品から開いたときの範囲は、その作品のためだけのもの。
+  const [checkChoices, rememberCheckChoices] = useUpdateCheckChoices();
   const form = useForm({
-    initialValues: { scope: workId ? "work" : "all", mode: "check_only", depth: "new" },
+    initialValues: { ...checkChoices, scope: workId ? "work" : checkChoices.scope } as { scope: string; mode: string; depth: string },
+    onValuesChange: (values) => rememberCheckChoices(parseUpdateCheckChoices({ ...values, scope: workId ? checkChoices.scope : values.scope })),
   });
   const targetForm = useForm({
     initialValues: { targetType: "author", source: "pixiv", sourceKey: "", displayName: "" },
@@ -162,6 +166,12 @@ export default function UpdatesPage() {
     { id: "demo-group-1", name: "毎日見る", sortOrder: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), targetIds: ["demo-target-1", "demo-target-2"] },
   ] });
   const groupList = groups.data ?? [];
+  // 覚えていたグループが消えていたら、すべてへ戻す。選べない値を出したままにしない。
+  const scopeValue = form.values.scope;
+  const setFormField = form.setFieldValue;
+  useEffect(() => {
+    if (groups.data && scopeValue.startsWith("group:") && !groups.data.some((group) => `group:${group.id}` === scopeValue)) setFormField("scope", "all");
+  }, [groups.data, scopeValue, setFormField]);
   /** グループの中で、止めていない対象。確認に送るのはこれだけ。 */
   const enabledMembers = (group: WatchGroup) => {
     const enabled = new Set((targets.data ?? []).filter((target) => target.enabled).map((target) => target.id));
