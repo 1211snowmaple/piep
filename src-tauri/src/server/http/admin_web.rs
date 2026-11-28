@@ -1027,7 +1027,11 @@ async fn issue_ticket(
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "admin_web_local",
-            "このサーバーの管理画面は、サーバーの PCのブラウザでだけ開けます。サーバーの PCで http://127.0.0.1:38778/admin/ を開いてください",
+            concat!(
+                "このサーバーの管理画面は、サーバーの PC のブラウザでだけ開けます。サーバーの PC で http://",
+                standalone::local_admin_address!(),
+                "/admin/ を開いてください"
+            ),
         ));
     }
     // デスクトップは、いま話している接続先の URL でリンクを開く。その名前を先に覚えておかないと、
@@ -1386,6 +1390,8 @@ struct ConnectionState {
     /// `server.toml` を読めないときの理由。
     problem: Option<String>,
     restartable: bool,
+    /// 管理の口を分けずに公開の URL を使うとき、管理画面を出すこの機械の中の口。
+    local_admin_address: &'static str,
 }
 
 fn connection_state(site: &AdminWeb) -> ConnectionState {
@@ -1396,6 +1402,7 @@ fn connection_state(site: &AdminWeb) -> ConnectionState {
         problem: saved.as_ref().err().cloned(),
         saved: saved.ok(),
         restartable: site.restart.get().is_some(),
+        local_admin_address: standalone::LOCAL_ADMIN_ADDRESS,
     }
 }
 

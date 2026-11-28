@@ -163,6 +163,8 @@ export interface ConnectionState {
   problem: string | null;
   /** 管理画面から立ち上げ直せるか。見張り役の下で動いているときだけ。 */
   restartable: boolean;
+  /** 管理の口を分けずに公開の URL を使うとき、管理画面を出すこの機械の中の口。 */
+  localAdminAddress: string;
 }
 
 export interface ConnectionChange {
