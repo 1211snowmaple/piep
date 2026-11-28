@@ -4,6 +4,7 @@
 //! 設計の理由は `docs/policy/06-backend.md` に書いてある。
 
 use super::super::admin_store::{TicketKind, RECENT_AUTH};
+use super::super::reader::Context as ReaderShelf;
 use super::super::standalone::{self, ConnectionChange, ServerPaths};
 use super::super::store::Role;
 use super::super::update::{self, UpdateController};
@@ -22,9 +23,9 @@ use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 const COOKIE: &str = "__Host-piep_admin";
 const LOGIN_TICKET: Duration = Duration::from_secs(60);
@@ -102,7 +103,9 @@ pub struct AdminWeb {
     /// ハッシュの計算でメモリを使い切らせない。
     hash_slots: Arc<Semaphore>,
     hash_waiters: Semaphore,
-    storage: Mutex<Option<(Instant, serde_json::Value)>>,
+    storage: Arc<AsyncMutex<Option<StorageUsage>>>,
+    #[cfg(test)]
+    before_storage_walk: OnceLock<Box<dyn Fn() + Send + Sync>>,
     /// 立ち上げ直す。見張り役の下で動いているときだけある。
     restart: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
@@ -122,7 +125,9 @@ impl AdminWeb {
             throttle: Mutex::new(LoginThrottle::default()),
             hash_slots: Arc::new(Semaphore::new(PASSWORD_HASH_SLOTS)),
             hash_waiters: Semaphore::new(PASSWORD_WAIT_SLOTS),
-            storage: Mutex::new(None),
+            storage: Arc::new(AsyncMutex::new(None)),
+            #[cfg(test)]
+            before_storage_walk: OnceLock::new(),
             restart: OnceLock::new(),
         }
     }
@@ -1337,28 +1342,53 @@ fn directory_bytes(path: &Path) -> u64 {
     total
 }
 
-/// 容量の内訳。全部のファイルを歩くので、10 分は同じ値を返す。
+struct StorageUsage {
+    // 配信中の写しごとに作る棚を識別する。棚が無いときは None。
+    shelf: Option<Weak<ReaderShelf>>,
+    measured_at: Instant,
+    value: serde_json::Value,
+}
+
+impl StorageUsage {
+    fn is_fresh_for(&self, shelf: Option<&Weak<ReaderShelf>>) -> bool {
+        let same_shelf = match (self.shelf.as_ref(), shelf) {
+            (Some(cached), Some(served)) => cached.ptr_eq(served),
+            (None, None) => true,
+            _ => false,
+        };
+        same_shelf && self.measured_at.elapsed() < STORAGE_CACHE
+    }
+}
+
+/// 容量の内訳。同じ棚について、走査の結果を 10 分間共有する。
 async fn storage(
     State(ctx): State<Ctx>,
     headers: AdminHeaders,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&ctx, &headers)?;
     let site = ctx.web.get().ok_or_else(ApiError::not_found)?;
-    if let Ok(cached) = site.storage.lock() {
-        if let Some((at, value)) = cached.as_ref() {
-            if at.elapsed() < STORAGE_CACHE {
-                return Ok(Json(value.clone()));
-            }
-        }
+    let mut cached = Arc::clone(&site.storage).lock_owned().await;
+    let shelf = ctx.reader_shelf();
+    let shelf_key = shelf.map(Arc::downgrade);
+    if let Some(usage) = cached
+        .as_ref()
+        .filter(|usage| usage.is_fresh_for(shelf_key.as_ref()))
+    {
+        return Ok(Json(usage.value.clone()));
     }
     let paths = site.paths.clone();
     // 配っている世代の棚。まだ受け取っていなければ 0 で答える。
-    let shelf = ctx
-        .reader_shelf()
-        .map(|shelf| shelf.library().root().to_path_buf());
-    let value = tokio::task::spawn_blocking(move || {
+    let shelf = shelf.map(|shelf| shelf.library().root().to_path_buf());
+    #[cfg(test)]
+    let walk_ctx = Arc::clone(&ctx);
+    // 要求が中断されても、走査と結果の保存が終わるまで集計の枠を保持する。
+    tokio::task::spawn_blocking(move || {
         // 棚は実体（`objects/`）・台帳（`library.db` と書きかけの記録）・作り直せる物（`derived/`）。
         let (content, index, total) = shelf.as_ref().map_or((0, 0, 0), |shelf| {
+            #[cfg(test)]
+            if let Some(before_walk) = web(&walk_ctx).unwrap().before_storage_walk.get() {
+                before_walk();
+            }
             (
                 directory_bytes(&shelf.join("objects")),
                 directory_bytes(&shelf.join("derived")),
@@ -1366,19 +1396,21 @@ async fn storage(
             )
         });
         let database = total.saturating_sub(content).saturating_sub(index);
-        serde_json::json!({
+        let value = serde_json::json!({
             "contentBytes": content,
             "databaseBytes": database,
             "indexBytes": index,
             "freeBytes": crate::analysis::available_space_bytes(&paths.root),
-        })
+        });
+        *cached = Some(StorageUsage {
+            shelf: shelf_key,
+            measured_at: Instant::now(),
+            value: value.clone(),
+        });
+        Json(value)
     })
     .await
-    .map_err(|_| ApiError::internal())?;
-    if let Ok(mut cached) = site.storage.lock() {
-        *cached = Some((Instant::now(), value.clone()));
-    }
-    Ok(Json(value))
+    .map_err(|_| ApiError::internal())
 }
 
 /// 動いている設定と、`server.toml` に書いてある設定。違えば再起動で切り替わる。
@@ -1696,6 +1728,91 @@ mod tests {
             },
         ));
         ctx
+    }
+
+    fn serve_test_shelf(ctx: &Ctx) -> u64 {
+        use crate::library::{protocol::Id, Library};
+        use crate::server::reader::{Context, DeviceAuthority};
+
+        let root = ctx.root.join("shelf");
+        let library = Arc::new(Library::create(&root).unwrap());
+        let content = root.join("objects/fixture");
+        std::fs::create_dir_all(content.parent().unwrap()).unwrap();
+        let bytes = b"test shelf content";
+        std::fs::write(content, bytes).unwrap();
+        let authority = Arc::new(DeviceAuthority::new(Arc::clone(&ctx.store)));
+        let epoch = Id::new(uuid::Uuid::now_v7()).unwrap();
+        let shelf = Arc::new(Context::new(library, authority, epoch).unwrap());
+        // 配信する棚だけを取り付け、検索索引の作成は始めない。
+        assert!(ctx.reader_shelf.set(shelf).is_ok());
+        bytes.len() as u64
+    }
+
+    fn storage_headers(ctx: &Ctx) -> AdminHeaders {
+        let ticket = ctx
+            .store
+            .issue_pairing(Role::Admin, Duration::from_secs(60))
+            .unwrap();
+        let device = ctx.store.consume_pairing(&ticket, "試験管理者").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", device.token)).unwrap(),
+        );
+        AdminHeaders::new(&headers, &Extensions::new())
+    }
+
+    #[tokio::test]
+    async fn storage_refreshes_when_a_shelf_is_served() {
+        let root = TestRoot::created("storage-new-shelf");
+        let ctx = login_context(&root.0);
+        let headers = storage_headers(&ctx);
+        let empty = storage(
+            State(Arc::clone(&ctx)),
+            AdminHeaders::new(&headers, &Extensions::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(empty.0["contentBytes"], 0);
+
+        let bytes = serve_test_shelf(&ctx);
+        let served = storage(State(Arc::clone(&ctx)), headers).await.unwrap();
+        assert_eq!(served.0["contentBytes"], bytes);
+    }
+
+    #[tokio::test]
+    async fn storage_concurrent_requests_walk_the_shelf_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = TestRoot::created("storage-concurrent");
+        let ctx = login_context(&root.0);
+        let bytes = serve_test_shelf(&ctx);
+        let headers = storage_headers(&ctx);
+        let walks = Arc::new(AtomicUsize::new(0));
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = Mutex::new(wait);
+        let counted_walks = Arc::clone(&walks);
+        assert!(web(&ctx)
+            .unwrap()
+            .before_storage_walk
+            .set(Box::new(move || {
+                if counted_walks.fetch_add(1, Ordering::Relaxed) == 0 {
+                    wait.lock().unwrap().recv().unwrap();
+                }
+            }))
+            .is_ok());
+
+        // 両方の要求が容量集計を待ち始めるまで、最初の走査を止める。
+        let (first, second, ()) = tokio::join!(
+            biased;
+            storage(State(Arc::clone(&ctx)), AdminHeaders::new(&headers, &Extensions::new())),
+            storage(State(Arc::clone(&ctx)), headers),
+            async { release.send(()).unwrap() },
+        );
+        let first = first.unwrap().0;
+        assert_eq!(first["contentBytes"], bytes);
+        assert_eq!(walks.load(Ordering::Relaxed), 1);
+        assert_eq!(second.unwrap().0, first);
     }
 
     async fn login_for_test(ctx: &Ctx, password: &str) -> Response {

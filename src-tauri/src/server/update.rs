@@ -914,16 +914,32 @@ pub(super) fn write_update_settings(
         let mut document: toml_edit::DocumentMut = text
             .parse()
             .map_err(|error| format!("設定を読み取れません: {error}"))?;
+        // 読み込み側は `update = { ... }` の書き方も受け取るので、どちらの表の形でも書き換える。
         let update = document
             .entry("update")
-            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-        let update = update
-            .as_table_mut()
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_like_mut()
             .ok_or("設定の update が表ではありません")?;
-        update["auto"] = toml_edit::value(auto);
-        update["window"] = toml_edit::value(window);
+        set_value_kept(update, "auto", auto.into());
+        set_value_kept(update, "window", window.into());
         write_atomic(path, document.to_string().as_bytes())
     })
+}
+
+/// 値だけを差し替え、行末のコメントなど前後の装飾は残す。
+/// 鍵（とその上の説明の行）は差し替えない。
+fn set_value_kept(table: &mut dyn toml_edit::TableLike, key: &str, mut value: toml_edit::Value) {
+    match table.get_mut(key) {
+        Some(item) => {
+            if let Some(old) = item.as_value() {
+                *value.decor_mut() = old.decor().clone();
+            }
+            *item = toml_edit::Item::Value(value);
+        }
+        None => {
+            table.insert(key, toml_edit::Item::Value(value));
+        }
+    }
 }
 
 /// 当てる前に DB を整合した形で写す。戻すときに使う。
@@ -1160,6 +1176,35 @@ mod tests {
         assert!(written.contains("# 上のコメント"));
         assert!(written.contains("# 時間帯の説明"));
         assert!(written.contains("listen = \"127.0.0.1:1234\""));
+        let config: crate::server::standalone::ServerConfig = toml::from_str(&written).unwrap();
+        assert!(!config.update.auto);
+        assert_eq!(config.update.window, "01:30-02:30");
+    }
+
+    #[test]
+    fn changing_the_settings_keeps_comments_after_the_values() {
+        let (_root, paths) = history_paths();
+        let text = "[update]\nauto = true # 自動で当てる\nwindow = \"03:00-06:00\" # 夜中だけ\n";
+        fs::write(paths.config(), text).unwrap();
+        write_update_settings(&paths, false, "01:30-02:30").unwrap();
+        let written = fs::read_to_string(paths.config()).unwrap();
+        assert!(written.contains("auto = false # 自動で当てる"), "{written}");
+        assert!(
+            written.contains("window = \"01:30-02:30\" # 夜中だけ"),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn settings_written_as_an_inline_table_can_be_changed() {
+        let (_root, paths) = history_paths();
+        let text =
+            "listen = \"127.0.0.1:1234\"\nupdate = { auto = true, window = \"03:00-06:00\" }\n";
+        fs::write(paths.config(), text).unwrap();
+        // 読み込み側が受け取る書き方であることを先に確かめる。
+        toml::from_str::<crate::server::standalone::ServerConfig>(text).unwrap();
+        write_update_settings(&paths, false, "01:30-02:30").unwrap();
+        let written = fs::read_to_string(paths.config()).unwrap();
         let config: crate::server::standalone::ServerConfig = toml::from_str(&written).unwrap();
         assert!(!config.update.auto);
         assert_eq!(config.update.window, "01:30-02:30");
