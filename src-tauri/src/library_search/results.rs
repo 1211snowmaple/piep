@@ -272,34 +272,34 @@ impl Library {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        let mut evidence: HashMap<i64, SemanticEvidence> =
-            self.semantic_matches(&meaning)?.into_iter().collect();
+        let mut excluded = HashSet::new();
         for term in &parsed.exclude {
             let words = if term.is_phrase {
                 format!("\"{}\"", term.raw)
             } else {
                 term.raw.clone()
             };
-            for (key, _) in self.matching_documents(&words)? {
-                evidence.remove(&key);
-            }
+            excluded.extend(
+                self.matching_documents(&words)?
+                    .into_iter()
+                    .map(|(key, _)| key),
+            );
         }
-        let found: Vec<(i64, f32)> = evidence
+        let (page, mut evidence) = self.semantic_page(&meaning, query, &excluded)?;
+        let matches = page
+            .items
             .iter()
-            .map(|(key, hit)| (*key, hit.score as f32))
+            .map(|card| {
+                let semantic = evidence.remove(&card.id);
+                SearchMatch {
+                    work: card.id,
+                    score: semantic.as_ref().map_or(0.0, |hit| hit.score),
+                    matched_version: None,
+                    historical_matches: 0,
+                    semantic,
+                }
+            })
             .collect();
-        let page = self.list_works_matching(query, &TextMatches::new(&found))?;
-        let mut matches = self.page_matches(&page, &found, found.len(), &HashMap::new())?;
-        let conn = self.reader()?;
-        let mut key =
-            conn.prepare_cached("SELECT doc_key FROM search_documents WHERE work_id=?1")?;
-        for hit in &mut matches {
-            let doc_key: i64 = key.query_row([hit.work.as_bytes().as_slice()], |r| r.get(0))?;
-            hit.semantic = evidence.remove(&doc_key);
-            if let Some(semantic) = &hit.semantic {
-                hit.score = semantic.score;
-            }
-        }
         Ok(SearchPage {
             page,
             intent: None,

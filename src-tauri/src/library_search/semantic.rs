@@ -6,7 +6,7 @@
 //! 説明の一断片だけを埋め込む）。
 
 use super::document::SearchDocument;
-use crate::library::{Error, Library, LibraryId, Result};
+use crate::library::{Error, Library, LibraryId, Result, TextMatches, WorkListPage, WorkListQuery};
 use crate::search_engine::semantic_index::{self, ReusableVectors, SemanticIndexDocument};
 use rusqlite::{params, OptionalExtension};
 use std::collections::{HashMap, HashSet};
@@ -375,39 +375,71 @@ impl Library {
         })
     }
 
-    /// 意味の近い作品を、本文の検索の索引の文書の鍵と近さで返す（順は決まらない）。
-    /// 近さが下限に届かない作品は入らない。
-    pub(super) fn semantic_matches(&self, text: &str) -> Result<Vec<(i64, SemanticEvidence)>> {
+    /// 棚の絞り込みとページ分けを適用し、ページ内の作品の意味検索の根拠を返す。
+    pub(super) fn semantic_page(
+        &self,
+        text: &str,
+        query: &WorkListQuery,
+        excluded: &HashSet<i64>,
+    ) -> Result<(WorkListPage, HashMap<LibraryId, SemanticEvidence>)> {
         let storage = self.semantic_storage();
         if !semantic_index::index_exists(&storage) {
             return Err(Error::ResourceUnavailable);
         }
-        let hits = semantic_index::search(&storage, text, usize::MAX).map_err(Error::Integrity)?;
-        let by_key: HashMap<i64, semantic_index::SemanticSearchHit> =
-            hits.into_iter().map(|hit| (hit.download_id, hit)).collect();
-        let conn = self.reader()?;
-        let mut rows = conn.prepare_cached(
-            "SELECT s.doc_key,d.doc_key FROM json_each(?1) j
-             JOIN semantic_documents s ON s.doc_key=j.value
-             JOIN search_documents d ON d.work_id=s.work_id",
+        let ((page, selected), hits) = semantic_index::search_selected(
+            &storage,
+            text,
+            |candidates| {
+                let by_key: HashMap<i64, f32> = candidates
+                    .iter()
+                    .map(|candidate| (candidate.download_id, candidate.score as f32))
+                    .collect();
+                let mut found = Vec::with_capacity(by_key.len());
+                let mut works = HashMap::with_capacity(by_key.len());
+                if !by_key.is_empty() {
+                    // 台帳側は再利用しないキーで結ぶ。検索中に消えた作品は結合から外れる。
+                    let conn = self.reader()?;
+                    let mut statement = conn.prepare_cached(
+                        "SELECT s.doc_key,d.doc_key,d.work_id FROM json_each(?1) j
+                         JOIN semantic_documents s ON s.doc_key=j.value
+                         JOIN search_documents d ON d.work_id=s.work_id",
+                    )?;
+                    let keys: Vec<_> = by_key.keys().copied().collect();
+                    let mut rows = statement.query([serde_json::to_string(&keys)?])?;
+                    while let Some(row) = rows.next()? {
+                        let semantic_key: i64 = row.get(0)?;
+                        let search_key: i64 = row.get(1)?;
+                        if !excluded.contains(&search_key) {
+                            found.push((search_key, by_key[&semantic_key]));
+                            works.insert(LibraryId::from_bytes(row.get(2)?), semantic_key);
+                        }
+                    }
+                }
+                let page = self.list_works_matching(query, &TextMatches::new(&found))?;
+                let selected: HashMap<_, _> = page
+                    .items
+                    .iter()
+                    .filter_map(|card| works.get(&card.id).map(|&key| (key, card.id)))
+                    .collect();
+                candidates.retain(|candidate| selected.contains_key(&candidate.download_id));
+                Ok((page, selected))
+            },
+            Error::Integrity,
         )?;
-        let keys: Vec<i64> = by_key.keys().copied().collect();
-        let mut found = Vec::with_capacity(keys.len());
-        for chunk in keys.chunks(1000) {
-            let mut result = rows.query([serde_json::to_string(chunk)?])?;
-            while let Some(row) = result.next()? {
-                let hit = &by_key[&row.get::<_, i64>(0)?];
-                found.push((
-                    row.get::<_, i64>(1)?,
+        let evidence = hits
+            .into_iter()
+            .map(|hit| {
+                (
+                    selected[&hit.download_id],
                     SemanticEvidence {
-                        field: hit.field.clone(),
-                        text: hit.text.clone(),
+                        field: hit.field,
+                        text: hit.text,
                         score: hit.score,
                     },
-                ));
-            }
-        }
-        Ok(found)
+                )
+            })
+            .collect();
+        Ok((page, evidence))
     }
 }
 
